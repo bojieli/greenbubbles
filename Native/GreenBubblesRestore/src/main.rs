@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use greenbubbles_restore::{
     archive::{create_conversation_policy, read_conversation_page},
+    connector::{ConnectorDestination, ConnectorService},
     merge::merge_incremental_archive,
     prepare_catalog,
     reconcile::reconcile_archives,
@@ -18,6 +19,7 @@ use greenbubbles_restore::{
         create_tool_policy, ConversationToolScope, LocalToolService, ToolCapability,
         ToolDataDestination, ToolMessageField,
     },
+    transport::{load_connector_request, run_mcp_adapter, send_unix_request, serve_unix},
     DatabasePassphrase, ReplicaKey, RestorationOptions,
 };
 use zeroize::Zeroizing;
@@ -207,6 +209,35 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let report = replica_coverage(&replica, &key)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        "connector-serve" => {
+            let replica = required_path(arguments.next(), "replica path")?;
+            let policy = required_path(arguments.next(), "tool policy path")?;
+            let audit = required_path(arguments.next(), "audit log path")?;
+            let drafts = required_path(arguments.next(), "draft directory")?;
+            let socket = required_path(arguments.next(), "Unix socket path")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if !remaining.iter().any(|value| value == "--replica-key-stdin") {
+                return Err("replica keys must be supplied with --replica-key-stdin".into());
+            }
+            let key = ReplicaKey::read_stdin()?;
+            let service = ConnectorService::open(&replica, &key, &policy, &audit, &drafts)?;
+            serve_unix(&service, &socket)?;
+        }
+        "connector-call" => {
+            let socket = required_path(arguments.next(), "Unix socket path")?;
+            let request_path = required_path(arguments.next(), "private request JSON path")?;
+            let request = load_connector_request(&request_path)?;
+            let response = send_unix_request(&socket, &request)?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        "connector-mcp" => {
+            let socket = required_path(arguments.next(), "Unix socket path")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            let requester = required_option(&remaining, "--requester")?;
+            let destination =
+                parse_connector_destination(option_string(&remaining, "--destination")?)?;
+            run_mcp_adapter(&socket, &requester, destination)?;
+        }
         "tool-policy" => {
             let archive = required_path(arguments.next(), "archive directory")?;
             let policy_path = required_path(arguments.next(), "tool policy path")?;
@@ -336,6 +367,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore replica-message <replica-path> <canonical-id> --replica-key-stdin\n",
                     "  greenbubbles-restore replica-conversations <replica-path> --replica-key-stdin [--limit <n>]\n",
                     "  greenbubbles-restore replica-coverage <replica-path> --replica-key-stdin\n",
+                    "  greenbubbles-restore connector-serve <replica-path> <policy-file> <audit-log> <draft-directory> <socket-path> --replica-key-stdin\n",
+                    "  greenbubbles-restore connector-call <socket-path> <private-request-json>\n",
+                    "  greenbubbles-restore connector-mcp <socket-path> --requester <id> [--destination local|remote]\n",
                     "  greenbubbles-restore tool-policy <archive> <policy-file> <conversation-id>... --capabilities list,read,search,draft [--fields sender,created-at,direction,type,content,attachments,relationships] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--max-results <n>] [--max-summary-bytes <n>] [--max-draft-bytes <n>]\n",
                     "  greenbubbles-restore tool-list <archive> <policy-file> <audit-log> --requester <id> [--destination local|remote]\n",
                     "  greenbubbles-restore tool-recent <archive> <policy-file> <audit-log> <conversation-id> --requester <id> [--limit <n>] [--destination local|remote]\n",
@@ -424,6 +458,14 @@ fn parse_destination(value: Option<String>) -> Result<ToolDataDestination, Strin
         "local" => Ok(ToolDataDestination::LocalModel),
         "remote" => Ok(ToolDataDestination::RemoteModel),
         value => Err(format!("unsupported data destination: {value}")),
+    }
+}
+
+fn parse_connector_destination(value: Option<String>) -> Result<ConnectorDestination, String> {
+    match value.as_deref().unwrap_or("local") {
+        "local" => Ok(ConnectorDestination::Local),
+        "remote" => Ok(ConnectorDestination::RemoteModel),
+        value => Err(format!("unsupported connector destination: {value}")),
     }
 }
 

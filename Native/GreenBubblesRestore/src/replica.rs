@@ -749,6 +749,144 @@ pub fn get_replica_message(
         .transpose()
 }
 
+pub fn get_replica_recent_messages(
+    replica_path: &Path,
+    key: &ReplicaKey,
+    conversation_id: &str,
+    not_before_unix: Option<i64>,
+    not_after_unix: Option<i64>,
+    requested_limit: usize,
+) -> Result<Vec<CanonicalMessage>, RestoreError> {
+    if conversation_id.is_empty() {
+        return Err(RestoreError::Integrity(
+            "conversation ID cannot be empty".to_string(),
+        ));
+    }
+    let opened = open_replica(replica_path, key)?;
+    let (account_id, _) = current_replica_identity(&opened.connection)?;
+    let limit = checked_usize_i64(requested_limit.clamp(1, 1_000))?;
+    let mut statement = opened.connection.prepare(
+        "SELECT record_json FROM message
+         WHERE account_id = ?1 AND conversation_id = ?2
+           AND (?3 IS NULL OR created_at_unix >= ?3)
+           AND (?4 IS NULL OR created_at_unix <= ?4)
+         ORDER BY conversation_ordinal DESC, canonical_id DESC LIMIT ?5",
+    )?;
+    let rows = statement.query_map(
+        params![
+            account_id,
+            conversation_id,
+            not_before_unix,
+            not_after_unix,
+            limit
+        ],
+        |row| row.get::<_, Vec<u8>>(0),
+    )?;
+    let mut messages = rows
+        .map(|row| -> Result<CanonicalMessage, RestoreError> {
+            let message: CanonicalMessage = serde_json::from_slice(&row?)?;
+            require_account(&message.account_id, &account_id)?;
+            Ok(message)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    messages.reverse();
+    Ok(messages)
+}
+
+pub fn get_replica_conversation(
+    replica_path: &Path,
+    key: &ReplicaKey,
+    conversation_id: &str,
+) -> Result<Option<CanonicalConversation>, RestoreError> {
+    get_replica_record(
+        replica_path,
+        key,
+        "conversation",
+        "conversation_id",
+        conversation_id,
+    )
+}
+
+pub fn get_replica_participant(
+    replica_path: &Path,
+    key: &ReplicaKey,
+    participant_id: &str,
+) -> Result<Option<CanonicalParticipant>, RestoreError> {
+    get_replica_record(
+        replica_path,
+        key,
+        "participant",
+        "participant_id",
+        participant_id,
+    )
+}
+
+pub fn get_replica_artifact(
+    replica_path: &Path,
+    key: &ReplicaKey,
+    artifact_id: &str,
+) -> Result<Option<CanonicalArtifact>, RestoreError> {
+    get_replica_record(replica_path, key, "artifact", "artifact_id", artifact_id)
+}
+
+pub fn replica_conversation_references_artifact(
+    replica_path: &Path,
+    key: &ReplicaKey,
+    conversation_id: &str,
+    artifact_id: &str,
+) -> Result<bool, RestoreError> {
+    if conversation_id.is_empty() || artifact_id.is_empty() {
+        return Err(RestoreError::Integrity(
+            "conversation and artifact IDs cannot be empty".to_string(),
+        ));
+    }
+    let opened = open_replica(replica_path, key)?;
+    let (account_id, _) = current_replica_identity(&opened.connection)?;
+    let exists: bool = opened.connection.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM message_artifact AS a
+           JOIN message AS m
+             ON m.account_id = a.account_id AND m.canonical_id = a.canonical_id
+           WHERE a.account_id = ?1 AND m.conversation_id = ?2 AND a.artifact_id = ?3
+         )",
+        params![account_id, conversation_id, artifact_id],
+        |row| row.get(0),
+    )?;
+    Ok(exists)
+}
+
+fn get_replica_record<T: DeserializeOwned>(
+    replica_path: &Path,
+    key: &ReplicaKey,
+    table: &str,
+    identifier_column: &str,
+    identifier: &str,
+) -> Result<Option<T>, RestoreError> {
+    if identifier.is_empty() {
+        return Err(RestoreError::Integrity(
+            "replica record identifier cannot be empty".to_string(),
+        ));
+    }
+    debug_assert!(matches!(table, "conversation" | "participant" | "artifact"));
+    debug_assert!(matches!(
+        identifier_column,
+        "conversation_id" | "participant_id" | "artifact_id"
+    ));
+    let opened = open_replica(replica_path, key)?;
+    let (account_id, _) = current_replica_identity(&opened.connection)?;
+    let query = format!(
+        "SELECT record_json FROM {table}
+         WHERE account_id = ?1 AND {identifier_column} = ?2"
+    );
+    let bytes: Option<Vec<u8>> = opened
+        .connection
+        .query_row(&query, params![account_id, identifier], |row| row.get(0))
+        .optional()?;
+    bytes
+        .map(|bytes| Ok(serde_json::from_slice(&bytes)?))
+        .transpose()
+}
+
 pub fn list_replica_conversations(
     replica_path: &Path,
     key: &ReplicaKey,

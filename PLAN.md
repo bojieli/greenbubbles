@@ -438,7 +438,7 @@ or exposing raw keys/data outside the local boundary.
 
 ## Phase 2 — encrypted local replica and continuous synchronization
 
-Status: **planned**
+Status: **complete for replica-backed reads and non-executing drafts**
 
 ### 2A. Canonical replica
 
@@ -516,15 +516,15 @@ get_message()
 refresh()
 ```
 
-- [ ] Keep JSON/JSONL schemas stable and versioned so scripts and downstream
+- [x] Keep JSON/JSONL schemas stable and versioned so scripts and downstream
   memory systems do not require MCP or a particular agent host.
-- [ ] Make `capabilities()` report read, draft, text-send, reply, and file-send
+- [x] Make `capabilities()` report read, draft, text-send, reply, and file-send
   support independently, including a machine-readable reason when unavailable.
-- [ ] Build a local authorization service with account, conversation, field,
+- [x] Build a local authorization service with account, conversation, field,
   time-range, and operation scopes.
-- [ ] Minimize context before any remote-model request and support a fully local
+- [x] Minimize context before any remote-model request and support a fully local
   query/model path.
-- [ ] Prevent message content and prompt injection from expanding deterministic
+- [x] Prevent message content and prompt injection from expanding deterministic
   scopes or enabling unavailable tools.
 
 ### 3B. Draft-only action layer
@@ -540,15 +540,16 @@ create_attachment_draft()
 preview_action()
 ```
 
-- [ ] Bind every draft to the account, immutable recipient/conversation
+- [x] Bind every draft to the account, immutable recipient/conversation
   identity, optional reply target, exact rendered text, attachment digests,
   connector version, expiration, and policy decision.
-- [ ] Show human-readable recipient and group details alongside stable internal
+- [x] Show human-readable recipient and group details alongside stable internal
   identities to catch ambiguous or stale contact resolution.
-- [ ] Add an append-only, owner-only audit log that can omit message bodies but
+- [x] Add an append-only, owner-only audit log that can omit message bodies but
   records who/what requested, reviewed, approved, attempted, and reconciled an
-  action.
-- [ ] Ensure creating or previewing a draft cannot mutate WeChat state.
+  action. Draft request/review stages are live; approval/attempt/reconciliation
+  stages remain unproducible until the separately gated Phase 4 lifecycle.
+- [x] Ensure creating or previewing a draft cannot mutate WeChat state.
 
 Exit gate: GreenBubbles is independently useful to people, scripts, OpenClaw,
 Codex, Claude, and downstream memory engines, and hostile source content cannot

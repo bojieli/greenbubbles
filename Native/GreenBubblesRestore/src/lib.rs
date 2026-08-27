@@ -1,6 +1,7 @@
 pub mod archive;
 pub mod artifact;
 pub mod catalog;
+pub mod connector;
 pub mod entities;
 pub mod error;
 pub mod manifest;
@@ -11,6 +12,7 @@ pub mod replica;
 pub mod restore;
 pub mod secret;
 pub mod tools;
+pub mod transport;
 
 pub use catalog::{prepare_catalog, PreparedCatalog, PreparedDatabase, StorageFamily};
 pub use error::RestoreError;

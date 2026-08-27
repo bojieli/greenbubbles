@@ -16,10 +16,10 @@ use crate::{
     MessageDirection, MessageRelationshipKind, RestorationCompletion, RestoreError, TypedPayload,
 };
 
-const MAX_TOOL_RESULTS: usize = 1_000;
-const MAX_MESSAGE_SUMMARY_BYTES: usize = 64 * 1024;
-const MAX_DRAFT_BYTES: usize = 256 * 1024;
-const MAX_SEARCH_QUERY_BYTES: usize = 1_024;
+pub(crate) const MAX_TOOL_RESULTS: usize = 1_000;
+pub(crate) const MAX_MESSAGE_SUMMARY_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_DRAFT_BYTES: usize = 256 * 1024;
+pub(crate) const MAX_SEARCH_QUERY_BYTES: usize = 1_024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -653,7 +653,7 @@ impl LocalToolService {
     }
 }
 
-fn load_tool_policy(path: &Path) -> Result<ToolAuthorizationPolicy, RestoreError> {
+pub(crate) fn load_tool_policy(path: &Path) -> Result<ToolAuthorizationPolicy, RestoreError> {
     ensure_private_regular_file(path)?;
     let policy: ToolAuthorizationPolicy = serde_json::from_slice(&fs::read(path)?)?;
     if policy.format_version != 2
@@ -721,7 +721,7 @@ fn validate_tool_scopes(
     Ok(())
 }
 
-fn minimize_message(
+pub(crate) fn minimize_message(
     message: CanonicalMessage,
     maximum_summary_bytes: usize,
     fields: &BTreeSet<ToolMessageField>,
@@ -851,7 +851,7 @@ fn truncate_utf8(mut value: String, maximum_bytes: usize) -> (String, bool) {
     (value, true)
 }
 
-fn released_body_bytes(messages: &[MinimizedMessage]) -> usize {
+pub(crate) fn released_body_bytes(messages: &[MinimizedMessage]) -> usize {
     messages
         .iter()
         .filter_map(|message| message.payload_summary.as_ref())
@@ -860,7 +860,7 @@ fn released_body_bytes(messages: &[MinimizedMessage]) -> usize {
 }
 
 impl ConversationToolScope {
-    fn includes_message(&self, message: &CanonicalMessage) -> bool {
+    pub(crate) fn includes_message(&self, message: &CanonicalMessage) -> bool {
         match message.created_at_unix {
             Some(created_at) => {
                 !self

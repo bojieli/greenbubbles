@@ -1,8 +1,9 @@
 # Local AI tool boundary
 
-The current tool kernel is a deterministic authorization boundary over a
-private restoration archive. It is a foundation for the replica-backed local
-service in Phase 3, not a claim that Phase 3 is complete.
+The original tool kernel is a deterministic authorization boundary over a
+private restoration archive. The replica-backed versioned service now uses the
+same policy principles through the owner-only Unix socket and MCP surfaces
+documented in `CONNECTOR_API.md` and `MCP.md`.
 
 ## Policy dimensions
 

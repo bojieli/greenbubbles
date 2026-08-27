@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -8,6 +8,16 @@ use greenbubbles_restore::replica::{
     bootstrap_replica, get_replica_changes, get_replica_message, list_replica_conversations,
     replica_coverage, replica_status, search_replica_messages, synchronize_replica,
     ReplicaMessageFilter,
+};
+use greenbubbles_restore::tools::{
+    create_tool_policy, ConversationToolScope, ToolCapability, ToolMessageField,
+};
+use greenbubbles_restore::{
+    connector::{
+        ConnectorDestination, ConnectorOperation, ConnectorRequest, ConnectorResult,
+        ConnectorService, CONNECTOR_API_VERSION,
+    },
+    transport::{send_unix_request, serve_unix_once},
 };
 use greenbubbles_restore::{
     ArtifactAvailability, ArtifactDecodeState, ArtifactKind, ArtifactRole, CanonicalArtifact,
@@ -25,6 +35,200 @@ const KEY_BYTES: [u8; 32] = [0x31; 32];
 const WRONG_KEY_BYTES: [u8; 32] = [0x32; 32];
 const PRIVATE_TEXT: &str = "encrypted replica private text";
 const PRIVATE_PATH: &str = "/synthetic/private/image.jpg";
+
+#[test]
+fn serves_scoped_replica_reads_and_complete_non_executing_drafts() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private");
+    let drafts = private.join("drafts");
+    fs::create_dir(&private).unwrap();
+    fs::create_dir(&drafts).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&drafts, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive = build_archive(&private, "archive", "account-a", "source-a");
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+    bootstrap_replica(&archive, &replica, &key).unwrap();
+    let policy = private.join("policy.json");
+    create_tool_policy(
+        &archive,
+        &policy,
+        BTreeMap::from([(
+            "conversation-a".to_string(),
+            ConversationToolScope {
+                capabilities: BTreeSet::from([
+                    ToolCapability::ListConversations,
+                    ToolCapability::ReadRecentMessages,
+                    ToolCapability::SearchMessages,
+                    ToolCapability::CreateDraft,
+                ]),
+                message_fields: BTreeSet::from([
+                    ToolMessageField::Sender,
+                    ToolMessageField::CreatedAt,
+                    ToolMessageField::Direction,
+                    ToolMessageField::MessageType,
+                    ToolMessageField::Content,
+                    ToolMessageField::Attachments,
+                    ToolMessageField::Relationships,
+                ]),
+                not_before_unix: None,
+                not_after_unix: None,
+                allow_remote_model: false,
+            },
+        )]),
+        100,
+        4_096,
+        16_384,
+    )
+    .unwrap();
+    let audit = private.join("connector-audit.ndjson");
+    let service = ConnectorService::open(&replica, &key, &policy, &audit, &drafts).unwrap();
+
+    let capabilities = service.handle(connector_request(
+        "capabilities",
+        ConnectorDestination::Local,
+        ConnectorOperation::Capabilities,
+    ));
+    let ConnectorResult::Capabilities(capabilities) = capabilities.result.unwrap() else {
+        panic!("unexpected connector result")
+    };
+    assert!(capabilities.passive_read.enabled);
+    assert!(capabilities.draft.enabled);
+    assert!(!capabilities.text_send.available);
+    assert!(!capabilities.reply_send.available);
+    assert!(!capabilities.file_send.available);
+
+    let listed = service.handle(connector_request(
+        "list",
+        ConnectorDestination::Local,
+        ConnectorOperation::ListConversations,
+    ));
+    let ConnectorResult::Conversations(listed) = listed.result.unwrap() else {
+        panic!("unexpected connector result")
+    };
+    assert_eq!(listed.conversations.len(), 1);
+    assert!(!listed.conversations[0].human_label.is_empty());
+
+    let remote_denied = service.handle(connector_request(
+        "remote-denied",
+        ConnectorDestination::RemoteModel,
+        ConnectorOperation::GetMessages {
+            conversation_id: "conversation-a".to_string(),
+            cursor: None,
+            limit: Some(10),
+        },
+    ));
+    assert!(!remote_denied.ok);
+
+    let draft_response = service.handle(connector_request(
+        "draft",
+        ConnectorDestination::Local,
+        ConnectorOperation::CreateReplyDraft {
+            conversation_id: "conversation-a".to_string(),
+            reply_target_canonical_id: "message-a".to_string(),
+            rendered_text: "immutable synthetic draft body".to_string(),
+            attachment_ids: vec!["artifact-a".to_string()],
+            expires_in_seconds: Some(60),
+        },
+    ));
+    assert!(draft_response.ok);
+    let ConnectorResult::Draft(receipt) = draft_response.result.unwrap() else {
+        panic!("unexpected connector result")
+    };
+    assert_eq!(
+        receipt.reply_target_canonical_id.as_deref(),
+        Some("message-a")
+    );
+    assert_eq!(receipt.attachment_count, 1);
+    let draft_path = drafts.join(format!("{}.json", receipt.draft_id));
+    assert_eq!(file_mode(&draft_path), 0o600);
+
+    let preview = service.handle(connector_request(
+        "preview",
+        ConnectorDestination::Local,
+        ConnectorOperation::PreviewAction {
+            draft_id: receipt.draft_id.clone(),
+        },
+    ));
+    let ConnectorResult::Preview(preview) = preview.result.unwrap() else {
+        panic!("unexpected connector result")
+    };
+    assert_eq!(
+        preview.draft.rendered_text,
+        "immutable synthetic draft body"
+    );
+    assert!(!preview.executable);
+    assert!(!preview.expired);
+    assert_eq!(preview.draft.attachments[0].sha256, "b".repeat(64));
+
+    let audit_bytes = fs::read(&audit).unwrap();
+    assert!(!contains_bytes(
+        &audit_bytes,
+        b"immutable synthetic draft body"
+    ));
+    assert!(contains_bytes(&audit_bytes, receipt.draft_id.as_bytes()));
+
+    let mut tampered: serde_json::Value =
+        serde_json::from_slice(&fs::read(&draft_path).unwrap()).unwrap();
+    tampered["renderedText"] = json!("tampered");
+    fs::write(&draft_path, serde_json::to_vec_pretty(&tampered).unwrap()).unwrap();
+    let rejected = service.handle(connector_request(
+        "tampered-preview",
+        ConnectorDestination::Local,
+        ConnectorOperation::PreviewAction {
+            draft_id: receipt.draft_id,
+        },
+    ));
+    assert!(!rejected.ok);
+
+    let socket = private.join("connector.sock");
+    let replica_for_thread = replica.clone();
+    let policy_for_thread = policy.clone();
+    let audit_for_thread = private.join("transport-audit.ndjson");
+    let drafts_for_thread = drafts.clone();
+    let socket_for_thread = socket.clone();
+    let server = std::thread::spawn(move || {
+        let key = ReplicaKey::from_bytes(KEY_BYTES);
+        let service = ConnectorService::open(
+            &replica_for_thread,
+            &key,
+            &policy_for_thread,
+            &audit_for_thread,
+            &drafts_for_thread,
+        )
+        .unwrap();
+        serve_unix_once(&service, &socket_for_thread).unwrap();
+    });
+    while !socket.exists() {
+        std::thread::yield_now();
+    }
+    let response = send_unix_request(
+        &socket,
+        &connector_request(
+            "socket-status",
+            ConnectorDestination::Local,
+            ConnectorOperation::Status,
+        ),
+    )
+    .unwrap();
+    assert!(response.ok);
+    server.join().unwrap();
+    assert!(!socket.exists());
+}
+
+fn connector_request(
+    request_id: &str,
+    destination: ConnectorDestination,
+    operation: ConnectorOperation,
+) -> ConnectorRequest {
+    ConnectorRequest {
+        api_version: CONNECTOR_API_VERSION.to_string(),
+        request_id: request_id.to_string(),
+        requester_id: "synthetic-test".to_string(),
+        destination,
+        operation,
+    }
+}
 
 #[test]
 fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() {
@@ -355,12 +559,12 @@ fn build_archive(parent: &Path, name: &str, account: &str, fingerprint: &str) ->
         source_file_id: Some(2),
         source_modified_seconds: Some(3),
         source_modified_nanoseconds: Some(4),
-        source_sha256: Some("source-hash".to_string()),
+        source_sha256: Some("a".repeat(64)),
         detected_format: Some("jpeg".to_string()),
         materialized_local_path: None,
         decoded_local_path: Some("/synthetic/private/decoded.jpg".to_string()),
         decoded_byte_count: Some(12),
-        decoded_sha256: Some("decoded-hash".to_string()),
+        decoded_sha256: Some("b".repeat(64)),
         decoded_format: Some("jpeg".to_string()),
         decode_state: ArtifactDecodeState::Decoded,
         verification_detail: None,
