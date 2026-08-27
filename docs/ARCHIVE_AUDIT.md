@@ -49,8 +49,10 @@ The auditor fails closed unless all of these checks pass:
   contiguous, and one conversation does not silently change ordering basis;
 - every message conversation and sender resolves to the account-scoped entity
   ledgers, participant/membership links are bidirectional, every resolved
-  relationship target exists in the same conversation, and every message
-  artifact ID and role agrees with the artifact ledger;
+  relationship target exists in the same conversation, every resolved,
+  absent-target, missing-identifier, ambiguous, and pending relationship state
+  reproduces its integrity counter, and every message artifact ID and role
+  agrees with the artifact ledger;
 - every downloaded source path is still an absolute canonical regular file,
   ends with its safe account-relative path, and matches the recorded device,
   inode, size, modification time, and SHA-256 before and after a descriptor-based
@@ -62,6 +64,13 @@ The auditor fails closed unless all of these checks pass:
   and partial-cache evidence agree; and
 - the component and top-level completion verdicts are no stronger than the
   independently reproduced evidence permits.
+
+Pending relationships cannot satisfy semantic completion. An unresolved
+relationship is completion-compatible only when it is explicitly classified as
+a target that is not present in the locally available history; missing target
+identifiers and ambiguous matches remain completion gaps. Canonical group-member
+and entity-decode-gap counts are likewise reproduced exactly from the entity
+ledgers rather than compared only as upper or lower bounds.
 
 A source file that is deleted, replaced, edited, or evicted after restoration
 therefore makes the audit fail. This is intentional: a stale pathname is not a

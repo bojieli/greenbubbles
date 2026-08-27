@@ -94,8 +94,6 @@ pub fn restore_entities(
     let mut conversations = BTreeMap::<String, ConversationBuilder>::new();
     let mut participants = BTreeMap::<String, ParticipantBuilder>::new();
     let mut source_row_count = 0_u64;
-    let mut decode_gap_count = 0_u64;
-    let mut group_member_count = 0_u64;
 
     for (id, source) in seeds.conversations {
         ensure_conversation(&mut conversations, account_id, id, source);
@@ -229,7 +227,6 @@ pub fn restore_entities(
                     if let Some(conversation) = conversations.get_mut(&conversation_id) {
                         conversation.conversation.entity_decode_state = EntityDecodeState::RawOnly;
                     }
-                    decode_gap_count += 1;
                     return Ok(());
                 }
                 match RoomDataProto::decode(ext.as_slice()) {
@@ -261,7 +258,6 @@ pub fn restore_entities(
                                 ConversationMembershipRole::Member,
                                 display,
                             );
-                            group_member_count += 1;
                         }
                     }
                     Err(_) => {
@@ -269,7 +265,6 @@ pub fn restore_entities(
                             conversation.conversation.entity_decode_state =
                                 EntityDecodeState::Failed;
                         }
-                        decode_gap_count += 1;
                     }
                 }
                 Ok(())
@@ -375,9 +370,16 @@ pub fn restore_entities(
         participants_path,
         conversation_count: conversations.len() as u64,
         participant_count: participants.len() as u64,
-        group_member_count,
+        group_member_count: conversations
+            .values()
+            .flat_map(|value| &value.conversation.memberships)
+            .filter(|membership| membership.role == ConversationMembershipRole::Member)
+            .count() as u64,
         source_row_count,
-        decode_gap_count,
+        decode_gap_count: conversations
+            .values()
+            .filter(|value| value.conversation.entity_decode_state != EntityDecodeState::Complete)
+            .count() as u64,
         missing_local_profile_count: participants
             .values()
             .filter(|value| {

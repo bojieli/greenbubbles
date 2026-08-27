@@ -503,6 +503,47 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
     assert!(audit.verified_connector_owned_file_count >= 2);
     assert!(!audit.full_restoration_verified);
 
+    let messages_path = output.join("messages.ndjson");
+    let report_path = output.join("report.json");
+    let original_message_bytes = fs::read(&messages_path).unwrap();
+    let original_report_bytes = fs::read(&report_path).unwrap();
+    let mut state_tampered_messages = messages.clone();
+    state_tampered_messages[0]["relationships"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "kind": "unknown",
+            "targetCanonicalId": null,
+            "targetServerId": null,
+            "targetLocalId": null,
+            "resolved": false,
+            "resolutionState": "referenceIdentifierMissing",
+            "rawReferenceBase64": null
+        }));
+    let state_tampered_bytes = state_tampered_messages
+        .iter()
+        .map(|message| serde_json::to_string(message).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    write_private(messages_path.clone(), state_tampered_bytes.as_bytes());
+    let mut state_tampered_report: serde_json::Value =
+        serde_json::from_slice(&original_report_bytes).unwrap();
+    state_tampered_report["integrity"]["relationshipReferenceCount"] = serde_json::json!(2);
+    state_tampered_report["integrity"]["unresolvedRelationshipCount"] = serde_json::json!(1);
+    state_tampered_report["integrity"]["absentRelationshipTargetCount"] = serde_json::json!(1);
+    write_private(
+        report_path.clone(),
+        &serde_json::to_vec_pretty(&state_tampered_report).unwrap(),
+    );
+    assert!(audit_archive(&output)
+        .unwrap_err()
+        .to_string()
+        .contains("relationship resolution-state counts"));
+    write_private(messages_path, &original_message_bytes);
+    write_private(report_path, &original_report_bytes);
+    assert!(audit_archive(&output).is_ok());
+
     let direct_conversation_id = direct_messages[0]["conversationId"]
         .as_str()
         .unwrap()

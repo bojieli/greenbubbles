@@ -558,7 +558,9 @@ impl RestorationCompletion {
         let entity_coverage_complete =
             integrity.entity_decode_gap_count == 0 && integrity.unresolved_conversation_count == 0;
         let relationship_coverage_complete = integrity.missing_relationship_identifier_count == 0
-            && integrity.ambiguous_relationship_count == 0;
+            && integrity.ambiguous_relationship_count == 0
+            && integrity.unresolved_relationship_count
+                == integrity.absent_relationship_target_count;
         let artifact_verification_complete = integrity.ambiguous_artifact_count == 0
             && integrity.corrupt_artifact_count == 0
             && integrity.unsafe_artifact_count == 0
@@ -639,4 +641,29 @@ pub struct MessageTableCoverage {
     pub columns: Vec<String>,
     #[serde(default)]
     pub schema_fingerprint: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RestorationCompletion, RestorationIntegrity};
+
+    #[test]
+    fn pending_relationships_cannot_satisfy_completion() {
+        let pending = RestorationIntegrity {
+            relationship_reference_count: 1,
+            unresolved_relationship_count: 1,
+            ..Default::default()
+        };
+        let pending_completion = RestorationCompletion::evaluate(&pending);
+        assert!(!pending_completion.relationship_coverage_complete);
+        assert!(!pending_completion.full_restoration_achieved);
+
+        let explicitly_absent = RestorationIntegrity {
+            relationship_reference_count: 1,
+            unresolved_relationship_count: 1,
+            absent_relationship_target_count: 1,
+            ..Default::default()
+        };
+        assert!(RestorationCompletion::evaluate(&explicitly_absent).relationship_coverage_complete);
+    }
 }

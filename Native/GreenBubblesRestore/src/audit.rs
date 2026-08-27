@@ -72,6 +72,11 @@ struct MessageAudit {
     artifact_references: Vec<(String, crate::ArtifactRole)>,
     artifact_reference_count: u64,
     relationship_reference_count: u64,
+    resolved_relationship_count: u64,
+    absent_relationship_target_count: u64,
+    missing_relationship_identifier_count: u64,
+    ambiguous_relationship_count: u64,
+    pending_relationship_count: u64,
     resolved_relationships: Vec<(String, String)>,
     logical_type_counts: BTreeMap<String, u64>,
     logical_sub_type_counts: BTreeMap<String, u64>,
@@ -446,14 +451,57 @@ fn audit_messages(path: &Path, report: &RestorationReport) -> Result<MessageAudi
                     "relationship resolved flag disagrees with its state",
                 ));
             }
-            if state_resolved {
-                let target = relationship
-                    .target_canonical_id
-                    .clone()
-                    .ok_or_else(|| integrity("resolved relationship lacks a canonical target"))?;
-                result
-                    .resolved_relationships
-                    .push((message.conversation_id.clone(), target));
+            match relationship.resolution_state {
+                RelationshipResolutionState::Resolved => {
+                    let target = relationship.target_canonical_id.clone().ok_or_else(|| {
+                        integrity("resolved relationship lacks a canonical target")
+                    })?;
+                    result
+                        .resolved_relationships
+                        .push((message.conversation_id.clone(), target));
+                    result.resolved_relationship_count += 1;
+                }
+                RelationshipResolutionState::TargetNotPresentLocally => {
+                    if relationship.target_canonical_id.is_some()
+                        || (relationship.target_server_id.is_none()
+                            && relationship.target_local_id.is_none())
+                    {
+                        return Err(integrity(
+                            "absent relationship target has inconsistent identity evidence",
+                        ));
+                    }
+                    result.absent_relationship_target_count += 1;
+                }
+                RelationshipResolutionState::ReferenceIdentifierMissing => {
+                    if relationship.target_canonical_id.is_some()
+                        || relationship.target_server_id.is_some()
+                        || relationship.target_local_id.is_some()
+                    {
+                        return Err(integrity(
+                            "missing relationship identifier has unexpected target evidence",
+                        ));
+                    }
+                    result.missing_relationship_identifier_count += 1;
+                }
+                RelationshipResolutionState::Ambiguous => {
+                    if relationship.target_canonical_id.is_some()
+                        || (relationship.target_server_id.is_none()
+                            && relationship.target_local_id.is_none())
+                    {
+                        return Err(integrity(
+                            "ambiguous relationship has inconsistent identity evidence",
+                        ));
+                    }
+                    result.ambiguous_relationship_count += 1;
+                }
+                RelationshipResolutionState::Pending => {
+                    if relationship.target_canonical_id.is_some() {
+                        return Err(integrity(
+                            "pending relationship unexpectedly has a canonical target",
+                        ));
+                    }
+                    result.pending_relationship_count += 1;
+                }
             }
         }
         result.relationship_reference_count += message.relationships.len() as u64;
@@ -963,6 +1011,7 @@ fn verify_integrity_counts(
     if messages.count != integrity_report.restored_row_count
         || rejection_count != integrity_report.rejected_row_count
         || messages.count + rejection_count != integrity_report.source_row_count
+        || integrity_report.duplicate_canonical_id_count != 0
         || messages.logical_type_counts != integrity_report.logical_type_counts
         || messages.logical_sub_type_counts != integrity_report.logical_sub_type_counts
         || messages.unknown_payload_reason_counts != integrity_report.unknown_payload_reason_counts
@@ -996,15 +1045,22 @@ fn verify_integrity_counts(
         ));
     }
 
-    let unresolved = integrity_report
-        .relationship_reference_count
-        .saturating_sub(integrity_report.resolved_relationship_count);
-    if unresolved != integrity_report.unresolved_relationship_count
-        || messages.resolved_relationships.len() as u64
-            != integrity_report.resolved_relationship_count
+    let unresolved = messages.absent_relationship_target_count
+        + messages.missing_relationship_identifier_count
+        + messages.ambiguous_relationship_count
+        + messages.pending_relationship_count;
+    if messages.resolved_relationship_count != integrity_report.resolved_relationship_count
+        || unresolved != integrity_report.unresolved_relationship_count
+        || messages.absent_relationship_target_count
+            != integrity_report.absent_relationship_target_count
+        || messages.missing_relationship_identifier_count
+            != integrity_report.missing_relationship_identifier_count
+        || messages.ambiguous_relationship_count != integrity_report.ambiguous_relationship_count
+        || messages.resolved_relationship_count + unresolved
+            != integrity_report.relationship_reference_count
     {
         return Err(integrity(
-            "relationship counts do not reproduce reported integrity",
+            "relationship resolution-state counts do not reproduce reported integrity",
         ));
     }
     let missing_profiles = participants
@@ -1035,9 +1091,8 @@ fn verify_integrity_counts(
     if missing_profiles != integrity_report.missing_local_profile_count
         || unresolved_conversations != integrity_report.unresolved_conversation_count
         || entity_source_rows != integrity_report.entity_source_row_count
-        || unique_group_members > integrity_report.group_member_count
-        || (entity_gaps == 0) != (integrity_report.entity_decode_gap_count == 0)
-        || entity_gaps > integrity_report.entity_decode_gap_count
+        || unique_group_members != integrity_report.group_member_count
+        || entity_gaps != integrity_report.entity_decode_gap_count
     {
         return Err(integrity(
             "entity records do not reproduce reported coverage gaps",

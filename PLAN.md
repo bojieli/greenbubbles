@@ -470,7 +470,8 @@ Status: **in progress**
 
 The independent `audit-archive` pass now reopens the completed archive, derives
 its row/type/gap/entity/reference counts from the ledgers, verifies schema
-profiles and bidirectional relationships, and descriptor-verifies every
+profiles, bidirectional relationships, and every relationship-resolution state,
+and descriptor-verifies every
 recorded downloaded or connector-derived file against its identity, timestamps,
 size, and SHA-256. Its content-free summary can make the eventual real-corpus
 evidence reproducible; it does not replace the still-required observation of

@@ -143,6 +143,12 @@ unless the archive is authoritative, media-resolved, pinned-build compatible,
 and already satisfies every strict completion component. See
 `docs/ARCHIVE_AUDIT.md`.
 
+Relationship completion also requires that no relationship remain in the
+transient `pending` state. Every unresolved relationship must be independently
+accounted for as target-not-present-locally, missing-identifier, or ambiguous;
+only the explicit target-not-present state is compatible with a complete
+restoration of the locally available archive.
+
 ## Media path semantics
 
 GreenBubbles records the verified location of the existing downloaded artifact;
