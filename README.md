@@ -49,6 +49,7 @@ swift run greenbubbles discover
 swift run greenbubbles integration-surfaces
 swift run greenbubbles inventory
 swift run greenbubbles snapshot
+swift run greenbubbles-public-article /private/owner-only-request.json
 cd Native/GreenBubblesRestore
 cargo test --locked --all-targets
 ```
@@ -62,6 +63,14 @@ are stable hashes intended for correlation, not a substitute for access control.
 build and emits no application path. It reports inbound and internal boundaries;
 it does not invoke them and does not claim an authenticated message or Moments
 read API. An unknown build fails closed.
+
+`greenbubbles-public-article` is a separately compiled, cookie-free,
+fail-closed helper for one ordinary public `https://mp.weixin.qq.com/s...`
+page. It checks robots, authentication, paywall signals, origin, redirects,
+file permissions, and size limits; it has no replica/restoration dependency and
+does not crawl subresources. The official robots policy observed on 2026-08-27
+disallows `/s`, so the current command stops before fetching any article. See
+[docs/PUBLIC_ARTICLE_FETCH.md](docs/PUBLIC_ARTICLE_FETCH.md).
 
 ```sh
 swift run greenbubbles inventory --include-paths

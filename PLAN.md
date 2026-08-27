@@ -638,7 +638,22 @@ retains raw provenance for every normalized row, records every other SNS table
 as unsupported schema coverage, and labels all output `partialLocalCache`.
 Cached public-account messages in supported business-message shards already
 flow through the conversation model. Fetching an external article body is not
-implemented and is not inferred from a cached link.
+inferred from a cached link. A separate, explicit
+`greenbubbles-public-article` process can fetch one ordinary public
+`https://mp.weixin.qq.com/s...` URL. It has no replica/restoration dependency,
+cookies, credentials, client session, crawler, or subresource loading; it
+checks robots first, rejects authentication and visible paywall boundaries,
+bounds redirects and bytes, and labels the result `singlePublicPage`. The
+result remains untrusted source content and is not inserted into the canonical
+replica. See `docs/PUBLIC_ARTICLE_FETCH.md`.
+
+The helper is implemented and synthetically tested, but this item remains
+unchecked operationally. The official `https://mp.weixin.qq.com/robots.txt`
+observed on 2026-08-27 returns HTTP 200 with `Disallow: /` for all agents and no
+allow rule covering `/s`. GreenBubbles consequently returns `robotsDenied`
+before requesting an article. No article was fetched in the live validation;
+the helper may become available only if normal public access and the published
+robots policy permit the exact path in the future.
 
 ### 5B. Active read feasibility gate
 
