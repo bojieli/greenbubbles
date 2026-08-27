@@ -146,7 +146,9 @@ same-source decoder or media upgrade—invalidates pagination rather than
 producing a mixed-state page. Change cursors deliberately remain resumable
 across those commits.
 `replica-message`, `replica-conversations`, and `replica-coverage` provide
-stable JSON access to exact canonical data and machine-readable coverage.
+stable JSON access to exact canonical data and machine-readable coverage. The
+coverage includes the observed schema-profile and per-table fingerprints, so a
+downstream operator can compare decoder runs without receiving schema SQL.
 
 `replica-cached-moments` provides author/type/time filters and bounded,
 checkpoint-consistent pagination. Its cursor binds the filter, account, random

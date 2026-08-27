@@ -81,6 +81,15 @@ ledger. Message-like tables that do not meet the supported adapter signature
 remain explicit completion-blocking candidates until their role is proved and
 an adapter or auxiliary classification is added.
 
+Coverage format 3 fingerprints every table from ordered `PRAGMA table_xinfo`
+metadata plus its related `sqlite_schema` table, index, and trigger objects. A
+second digest binds the complete ordered logical-path/table profile. These
+SHA-256 values expose exact schema drift without publishing the underlying SQL.
+Row mutations do not affect them. Cached-surface coverage format 2 uses the same
+fingerprints, and authoritative incremental merges recompute both profiles.
+Older archives deserialize with absent fingerprint evidence and cannot be
+silently upgraded to a claimed observed profile.
+
 Known auxiliary chains include:
 
 ```text

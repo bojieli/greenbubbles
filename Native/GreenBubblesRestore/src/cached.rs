@@ -9,6 +9,7 @@ use rusqlite::{types::ValueRef, Connection, OpenFlags, Row};
 use sha2::{Digest, Sha256};
 
 use crate::restore::scoped_opaque_id;
+use crate::schema::{schema_profile_fingerprint, table_schema_fingerprint};
 use crate::{
     CachedMomentInteractionKind, CachedSurfaceCompleteness, CachedSurfaceCoverage,
     CachedSurfaceTableCoverage, CachedSurfaceTableRole, CanonicalCachedMoment,
@@ -49,6 +50,7 @@ pub fn restore_cached_surfaces(
         connection.execute_batch("PRAGMA query_only = ON")?;
         for table in &database.tables {
             let columns = table_columns(&connection, table)?;
+            let schema_fingerprint = table_schema_fingerprint(&connection, table)?;
             let source_table_id = opaque_id(table.as_bytes());
             let source_row_count = table_row_count(&connection, table)?;
             let (role, reason) = classify_table(table, &columns);
@@ -91,6 +93,7 @@ pub fn restore_cached_surfaces(
                 source_table_id,
                 source_table_name: table.clone(),
                 columns,
+                schema_fingerprint: Some(schema_fingerprint),
                 source_row_count,
                 restored_row_count,
                 role,
@@ -112,8 +115,16 @@ pub fn restore_cached_surfaces(
                 &right.source_set_id,
             ))
     });
+    let schema_profile_fingerprint = schema_profile_fingerprint(tables.iter().map(|table| {
+        (
+            table.source_logical_path.as_str(),
+            table.source_table_name.as_str(),
+            table.schema_fingerprint.as_deref(),
+        )
+    }));
     let coverage = CachedSurfaceCoverage {
-        format_version: 1,
+        format_version: 2,
+        schema_profile_fingerprint,
         observed_at: catalog.manifest.created_at.clone(),
         cache_completeness: CachedSurfaceCompleteness::PartialLocalCache,
         source_database_present,

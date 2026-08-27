@@ -139,6 +139,11 @@ fn restores_cached_moments_and_interactions_without_claiming_cache_completeness(
 
     let coverage: serde_json::Value =
         serde_json::from_slice(&fs::read(output.join("cached-surfaces.json")).unwrap()).unwrap();
+    assert_eq!(coverage["formatVersion"], json!(2));
+    assert_eq!(
+        coverage["schemaProfileFingerprint"].as_str().unwrap().len(),
+        64
+    );
     assert_eq!(coverage["cacheCompleteness"], json!("partialLocalCache"));
     assert_eq!(coverage["sourceDatabasePresent"], json!(true));
     assert_eq!(coverage["momentCount"], json!(2));
@@ -149,6 +154,11 @@ fn restores_cached_moments_and_interactions_without_claiming_cache_completeness(
     }));
     assert!(coverage["tables"].as_array().unwrap().iter().any(|table| {
         table["sourceTableName"] == "SnsTimeLineLegacy" && table["role"] == "other"
+    }));
+    assert!(coverage["tables"].as_array().unwrap().iter().all(|table| {
+        table["schemaFingerprint"]
+            .as_str()
+            .is_some_and(|fingerprint| fingerprint.len() == 64)
     }));
     for name in [
         "cached-moments.ndjson",

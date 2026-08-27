@@ -12,6 +12,7 @@ pub mod model;
 pub mod reconcile;
 pub mod replica;
 pub mod restore;
+mod schema;
 pub mod secret;
 pub mod tools;
 pub mod transport;

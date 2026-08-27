@@ -317,8 +317,17 @@ is technically and legally supportable.
 - [ ] Prove bootstrap and incremental synchronization on disposable test data;
   measure idle, one-message, burst, edit, recall, deletion, and crash-recovery
   cases.
-- [ ] Fingerprint the client and schema precisely and prove that unknown or
+- [x] Fingerprint the client and schema precisely and prove that unknown or
   partially understood versions fail closed rather than silently losing data.
+
+The signed client fingerprint binds bundle/build, executable, signing team,
+CodeDirectory, architectures, Hardened Runtime, and signature validity. Archive
+coverage format 3 now adds deterministic whole-profile and per-table schema
+fingerprints without emitting schema SQL. Build drift is incompatible;
+unhandled message candidates and unknown logical types remain raw-retained,
+machine-readable completion gaps; incremental merges recompute the schema
+profile. This satisfies the fingerprint/fail-closed item but not the remaining
+real-corpus and disposable-account requirements in this gate.
 
 ### Ordinary-contact action feasibility gate
 

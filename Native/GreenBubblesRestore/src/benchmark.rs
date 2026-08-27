@@ -716,6 +716,7 @@ fn build_archive(
         decoder_name: "greenbubbles-synthetic-benchmark".to_string(),
         decoder_version: decoder_version.to_string(),
         snapshot_manifest_format_version: 3,
+        schema_profile_fingerprint: None,
         message_tables: Vec::new(),
         all_tables: Vec::new(),
         logical_type_counts: BTreeMap::from([("1".to_string(), messages.len() as u64)]),

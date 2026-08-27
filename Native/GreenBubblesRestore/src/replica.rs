@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::archive::{ensure_private_directory, ensure_private_regular_file, load_report};
+use crate::schema::{validate_cached_coverage_schema, validate_restoration_coverage_schema};
 use crate::{
     CanonicalArtifact, CanonicalConversation, CanonicalMessage, CanonicalParticipant, ReplicaKey,
     RestorationCoverage, RestorationReport, RestoreError, TypedPayload,
@@ -3174,7 +3175,9 @@ fn next_checkpoint_revision(
 fn load_archive_coverage(archive_directory: &Path) -> Result<RestorationCoverage, RestoreError> {
     let path = archive_directory.join("coverage.json");
     ensure_private_regular_file(&path)?;
-    Ok(serde_json::from_slice(&fs::read(path)?)?)
+    let coverage = serde_json::from_slice(&fs::read(path)?)?;
+    validate_restoration_coverage_schema(&coverage)?;
+    Ok(coverage)
 }
 
 fn load_cached_archive_inputs(
@@ -3200,6 +3203,7 @@ fn load_cached_archive_inputs(
         ensure_private_regular_file(path)?;
     }
     let coverage = serde_json::from_slice(&fs::read(coverage_path)?)?;
+    validate_cached_coverage_schema(&coverage)?;
     Ok(Some(CachedArchiveInputs {
         moments_path,
         interactions_path,

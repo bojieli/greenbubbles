@@ -805,6 +805,7 @@ fn build_archive(parent: &Path, name: &str, account: &str, fingerprint: &str) ->
             decoder_name: "synthetic".to_string(),
             decoder_version: "1".to_string(),
             snapshot_manifest_format_version: 1,
+            schema_profile_fingerprint: None,
             message_tables: Vec::new(),
             all_tables: Vec::new(),
             logical_type_counts: BTreeMap::new(),

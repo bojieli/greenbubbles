@@ -284,6 +284,8 @@ pub struct CachedSurfaceTableCoverage {
     pub source_table_id: String,
     pub source_table_name: String,
     pub columns: Vec<String>,
+    #[serde(default)]
+    pub schema_fingerprint: Option<String>,
     pub source_row_count: u64,
     pub restored_row_count: u64,
     pub role: CachedSurfaceTableRole,
@@ -294,6 +296,8 @@ pub struct CachedSurfaceTableCoverage {
 #[serde(rename_all = "camelCase")]
 pub struct CachedSurfaceCoverage {
     pub format_version: u32,
+    #[serde(default)]
+    pub schema_profile_fingerprint: Option<String>,
     pub observed_at: String,
     pub cache_completeness: CachedSurfaceCompleteness,
     pub source_database_present: bool,
@@ -591,6 +595,8 @@ pub struct RestorationCoverage {
     pub decoder_name: String,
     pub decoder_version: String,
     pub snapshot_manifest_format_version: u32,
+    #[serde(default)]
+    pub schema_profile_fingerprint: Option<String>,
     pub message_tables: Vec<MessageTableCoverage>,
     pub all_tables: Vec<TableSchemaCoverage>,
     pub logical_type_counts: BTreeMap<String, u64>,
@@ -616,6 +622,8 @@ pub struct TableSchemaCoverage {
     pub source_table_id: String,
     pub source_table_name: String,
     pub columns: Vec<String>,
+    #[serde(default)]
+    pub schema_fingerprint: Option<String>,
     pub role: TableCoverageRole,
     pub classification_reason: String,
 }
@@ -629,4 +637,6 @@ pub struct MessageTableCoverage {
     pub source_table_name: String,
     pub source_row_count: u64,
     pub columns: Vec<String>,
+    #[serde(default)]
+    pub schema_fingerprint: Option<String>,
 }

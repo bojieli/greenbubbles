@@ -9,6 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::cached::restore_cached_surfaces;
 use crate::entities::{restore_entities, EntitySeeds};
+use crate::schema::{schema_profile_fingerprint, table_schema_fingerprint};
 use crate::{
     artifact::ArtifactResolver, ArtifactAvailability, ArtifactDecodeState, CanonicalMessage,
     DirectionEvidence, MessageDirection, MessageOrderingBasis, MessageRelationship,
@@ -100,6 +101,7 @@ pub fn restore_catalog(
 
         for table in &database.tables {
             let columns = table_columns(&connection, table)?;
+            let schema_fingerprint = table_schema_fingerprint(&connection, table)?;
             let table_id = opaque_id(table.as_bytes());
             let (role, classification_reason) = classify_table(table, &columns);
             if role == TableCoverageRole::UnhandledMessageCandidate {
@@ -111,6 +113,7 @@ pub fn restore_catalog(
                 source_table_id: table_id.clone(),
                 source_table_name: table.clone(),
                 columns: columns.clone(),
+                schema_fingerprint: Some(schema_fingerprint.clone()),
                 role,
                 classification_reason: classification_reason.to_string(),
             });
@@ -119,15 +122,9 @@ pub fn restore_catalog(
             }
             integrity.message_table_count += 1;
             let conversation = infer_conversation(table, &database.logical_path, names.values());
-            let schema_identity = columns
-                .iter()
-                .map(|value| value.to_ascii_lowercase())
-                .collect::<Vec<_>>()
-                .join("\u{1f}");
-            let schema_id = opaque_id(schema_identity.as_bytes());
             *integrity
                 .message_schema_counts
-                .entry(schema_id)
+                .entry(schema_fingerprint.clone())
                 .or_default() += 1;
             let quoted = quote_identifier(table);
             let count_sql = format!("SELECT count(*) FROM {quoted}");
@@ -140,6 +137,7 @@ pub fn restore_catalog(
                 source_table_name: table.clone(),
                 source_row_count: row_count.max(0) as u64,
                 columns: columns.clone(),
+                schema_fingerprint: Some(schema_fingerprint),
             });
 
             let select_sql = format!("SELECT rowid, * FROM {quoted} ORDER BY rowid");
@@ -425,11 +423,20 @@ pub fn restore_catalog(
                 &right.source_set_id,
             ))
     });
+    let schema_profile_fingerprint =
+        schema_profile_fingerprint(all_table_coverage.iter().map(|table| {
+            (
+                table.source_logical_path.as_str(),
+                table.source_table_name.as_str(),
+                table.schema_fingerprint.as_deref(),
+            )
+        }));
     let coverage = RestorationCoverage {
-        format_version: 2,
+        format_version: 3,
         decoder_name: "greenbubbles-restore".to_string(),
         decoder_version: env!("CARGO_PKG_VERSION").to_string(),
         snapshot_manifest_format_version: catalog.manifest.manifest_format_version,
+        schema_profile_fingerprint,
         message_tables: table_coverage,
         all_tables: all_table_coverage,
         logical_type_counts: integrity.logical_type_counts.clone(),

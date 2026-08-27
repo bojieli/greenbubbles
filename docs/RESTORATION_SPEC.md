@@ -98,7 +98,17 @@ verification, and artifact decoding all pass. Retaining raw bytes is necessary
 for losslessness but does not by itself satisfy production compatibility,
 semantic completeness, or playable-media completeness.
 
-`coverage.json` format 2 contains the complete schema ledger in `allTables`.
+`coverage.json` format 3 contains the complete schema ledger in `allTables`.
+Each table carries a SHA-256 fingerprint derived from its ordered
+`table_xinfo` evidence and related table/index/trigger definitions. The
+top-level schema-profile fingerprint hashes the ordered logical database/table
+identities and those table fingerprints. SQL definitions are not emitted.
+Content-row changes therefore leave the schema profile stable, while a column,
+constraint, index, trigger, or table-set change produces explicit drift.
+Incremental merges recompute the profile from the merged authoritative ledger;
+legacy archives without table fingerprints retain a missing profile rather
+than receiving guessed evidence.
+
 Any message-like name or column signature that does not match a supported safe
 adapter is labeled `unhandledMessageCandidate`, increments
 `messageCandidateGapCount`, and keeps semantic completion false. This makes a

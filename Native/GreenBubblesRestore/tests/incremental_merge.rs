@@ -91,9 +91,11 @@ fn merges_selected_source_sets_reorders_globally_and_resolves_cross_shard_relati
     let cached_coverage: CachedSurfaceCoverage = read_json(&output.join("cached-surfaces.json"));
     assert_eq!(cached_coverage.moment_count, 2);
     assert_eq!(cached_coverage.tables.len(), 2);
+    assert!(cached_coverage.schema_profile_fingerprint.is_some());
 
     let coverage: RestorationCoverage = read_json(&output.join("coverage.json"));
     assert_eq!(coverage.message_tables.len(), 2);
+    assert!(coverage.schema_profile_fingerprint.is_some());
     assert!(coverage
         .message_tables
         .iter()
@@ -208,6 +210,9 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
             source_table_name: format!("Msg_{source_set}"),
             source_row_count: 1,
             columns: vec!["local_id".to_string(), "message_content".to_string()],
+            schema_fingerprint: Some(hex::encode(sha2::Sha256::digest(format!(
+                "schema-{source_set}"
+            )))),
         })
         .collect::<Vec<_>>();
     let all_tables = message_tables
@@ -218,6 +223,7 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
             source_table_id: table.source_table_id.clone(),
             source_table_name: table.source_table_name.clone(),
             columns: table.columns.clone(),
+            schema_fingerprint: table.schema_fingerprint.clone(),
             role: TableCoverageRole::Message,
             classification_reason: "synthetic".to_string(),
         })
@@ -227,6 +233,7 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
         decoder_name: "synthetic".to_string(),
         decoder_version: "1".to_string(),
         snapshot_manifest_format_version: if fragment { 3 } else { 2 },
+        schema_profile_fingerprint: None,
         message_tables,
         all_tables,
         logical_type_counts: BTreeMap::from([("1".to_string(), messages.len() as u64)]),
@@ -236,6 +243,7 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
     };
     let cached_coverage = CachedSurfaceCoverage {
         format_version: 1,
+        schema_profile_fingerprint: None,
         observed_at: if fragment {
             "2026-08-27T04:00:00Z"
         } else {
@@ -259,6 +267,9 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
                     "user_name".to_string(),
                     "content".to_string(),
                 ],
+                schema_fingerprint: Some(hex::encode(sha2::Sha256::digest(format!(
+                    "sns-schema-{source_set}"
+                )))),
                 source_row_count: 1,
                 restored_row_count: 1,
                 role: CachedSurfaceTableRole::MomentTimeline,

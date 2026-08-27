@@ -120,8 +120,18 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
     );
     let coverage: serde_json::Value =
         serde_json::from_slice(&fs::read(output.join("coverage.json")).unwrap()).unwrap();
+    assert_eq!(coverage["formatVersion"], json!(3));
+    assert_eq!(
+        coverage["schemaProfileFingerprint"].as_str().unwrap().len(),
+        64
+    );
     let all_tables = coverage["allTables"].as_array().unwrap();
     assert_eq!(all_tables.len(), 4);
+    assert!(all_tables.iter().all(|table| {
+        table["schemaFingerprint"]
+            .as_str()
+            .is_some_and(|fingerprint| fingerprint.len() == 64)
+    }));
     assert!(all_tables.iter().any(|table| {
         table["sourceTableName"] == "Name2Id" && table["role"] == "knownAuxiliary"
     }));

@@ -119,6 +119,9 @@ Production completeness is deliberately strict. The restoration report must
 satisfy `source rows = restored rows + rejected rows`, with zero rejections,
 zero duplicate canonical identities, no unknown observed message types, and no
 unexplained media state. See [docs/RESTORATION_SPEC.md](docs/RESTORATION_SPEC.md).
+The coverage ledger also carries deterministic whole-profile and per-table
+schema fingerprints; data-row changes do not alter them, while structural drift
+does.
 
 For low-latency text publication, media traversal and decoding can be deferred:
 

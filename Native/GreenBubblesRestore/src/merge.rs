@@ -9,6 +9,10 @@ use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::archive::{ensure_private_directory, ensure_private_regular_file, load_report};
+use crate::schema::{
+    schema_profile_fingerprint, validate_cached_coverage_schema,
+    validate_restoration_coverage_schema,
+};
 use crate::{
     ArtifactAvailability, ArtifactDecodeState, CachedSurfaceCompleteness, CachedSurfaceCoverage,
     CanonicalArtifact, CanonicalCachedMoment, CanonicalCachedMomentInteraction,
@@ -398,6 +402,13 @@ fn merge_cached_surfaces(
                 .is_some_and(|(_, _, coverage)| coverage.source_database_present));
     let moments = moments.into_values().collect::<Vec<_>>();
     let interactions = interactions.into_values().collect::<Vec<_>>();
+    let schema_profile_fingerprint = schema_profile_fingerprint(tables.iter().map(|table| {
+        (
+            table.source_logical_path.as_str(),
+            table.source_table_name.as_str(),
+            table.schema_fingerprint.as_deref(),
+        )
+    }));
     let coverage = CachedSurfaceCoverage {
         format_version: fragment
             .as_ref()
@@ -408,6 +419,7 @@ fn merge_cached_surfaces(
                     .map(|(_, _, coverage)| coverage.format_version)
             })
             .unwrap_or(1),
+        schema_profile_fingerprint,
         observed_at,
         cache_completeness: CachedSurfaceCompleteness::PartialLocalCache,
         source_database_present,
@@ -439,10 +451,12 @@ fn load_cached_surfaces(archive: &Path) -> Result<Option<MergedCachedSurfaces>, 
             "cached-surface archive files are incomplete".to_string(),
         ));
     }
+    let coverage = read_json(&coverage)?;
+    validate_cached_coverage_schema(&coverage)?;
     Ok(Some((
         read_ndjson(&moments)?,
         read_ndjson(&interactions)?,
-        read_json(&coverage)?,
+        coverage,
     )))
 }
 
@@ -970,6 +984,8 @@ fn merge_coverage(
 ) -> Result<RestorationCoverage, RestoreError> {
     let previous: RestorationCoverage = read_json(&previous_archive.join("coverage.json"))?;
     let fragment: RestorationCoverage = read_json(&fragment_archive.join("coverage.json"))?;
+    validate_restoration_coverage_schema(&previous)?;
+    validate_restoration_coverage_schema(&fragment)?;
     let mut message_tables = previous
         .message_tables
         .into_iter()
@@ -1008,11 +1024,19 @@ fn merge_coverage(
     });
     ensure_unique_table_coverage(&message_tables, &all_tables)?;
     let counts = message_type_counts(messages);
+    let schema_profile_fingerprint = schema_profile_fingerprint(all_tables.iter().map(|table| {
+        (
+            table.source_logical_path.as_str(),
+            table.source_table_name.as_str(),
+            table.schema_fingerprint.as_deref(),
+        )
+    }));
     Ok(RestorationCoverage {
         format_version: fragment.format_version,
         decoder_name: fragment.decoder_name,
         decoder_version: fragment.decoder_version,
         snapshot_manifest_format_version: fragment.snapshot_manifest_format_version,
+        schema_profile_fingerprint,
         message_tables,
         all_tables,
         logical_type_counts: counts.0,
@@ -1100,16 +1124,16 @@ fn calculate_integrity(
         .filter(|message| message.semantic_decode_state != SemanticDecodeState::Complete)
         .count() as u64;
     for table in &coverage.message_tables {
-        let identity = table
-            .columns
-            .iter()
-            .map(|column| column.to_ascii_lowercase())
-            .collect::<Vec<_>>()
-            .join("\u{1f}");
-        *integrity
-            .message_schema_counts
-            .entry(hex::encode(Sha256::digest(identity.as_bytes())))
-            .or_default() += 1;
+        let identity = table.schema_fingerprint.clone().unwrap_or_else(|| {
+            let legacy_identity = table
+                .columns
+                .iter()
+                .map(|column| column.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+                .join("\u{1f}");
+            hex::encode(Sha256::digest(legacy_identity.as_bytes()))
+        });
+        *integrity.message_schema_counts.entry(identity).or_default() += 1;
     }
     for message in messages {
         integrity.artifact_reference_count += message.artifact_references.len() as u64;
