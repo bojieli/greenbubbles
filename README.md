@@ -42,7 +42,9 @@ The implemented downstream protocol and validation evidence are in
 active-read assessment is in
 [docs/ACTIVE_READ_FEASIBILITY.md](docs/ACTIVE_READ_FEASIBILITY.md). The passive
 acquisition assessment and non-invasive stop rule are in
-[docs/ACQUISITION_FEASIBILITY.md](docs/ACQUISITION_FEASIBILITY.md).
+[docs/ACQUISITION_FEASIBILITY.md](docs/ACQUISITION_FEASIBILITY.md). Every
+remaining external gate and its required resumption evidence is mapped in
+[docs/GATE_READINESS.md](docs/GATE_READINESS.md).
 
 ## Build and test
 

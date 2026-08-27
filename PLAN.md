@@ -814,26 +814,30 @@ It does not initially include:
 
 ## Near-term work queue
 
-1. Keep the repository private and complete the Phase 0.5 technical,
-   ordinary-contact-action, and legal/distribution assessments. The action
-   experiment is an early feasibility spike, not authorization to ship it.
-2. Verify discovery and strict lossless restoration on one pinned current macOS
-   WeChat version using an authorized disposable/test account, then record exact
-   source and semantic coverage.
-3. Finish enumeration of message-bearing stores, unknown logical message types,
-   and local/missing attachment states until the restoration exit gate is met.
-4. Implement the encrypted canonical replica and transactional schema
-   migrations.
-5. Implement checkpointed change-proportional synchronization and benchmark
-   one-message, burst, edit, recall, deletion, missed-hint, and crash recovery
-   against the 60-second p95 objective.
-6. Add structured and exact full-text search, `coverage()`, `status()`, and
-   `get_changes(cursor)`.
-7. Expose stable JSON/JSONL and a local API, then add MCP as a typed adapter and
-   integrate one existing agent host.
-8. Add immutable drafts and exact human previews; productize confirmed
-   ordinary-contact text/reply/file actions only after all controlling gates
-   pass.
+1. Keep the repository private. Obtain an authorized disposable/test corpus by
+   official portable export/backup, owner-supplied plaintext, or passphrase
+   through standard input; do not add an invasive fallback.
+2. Verify discovery on Intel and Apple Silicon across two explicitly
+   fingerprinted client versions using redacted metadata only.
+3. On one immutable pinned-current-version corpus, close row accounting,
+   observed logical-type coverage, relationships, and every downloaded/missing
+   media state together; retain sanitized regressions only.
+4. Prove real-client bootstrap and change-proportional synchronization for idle,
+   one-message, burst, edit, recall, deletion, missed-hint, integrity-scan, and
+   crash/restart cases against the 60-second p95 objective.
+5. Obtain the legal, supportability, Tencent-route, and public-distribution
+   decisions required by Phase 0.5. Keep active reads and actions unavailable
+   in their absence.
+6. Only if those gates approve it, run one visible, allow-listed disposable
+   active-read or ordinary-contact feasibility experiment and accept a negative
+   result without switching to stealth, credential export, or protocol spoofing.
+7. Re-check the published robots policy before an explicitly requested public
+   article fetch; remain fail-closed while `/s` is disallowed.
+8. Treat a license, public release, or separate second connector as explicit
+   repository-owner product decisions, not inferred implementation tasks.
+
+The exact evidence needed to resume each unchecked item is mapped in
+`docs/GATE_READINESS.md`.
 
 ## Product proof and positioning
 
