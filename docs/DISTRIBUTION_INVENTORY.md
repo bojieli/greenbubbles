@@ -52,7 +52,7 @@ license decision still apply to distribution.
 
 ## Rust dependency boundary
 
-The restoration engine has 16 normal direct dependencies and one development
+The restoration engine has 17 normal direct dependencies and one development
 dependency. `Cargo.lock` is committed. At this audit the important direct
 families are:
 
@@ -63,6 +63,7 @@ families are:
 | `libc` | 0.2.189 | MIT OR Apache-2.0 | descriptor and permission primitives |
 | `md5` | 0.7.0 | Apache-2.0/MIT | source-compatible media identifiers |
 | `prost` | 0.13.5 | Apache-2.0 | protobuf decoding |
+| `roxmltree` | 0.21.1 | MIT OR Apache-2.0 | bounded nested-message XML normalization |
 | `rusqlite` | 0.40.2 | MIT | SQLite/SQLCipher access; native source is bundled |
 | `serde`, `serde_json` | 1.0.229, 1.0.151 | MIT OR Apache-2.0 | structured records |
 | `sha2` | 0.10.9 | MIT OR Apache-2.0 | integrity digests |
@@ -73,8 +74,8 @@ families are:
 | `wx-db`, `wx-decrypt`, `wx-media` | 0.7.4 at the revision below | absent on package records | pinned decoder primitives |
 | `filetime` (development only) | 0.2.29 | MIT/Apache-2.0 | timestamp tests |
 
-The locked graph contains 184 non-local package records across target and build
-configurations. Cargo metadata reports permissive expressions for 179 and no
+The locked graph contains 185 non-local package records across target and build
+configurations. Cargo metadata reports permissive expressions for 180 and no
 license value for the five pinned `wx-*` package records. License metadata is a
 useful index, not proof that every bundled source file is covered by that one
 expression; the native-source review below demonstrates why source inspection

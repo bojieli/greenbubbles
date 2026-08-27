@@ -1,1 +1,329 @@
-{"formatVersion":1,"rust":{"directDependencies":[{"features":[],"kind":"dev","licenseMetadata":"MIT/Apache-2.0","name":"filetime","optional":false,"requirement":"^0.2","resolvedVersion":"0.2.29","source":"registry+https://github.com/rust-lang/crates.io-index","usesDefaultFeatures":true},{"features":[],"kind":"normal","licenseMetadata":"MIT OR Apache-2.0","name":"base64","optional":false,"requirement":"^0.22","resolvedVersion":"0.22.1","source":"registry+https://github.com/rust-lang/crates.io-index","usesDefaultFeatures":true},{"features":[],"kind":"normal","licenseMetadata":"MIT OR Apache-2.0","name":"hex","optional":false,"requirement":"^0.4","resolvedVersion":"0.4.3","source":"registry+https://github.com/rust-lang/crates.io-index","usesDefaultFeatures":true},{"features":[],"kind":"normal","licenseMetadata":"MIT OR Apache-2.0","name":"libc","optional":false,"requirement":"^0.2","resolvedVersion":"0.2.189","source":"registry+https://github.com/rust-lang/crates.io-index","usesDefaultFeatures":true},{"features":[],"kind":"normal","licenseMetadata":"Apache-2.0/MIT","name":"md5","optional":false,"requirement":"^0.7","resolvedVersion":"0.7.0","source":"registry+https://github.com/rust-lang/crates.io-index","usesDefaultFeatures":true},{"features":[],"kind":"normal","licenseMetadata":"Apache-2.0","name":"prost","optional":false,"requirement":"^0.13","resolvedVersion":"0.13.5","source":"registry+https://github.com/rust-lang/crates.io-index","usesDefaultFeatures":true},{"features":["backup","bundled-sqlcipher"],"kind":"normal","licenseMetadata":"MIT","name":"rusqlite","optional":false,"requirement":"^0.40","resolvedVersion":"0.40.2","source":"registry+https://github.com/rust-lang/crates.io-index","usesDefaultFeatures":true},{"features":["derive"],"kind":"normal","licenseMetadata":"MIT OR Apache-2.0","name":"serde","optional":false,"requirement":"^1","resolvedVersion":"1.0.229","source":"registry+https://github.com/rust-lang/crates.io-index","usesDefaultFeatures":true},{"features":[],"kind":"normal","licenseMetadata":"MIT OR Apache-2.0","name":"serde_json","optional":false,"requirement":"^1","resolvedVersion":"1.0.151","source":"registry+https://github.com/rust-lang/crates.io-index","usesDefaultFeatures":true},{"features":[],"kind":"normal","licenseMetadata":"MIT OR Apache-2.0","name":"sha2","optional":false,"requirement":"^0.10","resolvedVersion":"0.10.9","source":"registry+https://github.com/rust-lang/crates.io-index","usesDefaultFeatures":true},{"features":[],"kind":"normal","licenseMetadata":"MIT OR Apache-2.0","name":"tempfile","optional":false,"requirement":"^3","resolvedVersion":"3.27.0","source":"registry+https://github.com/rust-lang/crates.io-index","usesDefaultFeatures":true},{"features":[],"kind":"normal","licenseMetadata":"MIT OR Apache-2.0","name":"thiserror","optional":false,"requirement":"^2","resolvedVersion":"2.0.20","source":"registry+https://github.com/rust-lang/crates.io-index","usesDefaultFeatures":true},{"features":[],"kind":"normal","licenseMetadata":"Unlicense/MIT","name":"walkdir","optional":false,"requirement":"^2","resolvedVersion":"2.5.0","source":"registry+https://github.com/rust-lang/crates.io-index","usesDefaultFeatures":true},{"features":[],"kind":"normal","licenseMetadata":null,"name":"wx-db","optional":false,"requirement":"*","resolvedVersion":"0.7.4","source":"git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74","usesDefaultFeatures":true},{"features":[],"kind":"normal","licenseMetadata":null,"name":"wx-decrypt","optional":false,"requirement":"*","resolvedVersion":"0.7.4","source":"git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74","usesDefaultFeatures":true},{"features":["audio"],"kind":"normal","licenseMetadata":null,"name":"wx-media","optional":false,"requirement":"*","resolvedVersion":"0.7.4","source":"git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74","usesDefaultFeatures":true},{"features":["derive"],"kind":"normal","licenseMetadata":"Apache-2.0 OR MIT","name":"zeroize","optional":false,"requirement":"^1","resolvedVersion":"1.9.0","source":"registry+https://github.com/rust-lang/crates.io-index","usesDefaultFeatures":true}],"gitPackages":[{"licenseMetadata":null,"name":"wx-db","source":"git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74","version":"0.7.4"},{"licenseMetadata":null,"name":"wx-decrypt","source":"git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74","version":"0.7.4"},{"licenseMetadata":null,"name":"wx-keychain","source":"git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74","version":"0.7.4"},{"licenseMetadata":null,"name":"wx-media","source":"git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74","version":"0.7.4"},{"licenseMetadata":null,"name":"wx-paths","source":"git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74","version":"0.7.4"}],"gitRepositoryLicense":{"licenseSHA256":"4d97412ef3e92a7f816240a39e5aae454dfe64c1b716e3702c21f64aa53e310e","workspaceLicenseMetadata":"MIT"},"nativePackages":[{"licenseMetadata":"MIT","name":"libsqlite3-sys","version":"0.38.2"},{"licenseMetadata":"MIT","name":"silk-rs","version":"0.2.0"}],"package":{"license":"Proprietary","name":"greenbubbles-restore","publishable":false,"version":"0.1.0"},"unknownLicensePackages":[{"name":"wx-db","source":"git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74","version":"0.7.4"},{"name":"wx-decrypt","source":"git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74","version":"0.7.4"},{"name":"wx-keychain","source":"git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74","version":"0.7.4"},{"name":"wx-media","source":"git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74","version":"0.7.4"},{"name":"wx-paths","source":"git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74","version":"0.7.4"}]},"swift":{"externalDependencies":[],"package":"greenbubbles"}}
+{
+  "formatVersion" : 1,
+  "rust" : {
+    "directDependencies" : [
+      {
+        "features" : [
+
+        ],
+        "kind" : "dev",
+        "licenseMetadata" : "MIT/Apache-2.0",
+        "name" : "filetime",
+        "optional" : false,
+        "requirement" : "^0.2",
+        "resolvedVersion" : "0.2.29",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "MIT OR Apache-2.0",
+        "name" : "base64",
+        "optional" : false,
+        "requirement" : "^0.22",
+        "resolvedVersion" : "0.22.1",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "MIT OR Apache-2.0",
+        "name" : "hex",
+        "optional" : false,
+        "requirement" : "^0.4",
+        "resolvedVersion" : "0.4.3",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "MIT OR Apache-2.0",
+        "name" : "libc",
+        "optional" : false,
+        "requirement" : "^0.2",
+        "resolvedVersion" : "0.2.189",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "Apache-2.0/MIT",
+        "name" : "md5",
+        "optional" : false,
+        "requirement" : "^0.7",
+        "resolvedVersion" : "0.7.0",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "Apache-2.0",
+        "name" : "prost",
+        "optional" : false,
+        "requirement" : "^0.13",
+        "resolvedVersion" : "0.13.5",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "MIT OR Apache-2.0",
+        "name" : "roxmltree",
+        "optional" : false,
+        "requirement" : "^0.21",
+        "resolvedVersion" : "0.21.1",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+          "backup",
+          "bundled-sqlcipher"
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "MIT",
+        "name" : "rusqlite",
+        "optional" : false,
+        "requirement" : "^0.40",
+        "resolvedVersion" : "0.40.2",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+          "derive"
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "MIT OR Apache-2.0",
+        "name" : "serde",
+        "optional" : false,
+        "requirement" : "^1",
+        "resolvedVersion" : "1.0.229",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "MIT OR Apache-2.0",
+        "name" : "serde_json",
+        "optional" : false,
+        "requirement" : "^1",
+        "resolvedVersion" : "1.0.151",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "MIT OR Apache-2.0",
+        "name" : "sha2",
+        "optional" : false,
+        "requirement" : "^0.10",
+        "resolvedVersion" : "0.10.9",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "MIT OR Apache-2.0",
+        "name" : "tempfile",
+        "optional" : false,
+        "requirement" : "^3",
+        "resolvedVersion" : "3.27.0",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "MIT OR Apache-2.0",
+        "name" : "thiserror",
+        "optional" : false,
+        "requirement" : "^2",
+        "resolvedVersion" : "2.0.20",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "Unlicense/MIT",
+        "name" : "walkdir",
+        "optional" : false,
+        "requirement" : "^2",
+        "resolvedVersion" : "2.5.0",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : null,
+        "name" : "wx-db",
+        "optional" : false,
+        "requirement" : "*",
+        "resolvedVersion" : "0.7.4",
+        "source" : "git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : null,
+        "name" : "wx-decrypt",
+        "optional" : false,
+        "requirement" : "*",
+        "resolvedVersion" : "0.7.4",
+        "source" : "git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+          "audio"
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : null,
+        "name" : "wx-media",
+        "optional" : false,
+        "requirement" : "*",
+        "resolvedVersion" : "0.7.4",
+        "source" : "git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+          "derive"
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "Apache-2.0 OR MIT",
+        "name" : "zeroize",
+        "optional" : false,
+        "requirement" : "^1",
+        "resolvedVersion" : "1.9.0",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      }
+    ],
+    "gitPackages" : [
+      {
+        "licenseMetadata" : null,
+        "name" : "wx-db",
+        "source" : "git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74",
+        "version" : "0.7.4"
+      },
+      {
+        "licenseMetadata" : null,
+        "name" : "wx-decrypt",
+        "source" : "git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74",
+        "version" : "0.7.4"
+      },
+      {
+        "licenseMetadata" : null,
+        "name" : "wx-keychain",
+        "source" : "git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74",
+        "version" : "0.7.4"
+      },
+      {
+        "licenseMetadata" : null,
+        "name" : "wx-media",
+        "source" : "git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74",
+        "version" : "0.7.4"
+      },
+      {
+        "licenseMetadata" : null,
+        "name" : "wx-paths",
+        "source" : "git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74",
+        "version" : "0.7.4"
+      }
+    ],
+    "gitRepositoryLicense" : {
+      "licenseSHA256" : "4d97412ef3e92a7f816240a39e5aae454dfe64c1b716e3702c21f64aa53e310e",
+      "workspaceLicenseMetadata" : "MIT"
+    },
+    "nativePackages" : [
+      {
+        "licenseMetadata" : "MIT",
+        "name" : "libsqlite3-sys",
+        "version" : "0.38.2"
+      },
+      {
+        "licenseMetadata" : "MIT",
+        "name" : "silk-rs",
+        "version" : "0.2.0"
+      }
+    ],
+    "package" : {
+      "license" : "Proprietary",
+      "name" : "greenbubbles-restore",
+      "publishable" : false,
+      "version" : "0.1.0"
+    },
+    "unknownLicensePackages" : [
+      {
+        "name" : "wx-db",
+        "source" : "git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74",
+        "version" : "0.7.4"
+      },
+      {
+        "name" : "wx-decrypt",
+        "source" : "git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74",
+        "version" : "0.7.4"
+      },
+      {
+        "name" : "wx-keychain",
+        "source" : "git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74",
+        "version" : "0.7.4"
+      },
+      {
+        "name" : "wx-media",
+        "source" : "git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74",
+        "version" : "0.7.4"
+      },
+      {
+        "name" : "wx-paths",
+        "source" : "git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74",
+        "version" : "0.7.4"
+      }
+    ]
+  },
+  "swift" : {
+    "externalDependencies" : [
+
+    ],
+    "package" : "greenbubbles"
+  }
+}

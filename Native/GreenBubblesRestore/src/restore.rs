@@ -658,42 +658,27 @@ fn restore_row(
                             Some(reason),
                         )
                     }
-                    known => {
-                        let partial_reason = match &known {
-                            wx_db::MessageContent::AppGeneric { sub_type, .. } => Some(format!(
-                                "app message subtype {sub_type} has only generic XML decoding"
-                            )),
-                            wx_db::MessageContent::MergedMessages { .. } => Some(
-                                "merged-message children are retained in raw XML but not yet normalized"
-                                    .to_string(),
-                            ),
-                            wx_db::MessageContent::ChannelVideo { sub_type, .. } => Some(format!(
-                                "channel media subtype {sub_type} metadata is decoded but its nested media graph is not yet normalized"
-                            )),
-                            _ => None,
-                        };
-                        match serde_json::to_value(known) {
-                            Ok(value) => (
-                                TypedPayload::Decoded(value),
-                                if partial_reason.is_some() {
-                                    SemanticDecodeState::Partial
-                                } else {
-                                    SemanticDecodeState::Complete
+                    known => match crate::nested_xml::serialize_message_content(&known) {
+                        Ok((value, partial_reason)) => (
+                            TypedPayload::Decoded(value),
+                            if partial_reason.is_some() {
+                                SemanticDecodeState::Partial
+                            } else {
+                                SemanticDecodeState::Complete
+                            },
+                            partial_reason,
+                        ),
+                        Err(error) => {
+                            let reason = format!("typed serialization failed: {error}");
+                            (
+                                TypedPayload::Unknown {
+                                    reason: reason.clone(),
                                 },
-                                partial_reason,
-                            ),
-                            Err(error) => {
-                                let reason = format!("typed serialization failed: {error}");
-                                (
-                                    TypedPayload::Unknown {
-                                        reason: reason.clone(),
-                                    },
-                                    SemanticDecodeState::Failed,
-                                    Some(reason),
-                                )
-                            }
+                                SemanticDecodeState::Failed,
+                                Some(reason),
+                            )
                         }
-                    }
+                    },
                 }
             }
             Err(error) => {

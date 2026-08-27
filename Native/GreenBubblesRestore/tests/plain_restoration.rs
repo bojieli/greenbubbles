@@ -41,6 +41,24 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
              CREATE TABLE Preference(key TEXT, value BLOB);",
         )
         .unwrap();
+    let merged_type = (19_i64 << 32) | 49_i64;
+    let merged_xml = r#"<msg><appmsg><type>19</type><title>Forwarded history</title><recorditem><![CDATA[<recordinfo><datalist><dataitem datatype="1" dataid="child-1"><sourcename>Alice</sourcename><sourcetime>2026-08-27</sourcetime><datadesc>Hello</datadesc></dataitem><dataitem datatype="49" dataid="child-2"><content>&lt;msg&gt;&lt;appmsg&gt;&lt;title&gt;Nested link&lt;/title&gt;&lt;/appmsg&gt;&lt;/msg&gt;</content></dataitem></datalist></recordinfo>]]></recorditem></appmsg></msg>"#;
+    let channel_type = (51_i64 << 32) | 49_i64;
+    let channel_xml = r#"<msg xmlns:f="urn:finder"><appmsg><type>51</type><title>Channel clip</title><f:finderFeed id="feed-1"><objectId>123</objectId><mediaList><media><mediaType>4</mediaType><url>https://example.invalid/video</url><thumbUrl>https://example.invalid/thumb</thumbUrl><width>1080</width><height>1920</height></media></mediaList></f:finderFeed></appmsg></msg>"#;
+    connection
+        .execute(
+            "INSERT INTO Msg_29a6db07e8bbdb53f5d54cc3c309f3f1
+             VALUES (12, 22, 32, ?1, 1, 1700000002, 2, ?2, NULL, 0)",
+            rusqlite::params![merged_type, merged_xml.as_bytes()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO Msg_29a6db07e8bbdb53f5d54cc3c309f3f1
+             VALUES (13, 23, 33, ?1, 1, 1700000003, 2, ?2, NULL, 0)",
+            rusqlite::params![channel_type, channel_xml.as_bytes()],
+        )
+        .unwrap();
     drop(connection);
 
     let bytes = fs::read(&database).unwrap();
@@ -91,8 +109,8 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
     .unwrap();
 
     assert!(report.integrity.row_equation_holds());
-    assert_eq!(report.integrity.source_row_count, 2);
-    assert_eq!(report.integrity.restored_row_count, 2);
+    assert_eq!(report.integrity.source_row_count, 4);
+    assert_eq!(report.integrity.restored_row_count, 4);
     assert_eq!(report.integrity.rejected_row_count, 0);
     assert_eq!(report.integrity.unknown_payload_count, 1);
     assert_eq!(report.integrity.semantic_gap_count, 1);
@@ -112,13 +130,40 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(lines.len(), 2);
+    assert_eq!(lines.len(), 4);
     assert_eq!(lines[0]["contentBase64"], json!("aGVsbG8="));
     assert_eq!(lines[1]["contentBase64"], json!("AP8="));
     assert_eq!(
         lines[0]["rawColumns"]["packed_info_data"],
         json!({"storageClass": "blobBase64", "value": "AQI="})
     );
+    let merged = lines
+        .iter()
+        .find(|message| message["subType"] == 19)
+        .unwrap();
+    assert_eq!(merged["semanticDecodeState"], "complete");
+    assert!(merged["semanticGapReason"].is_null());
+    assert_eq!(
+        merged["typedPayload"]["value"]["MergedMessages"]["normalized_xml"]
+            ["embeddedDocumentCount"],
+        2
+    );
+    assert!(
+        merged["typedPayload"]["value"]["MergedMessages"]["normalized_xml"]["nodeCount"]
+            .as_u64()
+            .unwrap()
+            > 10
+    );
+    let channel = lines
+        .iter()
+        .find(|message| message["subType"] == 51)
+        .unwrap();
+    assert_eq!(channel["semanticDecodeState"], "complete");
+    let channel_projection =
+        serde_json::to_string(&channel["typedPayload"]["value"]["ChannelVideo"]["normalized_xml"])
+            .unwrap();
+    assert!(channel_projection.contains("urn:finder"));
+    assert!(channel_projection.contains("thumbUrl"));
     let coverage: serde_json::Value =
         serde_json::from_slice(&fs::read(output.join("coverage.json")).unwrap()).unwrap();
     assert_eq!(coverage["formatVersion"], json!(3));
@@ -148,12 +193,31 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
     assert!(audit.all_artifact_references_resolve);
     assert!(audit.all_resolved_relationships_resolve);
     assert!(audit.all_recorded_artifact_files_match);
-    assert_eq!(audit.message_count, 2);
+    assert_eq!(audit.message_count, 4);
     assert!(!audit.full_restoration_verified);
     assert!(Path::new(&report.messages_path).is_absolute());
     assert!(Path::new(&report.report_path).is_absolute());
 
     let message_path = output.join("messages.ndjson");
+    let mut nested_tampered = lines.clone();
+    let merged_index = nested_tampered
+        .iter()
+        .position(|message| message["subType"] == 19)
+        .unwrap();
+    nested_tampered[merged_index]["typedPayload"]["value"]["MergedMessages"]["normalized_xml"]
+        ["nodeCount"] = json!(0);
+    let bytes = nested_tampered
+        .iter()
+        .map(|message| serde_json::to_string(message).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(&message_path, bytes).unwrap();
+    assert!(audit_archive(&output)
+        .unwrap_err()
+        .to_string()
+        .contains("projection differs from its source XML"));
+
     let mut provenance_tampered = lines.clone();
     provenance_tampered[0]["sourceTableName"] = json!("substituted-source-table");
     let bytes = provenance_tampered

@@ -70,6 +70,15 @@ path.
 Raw payloads are held inside the local trust boundary. AI-facing tools receive
 only policy-approved normalized fields, never the lossless archive by default.
 
+Merged-message and Finder/channel app messages retain their complete source XML
+and, when bounded parsing succeeds, add a format-versioned ordered structural
+projection. That projection preserves namespaces, attributes, text, comments,
+processing instructions, and recursively parsed XML embedded in
+`recorditem`/`content`/`recordxml` text. It does not assign undocumented meaning
+to private tags. DTD processing is disabled, and byte, node, and embedded-depth
+limits turn malformed or adversarial structures into explicit semantic gaps
+while leaving the authoritative raw XML recoverable.
+
 ## Passive cached surfaces
 
 When a supported `sns/sns.db` is present, restoration also writes the
@@ -142,11 +151,14 @@ full semantic restoration until each observed type is understood.
 `audit-archive` does not accept the writer's completion report on trust. It
 streams every canonical ledger again, reproduces row/type/gap/reference/entity
 and cached-surface counts, validates the table and schema-profile ledgers,
-checks ordering and bidirectional relationships, and verifies every recorded
-source or derivative file from a read-only no-follow descriptor. External media
-must still match device, inode, size, modification time, and SHA-256; connector
-derivatives must remain owner-only beneath the archive and match size and
-SHA-256. The successful result exposes aggregate evidence only.
+checks ordering and bidirectional relationships, regenerates every present
+nested-XML projection from its retained source XML, and verifies every recorded
+source or derivative file from a read-only no-follow descriptor. A complete
+nested message cannot omit or alter that projection. Legacy partial records may
+omit it only while retaining a semantic-gap verdict. External media must still
+match device, inode, size, modification time, and SHA-256; connector derivatives
+must remain owner-only beneath the archive and match size and SHA-256. The
+successful result exposes aggregate evidence only.
 
 This audit is required before a real archive can serve as Phase 1 completion
 evidence or enter a replica. Its `fullRestorationVerified` field remains false

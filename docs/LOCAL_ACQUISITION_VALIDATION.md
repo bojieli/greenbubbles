@@ -96,12 +96,32 @@ exactly 9 content-changed sets from the complete inventories, with matching
 baseline fingerprint and pinned client build. This proves classification and
 copy proportionality, not decoded message semantics or latency.
 
+A fresh repeated validation on the larger account then produced a 25-set,
+75-entry bootstrap using descriptor-based atomic APFS clones. Snapshot planning
+took 1,317 ms, acquisition 2,045 ms, and the complete snapshot command 3,362 ms.
+The native preflight independently rehashed all entries and again classified all
+25 databases as the pinned encrypted family requiring an owner-supplied
+passphrase. The immediate incremental selected exactly 8 content-changed sets,
+copied 24 entries, and reported no deletions or reconciliation-only sets;
+planning took 1,293 ms, acquisition 702 ms, and total runtime 1,996 ms.
+`audit-acquisition-chain` reproduced the exact baseline, signed build,
+inventories, deletion set, and changed-set classification.
+
+The latest metadata-only attachment recount observed 136,751 candidates
+totaling 38,865,082,886 bytes in the larger root and 87 candidates totaling
+1,469,805 bytes in the smaller root. One larger-root metadata item could not be
+fully classified, so this latest enumeration is explicitly incomplete and no
+file-type completeness is inferred. These changing aggregate values are a
+point-in-time observation, not evidence of message linkage or server-history
+coverage.
+
 ## Remaining restoration gate
 
-The snapshot command now records monotonic planning, descriptor-based
-acquisition, and total durations for future controlled runs. The retained
-validation snapshots predate those report fields, so no latency value is
-retroactively inferred from them.
+The snapshot command records monotonic planning, descriptor-based acquisition,
+and total durations. The fresh timings above measure passive capture stages
+only: source-persistence delay, inter-command delay, restoration, publication,
+replica application, and disposable-account scenario labels are absent, so no
+end-to-end synchronization latency or 60-second p95 claim is inferred.
 
 None of the encrypted database contents were read. Consequently this validation
 does not close row accounting, logical-type coverage, relationship resolution,

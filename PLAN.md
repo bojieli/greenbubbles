@@ -343,19 +343,23 @@ Owner-authorized local validation now adds real passive acquisition evidence:
 two redacted account roots produced consistent 25-set and 15-set bootstrap
 snapshots, every copied database was independently digest-verified and
 classified as the pinned encrypted WCDB family, the idle account produced a
-true no-op incremental, and an active-account incremental captured 7 changed
-sets as 21 descriptor-based atomic APFS clones. No database was decrypted, so
-this does not satisfy useful-content, semantic/media restoration, or real sync
-latency requirements. A separate content-free metadata pass fully enumerated
-136,741 attachment candidates (38,873,733,974 bytes) in the larger attachment
-root and 87 (1,469,805 bytes) in the smaller root, with no traversal errors; it
-did not inspect content or prove message linkage. See
+true no-op incremental, and fresh active-account evidence captured exactly 8
+content-changed sets as 24 descriptor-based atomic APFS clones. The fresh
+25-set bootstrap completed in 3,362 ms and its immediate incremental in 1,996
+ms, but those capture timings omit source persistence, restoration,
+publication, replica application, and disposable-scenario labels. No database
+was decrypted, so this does not satisfy useful-content, semantic/media
+restoration, or real sync latency requirements. A separate content-free latest
+metadata pass observed 136,751 attachment candidates (38,865,082,886 bytes) in
+the larger attachment root and 87 (1,469,805 bytes) in the smaller root. One
+larger-root metadata issue makes that enumeration explicitly incomplete; it did
+not inspect content or prove message linkage. See
 `docs/LOCAL_ACQUISITION_VALIDATION.md`.
 
-A new owner-authorized bootstrap/incremental pair independently reproduces the
-incremental's 9 changed sets from the two complete 25-set content inventories,
-with 27 copied entries versus 75 for bootstrap and exact baseline, build,
-deletion, and reconciliation continuity. This strengthens real
+A fresh owner-authorized bootstrap/incremental pair independently reproduces
+the incremental's 8 changed sets from the two complete 25-set content
+inventories, with 24 copied entries versus 75 for bootstrap and exact baseline,
+build, deletion, and reconciliation continuity. This strengthens real
 change-proportional acquisition evidence but still does not establish decoded
 message latency or semantic synchronization. See
 `docs/ACQUISITION_CHAIN_AUDIT.md`.
@@ -489,6 +493,15 @@ file against its identity, timestamps, size, and SHA-256. Its content-free
 summary can make the eventual real-corpus evidence reproducible; it does not
 replace the still-required observation of all real tables, types, and media
 states. See `docs/ARCHIVE_AUDIT.md`.
+
+Merged-history and Finder/channel app messages now retain raw XML plus a
+bounded, ordered, versioned structural projection, including recursively
+embedded forwarded-message documents and namespace evidence. The independent
+archive audit regenerates the projection from raw XML and rejects altered or
+unjustifiably complete records while remaining compatible with legacy partial
+archives. Synthetic fixtures close the previously known decoder-design gap;
+they do not prove that every variant in a real pinned corpus has been observed,
+so the logical-type completion item remains unchecked.
 
 ### 1E. Incoming event reconciler
 

@@ -718,6 +718,7 @@ fn audit_messages(
             _ => "missing".to_string(),
         };
         *result.logical_sub_type_counts.entry(subtype).or_default() += 1;
+        crate::nested_xml::validate_canonical_message(&message).map_err(integrity)?;
         if let TypedPayload::Unknown { reason } = &message.typed_payload {
             *result
                 .unknown_payload_reason_counts

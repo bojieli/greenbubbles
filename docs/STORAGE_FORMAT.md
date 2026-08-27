@@ -147,10 +147,31 @@ key-unavailable media are distinct states. The current adapter does not infer
 which remote state applies unless local metadata proves it; a generic local miss
 therefore remains `notDownloaded`.
 
+## Nested message XML
+
+App-message subtypes for merged histories (`49:19`) and Finder/channel media
+(`49:51` and `49:63`) retain the decoder's complete `raw_xml` value and also
+carry a versioned `normalized_xml` projection when the graph can be parsed
+safely. The projection is an ordered generic XML tree rather than a guessed
+private schema: it retains element and attribute names, namespace URIs and
+declarations, text, comments, and processing instructions. XML documents
+embedded in `recorditem`, `content`, or `recordxml` text are recursively
+projected so forwarded-message children do not remain an opaque string.
+
+The parser disables DTD processing and bounds each document to 8 MiB and
+100,000 nodes, with at most four embedded-document levels. The raw XML remains
+authoritative. Malformed, structurally incomplete, oversized, or over-depth
+graphs keep that raw value and an explicit semantic gap instead of being
+discarded or labeled complete. Archive audit independently regenerates every
+present projection from the raw XML. It also accepts older partial archives
+that predate this projection, but a record labeled complete must contain an
+exact reproducible projection.
+
 ## Uncertainty and completion
 
-Observed-but-unknown message types, generic app subtypes, undecoded nested
-merged-message children, unresolved sender directions, failed group protobufs,
-ambiguous relationships, and unavailable media decoders remain machine-readable
-coverage gaps. They do not prevent raw retention, but they keep
-`fullRestorationAchieved` false until the exact observed corpus is understood.
+Observed-but-unknown message types, generic app subtypes, nested XML that fails
+bounded structural normalization, unresolved sender directions, failed group
+protobufs, ambiguous relationships, and unavailable media decoders remain
+machine-readable coverage gaps. They do not prevent raw retention, but they
+keep `fullRestorationAchieved` false until the exact observed corpus is
+understood.

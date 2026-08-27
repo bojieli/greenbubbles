@@ -43,6 +43,10 @@ The auditor fails closed unless all of these checks pass:
 - message logical-type, subtype, semantic-gap, direction, ordering,
   relationship, and artifact-reference counts reproduce both `coverage.json`
   and `report.json`;
+- every present merged-history or Finder/channel `normalized_xml` projection is
+  regenerated from its retained `raw_xml` and must match exactly; complete
+  records must carry the reproducible projection with no gap, while legacy
+  partial records may omit it only with an explicit semantic-gap verdict;
 - the complete table ledger, supported message-table subset, source-row
   counts, message-candidate gaps, per-table schema fingerprints, and aggregate
   schema-profile fingerprint agree; every message row's source table name and
@@ -119,8 +123,9 @@ audited successfully but still reports `fullRestorationVerified: false`.
 This audit proves internal archive consistency and the current identity of
 every recorded local file. It does not prove that an undiscovered WeChat table
 was absent, that a private field's semantics were interpreted correctly, or
-that remote-only history exists locally. Those claims still require one real
-pinned-version corpus with zero unhandled message tables, zero observed
-logical-type gaps, and an explicit state for every media reference. Likewise,
-the audit does not authorize public distribution, authenticated active reads,
-or actions.
+that a synthetically exercised nested tag graph covers every real-world
+merged-message or Finder variant, or that remote-only history exists locally.
+Those claims still require one real pinned-version corpus with zero unhandled
+message tables, zero observed logical-type gaps, and an explicit state for
+every media reference. Likewise, the audit does not authorize public
+distribution, authenticated active reads, or actions.
