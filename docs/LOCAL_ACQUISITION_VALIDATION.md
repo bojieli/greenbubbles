@@ -41,6 +41,18 @@ name and nonzero encrypted file size prove local persistence surfaces, not that
 the database contains a useful row, that every message shard has been found, or
 that an attachment file is downloaded.
 
+An uncapped, metadata-only enumeration of the two `msg/attach` roots completed
+with zero traversal issues and zero symbolic links. The larger root contains
+136,741 regular-file candidates totaling 38,873,733,974 bytes; the smaller root
+contains 87 totaling 1,469,805 bytes. Extension-only classification identified
+43 documents, 4 audio candidates, and 1 video candidate in the larger root. The
+remaining 136,693 larger-root files and all 87 smaller-root files use
+unclassified names/extensions and were not guessed to be images or another
+type. No filename, path, digest, timestamp, or file content was emitted or read.
+This proves substantial locally persisted artifact candidates, not their
+message linkage, format, decryptability, semantic usefulness, or completeness
+relative to server history.
+
 `greenbubbles-restore preflight` verified every copied database/WAL/SHM digest,
 accepted the exact signed-client evidence, and classified every database from
 its 16-byte header without decryption or schema enumeration. All 40 databases

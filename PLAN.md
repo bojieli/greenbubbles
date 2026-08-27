@@ -346,7 +346,11 @@ classified as the pinned encrypted WCDB family, the idle account produced a
 true no-op incremental, and an active-account incremental captured 7 changed
 sets as 21 descriptor-based atomic APFS clones. No database was decrypted, so
 this does not satisfy useful-content, semantic/media restoration, or real sync
-latency requirements. See `docs/LOCAL_ACQUISITION_VALIDATION.md`.
+latency requirements. A separate content-free metadata pass fully enumerated
+136,741 attachment candidates (38,873,733,974 bytes) in the larger attachment
+root and 87 (1,469,805 bytes) in the smaller root, with no traversal errors; it
+did not inspect content or prove message linkage. See
+`docs/LOCAL_ACQUISITION_VALIDATION.md`.
 
 ### Ordinary-contact action feasibility gate
 

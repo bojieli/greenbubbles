@@ -48,13 +48,14 @@ public struct WeChatAccountDiscovery: Sendable {
     resolvedAccounts().first { $0.report.accountID == accountID }?.root
   }
 
-  private struct ResolvedAccount {
+  struct ResolvedAccount: Sendable {
     let report: WeChatAccountLocation
     let root: URL
     let databaseRoot: URL
+    let attachmentRoot: URL?
   }
 
-  private func resolvedAccounts() -> [ResolvedAccount] {
+  func resolvedAccounts() -> [ResolvedAccount] {
     let fileManager = FileManager.default
     var accounts: [ResolvedAccount] = []
     for xwechatRoot in xwechatFileRoots(fileManager: fileManager) {
@@ -71,8 +72,11 @@ public struct WeChatAccountDiscovery: Sendable {
           values.isSymbolicLink != true
         else { continue }
         let databaseRoot = root.appending(path: "db_storage", directoryHint: .isDirectory)
-        guard fileManager.fileExists(atPath: databaseRoot.path) else { continue }
+        guard safeDirectory(databaseRoot) else { continue }
         let attachmentCandidate = root.appending(path: "msg/attach", directoryHint: .isDirectory)
+        let attachmentRoot =
+          safeDirectory(attachmentCandidate)
+          ? attachmentCandidate.standardizedFileURL : nil
         let rootReference = privacy.reference(for: root)
         accounts.append(
           ResolvedAccount(
@@ -80,13 +84,12 @@ public struct WeChatAccountDiscovery: Sendable {
               accountID: rootReference.opaqueID,
               root: rootReference,
               databaseRoot: privacy.reference(for: databaseRoot),
-              attachmentRoot: fileManager.fileExists(atPath: attachmentCandidate.path)
-                ? privacy.reference(for: attachmentCandidate)
-                : nil,
+              attachmentRoot: attachmentRoot.map { privacy.reference(for: $0) },
               isReadable: fileManager.isReadableFile(atPath: databaseRoot.path)
             ),
             root: root.standardizedFileURL,
-            databaseRoot: databaseRoot.standardizedFileURL
+            databaseRoot: databaseRoot.standardizedFileURL,
+            attachmentRoot: attachmentRoot
           ))
       }
     }
@@ -121,5 +124,12 @@ public struct WeChatAccountDiscovery: Sendable {
     return candidates.filter {
       fileManager.fileExists(atPath: $0.path) && seen.insert($0.standardizedFileURL.path).inserted
     }
+  }
+
+  private func safeDirectory(_ url: URL) -> Bool {
+    guard
+      let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+    else { return false }
+    return values.isDirectory == true && values.isSymbolicLink != true
   }
 }

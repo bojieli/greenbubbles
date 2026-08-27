@@ -22,6 +22,7 @@ enum CLIError: Error, CustomStringConvertible {
 struct Arguments {
   enum Command: String {
     case accounts
+    case accountStorage = "account-storage"
     case acquisitionSurfaces = "acquisition-surfaces"
     case discover
     case integrationSurfaces = "integration-surfaces"
@@ -113,6 +114,7 @@ private let usage = """
 
   Commands:
     accounts             Find account-scoped database and attachment roots
+    account-storage      Count redacted local database and attachment candidates
     acquisition-surfaces
                          Inspect static, signed backup/export workflow evidence
     discover             Find known WeChat installations and data roots (default)
@@ -138,7 +140,7 @@ private let usage = """
                          Revisit recently modified sets (default: 900)
     --include-paths      Include sensitive filesystem paths in local output
     --max-depth <n>      Limit recursive traversal depth (default: 10)
-    --max-artifacts <n>  Stop after this many classified artifacts (default: 10000)
+    --max-artifacts <n>  Limit inventory or attachment files (default: 10000)
     -h, --help           Show this help
   """
 
@@ -162,6 +164,12 @@ do {
     print(usage)
   case .accounts:
     try printJSON(WeChatAccountDiscovery(includePaths: arguments.includePaths).discover())
+  case .accountStorage:
+    try printJSON(
+      WeChatAccountStorageAssessor(
+        maxDepth: arguments.maxDepth,
+        maxAttachmentFiles: arguments.maxArtifacts
+      ).assess(accountID: arguments.accountID))
   case .acquisitionSurfaces:
     let surfaceInspector = WeChatAcquisitionSurfaceInspector()
     if let application = arguments.application {

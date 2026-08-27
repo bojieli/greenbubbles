@@ -54,6 +54,7 @@ owner-authorized, content-free local snapshot validation is in
 swift build
 swift test
 swift run greenbubbles accounts
+swift run greenbubbles account-storage --max-artifacts 100000
 swift run greenbubbles acquisition-surfaces
 swift run greenbubbles discover
 swift run greenbubbles integration-surfaces
@@ -68,6 +69,13 @@ cargo test --locked --all-targets
 `--include-paths` may be used explicitly. Do not paste that output into issues
 or logs because paths can contain stable account identifiers. Opaque identifiers
 are stable hashes intended for correlation, not a substitute for access control.
+
+`account-storage` emits aggregate filesystem metadata only: database-family
+candidate counts and attachment-candidate counts/bytes by broad type. It does
+not output attachment filenames or paths and does not open database or
+attachment content. `reachedAttachmentLimit` or metadata issues make the
+enumeration incomplete; even a complete enumeration does not prove that a file
+belongs to a message or that restoration can decode it.
 
 `integration-surfaces` reads only signed metadata from the exact pinned WeChat
 build and emits no application path. It reports inbound and internal boundaries;
