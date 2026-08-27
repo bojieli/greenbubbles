@@ -502,6 +502,10 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
     assert_eq!(audit.verified_external_source_file_count, 4);
     assert!(audit.verified_connector_owned_file_count >= 2);
     assert!(!audit.full_restoration_verified);
+    assert!(audit.completion_evidence.media_reference_corpus_observed);
+    assert!(audit.completion_evidence.verified_local_media_observed);
+    assert!(!audit.completion_evidence.artifact_verification_complete);
+    assert!(!audit.completion_evidence.technical_restoration_complete);
 
     let messages_path = output.join("messages.ndjson");
     let artifacts_path = output.join("artifacts.ndjson");

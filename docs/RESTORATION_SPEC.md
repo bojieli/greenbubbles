@@ -166,6 +166,15 @@ unless the archive is authoritative, media-resolved, pinned-build compatible,
 and already satisfies every strict completion component. See
 `docs/ARCHIVE_AUDIT.md`.
 
+The privacy-safe audit report exposes those components independently so the
+same immutable corpus can be evaluated against the row, observed-type,
+relationship/entity, and media requirements together. Non-empty message,
+media-reference, and verified-local-media booleans distinguish representative
+evidence from vacuous success. Machine verification remains scoped to what the
+snapshot actually contains; authorization, disposable-account provenance, and
+the completeness of the observed universe require external attestations and
+remain explicitly marked as such.
+
 Row accounting is enforced independently for each `(source set, message
 table)` identity. A globally balanced total cannot conceal a missing row in one
 table and an extra row in another, and one source row cannot appear in both the

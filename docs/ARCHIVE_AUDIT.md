@@ -111,6 +111,25 @@ coverage-gap counts, and booleans. It emits no message body, identifier,
 filesystem path, source fingerprint, file digest, table name, or failure-row
 identity. Errors name the failed invariant but not the sensitive record.
 
+Audit-report format 2 includes `completionEvidence`, an independently derived
+component verdict rather than a copy of the writer's top-level flag. It reports
+row accounting (including zero rejections and unique identities), observed
+message-type semantics, direction, entity, relationship, artifact verification,
+artifact decoding, authoritative source scope, resolved media phase, and pinned
+client-build compatibility separately. It also states whether the archive
+actually contains messages, media references, and at least one still-verified
+local source or connector-owned media file. This prevents a structurally empty
+or media-free synthetic run from being mistaken for the representative corpus
+required by the plan.
+
+`technicalRestorationComplete` means all machine-verifiable completion
+components pass for this one audited archive. It is deliberately accompanied by
+`externalAuthorizationAttestationRequired`,
+`disposableScenarioAttestationRequired`, and `observedCorpusScopeOnly`, all true.
+The auditor cannot prove owner authorization, disposable-account provenance, or
+that a different undiscovered table/type exists outside the observed snapshot.
+Those attestations must never be flipped by archive contents.
+
 `fullRestorationVerified` is true only when all archive checks pass and the
 archive itself claims full restoration from an authoritative, media-resolved,
 production-compatible pinned build. A structurally valid archive with an

@@ -189,12 +189,32 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
         .any(|table| { table["sourceTableName"] == "Preference" && table["role"] == "other" }));
 
     let audit = audit_archive(&output).unwrap();
+    assert_eq!(audit.format_version, 2);
     assert!(audit.report_matches_archive);
     assert!(audit.all_artifact_references_resolve);
     assert!(audit.all_resolved_relationships_resolve);
     assert!(audit.all_recorded_artifact_files_match);
     assert_eq!(audit.message_count, 4);
     assert!(!audit.full_restoration_verified);
+    assert!(audit.completion_evidence.row_accounting_complete);
+    assert!(audit.completion_evidence.non_empty_message_corpus_observed);
+    assert!(
+        !audit
+            .completion_evidence
+            .observed_message_type_coverage_complete
+    );
+    assert!(!audit.completion_evidence.verified_local_media_observed);
+    assert!(
+        audit
+            .completion_evidence
+            .external_authorization_attestation_required
+    );
+    assert!(
+        audit
+            .completion_evidence
+            .disposable_scenario_attestation_required
+    );
+    assert!(audit.completion_evidence.observed_corpus_scope_only);
     assert!(Path::new(&report.messages_path).is_absolute());
     assert!(Path::new(&report.report_path).is_absolute());
 

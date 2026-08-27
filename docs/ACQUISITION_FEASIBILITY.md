@@ -89,6 +89,47 @@ re-signing, reusable session-credential export, security-control bypass, or
 anti-detection work. Static evidence that an internal workflow exists does not
 change this stop rule.
 
+## Current public-project survey
+
+A fresh public-source review on 2026-08-27 found no documented non-invasive
+source for the macOS 4.1.12 database passphrase:
+
+- [`pandorafuture/wx-cli`](https://github.com/pandorafuture/wx-cli), whose
+  decoder crates GreenBubbles pins for offline format support, documents its
+  optional key acquisition as disabling macOS SIP and intercepting a live
+  WeChat PBKDF2 call with LLDB. An already known key can be supplied manually,
+  but the project does not identify a supported export or ordinary user-visible
+  passphrase source.
+- [`robbin/wechat-exporter`](https://github.com/robbin/wechat-exporter)
+  documents re-signing WeChat, privileged memory scanning, and key extraction.
+  That is client modification and live credential extraction, not an official
+  backup importer.
+- Contemporary Windows projects likewise describe live-process memory scanning
+  or injected hooks. Different platform mechanics do not make that an
+  owner-controlled portable export or a macOS passphrase source.
+- [`PyWxDump`](https://github.com/xaoyaoo/PyWxDump) and
+  [`chatlog`](https://github.com/sjzar/chatlog) removed their implementation and
+  history after reporting WeChat legal notices in October 2025; neither remains
+  an available supported acquisition path.
+- [`WechatExporter`](https://github.com/BlueMatthew/WechatExporter) consumes an
+  unencrypted iTunes/iOS backup and documents much older tested mobile versions.
+  It neither obtains nor replaces the current macOS desktop database
+  passphrase.
+- [`WxBackup`](https://github.com/weibeifen/wxbackup) describes a proprietary,
+  phone-confirmed NAS backup/restore product. Its public repository does not
+  document a portable plaintext format or expose the desktop WCDB passphrase.
+- Tencent's
+  [`openclaw-weixin`](https://github.com/Tencent/openclaw-weixin) provides a
+  QR-authorized bot/channel relationship. It does not expose the existing
+  desktop conversation archive or its database key.
+
+This survey is descriptive, not an endorsement or legal conclusion. It also
+does not prove that every private or future route is impossible. It establishes
+that “other projects can decrypt WeChat” currently means either an invasive key
+acquisition mechanism, an already supplied key, a different/older backup
+surface, or a different bot relationship. GreenBubbles will not download, run,
+port, or automate the invasive mechanisms.
+
 ## Remaining evidence required
 
 This evaluation completes the plan item to examine official workflows and

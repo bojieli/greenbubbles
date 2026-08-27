@@ -57,6 +57,30 @@ pub struct ArchiveAuditReport {
     pub artifact_decode_gap_count: u64,
     pub entity_decode_gap_count: u64,
     pub unresolved_relationship_count: u64,
+    pub completion_evidence: AuditedRestorationCompletionEvidence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditedRestorationCompletionEvidence {
+    pub format_version: u32,
+    pub row_accounting_complete: bool,
+    pub observed_message_type_coverage_complete: bool,
+    pub direction_resolution_complete: bool,
+    pub entity_reconstruction_complete: bool,
+    pub relationship_resolution_complete: bool,
+    pub artifact_verification_complete: bool,
+    pub artifact_decoding_complete: bool,
+    pub source_scope_authoritative: bool,
+    pub media_phase_resolved: bool,
+    pub client_build_production_compatible: bool,
+    pub technical_restoration_complete: bool,
+    pub non_empty_message_corpus_observed: bool,
+    pub media_reference_corpus_observed: bool,
+    pub verified_local_media_observed: bool,
+    pub external_authorization_attestation_required: bool,
+    pub disposable_scenario_attestation_required: bool,
+    pub observed_corpus_scope_only: bool,
 }
 
 #[derive(Default)]
@@ -187,14 +211,23 @@ pub fn audit_archive(archive_directory: &Path) -> Result<ArchiveAuditReport, Res
         ));
     }
 
-    verify_completion(&report)?;
+    let audited_completion = verify_completion(&report)?;
     let full_restoration_verified = report.completion.full_restoration_achieved
         && report.archive_scope == RestorationArchiveScope::Authoritative
         && report.media_phase == RestorationMediaPhase::Resolved
         && report.client_build_compatibility.production_compatible;
+    let completion_evidence = audited_completion_evidence(
+        &audited_completion,
+        report.archive_scope,
+        report.media_phase,
+        report.client_build_compatibility.production_compatible,
+        messages.count,
+        messages.artifact_reference_count,
+        artifacts.external_paths.len() as u64 + artifacts.connector_paths.len() as u64,
+    );
 
     Ok(ArchiveAuditReport {
-        format_version: 1,
+        format_version: 2,
         privacy_safe_summary: true,
         archive_format_version: report.format_version,
         coverage_format_version: coverage.format_version,
@@ -228,6 +261,7 @@ pub fn audit_archive(archive_directory: &Path) -> Result<ArchiveAuditReport, Res
         artifact_decode_gap_count: report.integrity.artifact_decode_gap_count,
         entity_decode_gap_count: report.integrity.entity_decode_gap_count,
         unresolved_relationship_count: report.integrity.unresolved_relationship_count,
+        completion_evidence,
     })
 }
 
@@ -2024,7 +2058,7 @@ fn audit_cached_surfaces(
     Ok((moments.len() as u64, interactions.len() as u64))
 }
 
-fn verify_completion(report: &RestorationReport) -> Result<(), RestoreError> {
+fn verify_completion(report: &RestorationReport) -> Result<RestorationCompletion, RestoreError> {
     let mut expected = RestorationCompletion::evaluate(&report.integrity);
     if report.media_phase == RestorationMediaPhase::Deferred
         || report.archive_scope != RestorationArchiveScope::Authoritative
@@ -2052,7 +2086,41 @@ fn verify_completion(report: &RestorationReport) -> Result<(), RestoreError> {
             "completion verdict is inconsistent with audited evidence",
         ));
     }
-    Ok(())
+    Ok(expected)
+}
+
+fn audited_completion_evidence(
+    completion: &RestorationCompletion,
+    archive_scope: RestorationArchiveScope,
+    media_phase: RestorationMediaPhase,
+    client_build_production_compatible: bool,
+    message_count: u64,
+    artifact_reference_count: u64,
+    verified_local_file_count: u64,
+) -> AuditedRestorationCompletionEvidence {
+    let row_accounting_complete = completion.row_equation_holds
+        && completion.zero_rejected_rows
+        && completion.canonical_identities_unique;
+    AuditedRestorationCompletionEvidence {
+        format_version: 1,
+        row_accounting_complete,
+        observed_message_type_coverage_complete: completion.semantic_message_coverage_complete,
+        direction_resolution_complete: completion.directions_complete,
+        entity_reconstruction_complete: completion.entity_coverage_complete,
+        relationship_resolution_complete: completion.relationship_coverage_complete,
+        artifact_verification_complete: completion.artifact_verification_complete,
+        artifact_decoding_complete: completion.artifact_decoding_complete,
+        source_scope_authoritative: archive_scope == RestorationArchiveScope::Authoritative,
+        media_phase_resolved: media_phase == RestorationMediaPhase::Resolved,
+        client_build_production_compatible,
+        technical_restoration_complete: completion.full_restoration_achieved,
+        non_empty_message_corpus_observed: message_count > 0,
+        media_reference_corpus_observed: artifact_reference_count > 0,
+        verified_local_media_observed: verified_local_file_count > 0,
+        external_authorization_attestation_required: true,
+        disposable_scenario_attestation_required: true,
+        observed_corpus_scope_only: true,
+    }
 }
 
 fn required_artifact_path(value: Option<&str>, message: &str) -> Result<PathBuf, RestoreError> {
@@ -2212,4 +2280,64 @@ fn same_file_version(before: &fs::Metadata, after: &fs::Metadata) -> bool {
 
 fn integrity(message: impl Into<String>) -> RestoreError {
     RestoreError::Integrity(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completion_evidence_keeps_machine_checks_and_external_attestations_distinct() {
+        let completion = RestorationCompletion {
+            row_equation_holds: true,
+            zero_rejected_rows: true,
+            canonical_identities_unique: true,
+            semantic_message_coverage_complete: true,
+            directions_complete: true,
+            entity_coverage_complete: true,
+            relationship_coverage_complete: true,
+            artifact_verification_complete: true,
+            artifact_decoding_complete: true,
+            full_restoration_achieved: true,
+        };
+        let evidence = audited_completion_evidence(
+            &completion,
+            RestorationArchiveScope::Authoritative,
+            RestorationMediaPhase::Resolved,
+            true,
+            10,
+            3,
+            2,
+        );
+
+        assert!(evidence.row_accounting_complete);
+        assert!(evidence.observed_message_type_coverage_complete);
+        assert!(evidence.technical_restoration_complete);
+        assert!(evidence.non_empty_message_corpus_observed);
+        assert!(evidence.media_reference_corpus_observed);
+        assert!(evidence.verified_local_media_observed);
+        assert!(evidence.external_authorization_attestation_required);
+        assert!(evidence.disposable_scenario_attestation_required);
+        assert!(evidence.observed_corpus_scope_only);
+
+        let fragment = audited_completion_evidence(
+            &RestorationCompletion {
+                full_restoration_achieved: false,
+                ..completion
+            },
+            RestorationArchiveScope::IncrementalFragment,
+            RestorationMediaPhase::Deferred,
+            false,
+            0,
+            0,
+            0,
+        );
+        assert!(!fragment.source_scope_authoritative);
+        assert!(!fragment.media_phase_resolved);
+        assert!(!fragment.client_build_production_compatible);
+        assert!(!fragment.technical_restoration_complete);
+        assert!(!fragment.non_empty_message_corpus_observed);
+        assert!(!fragment.media_reference_corpus_observed);
+        assert!(!fragment.verified_local_media_observed);
+    }
 }

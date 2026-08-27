@@ -112,10 +112,12 @@ fn merges_selected_source_sets_reorders_globally_and_resolves_cross_shard_relati
     assert_eq!(fs::read(relocated).unwrap(), b"synthetic-media");
 
     let audit = audit_archive(&output).unwrap();
+    assert_eq!(audit.format_version, 2);
     assert_eq!(audit.archive_format_version, 4);
     assert_eq!(audit.message_count, 2);
     assert_eq!(audit.cached_moment_count, 2);
     assert!(audit.all_recorded_artifact_files_match);
+    assert!(audit.completion_evidence.source_scope_authoritative);
     assert!(Path::new(&merged_report.messages_path).is_absolute());
     assert!(Path::new(&merged_report.report_path).is_absolute());
 

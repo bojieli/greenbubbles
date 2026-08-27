@@ -363,6 +363,14 @@ clean repeat completed without traversal issues, symbolic links, or a cap hit;
 it did not inspect content or prove message linkage. See
 `docs/LOCAL_ACQUISITION_VALIDATION.md`.
 
+A refreshed public-project survey found no ordinary user-visible or officially
+documented source for the current macOS database passphrase. Available projects
+either instrument or scan a live client, weaken platform protections, re-sign
+the application, require an already known key, target older mobile backups, or
+use a separate bot relationship. This reinforces the existing stop rule rather
+than authorizing automated key extraction. See
+`docs/ACQUISITION_FEASIBILITY.md`.
+
 A fresh owner-authorized bootstrap/incremental pair independently reproduces
 the incremental's 8 changed sets from the two complete 25-set content
 inventories, with 24 copied entries versus 75 for bootstrap and exact baseline,
@@ -508,6 +516,15 @@ file against its identity, timestamps, size, and SHA-256. Its content-free
 summary can make the eventual real-corpus evidence reproducible; it does not
 replace the still-required observation of all real tables, types, and media
 states. See `docs/ARCHIVE_AUDIT.md`.
+
+Archive-audit format 2 now emits independently derived completion components
+for row accounting, observed types, direction, entities, relationships, media
+verification/decoding, archive scope, media phase, and pinned-build support. It
+also distinguishes non-empty message/media evidence from vacuous structural
+success and permanently marks authorization, disposable-scenario provenance,
+and observed-universe scope as external attestations. This makes the eventual
+single-corpus Phase 1 decision machine-readable without claiming that synthetic
+or encrypted evidence has passed it.
 
 Merged-history and Finder/channel app messages now retain raw XML plus a
 bounded, ordered, versioned structural projection, including recursively

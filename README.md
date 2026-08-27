@@ -236,8 +236,10 @@ Git, issue attachments, shell transcripts, and model prompts.
 relationships, validates source-preserving encodings and schema profiles, and
 descriptor-verifies every recorded downloaded/materialized/decoded file against
 its stored identity, size, timestamps, and SHA-256. Its output contains only
-aggregate counts and verdicts. A moved, evicted, substituted, or changed media
-file fails closed. See [docs/ARCHIVE_AUDIT.md](docs/ARCHIVE_AUDIT.md).
+aggregate counts and independently derived per-component completion verdicts,
+including explicit external-attestation limitations. A moved, evicted,
+substituted, or changed media file fails closed. See
+[docs/ARCHIVE_AUDIT.md](docs/ARCHIVE_AUDIT.md).
 
 `audit-acquisition-chain` digest-verifies two owner-only snapshots and proves
 that baseline continuity, client build, changed/reconciliation/deleted set
