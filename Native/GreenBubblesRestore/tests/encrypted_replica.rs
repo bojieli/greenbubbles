@@ -953,6 +953,89 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
 }
 
 #[test]
+fn rejects_tampered_migration_identity_before_creating_a_recovery_backup() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private-migration-ledger");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive = build_archive(&private, "archive", "account-a", "source-a");
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+    bootstrap_replica(&archive, &replica, &key).unwrap();
+    downgrade_to_schema_1(&replica);
+    let backup_count = migration_backup_count(&private);
+
+    let connection = keyed_connection(&replica);
+    connection
+        .execute(
+            "UPDATE migration_history SET migration_sha256 = '00' WHERE schema_version = 1",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    assert!(replica_status(&replica, &key).is_err());
+    assert_eq!(migration_backup_count(&private), backup_count);
+
+    let expected_digest = hex::encode(Sha256::digest(b"canonical replica base schema"));
+    let connection = keyed_connection(&replica);
+    connection
+        .execute(
+            "UPDATE migration_history SET migration_sha256 = ?1 WHERE schema_version = 1",
+            [&expected_digest],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE replica_schema SET replica_format_version = 2 WHERE singleton = 1",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    assert!(replica_status(&replica, &key).is_err());
+    assert_eq!(migration_backup_count(&private), backup_count);
+
+    let connection = keyed_connection(&replica);
+    connection
+        .execute(
+            "UPDATE replica_schema SET replica_format_version = 1 WHERE singleton = 1",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE migration_history SET applied_at_unix_nanoseconds = '0' WHERE schema_version = 1",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    assert!(replica_status(&replica, &key).is_err());
+    assert_eq!(migration_backup_count(&private), backup_count);
+
+    let connection = keyed_connection(&replica);
+    connection
+        .execute(
+            "UPDATE migration_history SET applied_at_unix_nanoseconds = '1' WHERE schema_version = 1",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    assert_eq!(replica_status(&replica, &key).unwrap().schema_version, 4);
+    assert_eq!(migration_backup_count(&private), backup_count + 1);
+}
+
+#[test]
 fn follows_monotonic_authoritative_archive_handoffs_with_crash_safe_state() {
     let fixture = tempfile::tempdir().unwrap();
     let private = fixture.path().join("private-follow");
@@ -1419,6 +1502,19 @@ fn write_private(path: &Path, bytes: &[u8]) {
 
 fn file_mode(path: &Path) -> u32 {
     fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+fn migration_backup_count(directory: &Path) -> usize {
+    fs::read_dir(directory)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.contains(".pre-migration-v"))
+        })
+        .count()
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {

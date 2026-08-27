@@ -72,10 +72,23 @@ uses SQLite's online backup API to create a same-key encrypted, mode-`0600`
 pre-migration database in the replica directory. The backup filename—not its
 absolute location—is the only backup reference exposed in normal reports.
 
+Opening a non-empty replica now verifies the singleton schema row, replica
+format, exact contiguous migration sequence, positive recorded timestamps, and
+the compiled identity digest for every migration already claimed by that
+schema. The same ledger is verified again after applying migrations. A missing,
+extra, reordered, malformed, or changed entry fails before a new recovery
+backup or migration is attempted; the operator must restore a known-good
+encrypted backup or explicitly rebootstrap instead of blessing unexplained
+state. This is tamper/corruption detection, not a signature against an attacker
+who can replace the entire encrypted replica and its key.
+
 Synthetic tests prove that plaintext headers, message text, and stable artifact
 paths do not appear in the database bytes; unkeyed and wrong-key reads fail;
 cross-account bootstrap fails; same-checkpoint bootstrap is idempotent; and a
 schema-1 database is backed up in encrypted form before migration to schema 4.
+They also prove that changed migration digests, invalid format versions, and
+malformed migration timestamps are rejected without creating a misleading new
+backup.
 
 ## Transactional reconciliation and changes
 

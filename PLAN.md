@@ -624,6 +624,14 @@ path and re-audits it; interrupted moves reconcile from deterministic locations
 and seals. This bounds active archive clutter without weakening rollback
 recovery or exposing private paths. See `docs/ARCHIVE_RETENTION.md`.
 
+Replica opening now independently verifies its singleton format/schema state
+and the exact contiguous identity digest and timestamp record for every claimed
+migration before creating a new pre-migration backup or changing data, then
+verifies the complete ledger again after migration. Tampered, incomplete, or
+unexpected history fails closed and requires restoration of a known-good
+encrypted backup or explicit rebootstrap rather than silently legitimizing the
+state.
+
 ## Phase 3 — agent-neutral connector service and drafts
 
 Status: **complete for replica-backed reads and non-executing drafts**

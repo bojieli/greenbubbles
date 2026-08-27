@@ -382,9 +382,12 @@ Avoid placing a real key literally in shell history; pipe it from an
 owner-controlled secret manager. The example value is a placeholder. Bootstrap
 atomically stores canonical records, provenance, coverage, FTS, and its source
 checkpoint. Each replica rejects another account, and migrations retain an
-encrypted pre-migration backup. Synchronization mutates only changed canonical
-records and commits them with the checkpoint; the body-free change stream is
-ordered and resumable. See [docs/REPLICA_SPEC.md](docs/REPLICA_SPEC.md).
+encrypted pre-migration backup. Before migration or normal use, the exact
+contiguous migration identity ledger and replica format are verified; changed
+or incomplete history fails before another backup is created. Synchronization
+mutates only changed canonical records and commits them with the checkpoint;
+the body-free change stream is ordered and resumable. See
+[docs/REPLICA_SPEC.md](docs/REPLICA_SPEC.md).
 
 Exact retrieval uses an owner-only JSON filter. Any field can be omitted:
 

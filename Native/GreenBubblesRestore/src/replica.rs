@@ -23,6 +23,10 @@ use crate::{
 
 const CURRENT_SCHEMA_VERSION: u32 = 4;
 const REPLICA_FORMAT_VERSION: u32 = 1;
+const MIGRATION_1_IDENTITY: &str = "canonical replica base schema";
+const MIGRATION_2_IDENTITY: &str = "checkpoints change stream and exact FTS";
+const MIGRATION_3_IDENTITY: &str = "encrypted reconciliation staging and resumable change stream";
+const MIGRATION_4_IDENTITY: &str = "passive cached moments interactions and coverage";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1312,6 +1316,7 @@ fn open_replica(path: &Path, key: &ReplicaKey) -> Result<OpenedReplica, RestoreE
                 "replica schema version {version} is newer than supported version {CURRENT_SCHEMA_VERSION}"
             )));
         }
+        validate_replica_migration_ledger(&connection, version)?;
         let pre_migration_backup_file_name = if version > 0 && version < CURRENT_SCHEMA_VERSION {
             Some(create_pre_migration_backup(
                 &connection,
@@ -1323,6 +1328,7 @@ fn open_replica(path: &Path, key: &ReplicaKey) -> Result<OpenedReplica, RestoreE
             None
         };
         apply_migrations(&mut connection, version)?;
+        validate_replica_migration_ledger(&connection, CURRENT_SCHEMA_VERSION)?;
         connection.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = FULL;
@@ -1391,6 +1397,69 @@ fn schema_version(connection: &Connection) -> Result<u32, RestoreError> {
     u32::try_from(version).map_err(|_| {
         RestoreError::Integrity("replica schema version is outside the supported range".to_string())
     })
+}
+
+fn validate_replica_migration_ledger(
+    connection: &Connection,
+    expected_schema_version: u32,
+) -> Result<(), RestoreError> {
+    if expected_schema_version == 0 {
+        return Ok(());
+    }
+    let (recorded_schema_version, replica_format_version): (i64, i64) = connection.query_row(
+        "SELECT schema_version, replica_format_version
+         FROM replica_schema WHERE singleton = 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if u32::try_from(recorded_schema_version).ok() != Some(expected_schema_version)
+        || u32::try_from(replica_format_version).ok() != Some(REPLICA_FORMAT_VERSION)
+    {
+        return Err(RestoreError::Integrity(
+            "replica schema identity does not match its supported format".to_string(),
+        ));
+    }
+    let identities = [
+        MIGRATION_1_IDENTITY,
+        MIGRATION_2_IDENTITY,
+        MIGRATION_3_IDENTITY,
+        MIGRATION_4_IDENTITY,
+    ];
+    let mut statement = connection.prepare(
+        "SELECT schema_version, applied_at_unix_nanoseconds, migration_sha256
+         FROM migration_history ORDER BY schema_version",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut observed = 0_u32;
+    while let Some(row) = rows.next()? {
+        let version: i64 = row.get(0)?;
+        let applied_at: String = row.get(1)?;
+        let digest: String = row.get(2)?;
+        observed = observed.checked_add(1).ok_or_else(|| {
+            RestoreError::Integrity("replica migration count overflowed".to_string())
+        })?;
+        let expected_identity = identities.get((observed - 1) as usize).ok_or_else(|| {
+            RestoreError::Integrity("replica migration history has unexpected entries".to_string())
+        })?;
+        let expected_digest = hex::encode(Sha256::digest(expected_identity.as_bytes()));
+        if u32::try_from(version).ok() != Some(observed)
+            || applied_at
+                .parse::<u128>()
+                .ok()
+                .is_none_or(|timestamp| timestamp == 0)
+            || digest != expected_digest
+        {
+            return Err(RestoreError::Integrity(
+                "replica migration history failed identity verification".to_string(),
+            ));
+        }
+    }
+    if observed != expected_schema_version {
+        return Err(RestoreError::Integrity(
+            "replica migration history is incomplete".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn apply_migrations(connection: &mut Connection, from: u32) -> Result<(), RestoreError> {
@@ -1527,7 +1596,7 @@ fn migration_1(transaction: &Transaction<'_>) -> Result<(), RestoreError> {
            FOREIGN KEY(account_id) REFERENCES replica_identity(account_id) ON DELETE CASCADE
          ) WITHOUT ROWID;",
     )?;
-    record_migration(transaction, 1, "canonical replica base schema")?;
+    record_migration(transaction, 1, MIGRATION_1_IDENTITY)?;
     Ok(())
 }
 
@@ -1584,7 +1653,7 @@ fn migration_2(transaction: &Transaction<'_>) -> Result<(), RestoreError> {
          );
          UPDATE replica_schema SET schema_version = 2 WHERE singleton = 1;",
     )?;
-    record_migration(transaction, 2, "checkpoints change stream and exact FTS")?;
+    record_migration(transaction, 2, MIGRATION_2_IDENTITY)?;
     Ok(())
 }
 
@@ -1602,11 +1671,7 @@ fn migration_3(transaction: &Transaction<'_>) -> Result<(), RestoreError> {
          ) WITHOUT ROWID;
          UPDATE replica_schema SET schema_version = 3 WHERE singleton = 1;",
     )?;
-    record_migration(
-        transaction,
-        3,
-        "encrypted reconciliation staging and resumable change stream",
-    )?;
+    record_migration(transaction, 3, MIGRATION_3_IDENTITY)?;
     Ok(())
 }
 
@@ -1651,11 +1716,7 @@ fn migration_4(transaction: &Transaction<'_>) -> Result<(), RestoreError> {
            ON cached_moment_interaction(account_id, created_at_unix, canonical_id);
          UPDATE replica_schema SET schema_version = 4 WHERE singleton = 1;",
     )?;
-    record_migration(
-        transaction,
-        4,
-        "passive cached moments interactions and coverage",
-    )?;
+    record_migration(transaction, 4, MIGRATION_4_IDENTITY)?;
     Ok(())
 }
 
