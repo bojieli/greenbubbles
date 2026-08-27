@@ -504,9 +504,103 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
     assert!(!audit.full_restoration_verified);
 
     let messages_path = output.join("messages.ndjson");
+    let artifacts_path = output.join("artifacts.ndjson");
     let report_path = output.join("report.json");
     let original_message_bytes = fs::read(&messages_path).unwrap();
+    let original_artifact_bytes = fs::read(&artifacts_path).unwrap();
     let original_report_bytes = fs::read(&report_path).unwrap();
+
+    let mut preferred_tampered_messages = messages.clone();
+    let variants = preferred_tampered_messages
+        .iter_mut()
+        .find_map(|message| {
+            let references = message["artifactReferences"].as_array_mut()?;
+            (references.len() > 1).then_some(references)
+        })
+        .unwrap();
+    for reference in variants {
+        reference["preferred"] = serde_json::json!(true);
+    }
+    write_private(
+        messages_path.clone(),
+        (preferred_tampered_messages
+            .iter()
+            .map(|message| serde_json::to_string(message).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n")
+            .as_bytes(),
+    );
+    assert!(audit_archive(&output)
+        .unwrap_err()
+        .to_string()
+        .contains("exactly one preferred artifact"));
+    write_private(messages_path.clone(), &original_message_bytes);
+
+    let mut unavailable_tampered_artifacts = artifacts.clone();
+    unavailable_tampered_artifacts
+        .iter_mut()
+        .find(|artifact| artifact["availability"] == "notDownloaded")
+        .unwrap()["sourceByteCount"] = serde_json::json!(1);
+    write_private(
+        artifacts_path.clone(),
+        (unavailable_tampered_artifacts
+            .iter()
+            .map(|artifact| serde_json::to_string(artifact).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n")
+            .as_bytes(),
+    );
+    assert!(audit_archive(&output)
+        .unwrap_err()
+        .to_string()
+        .contains("unexpectedly retains verified local-file evidence"));
+    write_private(artifacts_path.clone(), &original_artifact_bytes);
+
+    let mut provenance_tampered_artifacts = artifacts.clone();
+    provenance_tampered_artifacts
+        .iter_mut()
+        .find(|artifact| artifact["availability"] == "materializedFromDatabase")
+        .unwrap()["sourceResourceTableName"] = serde_json::json!("MessageResourceInfo");
+    write_private(
+        artifacts_path.clone(),
+        (provenance_tampered_artifacts
+            .iter()
+            .map(|artifact| serde_json::to_string(artifact).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n")
+            .as_bytes(),
+    );
+    assert!(audit_archive(&output)
+        .unwrap_err()
+        .to_string()
+        .contains("does not identify a covered resource table"));
+    write_private(artifacts_path.clone(), &original_artifact_bytes);
+
+    let mut decode_tampered_artifacts = artifacts.clone();
+    decode_tampered_artifacts
+        .iter_mut()
+        .find(|artifact| artifact["decodeState"] == "decoded")
+        .unwrap()["decodedFormat"] = serde_json::Value::Null;
+    write_private(
+        artifacts_path.clone(),
+        (decode_tampered_artifacts
+            .iter()
+            .map(|artifact| serde_json::to_string(artifact).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n")
+            .as_bytes(),
+    );
+    assert!(audit_archive(&output)
+        .unwrap_err()
+        .to_string()
+        .contains("incomplete or incompatible derivative evidence"));
+    write_private(artifacts_path, &original_artifact_bytes);
+    assert!(audit_archive(&output).is_ok());
+
     let mut state_tampered_messages = messages.clone();
     state_tampered_messages[0]["relationships"]
         .as_array_mut()

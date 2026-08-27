@@ -264,6 +264,16 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
         role: TableCoverageRole::Other,
         classification_reason: "synthetic cached table".to_string(),
     }));
+    all_tables.push(TableSchemaCoverage {
+        source_set_id: "set-a".to_string(),
+        source_logical_path: "media/media_0.db".to_string(),
+        source_table_id: opaque_id(b"VoiceInfo"),
+        source_table_name: "VoiceInfo".to_string(),
+        columns: vec!["voice_data".to_string()],
+        schema_fingerprint: Some(hex::encode(sha2::Sha256::digest("voice-schema"))),
+        role: TableCoverageRole::KnownAuxiliary,
+        classification_reason: "synthetic voice payload table".to_string(),
+    });
     let coverage = RestorationCoverage {
         format_version: 2,
         decoder_name: "synthetic".to_string(),
@@ -272,8 +282,8 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
         schema_profile_fingerprint: None,
         message_tables,
         all_tables,
-        logical_type_counts: BTreeMap::from([("1".to_string(), messages.len() as u64)]),
-        logical_sub_type_counts: BTreeMap::from([("1:0".to_string(), messages.len() as u64)]),
+        logical_type_counts: BTreeMap::from([("34".to_string(), messages.len() as u64)]),
+        logical_sub_type_counts: BTreeMap::from([("34:0".to_string(), messages.len() as u64)]),
         unknown_payload_reason_counts: BTreeMap::new(),
         semantic_gap_reason_counts: BTreeMap::new(),
     };
@@ -363,9 +373,14 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
         decoded_byte_count: None,
         decoded_sha256: None,
         decoded_format: None,
-        decode_state: ArtifactDecodeState::NotRequired,
-        verification_detail: None,
+        decode_state: ArtifactDecodeState::Unsupported,
+        verification_detail: Some(
+            "synthetic lossless voice source has no playable derivative".to_string(),
+        ),
         source_resource_set_id: Some("set-a".to_string()),
+        source_resource_logical_path: Some("media/media_0.db".to_string()),
+        source_resource_table_id: Some(opaque_id(b"VoiceInfo")),
+        source_resource_table_name: Some("VoiceInfo".to_string()),
         source_resource_row_id: Some(1),
     };
     write_json(&archive.join("report.json"), &report);
@@ -434,8 +449,8 @@ fn message(
         created_at_unix: Some(1_700_000_000 + source_row_id),
         conversation_ordinal: 0,
         ordering_basis: MessageOrderingBasis::SortSequence,
-        raw_type: Some(1),
-        logical_type: Some(1),
+        raw_type: Some(34),
+        logical_type: Some(34),
         sub_type: Some(0),
         status: Some(2),
         direction: MessageDirection::Incoming,
@@ -519,6 +534,10 @@ fn scoped_id(scope: &str, value: &[u8]) -> String {
     hasher.update([0]);
     hasher.update(value);
     hex::encode(hasher.finalize())
+}
+
+fn opaque_id(value: &[u8]) -> String {
+    hex::encode(sha2::Sha256::digest(value))
 }
 
 fn read_ndjson<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {

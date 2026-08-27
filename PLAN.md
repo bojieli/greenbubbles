@@ -481,11 +481,14 @@ its per-table row/type/gap/entity/reference counts from the ledgers, verifies sc
 profiles, bidirectional relationships, and every relationship-resolution state,
 validates ordinary-message and cached-surface row provenance per source table,
 re-derives account-scoped entity and sender identities from preserved sources,
-and descriptor-verifies every
-recorded downloaded or connector-derived file against its identity, timestamps,
-size, and SHA-256. Its content-free summary can make the eventual real-corpus
-evidence reproducible; it does not replace the still-required observation of
-all real tables, types, and media states. See `docs/ARCHIVE_AUDIT.md`.
+requires exactly one preferred artifact for each known media-bearing message,
+validates the complete availability/decode evidence state of every artifact,
+resolves full `MessageResourceInfo`/`VoiceInfo` row provenance against schema
+coverage, and descriptor-verifies every recorded downloaded or connector-derived
+file against its identity, timestamps, size, and SHA-256. Its content-free
+summary can make the eventual real-corpus evidence reproducible; it does not
+replace the still-required observation of all real tables, types, and media
+states. See `docs/ARCHIVE_AUDIT.md`.
 
 ### 1E. Incoming event reconciler
 

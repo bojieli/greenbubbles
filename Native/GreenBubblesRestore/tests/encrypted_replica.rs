@@ -860,6 +860,9 @@ fn build_archive(parent: &Path, name: &str, account: &str, fingerprint: &str) ->
         decode_state: ArtifactDecodeState::Decoded,
         verification_detail: None,
         source_resource_set_id: None,
+        source_resource_logical_path: None,
+        source_resource_table_id: None,
+        source_resource_table_name: None,
         source_resource_row_id: None,
     };
     let message = CanonicalMessage {

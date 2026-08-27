@@ -192,6 +192,9 @@ pub struct CanonicalArtifact {
     pub decode_state: ArtifactDecodeState,
     pub verification_detail: Option<String>,
     pub source_resource_set_id: Option<String>,
+    pub source_resource_logical_path: Option<String>,
+    pub source_resource_table_id: Option<String>,
+    pub source_resource_table_name: Option<String>,
     pub source_resource_row_id: Option<i64>,
 }
 

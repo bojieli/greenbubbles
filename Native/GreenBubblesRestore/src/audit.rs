@@ -11,13 +11,13 @@ use sha2::{Digest, Sha256};
 use crate::archive::{ensure_private_directory, ensure_private_regular_file};
 use crate::schema::schema_profile_fingerprint;
 use crate::{
-    ArtifactAvailability, ArtifactDecodeState, CachedSurfaceCoverage, CachedSurfaceTableRole,
-    CanonicalArtifact, CanonicalCachedMoment, CanonicalCachedMomentInteraction,
-    CanonicalConversation, CanonicalMessage, CanonicalParticipant, ConversationKind,
-    ConversationMembershipRole, EntityDecodeState, LocalProfileState, RawSQLiteValue, RejectedRow,
-    RelationshipResolutionState, RestorationArchiveScope, RestorationCompletion,
-    RestorationCoverage, RestorationMediaPhase, RestorationReport, RestoreError,
-    SemanticDecodeState, TableCoverageRole, TypedPayload,
+    ArtifactAvailability, ArtifactDecodeState, ArtifactKind, CachedSurfaceCoverage,
+    CachedSurfaceTableRole, CanonicalArtifact, CanonicalCachedMoment,
+    CanonicalCachedMomentInteraction, CanonicalConversation, CanonicalMessage,
+    CanonicalParticipant, ConversationKind, ConversationMembershipRole, EntityDecodeState,
+    LocalProfileState, RawSQLiteValue, RejectedRow, RelationshipResolutionState,
+    RestorationArchiveScope, RestorationCompletion, RestorationCoverage, RestorationMediaPhase,
+    RestorationReport, RestoreError, SemanticDecodeState, TableCoverageRole, TypedPayload,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,7 +161,11 @@ pub fn audit_archive(archive_directory: &Path) -> Result<ArchiveAuditReport, Res
     }
     verify_source_row_accounting(&coverage, &messages, &rejections)?;
 
-    let artifacts = audit_artifacts(&archive_root, &archive_root.join("artifacts.ndjson"))?;
+    let artifacts = audit_artifacts(
+        &archive_root,
+        &archive_root.join("artifacts.ndjson"),
+        &coverage,
+    )?;
     verify_message_artifacts(&messages, &artifacts)?;
     verify_integrity_counts(
         &report,
@@ -564,13 +568,23 @@ fn audit_messages(
                 .artifact_references
                 .push((reference.artifact_id.clone(), reference.role));
         }
+        let media_bearing = message_requires_artifact(&message);
+        if media_bearing != !message.artifact_references.is_empty() {
+            return Err(integrity(
+                "message artifact references disagree with its logical media type",
+            ));
+        }
         if !message.artifact_references.is_empty()
-            && !message
+            && message
                 .artifact_references
                 .iter()
-                .any(|value| value.preferred)
+                .filter(|value| value.preferred)
+                .count()
+                != 1
         {
-            return Err(integrity("media-bearing message has no preferred artifact"));
+            return Err(integrity(
+                "media-bearing message does not have exactly one preferred artifact",
+            ));
         }
         result.artifact_reference_count += message.artifact_references.len() as u64;
 
@@ -776,9 +790,27 @@ fn verify_source_row_accounting(
     Ok(())
 }
 
-fn audit_artifacts(root: &Path, path: &Path) -> Result<ArtifactAudit, RestoreError> {
+fn audit_artifacts(
+    root: &Path,
+    path: &Path,
+    coverage: &RestorationCoverage,
+) -> Result<ArtifactAudit, RestoreError> {
     let mut result = ArtifactAudit::default();
     let mut verified_files = HashMap::<PathBuf, VerifiedFile>::new();
+    let covered_tables = coverage
+        .all_tables
+        .iter()
+        .map(|table| {
+            (
+                (
+                    table.source_set_id.as_str(),
+                    table.source_logical_path.as_str(),
+                    table.source_table_id.as_str(),
+                ),
+                table,
+            )
+        })
+        .collect::<HashMap<_, _>>();
     read_ndjson(path, |artifact: CanonicalArtifact| {
         if artifact.artifact_id.is_empty()
             || !result.identifiers.insert(artifact.artifact_id.clone())
@@ -806,6 +838,7 @@ fn audit_artifacts(root: &Path, path: &Path) -> Result<ArtifactAudit, RestoreErr
         {
             return Err(integrity("artifact ledger contains a malformed digest"));
         }
+        validate_artifact_state(&artifact, &covered_tables)?;
         match artifact.availability {
             ArtifactAvailability::Downloaded => result.downloaded += 1,
             ArtifactAvailability::MaterializedFromDatabase => result.materialized += 1,
@@ -823,10 +856,7 @@ fn audit_artifacts(root: &Path, path: &Path) -> Result<ArtifactAudit, RestoreErr
             ArtifactAvailability::UnsafePath => result.unsafe_count += 1,
         }
 
-        if matches!(
-            artifact.availability,
-            ArtifactAvailability::Downloaded | ArtifactAvailability::Ambiguous
-        ) {
+        if artifact_has_external_source(&artifact) {
             let source_path = required_artifact_path(
                 artifact.source_local_path.as_deref(),
                 "downloaded artifact lacks its source path",
@@ -834,7 +864,7 @@ fn audit_artifacts(root: &Path, path: &Path) -> Result<ArtifactAudit, RestoreErr
             verify_external_source(&artifact, &source_path, &mut verified_files)?;
             result.external_paths.insert(source_path);
         }
-        if artifact.availability == ArtifactAvailability::MaterializedFromDatabase {
+        if artifact.materialized_local_path.is_some() {
             let materialized = required_artifact_path(
                 artifact.materialized_local_path.as_deref(),
                 "database artifact lacks its materialized path",
@@ -890,6 +920,247 @@ fn audit_artifacts(root: &Path, path: &Path) -> Result<ArtifactAudit, RestoreErr
         Ok(())
     })?;
     Ok(result)
+}
+
+fn validate_artifact_state(
+    artifact: &CanonicalArtifact,
+    covered_tables: &HashMap<(&str, &str, &str), &crate::TableSchemaCoverage>,
+) -> Result<(), RestoreError> {
+    if artifact
+        .verification_detail
+        .as_deref()
+        .is_none_or(str::is_empty)
+    {
+        return Err(integrity("artifact lacks a nonempty verification detail"));
+    }
+    if artifact
+        .source_modified_nanoseconds
+        .is_some_and(|value| !(0..1_000_000_000).contains(&value))
+    {
+        return Err(integrity(
+            "artifact source timestamp has invalid nanoseconds",
+        ));
+    }
+
+    validate_artifact_resource_provenance(artifact, covered_tables)?;
+
+    let external_complete = artifact.source_local_path.is_some()
+        && artifact.account_relative_path.is_some()
+        && artifact.source_byte_count.is_some()
+        && artifact.source_device_id.is_some()
+        && artifact.source_file_id.is_some()
+        && artifact.source_modified_seconds.is_some()
+        && artifact.source_modified_nanoseconds.is_some()
+        && artifact.source_sha256.is_some()
+        && artifact
+            .detected_format
+            .as_deref()
+            .is_some_and(|value| !value.is_empty());
+    let external_present = artifact_has_external_source(artifact);
+    let materialized_complete = artifact.materialized_local_path.is_some()
+        && artifact.source_byte_count.is_some()
+        && artifact.source_sha256.is_some()
+        && artifact
+            .detected_format
+            .as_deref()
+            .is_some_and(|value| !value.is_empty());
+    let materialized_present = artifact.materialized_local_path.is_some();
+    let external_identity_present = artifact.source_local_path.is_some()
+        || artifact.account_relative_path.is_some()
+        || artifact.source_device_id.is_some()
+        || artifact.source_file_id.is_some()
+        || artifact.source_modified_seconds.is_some()
+        || artifact.source_modified_nanoseconds.is_some();
+
+    match artifact.availability {
+        ArtifactAvailability::Downloaded => {
+            if !external_complete || materialized_present {
+                return Err(integrity(
+                    "downloaded artifact has incomplete or contradictory source evidence",
+                ));
+            }
+        }
+        ArtifactAvailability::MaterializedFromDatabase => {
+            if !materialized_complete || external_identity_present {
+                return Err(integrity(
+                    "database-materialized artifact has incomplete or contradictory source evidence",
+                ));
+            }
+        }
+        ArtifactAvailability::Ambiguous | ArtifactAvailability::Corrupt => {
+            if external_complete == materialized_complete
+                || (external_present && !external_complete)
+                || (materialized_present && !materialized_complete)
+                || (materialized_complete && external_identity_present)
+            {
+                return Err(integrity(
+                    "ambiguous or corrupt artifact does not identify exactly one complete local source",
+                ));
+            }
+        }
+        ArtifactAvailability::NotDownloaded
+        | ArtifactAvailability::RemoteOnly
+        | ArtifactAvailability::Expired
+        | ArtifactAvailability::Deleted
+        | ArtifactAvailability::MetadataMissing
+        | ArtifactAvailability::UnsafePath
+        | ArtifactAvailability::AccountRootUnavailable => {
+            if external_present
+                || materialized_present
+                || artifact.source_byte_count.is_some()
+                || artifact.source_sha256.is_some()
+                || artifact.detected_format.is_some()
+            {
+                return Err(integrity(
+                    "unavailable artifact unexpectedly retains verified local-file evidence",
+                ));
+            }
+        }
+    }
+
+    let source_is_verified = matches!(
+        artifact.availability,
+        ArtifactAvailability::Downloaded
+            | ArtifactAvailability::MaterializedFromDatabase
+            | ArtifactAvailability::Ambiguous
+    );
+    let source_is_present =
+        source_is_verified || artifact.availability == ArtifactAvailability::Corrupt;
+    match artifact.decode_state {
+        ArtifactDecodeState::Decoded => {
+            if !source_is_verified
+                || artifact.decoded_local_path.is_none()
+                || artifact.decoded_byte_count.is_none()
+                || artifact.decoded_sha256.is_none()
+                || artifact.decoded_format.as_deref().is_none_or(str::is_empty)
+            {
+                return Err(integrity(
+                    "decoded artifact has incomplete or incompatible derivative evidence",
+                ));
+            }
+        }
+        ArtifactDecodeState::KeyUnavailable => {
+            if !source_is_verified
+                || !matches!(
+                    artifact.kind,
+                    ArtifactKind::Image | ArtifactKind::AnimatedImage
+                )
+            {
+                return Err(integrity(
+                    "artifact key-unavailable state is incompatible with its source or media kind",
+                ));
+            }
+        }
+        ArtifactDecodeState::Unsupported | ArtifactDecodeState::Failed => {
+            if !source_is_present {
+                return Err(integrity(
+                    "artifact decode gap has no verified local source",
+                ));
+            }
+        }
+        ArtifactDecodeState::NotRequired => {
+            if artifact.kind == ArtifactKind::Voice
+                && matches!(
+                    artifact.availability,
+                    ArtifactAvailability::MaterializedFromDatabase
+                        | ArtifactAvailability::Ambiguous
+                )
+            {
+                return Err(integrity(
+                    "materialized voice artifact lacks an explicit decode outcome",
+                ));
+            }
+        }
+    }
+
+    if matches!(
+        artifact.kind,
+        ArtifactKind::Image | ArtifactKind::AnimatedImage
+    ) && artifact
+        .source_local_path
+        .as_deref()
+        .and_then(|path| Path::new(path).extension())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("dat"))
+        && artifact.decode_state == ArtifactDecodeState::NotRequired
+    {
+        return Err(integrity(
+            "encoded image source lacks an explicit decode outcome",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_artifact_resource_provenance(
+    artifact: &CanonicalArtifact,
+    covered_tables: &HashMap<(&str, &str, &str), &crate::TableSchemaCoverage>,
+) -> Result<(), RestoreError> {
+    let present = [
+        artifact.source_resource_set_id.is_some(),
+        artifact.source_resource_logical_path.is_some(),
+        artifact.source_resource_table_id.is_some(),
+        artifact.source_resource_table_name.is_some(),
+        artifact.source_resource_row_id.is_some(),
+    ];
+    let present_count = present.into_iter().filter(|value| *value).count();
+    if present_count == 0 {
+        if artifact.availability == ArtifactAvailability::MaterializedFromDatabase {
+            return Err(integrity(
+                "database-materialized artifact lacks source-row provenance",
+            ));
+        }
+        return Ok(());
+    }
+    if present_count != present.len()
+        || artifact
+            .source_resource_row_id
+            .is_none_or(|row_id| row_id <= 0)
+    {
+        return Err(integrity(
+            "artifact source-row provenance is incomplete or invalid",
+        ));
+    }
+    let table = covered_tables
+        .get(&(
+            artifact.source_resource_set_id.as_deref().unwrap(),
+            artifact.source_resource_logical_path.as_deref().unwrap(),
+            artifact.source_resource_table_id.as_deref().unwrap(),
+        ))
+        .ok_or_else(|| integrity("artifact source-row provenance is absent from coverage"))?;
+    if table.source_table_name != artifact.source_resource_table_name.as_deref().unwrap()
+        || table.role != TableCoverageRole::KnownAuxiliary
+        || !matches!(
+            table.source_table_name.to_ascii_lowercase().as_str(),
+            "messageresourceinfo" | "voiceinfo"
+        )
+    {
+        return Err(integrity(
+            "artifact source-row provenance does not identify a covered resource table",
+        ));
+    }
+    if artifact.availability == ArtifactAvailability::MaterializedFromDatabase
+        && !table.source_table_name.eq_ignore_ascii_case("VoiceInfo")
+    {
+        return Err(integrity(
+            "database-materialized artifact provenance does not identify VoiceInfo",
+        ));
+    }
+    Ok(())
+}
+
+fn artifact_has_external_source(artifact: &CanonicalArtifact) -> bool {
+    artifact.source_local_path.is_some()
+        || artifact.account_relative_path.is_some()
+        || artifact.source_device_id.is_some()
+        || artifact.source_file_id.is_some()
+        || artifact.source_modified_seconds.is_some()
+        || artifact.source_modified_nanoseconds.is_some()
+}
+
+fn message_requires_artifact(message: &CanonicalMessage) -> bool {
+    matches!(
+        (message.logical_type, message.sub_type.unwrap_or_default()),
+        (Some(3 | 34 | 43 | 47), _) | (Some(49), 2 | 3 | 4 | 6 | 8 | 51 | 63 | 74)
+    )
 }
 
 fn verify_external_source(

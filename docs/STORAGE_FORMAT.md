@@ -129,7 +129,10 @@ voice message
 `MessageResourceInfo`, `VoiceInfo`, session, contact, and group columns are
 matched through verified aliases instead of one fixed schema. Their source rows
 are retained in the local archive where they contribute to a normalized
-entity.
+entity. Artifact provenance records the resource database set, logical path,
+opaque table ID, exact table name, and row ID as one indivisible group. The
+independent archive audit resolves that group back to complete schema coverage;
+a partial or substituted auxiliary-table identity fails closed.
 
 ## Media variants
 

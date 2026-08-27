@@ -56,7 +56,18 @@ The auditor fails closed unless all of these checks pass:
   relationship target exists in the same conversation, every resolved,
   absent-target, missing-identifier, ambiguous, and pending relationship state
   reproduces its integrity counter, and every message artifact ID and role
-  agrees with the artifact ledger;
+  agrees with the artifact ledger; every known media-bearing logical type has
+  artifact references and exactly one preferred variant;
+- every artifact availability state has one coherent evidence shape:
+  downloaded sources carry the complete external-file identity, database
+  payloads carry the complete connector-owned source identity, unavailable
+  states carry neither, and ambiguous/corrupt states identify exactly one local
+  source without mixing the two shapes;
+- resource-row provenance is either wholly absent or includes database set,
+  logical path, table ID/name, and positive row ID; present provenance resolves
+  to the exact `MessageResourceInfo` or `VoiceInfo` auxiliary table in complete
+  schema coverage, and every database-materialized voice identifies
+  `VoiceInfo`;
 - every downloaded source path is still an absolute canonical regular file,
   ends with its safe account-relative path, and matches the recorded device,
   inode, size, modification time, and SHA-256 before and after a descriptor-based
@@ -64,6 +75,11 @@ The auditor fails closed unless all of these checks pass:
 - every database-materialized or decoded derivative stays beneath the archive,
   traverses no symlink, remains owner-only and single-link, and matches its
   recorded size and SHA-256;
+- decoded artifacts carry a complete verified derivative; non-decoded states
+  carry no derivative fields; key-unavailable, unsupported, and failed states
+  are compatible with the media kind and with an actually present lossless
+  source; encoded image and materialized voice sources cannot silently use
+  `notRequired` as their decode outcome;
 - cached-surface row equations hold independently for every timeline and
   interaction table; canonical row and participant identities are reproduced
   from source evidence; interaction kind agrees with raw type; and its complete

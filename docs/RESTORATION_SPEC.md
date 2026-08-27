@@ -25,8 +25,9 @@ A restoration is complete only when all of the following are true:
    relationships are resolved when the corresponding local source exists.
 7. Each downloaded image, animation, audio item, video, document, thumbnail, or
    auxiliary artifact is linked to a canonical local artifact record containing
-   an opaque path reference, size, digest, detected format, and verification
-   state.
+   an opaque path reference, size, digest, detected format, verification state,
+   and complete auxiliary source-row provenance when `MessageResourceInfo` or
+   `VoiceInfo` supplied the metadata or payload.
 8. A remote-only, expired, deleted, corrupt, or not-downloaded attachment is
    represented explicitly. It is never reported as restored media.
 9. Restoration never alters the source database or media tree and never places
@@ -55,6 +56,16 @@ content bytes / packed-info bytes / compression metadata
 typed payload or explicit unknown-payload reason
 zero or more relationship and artifact references
 ```
+
+Every known media-bearing logical type has one or more artifact references and
+exactly one preferred variant. Preference does not erase alternates: originals,
+high-resolution images, thumbnails, video payloads/posters, and ambiguous
+candidates remain independently represented. An artifact's availability and
+decode states are orthogonal but constrained. A local downloaded or
+database-materialized lossless source is verified separately from any decoded
+derivative; an unavailable state cannot retain local-file evidence; and a
+decoded state cannot omit its derivative size, digest, format, or archive-owned
+path.
 
 Raw payloads are held inside the local trust boundary. AI-facing tools receive
 only policy-approved normalized fields, never the lossless archive by default.

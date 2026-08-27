@@ -18,6 +18,9 @@ use crate::{
 #[derive(Debug, Clone)]
 struct ResourceRecord {
     source_set_id: String,
+    source_logical_path: String,
+    source_table_id: String,
+    source_table_name: String,
     source_row_id: i64,
     local_id: Option<i64>,
     server_id: Option<i64>,
@@ -28,6 +31,9 @@ struct ResourceRecord {
 struct VoiceLocator {
     database_path: PathBuf,
     source_set_id: String,
+    source_logical_path: String,
+    source_table_id: String,
+    source_table_name: String,
     source_row_id: i64,
     local_id: Option<i64>,
     server_id: Option<i64>,
@@ -169,6 +175,9 @@ impl ArtifactResolver {
                             .to_string(),
                     ),
                     source_resource_set_id: None,
+                    source_resource_logical_path: None,
+                    source_resource_table_id: None,
+                    source_resource_table_name: None,
                     source_resource_row_id: None,
                 });
             return Ok(vec![MessageArtifactReference {
@@ -225,7 +234,7 @@ impl ArtifactResolver {
                 ArtifactAvailability::NotDownloaded
             };
             let md5 = md5s.first().cloned();
-            let resource = resources.first();
+            let resource = (resources.len() == 1).then(|| &resources[0]);
             let identity = format!(
                 "missing:{}:{kind:?}:{default_role:?}:{}:{}",
                 message.canonical_id,
@@ -269,6 +278,11 @@ impl ArtifactResolver {
                             .to_string(),
                     }),
                     source_resource_set_id: resource.map(|value| value.source_set_id.clone()),
+                    source_resource_logical_path: resource
+                        .map(|value| value.source_logical_path.clone()),
+                    source_resource_table_id: resource.map(|value| value.source_table_id.clone()),
+                    source_resource_table_name: resource
+                        .map(|value| value.source_table_name.clone()),
                     source_resource_row_id: resource.map(|value| value.source_row_id),
                 });
             return Ok(vec![MessageArtifactReference {
@@ -286,15 +300,11 @@ impl ArtifactResolver {
                 .iter()
                 .find(|md5| path_matches_md5(&path, md5))
                 .cloned();
-            let resource = resources.first();
-            let artifact_id = self.verify_path(
-                &path,
-                kind,
-                role,
-                source_md5,
-                resource.map(|value| value.source_set_id.as_str()),
-                resource.map(|value| value.source_row_id),
-            )?;
+            let resource = resources
+                .iter()
+                .find(|resource| resource_matches_path(resource, &path))
+                .or_else(|| (resources.len() == 1).then(|| &resources[0]));
+            let artifact_id = self.verify_path(&path, kind, role, source_md5, resource)?;
             references.push(MessageArtifactReference {
                 artifact_id,
                 role,
@@ -395,12 +405,15 @@ impl ArtifactResolver {
                     decoded_byte_count: None,
                     decoded_sha256: None,
                     decoded_format: None,
-                    decode_state: ArtifactDecodeState::Unsupported,
+                    decode_state: ArtifactDecodeState::NotRequired,
                     verification_detail: Some(
                         "no matching VoiceInfo payload was present in the authorized snapshot"
                             .to_string(),
                     ),
                     source_resource_set_id: None,
+                    source_resource_logical_path: None,
+                    source_resource_table_id: None,
+                    source_resource_table_name: None,
                     source_resource_row_id: None,
                 });
             return Ok(vec![MessageArtifactReference {
@@ -468,6 +481,9 @@ impl ArtifactResolver {
                     "lossless SILK payload materialized from the snapshot".to_string()
                 }),
                 source_resource_set_id: Some(locator.source_set_id),
+                source_resource_logical_path: Some(locator.source_logical_path),
+                source_resource_table_id: Some(locator.source_table_id),
+                source_resource_table_name: Some(locator.source_table_name),
                 source_resource_row_id: Some(locator.source_row_id),
             };
             match wx_media::transcode_silk_to_ogg_opus(&data) {
@@ -515,8 +531,7 @@ impl ArtifactResolver {
         kind: ArtifactKind,
         role: ArtifactRole,
         source_md5: Option<String>,
-        resource_set: Option<&str>,
-        resource_row: Option<i64>,
+        resource: Option<&ResourceRecord>,
     ) -> Result<String, RestoreError> {
         let Some(root) = self.account_root.as_deref() else {
             return Err(RestoreError::UnsafePath(path.display().to_string()));
@@ -535,8 +550,7 @@ impl ArtifactResolver {
                     role,
                     ArtifactAvailability::Deleted,
                     source_md5,
-                    resource_set,
-                    resource_row,
+                    resource,
                     "indexed candidate disappeared before it could be verified",
                 ));
             }
@@ -548,8 +562,7 @@ impl ArtifactResolver {
                 kind,
                 role,
                 source_md5,
-                resource_set,
-                resource_row,
+                resource,
                 "candidate is not a regular non-symlink file",
             ));
         }
@@ -560,8 +573,7 @@ impl ArtifactResolver {
                 kind,
                 role,
                 source_md5,
-                resource_set,
-                resource_row,
+                resource,
                 "candidate resolves outside the authorized account root",
             ));
         }
@@ -580,8 +592,7 @@ impl ArtifactResolver {
                     kind,
                     role,
                     source_md5,
-                    resource_set,
-                    resource_row,
+                    resource,
                     "candidate became a symlink before it could be opened",
                 ));
             }
@@ -592,8 +603,7 @@ impl ArtifactResolver {
                     role,
                     ArtifactAvailability::Deleted,
                     source_md5,
-                    resource_set,
-                    resource_row,
+                    resource,
                     "candidate disappeared before its read-only descriptor could be opened",
                 ));
             }
@@ -664,8 +674,11 @@ impl ArtifactResolver {
             verification_detail: Some(
                 "regular file verified beneath the authorized account root".to_string(),
             ),
-            source_resource_set_id: resource_set.map(str::to_string),
-            source_resource_row_id: resource_row,
+            source_resource_set_id: resource.map(|value| value.source_set_id.clone()),
+            source_resource_logical_path: resource.map(|value| value.source_logical_path.clone()),
+            source_resource_table_id: resource.map(|value| value.source_table_id.clone()),
+            source_resource_table_name: resource.map(|value| value.source_table_name.clone()),
+            source_resource_row_id: resource.map(|value| value.source_row_id),
         };
         if let Some(data) = image_data.as_deref() {
             self.decode_image(data, &artifact_id, &mut artifact)?;
@@ -729,8 +742,7 @@ impl ArtifactResolver {
         kind: ArtifactKind,
         role: ArtifactRole,
         source_md5: Option<String>,
-        resource_set: Option<&str>,
-        resource_row: Option<i64>,
+        resource: Option<&ResourceRecord>,
         reason: &str,
     ) -> String {
         self.record_unavailable_path(
@@ -739,8 +751,7 @@ impl ArtifactResolver {
             role,
             ArtifactAvailability::UnsafePath,
             source_md5,
-            resource_set,
-            resource_row,
+            resource,
             reason,
         )
     }
@@ -753,8 +764,7 @@ impl ArtifactResolver {
         role: ArtifactRole,
         availability: ArtifactAvailability,
         source_md5: Option<String>,
-        resource_set: Option<&str>,
-        resource_row: Option<i64>,
+        resource: Option<&ResourceRecord>,
         reason: &str,
     ) -> String {
         let identity = format!(
@@ -786,8 +796,12 @@ impl ArtifactResolver {
                 decoded_format: None,
                 decode_state: ArtifactDecodeState::NotRequired,
                 verification_detail: Some(reason.to_string()),
-                source_resource_set_id: resource_set.map(str::to_string),
-                source_resource_row_id: resource_row,
+                source_resource_set_id: resource.map(|value| value.source_set_id.clone()),
+                source_resource_logical_path: resource
+                    .map(|value| value.source_logical_path.clone()),
+                source_resource_table_id: resource.map(|value| value.source_table_id.clone()),
+                source_resource_table_name: resource.map(|value| value.source_table_name.clone()),
+                source_resource_row_id: resource.map(|value| value.source_row_id),
             });
         artifact_id
     }
@@ -830,6 +844,9 @@ fn load_resource_index(
             }
             let record = ResourceRecord {
                 source_set_id: database.source_set_id.clone(),
+                source_logical_path: database.logical_path.clone(),
+                source_table_id: source_table_id(table),
+                source_table_name: table.clone(),
                 source_row_id: get_i64(row.get_ref(0).ok()).unwrap_or_default(),
                 local_id: local_index.and_then(|index| get_i64(row.get_ref(index + 1).ok())),
                 server_id: server_index.and_then(|index| get_i64(row.get_ref(index + 1).ok())),
@@ -881,6 +898,9 @@ fn load_voice_index(catalog: &PreparedCatalog) -> Result<(VoiceIndex, VoiceIndex
             let locator = VoiceLocator {
                 database_path: database.path.clone(),
                 source_set_id: database.source_set_id.clone(),
+                source_logical_path: database.logical_path.clone(),
+                source_table_id: source_table_id(table),
+                source_table_name: table.clone(),
                 source_row_id: get_i64(row.get_ref(0).ok()).unwrap_or_default(),
                 local_id: local_index.and_then(|index| get_i64(row.get_ref(index + 1).ok())),
                 server_id: server_index.and_then(|index| get_i64(row.get_ref(index + 1).ok())),
@@ -1052,6 +1072,12 @@ fn path_matches_md5(path: &Path, md5: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn resource_matches_path(resource: &ResourceRecord, path: &Path) -> bool {
+    let mut md5s = BTreeSet::new();
+    collect_md5s(&resource.packed_info, &mut md5s);
+    md5s.iter().any(|md5| path_matches_md5(path, md5))
+}
+
 fn role_for_path(path: &Path, kind: ArtifactKind, default: ArtifactRole) -> ArtifactRole {
     let name = path
         .file_name()
@@ -1140,6 +1166,10 @@ fn quote_identifier(value: &str) -> String {
 fn opaque_id(value: &[u8]) -> String {
     let digest = Sha256::digest(value);
     hex::encode(&digest[..16])
+}
+
+fn source_table_id(table: &str) -> String {
+    hex::encode(Sha256::digest(table.as_bytes()))
 }
 
 fn detect_format(prefix: &[u8], extension: Option<&str>) -> String {
