@@ -73,6 +73,11 @@ public struct WeChatClientBuildInspector: Sendable {
   }
 
   public func inspectDefaultInstallation() throws -> WeChatClientBuildFingerprint? {
+    guard let application = defaultApplicationURL() else { return nil }
+    return try inspect(application: application)
+  }
+
+  public func defaultApplicationURL() -> URL? {
     let fileManager = FileManager.default
     let candidates = [
       URL(fileURLWithPath: "/Applications/WeChat.app"),
@@ -80,9 +85,7 @@ public struct WeChatClientBuildInspector: Sendable {
       homeDirectory.appending(path: "Applications/WeChat.app"),
       homeDirectory.appending(path: "Applications/微信.app"),
     ]
-    guard let application = candidates.first(where: { fileManager.fileExists(atPath: $0.path) })
-    else { return nil }
-    return try inspect(application: application)
+    return candidates.first(where: { fileManager.fileExists(atPath: $0.path) })
   }
 
   public func inspect(application: URL) throws -> WeChatClientBuildFingerprint {

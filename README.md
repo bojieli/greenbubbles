@@ -27,12 +27,17 @@ The current passive-read slice provides:
 - restores the pinned client's passive local Moments cache and interactions
   with raw provenance, explicit partial-cache semantics, encrypted replica
   storage, and a separately authorized minimized connector/MCP view.
+- inventories the pinned signed app bundle's URL, extension, XPC, app-group,
+  and internal-service metadata without live-process interaction, while keeping
+  authenticated reads explicitly unavailable.
 
 See [PLAN.md](PLAN.md) for the phased roadmap and safety gates.
 The implemented downstream protocol and validation evidence are in
 [docs/SOURCE_CONNECTOR_CONTRACT.md](docs/SOURCE_CONNECTOR_CONTRACT.md),
 [docs/DOWNSTREAM_CONSUMER.md](docs/DOWNSTREAM_CONSUMER.md), and
-[docs/ECOSYSTEM_VALIDATION.md](docs/ECOSYSTEM_VALIDATION.md).
+[docs/ECOSYSTEM_VALIDATION.md](docs/ECOSYSTEM_VALIDATION.md). The bounded static
+active-read assessment is in
+[docs/ACTIVE_READ_FEASIBILITY.md](docs/ACTIVE_READ_FEASIBILITY.md).
 
 ## Build and test
 
@@ -41,6 +46,7 @@ swift build
 swift test
 swift run greenbubbles accounts
 swift run greenbubbles discover
+swift run greenbubbles integration-surfaces
 swift run greenbubbles inventory
 swift run greenbubbles snapshot
 cd Native/GreenBubblesRestore
@@ -51,6 +57,11 @@ cargo test --locked --all-targets
 `--include-paths` may be used explicitly. Do not paste that output into issues
 or logs because paths can contain stable account identifiers. Opaque identifiers
 are stable hashes intended for correlation, not a substitute for access control.
+
+`integration-surfaces` reads only signed metadata from the exact pinned WeChat
+build and emits no application path. It reports inbound and internal boundaries;
+it does not invoke them and does not claim an authenticated message or Moments
+read API. An unknown build fails closed.
 
 ```sh
 swift run greenbubbles inventory --include-paths

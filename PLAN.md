@@ -633,8 +633,8 @@ implemented and is not inferred from a cached link.
 
 ### 5B. Active read feasibility gate
 
-- [ ] Map official local IPC boundaries before considering in-process or network
-  approaches.
+- [x] Map official local IPC boundaries before considering in-process or network
+  approaches, using a static signed-bundle inventory only.
 - [ ] Determine whether a high-level, read-only operation can reuse the existing
   logged-in client without extracting reusable session credentials.
 - [ ] Prototype only on a disposable test account and pinned client version,
@@ -657,6 +657,15 @@ are capped; and the service applies a 60-request rolling minute limit. Raw
 columns/XML are never released by the AI-facing view. `load_more_moments` is
 unavailable because authenticated active-read feasibility has not passed Phase
 0.5.
+
+For the exact pinned build, the static inventory now records URL schemes,
+helper apps, Share and File Provider extension points, the bundled XPC service,
+app-group and Mach-lookup entitlements, named data-access allow-lists, and
+bundled frameworks. Each item is classified by what its signed metadata proves.
+Inbound handoff, system-managed storage, an internal service name, or a private
+framework does not prove a third-party authenticated read contract. No such
+contract is currently proven, so active message/Moments reads remain
+unavailable. See `docs/ACTIVE_READ_FEASIBILITY.md`.
 
 Exit gate: optional authenticated reads are isolated, version-gated, auditable,
 and cannot weaken the reliable local conversation path or authorize a write.

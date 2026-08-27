@@ -23,6 +23,7 @@ struct Arguments {
   enum Command: String {
     case accounts
     case discover
+    case integrationSurfaces = "integration-surfaces"
     case inventory
     case notificationHints = "notification-hints"
     case snapshot
@@ -33,6 +34,7 @@ struct Arguments {
   var includePaths = false
   var roots: [URL] = []
   var accountID: String?
+  var application: URL?
   var snapshotBase: URL?
   var previousManifest: URL?
   var integrityScan = false
@@ -65,6 +67,10 @@ struct Arguments {
         index += 1
         guard index < arguments.count else { throw CLIError.missingValue(option) }
         accountID = arguments[index]
+      case "--application":
+        index += 1
+        guard index < arguments.count else { throw CLIError.missingValue(option) }
+        application = URL(fileURLWithPath: arguments[index])
       case "--snapshot-base":
         index += 1
         guard index < arguments.count else { throw CLIError.missingValue(option) }
@@ -107,6 +113,8 @@ private let usage = """
   Commands:
     accounts             Find account-scoped database and attachment roots
     discover             Find known WeChat installations and data roots (default)
+    integration-surfaces
+                         Inspect static, signed integration metadata for a pinned build
     inventory            Classify candidate artifacts without opening their contents
     notification-hints   Assess optional notification wake-up feasibility without prompting
     snapshot             Verify a consistent, temporary read-only database snapshot
@@ -115,6 +123,7 @@ private let usage = """
   Options:
     --root <path>        Inventory a supplied root instead of discovered roots; repeatable
     --account <id>       Scope snapshot discovery to one opaque account ID
+    --application <path> Inspect this WeChat application bundle instead of the default
     --snapshot-base <p>  Preserve a snapshot under this owner-only base directory
     --previous-manifest <p>
                          Plan a change-proportional snapshot from this prior manifest
@@ -153,6 +162,16 @@ do {
   case .discover:
     let discovery = WeChatDiscovery(includePaths: arguments.includePaths)
     try printJSON(discovery.discover())
+  case .integrationSurfaces:
+    let surfaceInspector = WeChatIntegrationSurfaceInspector()
+    if let application = arguments.application {
+      let build = try WeChatClientBuildInspector().inspect(application: application)
+      try printJSON(surfaceInspector.inspect(application: application, clientBuild: build))
+    } else if let report = try surfaceInspector.inspectDefaultInstallation() {
+      try printJSON(report)
+    } else {
+      throw CLIError.invalidOption("no WeChat installation was found")
+    }
   case .inventory:
     let discovery = WeChatDiscovery(includePaths: arguments.includePaths)
     let roots: [(url: URL, kind: DataRootKind)]
