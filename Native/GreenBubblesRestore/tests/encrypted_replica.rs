@@ -16,8 +16,8 @@ use greenbubbles_restore::tools::{
 };
 use greenbubbles_restore::{
     connector::{
-        ConnectorDestination, ConnectorErrorCode, ConnectorOperation, ConnectorRequest,
-        ConnectorResult, ConnectorService, CONNECTOR_API_VERSION,
+        audit_connector_log, ConnectorDestination, ConnectorErrorCode, ConnectorOperation,
+        ConnectorRequest, ConnectorResult, ConnectorService, CONNECTOR_API_VERSION,
     },
     transport::{send_unix_request, serve_unix_once},
 };
@@ -266,6 +266,14 @@ fn serves_scoped_replica_reads_and_complete_non_executing_drafts() {
         b"immutable synthetic draft body"
     ));
     assert!(contains_bytes(&audit_bytes, receipt.draft_id.as_bytes()));
+    let audit_report = audit_connector_log(&audit).unwrap();
+    assert!(audit_report.chain_verified);
+    assert!(audit_report.fully_chained);
+    assert_eq!(audit_report.legacy_unchained_event_count, 0);
+    assert!(audit_report.chained_event_count > 0);
+    assert_eq!(audit_report.approval_event_count, 0);
+    assert_eq!(audit_report.attempt_event_count, 0);
+    assert_eq!(audit_report.reconciliation_event_count, 0);
 
     let mut tampered: serde_json::Value =
         serde_json::from_slice(&fs::read(&draft_path).unwrap()).unwrap();
@@ -279,6 +287,16 @@ fn serves_scoped_replica_reads_and_complete_non_executing_drafts() {
         },
     ));
     assert!(!rejected.ok);
+
+    let mut tampered_audit = fs::read_to_string(&audit).unwrap();
+    tampered_audit = tampered_audit.replacen(
+        "\"operation\":\"capabilities\"",
+        "\"operation\":\"status\"",
+        1,
+    );
+    fs::write(&audit, tampered_audit).unwrap();
+    assert!(audit_connector_log(&audit).is_err());
+    assert!(ConnectorService::open(&replica, &key, &policy, &audit, &drafts).is_err());
 
     let socket = private.join("connector.sock");
     let replica_for_thread = replica.clone();

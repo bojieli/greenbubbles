@@ -177,6 +177,11 @@ non-executable, and never invokes WeChat.
 
 The append-only audit JSONL is owner-only and body-free. It records requester,
 request ID, operation, conversation, local/remote destination, outcome, counts,
-draft ID, and policy-decision identity. Preview operations provide the review
-transition available in the draft-only phase; approval, attempt, and
-reconciliation transitions will be introduced only with a gated action layer.
+draft ID, and policy-decision identity. Format-2 events digest their complete
+contents and bind the predecessor digest under an exclusive append lock. The
+service verifies the whole journal before startup, and
+`audit-connector-log` independently returns an aggregate-only chain report.
+Any format-1 prefix is retained but explicitly reported as unchained. Preview
+operations provide the review transition available in the draft-only phase;
+approval, attempt, and reconciliation transitions will be introduced only with
+a gated action layer. See `CONNECTOR_AUDIT.md`.

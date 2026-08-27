@@ -64,3 +64,9 @@ still requires:
 
 Until that evidence exists, approval, attempt, reconciliation, and send
 operations remain absent from the serving process.
+
+The current body-free connector audit journal provides the chained,
+independently verifiable request/draft/review substrate described in
+`CONNECTOR_AUDIT.md`. It deliberately does not create the future stages, and
+its unkeyed hashes are not a substitute for any independently protected action
+attestation required by the eventual threat model.

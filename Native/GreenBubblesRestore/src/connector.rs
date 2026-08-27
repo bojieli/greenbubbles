@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs::{self, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -37,6 +37,8 @@ const DEFAULT_DRAFT_EXPIRY_SECONDS: u64 = 24 * 60 * 60;
 const MAX_DRAFT_EXPIRY_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_REQUESTER_ID_BYTES: usize = 256;
 const MAX_CACHED_MOMENT_REQUESTS_PER_MINUTE: usize = 60;
+const MAX_CONNECTOR_AUDIT_BYTES: u64 = 1_073_741_824;
+const MAX_CONNECTOR_AUDIT_RECORD_BYTES: usize = 64 * 1_024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -441,7 +443,7 @@ pub enum ConnectorAuditStage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ConnectorAuditEvent {
     pub format_version: u32,
     pub event_id: String,
@@ -459,6 +461,29 @@ pub struct ConnectorAuditEvent {
     pub request_body_byte_count: usize,
     pub draft_id: Option<String>,
     pub policy_decision_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_event_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub event_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorAuditReport {
+    pub format_version: u32,
+    pub privacy_safe_summary: bool,
+    pub chain_verified: bool,
+    pub fully_chained: bool,
+    pub event_count: u64,
+    pub legacy_unchained_event_count: u64,
+    pub chained_event_count: u64,
+    pub completed_event_count: u64,
+    pub denied_event_count: u64,
+    pub draft_requested_event_count: u64,
+    pub draft_reviewed_event_count: u64,
+    pub approval_event_count: u64,
+    pub attempt_event_count: u64,
+    pub reconciliation_event_count: u64,
 }
 
 pub struct ConnectorService<'a> {
@@ -503,6 +528,7 @@ impl<'a> ConnectorService<'a> {
         ensure_private_directory(audit_parent)?;
         if audit_path.try_exists()? {
             ensure_private_regular_file(audit_path)?;
+            audit_connector_log_for_account(audit_path, Some(&account_id))?;
         }
         ensure_private_directory(draft_directory)?;
         Ok(Self {
@@ -2054,7 +2080,7 @@ impl<'a> ConnectorService<'a> {
             self.policy.account_id, request.requester_id, request.request_id
         );
         let event = ConnectorAuditEvent {
-            format_version: 1,
+            format_version: 2,
             event_id: hex::encode(Sha256::digest(identity.as_bytes())),
             observed_at_unix_nanoseconds: observed,
             account_id: self.policy.account_id.clone(),
@@ -2074,8 +2100,10 @@ impl<'a> ConnectorService<'a> {
             request_body_byte_count,
             draft_id: draft_id.map(str::to_string),
             policy_decision_id: policy_decision_id.map(str::to_string),
+            previous_event_sha256: None,
+            event_sha256: String::new(),
         };
-        append_owner_only_json_line(&self.audit_path, &event).map_err(integrity_error)
+        append_owner_only_connector_event(&self.audit_path, event).map_err(integrity_error)
     }
 
     fn audit_metadata(
@@ -2190,8 +2218,12 @@ fn write_owner_only_json(path: &Path, value: &impl Serialize) -> Result<(), Rest
     Ok(())
 }
 
-fn append_owner_only_json_line(path: &Path, value: &impl Serialize) -> Result<(), RestoreError> {
+fn append_owner_only_connector_event(
+    path: &Path,
+    mut event: ConnectorAuditEvent,
+) -> Result<(), RestoreError> {
     let mut file = OpenOptions::new()
+        .read(true)
         .append(true)
         .create(true)
         .mode(0o600)
@@ -2208,7 +2240,15 @@ fn append_owner_only_json_line(path: &Path, value: &impl Serialize) -> Result<()
         return Err(std::io::Error::last_os_error().into());
     }
     let result = (|| -> Result<(), RestoreError> {
-        serde_json::to_writer(&mut file, value)?;
+        let previous = read_last_audit_line(&mut file)?
+            .as_deref()
+            .map(previous_audit_event_digest)
+            .transpose()?;
+        event.format_version = 2;
+        event.previous_event_sha256 = previous;
+        event.event_sha256 = connector_audit_event_digest(&event)?;
+        validate_connector_audit_event(&event)?;
+        serde_json::to_writer(&mut file, &event)?;
         file.write_all(b"\n")?;
         file.sync_data()?;
         Ok(())
@@ -2219,6 +2259,237 @@ fn append_owner_only_json_line(path: &Path, value: &impl Serialize) -> Result<()
         return Err(std::io::Error::last_os_error().into());
     }
     Ok(())
+}
+
+pub fn audit_connector_log(path: &Path) -> Result<ConnectorAuditReport, RestoreError> {
+    audit_connector_log_for_account(path, None)
+}
+
+fn audit_connector_log_for_account(
+    path: &Path,
+    expected_account_id: Option<&str>,
+) -> Result<ConnectorAuditReport, RestoreError> {
+    ensure_private_regular_file(path)?;
+    let file = File::open(path)?;
+    let descriptor = std::os::fd::AsRawFd::as_raw_fd(&file);
+    if unsafe { libc::flock(descriptor, libc::LOCK_SH) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let result = audit_connector_log_file(&file, expected_account_id);
+    let unlock = unsafe { libc::flock(descriptor, libc::LOCK_UN) };
+    let report = result?;
+    if unlock != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(report)
+}
+
+fn audit_connector_log_file(
+    file: &File,
+    expected_account_id: Option<&str>,
+) -> Result<ConnectorAuditReport, RestoreError> {
+    if file.metadata()?.len() > MAX_CONNECTOR_AUDIT_BYTES {
+        return Err(RestoreError::Integrity(
+            "connector audit log exceeds the verification limit".to_string(),
+        ));
+    }
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    let mut previous_digest: Option<String> = None;
+    let mut seen_chained = false;
+    let mut account_id: Option<String> = None;
+    let mut event_ids = BTreeSet::new();
+    let mut report = ConnectorAuditReport {
+        format_version: 1,
+        privacy_safe_summary: true,
+        chain_verified: true,
+        fully_chained: true,
+        event_count: 0,
+        legacy_unchained_event_count: 0,
+        chained_event_count: 0,
+        completed_event_count: 0,
+        denied_event_count: 0,
+        draft_requested_event_count: 0,
+        draft_reviewed_event_count: 0,
+        approval_event_count: 0,
+        attempt_event_count: 0,
+        reconciliation_event_count: 0,
+    };
+    loop {
+        line.clear();
+        let bytes_read = reader.read_until(b'\n', &mut line)?;
+        if bytes_read == 0 {
+            break;
+        }
+        while line
+            .last()
+            .is_some_and(|byte| matches!(byte, b'\n' | b'\r'))
+        {
+            line.pop();
+        }
+        if line.is_empty() || line.len() > MAX_CONNECTOR_AUDIT_RECORD_BYTES {
+            return Err(RestoreError::Integrity(
+                "connector audit log contains an empty or oversized record".to_string(),
+            ));
+        }
+        let event: ConnectorAuditEvent = serde_json::from_slice(&line)?;
+        validate_connector_audit_event(&event)?;
+        if expected_account_id.is_some_and(|expected| event.account_id != expected) {
+            return Err(RestoreError::Integrity(
+                "connector audit log belongs to a different account".to_string(),
+            ));
+        }
+        if account_id
+            .as_ref()
+            .is_some_and(|account| account != &event.account_id)
+        {
+            return Err(RestoreError::Integrity(
+                "connector audit log mixes account identities".to_string(),
+            ));
+        }
+        account_id.get_or_insert_with(|| event.account_id.clone());
+        if !event_ids.insert(event.event_id.clone()) {
+            return Err(RestoreError::Integrity(
+                "connector audit log repeats an event identity".to_string(),
+            ));
+        }
+        match event.format_version {
+            1 => {
+                if seen_chained
+                    || event.previous_event_sha256.is_some()
+                    || !event.event_sha256.is_empty()
+                {
+                    return Err(RestoreError::Integrity(
+                        "legacy connector audit record appears inside a chained suffix".to_string(),
+                    ));
+                }
+                previous_digest = Some(hex::encode(Sha256::digest(&line)));
+                report.legacy_unchained_event_count += 1;
+                report.fully_chained = false;
+            }
+            2 => {
+                if event.previous_event_sha256 != previous_digest {
+                    return Err(RestoreError::Integrity(
+                        "connector audit chain predecessor does not match".to_string(),
+                    ));
+                }
+                let expected = connector_audit_event_digest(&event)?;
+                if event.event_sha256 != expected {
+                    return Err(RestoreError::Integrity(
+                        "connector audit event digest does not match its contents".to_string(),
+                    ));
+                }
+                previous_digest = Some(event.event_sha256.clone());
+                seen_chained = true;
+                report.chained_event_count += 1;
+            }
+            _ => {
+                return Err(RestoreError::Integrity(
+                    "unsupported connector audit event format".to_string(),
+                ));
+            }
+        }
+        report.event_count += 1;
+        match event.outcome {
+            ConnectorAuditOutcome::Completed => report.completed_event_count += 1,
+            ConnectorAuditOutcome::Denied => report.denied_event_count += 1,
+        }
+        match event.stage {
+            ConnectorAuditStage::DraftRequested => report.draft_requested_event_count += 1,
+            ConnectorAuditStage::DraftReviewed => report.draft_reviewed_event_count += 1,
+            ConnectorAuditStage::ApprovalRecorded => report.approval_event_count += 1,
+            ConnectorAuditStage::AttemptRecorded => report.attempt_event_count += 1,
+            ConnectorAuditStage::ReconciliationRecorded => {
+                report.reconciliation_event_count += 1;
+            }
+            ConnectorAuditStage::Request => {}
+        }
+    }
+    Ok(report)
+}
+
+fn validate_connector_audit_event(event: &ConnectorAuditEvent) -> Result<(), RestoreError> {
+    if !matches!(event.format_version, 1 | 2)
+        || !valid_sha256(&event.event_id)
+        || event.account_id.is_empty()
+        || event.requester_id.is_empty()
+        || event.request_id.is_empty()
+        || event.operation.is_empty()
+        || event
+            .draft_id
+            .as_ref()
+            .is_some_and(|value| !valid_sha256(value))
+        || event
+            .policy_decision_id
+            .as_ref()
+            .is_some_and(|value| !valid_sha256(value))
+        || event
+            .previous_event_sha256
+            .as_ref()
+            .is_some_and(|value| !valid_sha256(value))
+        || (!event.event_sha256.is_empty() && !valid_sha256(&event.event_sha256))
+    {
+        return Err(RestoreError::Integrity(
+            "connector audit event is malformed".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn connector_audit_event_digest(event: &ConnectorAuditEvent) -> Result<String, RestoreError> {
+    let mut canonical = event.clone();
+    canonical.event_sha256.clear();
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(&canonical)?)))
+}
+
+fn previous_audit_event_digest(line: &[u8]) -> Result<String, RestoreError> {
+    let event: ConnectorAuditEvent = serde_json::from_slice(line)?;
+    validate_connector_audit_event(&event)?;
+    match event.format_version {
+        1 if event.previous_event_sha256.is_none() && event.event_sha256.is_empty() => {
+            Ok(hex::encode(Sha256::digest(line)))
+        }
+        2 if connector_audit_event_digest(&event)? == event.event_sha256 => Ok(event.event_sha256),
+        1 => Err(RestoreError::Integrity(
+            "legacy connector audit event contains chained fields".to_string(),
+        )),
+        _ => Err(RestoreError::Integrity(
+            "connector audit tail is unsupported or corrupt".to_string(),
+        )),
+    }
+}
+
+fn read_last_audit_line(file: &mut File) -> Result<Option<Vec<u8>>, RestoreError> {
+    let mut position = file.metadata()?.len();
+    if position == 0 {
+        return Ok(None);
+    }
+    let mut reversed = Vec::new();
+    let mut byte = [0_u8; 1];
+    while position > 0 {
+        position -= 1;
+        file.seek(SeekFrom::Start(position))?;
+        file.read_exact(&mut byte)?;
+        if matches!(byte[0], b'\n' | b'\r') {
+            if reversed.is_empty() {
+                continue;
+            }
+            break;
+        }
+        reversed.push(byte[0]);
+        if reversed.len() > MAX_CONNECTOR_AUDIT_RECORD_BYTES {
+            return Err(RestoreError::Integrity(
+                "connector audit tail exceeds the record limit".to_string(),
+            ));
+        }
+    }
+    reversed.reverse();
+    if reversed.is_empty() {
+        return Err(RestoreError::Integrity(
+            "connector audit log contains no complete record".to_string(),
+        ));
+    }
+    Ok(Some(reversed))
 }
 
 fn connector_artifact_view(
@@ -2354,5 +2625,67 @@ fn integrity_error(error: RestoreError) -> ConnectorErrorBody {
         code: ConnectorErrorCode::IntegrityFailure,
         message: error.to_string(),
         retryable: false,
+    }
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    fn event(format_version: u32, event_id: char, operation: &str) -> ConnectorAuditEvent {
+        ConnectorAuditEvent {
+            format_version,
+            event_id: std::iter::repeat_n(event_id, 64).collect(),
+            observed_at_unix_nanoseconds: 1,
+            account_id: "synthetic-account".to_string(),
+            requester_id: "synthetic-requester".to_string(),
+            request_id: format!("request-{event_id}"),
+            operation: operation.to_string(),
+            stage: ConnectorAuditStage::Request,
+            conversation_id: None,
+            destination: ConnectorDestination::Local,
+            outcome: ConnectorAuditOutcome::Completed,
+            returned_item_count: 1,
+            released_body_byte_count: 0,
+            request_body_byte_count: 0,
+            draft_id: None,
+            policy_decision_id: None,
+            previous_event_sha256: None,
+            event_sha256: String::new(),
+        }
+    }
+
+    #[test]
+    fn chains_new_events_after_a_reported_legacy_prefix_and_detects_tampering() {
+        let temporary = tempfile::tempdir().unwrap();
+        fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let path = temporary.path().join("audit.ndjson");
+        let mut legacy = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        serde_json::to_writer(&mut legacy, &event(1, 'a', "legacy")).unwrap();
+        legacy.write_all(b"\n").unwrap();
+        legacy.sync_all().unwrap();
+        drop(legacy);
+
+        append_owner_only_connector_event(&path, event(2, 'b', "current")).unwrap();
+        let report = audit_connector_log(&path).unwrap();
+        assert!(report.chain_verified);
+        assert!(!report.fully_chained);
+        assert_eq!(report.event_count, 2);
+        assert_eq!(report.legacy_unchained_event_count, 1);
+        assert_eq!(report.chained_event_count, 1);
+
+        let mut bytes = fs::read(&path).unwrap();
+        let offset = bytes
+            .windows(b"current".len())
+            .position(|window| window == b"current")
+            .unwrap();
+        bytes[offset] = b'C';
+        fs::write(&path, bytes).unwrap();
+        assert!(audit_connector_log(&path).is_err());
     }
 }

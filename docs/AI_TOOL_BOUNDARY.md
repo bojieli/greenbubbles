@@ -55,6 +55,13 @@ destination, outcome, result count, and byte counts. They omit queries,
 messages, and draft bodies. Symlinks, multiply linked files, and group- or
 world-accessible audit files are rejected.
 
+Connector event format 2 additionally hashes each canonical event and binds the
+predecessor digest. The full journal is checked under a shared lock before
+service startup; append validates the tail under an exclusive lock. The
+aggregate-only `audit-connector-log` command reports chain integrity and any
+unlinked format-1 prefix. This is tamper-evident hashing, not an independently
+signed attestation; see `CONNECTOR_AUDIT.md`.
+
 Connector drafts bind the body to account/conversation and human-readable
 recipient evidence, optional reply target, attachment digests, connector/API
 version, expiry, requester, policy decision, and authoritative checkpoint.

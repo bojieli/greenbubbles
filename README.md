@@ -177,6 +177,11 @@ cargo run --locked \
   --manifest-path Native/GreenBubblesRestore/Cargo.toml \
   --bin greenbubbles-restore -- \
   audit-acquisition-chain <previous-snapshot> <current-snapshot>
+
+cargo run --locked \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  audit-connector-log <owner-only-connector-audit.ndjson>
 ```
 
 `preflight` verifies every copied database/WAL/SHM digest and reports the
@@ -207,6 +212,12 @@ that baseline continuity, client build, changed/reconciliation/deleted set
 classification, and selected copied entries agree with both complete source
 inventories. Its output is aggregate-only. See
 [docs/ACQUISITION_CHAIN_AUDIT.md](docs/ACQUISITION_CHAIN_AUDIT.md).
+
+`audit-connector-log` verifies the body-free connector journal's owner-only
+file boundary, event structure, unique identities, account consistency, event
+digests, and predecessor chain. Its report is aggregate-only and explicitly
+counts any unchained legacy prefix. See
+[docs/CONNECTOR_AUDIT.md](docs/CONNECTOR_AUDIT.md).
 
 Production completeness is deliberately strict. The restoration report must
 satisfy `source rows = restored rows + rejected rows`, with zero rejections,

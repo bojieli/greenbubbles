@@ -640,6 +640,14 @@ preview_action()
   stages remain unproducible until the separately gated Phase 4 lifecycle.
 - [x] Ensure creating or previewing a draft cannot mutate WeChat state.
 
+New connector audit events are hash-chained under the append lock and the
+service verifies the journal before startup. An independent privacy-safe audit
+reports event/stage/outcome counts, chain integrity, and any unlinked legacy
+prefix without emitting identities or bodies. This supplies tamper-detection
+for current request/draft/review evidence; it is not a signature and does not
+make the gated approval/attempt/reconciliation stages producible. See
+`docs/CONNECTOR_AUDIT.md`.
+
 Exit gate: GreenBubbles is independently useful to people, scripts, OpenClaw,
 Codex, Claude, and downstream memory engines, and hostile source content cannot
 access another conversation or turn a draft into an action.

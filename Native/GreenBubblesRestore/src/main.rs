@@ -8,7 +8,7 @@ use greenbubbles_restore::{
     archive::{create_conversation_policy, read_conversation_page},
     audit::audit_archive,
     benchmark::{run_synthetic_benchmark, SyntheticBenchmarkConfig},
-    connector::{ConnectorDestination, ConnectorService},
+    connector::{audit_connector_log, ConnectorDestination, ConnectorService},
     merge::merge_incremental_archive,
     preflight_snapshot, prepare_catalog,
     reconcile::reconcile_archives,
@@ -111,6 +111,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let previous = required_path(arguments.next(), "previous snapshot directory")?;
             let current = required_path(arguments.next(), "current snapshot directory")?;
             let report = audit_acquisition_chain(&previous, &current)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "audit-connector-log" => {
+            let audit_log = required_path(arguments.next(), "connector audit log")?;
+            let report = audit_connector_log(&audit_log)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "policy" => {
@@ -438,6 +443,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore restore <snapshot> <output> [--account-root <path>] [--defer-media] [--passphrase-stdin]\n",
                     "  greenbubbles-restore audit-archive <archive>\n",
                     "  greenbubbles-restore audit-acquisition-chain <previous-snapshot> <current-snapshot>\n",
+                    "  greenbubbles-restore audit-connector-log <connector-audit-log>\n",
                     "  greenbubbles-restore policy <archive> <policy-file> <conversation-id>... [--max-page-size <n>]\n",
                     "  greenbubbles-restore read <archive> <policy-file> <conversation-id> [--cursor <cursor>] [--limit <n>]\n",
                     "  greenbubbles-restore reconcile <previous-archive> <current-archive> <policy-file> <events-output>\n",
