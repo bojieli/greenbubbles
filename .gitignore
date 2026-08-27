@@ -1,0 +1,18 @@
+.DS_Store
+/.build
+/.swiftpm
+*.xcuserstate
+DerivedData/
+
+# Never commit user data, database snapshots, credentials, or extracted material.
+/captures
+/fixtures/private
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.key
+*.pem
+*.p12
+*.mobileprovision

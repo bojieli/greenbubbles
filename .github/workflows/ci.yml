@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Check formatting
+        run: swift format lint --recursive Package.swift Sources Tests
+
+      - name: Run tests
+        run: swift test
+
+      - name: Build release executable
+        run: swift build -c release
