@@ -7,7 +7,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use greenbubbles_restore::follow::{
-    follow_replica_once, publish_replica_handoff, ReplicaFollowOutcome,
+    follow_replica_once, publish_replica_handoff, replica_follower_status, ReplicaFollowOutcome,
+    ReplicaFollowerHealth,
 };
 use greenbubbles_restore::replica::{
     bootstrap_replica, get_replica_changes, get_replica_message, list_replica_conversations,
@@ -969,10 +970,46 @@ fn follows_monotonic_authoritative_archive_handoffs_with_crash_safe_state() {
     assert!(published.privacy_safe_summary);
     assert_eq!(published.generation, 1);
     assert_eq!(file_mode(&handoff), 0o600);
+    let uninitialized = replica_follower_status(&handoff, &state, &replica, &key).unwrap();
+    assert_eq!(uninitialized.health, ReplicaFollowerHealth::Uninitialized);
+    assert_eq!(uninitialized.generation_lag, 1);
+    assert!(!uninitialized.replica_present);
     let first = follow_replica_once(&handoff, &state, &replica, &key).unwrap();
     assert_eq!(first.outcome, ReplicaFollowOutcome::Bootstrapped);
     assert!(first.source_advanced);
     assert_eq!(file_mode(&state), 0o600);
+    let current = replica_follower_status(&handoff, &state, &replica, &key).unwrap();
+    assert_eq!(current.health, ReplicaFollowerHealth::Current);
+    assert_eq!(current.applied_generation, Some(1));
+    assert_eq!(current.generation_lag, 0);
+    let mut status_process = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .arg("replica-follow-status")
+        .args([&handoff, &state, &replica])
+        .arg("--replica-key-stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    status_process
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{}\n", "31".repeat(32)).as_bytes())
+        .unwrap();
+    let status_output = status_process.wait_with_output().unwrap();
+    assert!(
+        status_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status_output.stderr)
+    );
+    let status_json: serde_json::Value = serde_json::from_slice(&status_output.stdout).unwrap();
+    assert_eq!(status_json["health"], "current");
+    assert_eq!(status_json["privacySafeSummary"], true);
+    let status_text = String::from_utf8(status_output.stdout).unwrap();
+    for private_value in ["account-a", "source-a", archive_a.to_str().unwrap()] {
+        assert!(!status_text.contains(private_value));
+    }
     let repeated = follow_replica_once(&handoff, &state, &replica, &key).unwrap();
     assert_eq!(repeated.outcome, ReplicaFollowOutcome::AlreadyApplied);
     assert!(repeated.idempotent);
@@ -983,6 +1020,11 @@ fn follows_monotonic_authoritative_archive_handoffs_with_crash_safe_state() {
     messages[0].content_base64 = Some("Zm9sbG93ZWQgZWRpdA==".to_string());
     overwrite_ndjson(&archive_b.join("messages.ndjson"), &messages);
     publish_replica_handoff(&archive_b, &handoff, 2).unwrap();
+    let pending = replica_follower_status(&handoff, &state, &replica, &key).unwrap();
+    assert_eq!(pending.health, ReplicaFollowerHealth::Pending);
+    assert_eq!(pending.published_generation, 2);
+    assert_eq!(pending.applied_generation, Some(1));
+    assert_eq!(pending.generation_lag, 1);
     let synchronized = follow_replica_once(&handoff, &state, &replica, &key).unwrap();
     assert_eq!(synchronized.outcome, ReplicaFollowOutcome::Synchronized);
     assert!(synchronized.source_advanced);
@@ -1059,6 +1101,11 @@ fn follows_monotonic_authoritative_archive_handoffs_with_crash_safe_state() {
     assert!(generation_three.idempotent);
 
     fs::remove_file(&state).unwrap();
+    let recovery_required = replica_follower_status(&handoff, &state, &replica, &key).unwrap();
+    assert_eq!(
+        recovery_required.health,
+        ReplicaFollowerHealth::StateRecoveryRequired
+    );
     let recovered_after_state_loss = follow_replica_once(&handoff, &state, &replica, &key).unwrap();
     assert_eq!(
         recovered_after_state_loss.outcome,

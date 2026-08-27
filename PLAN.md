@@ -580,7 +580,10 @@ and records crash-safe state bound to the random replica ID and committed
 checkpoint. It cannot acquire a WeChat passphrase, inspect live stores, or
 accept an unmerged incremental fragment. Synthetic restart, rollback,
 equivocation, replacement, idempotency, bootstrap, and synchronization behavior
-is covered; real disposable-account latency evidence remains required. See
+is covered. A bounded aggregate-only supervisor status reports published and
+applied generations, generation lag, checkpoint age, and state-recovery needs
+without exposing account/source identities or rescanning the archive; real
+disposable-account latency evidence remains required. See
 `docs/REPLICA_FOLLOW.md`.
 
 ## Phase 3 — agent-neutral connector service and drafts

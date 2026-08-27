@@ -11,7 +11,7 @@ use greenbubbles_restore::{
     audit::audit_archive,
     benchmark::{run_synthetic_benchmark, SyntheticBenchmarkConfig},
     connector::{audit_connector_log, ConnectorDestination, ConnectorService},
-    follow::{follow_replica_once, publish_replica_handoff},
+    follow::{follow_replica_once, publish_replica_handoff, replica_follower_status},
     merge::merge_incremental_archive,
     preflight_snapshot, prepare_catalog,
     reconcile::reconcile_archives,
@@ -264,6 +264,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 std::thread::sleep(Duration::from_millis(poll_milliseconds));
             }
+        }
+        "replica-follow-status" => {
+            let handoff = required_path(arguments.next(), "replica handoff path")?;
+            let state = required_path(arguments.next(), "replica follow state path")?;
+            let replica = required_path(arguments.next(), "replica path")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if !remaining.iter().any(|value| value == "--replica-key-stdin") {
+                return Err("replica keys must be supplied with --replica-key-stdin".into());
+            }
+            let key = ReplicaKey::read_stdin()?;
+            let report = replica_follower_status(&handoff, &state, &replica, &key)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "replica-changes" => {
             let replica = required_path(arguments.next(), "replica path")?;
@@ -528,6 +540,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore replica-publish <authoritative-archive> <handoff-file> --generation <positive-integer>\n",
                     "  greenbubbles-restore replica-follow-once <handoff-file> <follow-state-file> <replica-path> --replica-key-stdin\n",
                     "  greenbubbles-restore replica-follow <handoff-file> <follow-state-file> <replica-path> --replica-key-stdin [--poll-milliseconds <100..60000>] [--maximum-polls <n>]\n",
+                    "  greenbubbles-restore replica-follow-status <handoff-file> <follow-state-file> <replica-path> --replica-key-stdin\n",
                     "  greenbubbles-restore replica-changes <replica-path> --replica-key-stdin [--cursor <cursor>] [--limit <n>]\n",
                     "  greenbubbles-restore replica-search <replica-path> <private-filter-json> --replica-key-stdin [--cursor <cursor>] [--limit <n>]\n",
                     "  greenbubbles-restore replica-cached-moments <replica-path> --replica-key-stdin [--author <opaque-id>] [--content-type <n>] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--cursor <cursor>] [--limit <n>]\n",

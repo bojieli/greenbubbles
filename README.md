@@ -301,12 +301,18 @@ greenbubbles-restore replica-publish \
 greenbubbles-restore replica-follow \
   <private-handoff.json> <private-follow-state.json> <encrypted-replica.db> \
   --replica-key-stdin --poll-milliseconds 1000
+
+greenbubbles-restore replica-follow-status \
+  <private-handoff.json> <private-follow-state.json> <encrypted-replica.db> \
+  --replica-key-stdin
 ```
 
 The follower polls only handoff metadata while idle, validates a monotonic
 atomic handoff and full production archive, and then bootstraps or synchronizes
 transactionally. It cannot acquire the WeChat passphrase, snapshot a live
-store, or accept an incremental fragment. See
+store, or accept an incremental fragment. The aggregate-only status reports
+published/applied generations, generation lag, checkpoint age, and whether
+state recovery is required without disclosing account or source identities. See
 [docs/REPLICA_FOLLOW.md](docs/REPLICA_FOLLOW.md).
 
 Avoid placing a real key literally in shell history; pipe it from an

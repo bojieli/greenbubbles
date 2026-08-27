@@ -170,6 +170,12 @@ before state replacement recovers only after a read-only exact source and
 restoration-revision comparison. See
 `REPLICA_FOLLOW.md`.
 
+`replica-follow-status` provides a bounded, key-gated supervisor check over the
+handoff/state/checkpoint binding. It reports aggregate published and applied
+generations, lag, checkpoint age, initialization, and recovery state without
+identities or local paths. Whole-archive validation remains on the application
+path rather than every health probe.
+
 ## Exact retrieval and health
 
 `replica-search` combines encrypted FTS5 with deterministic structured filters:

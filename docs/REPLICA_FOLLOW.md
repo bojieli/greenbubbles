@@ -49,6 +49,21 @@ synchronization. Successful applications are emitted as aggregate NDJSON.
 continuous process. `replica-follow-once` performs the same verified transition
 without polling.
 
+Supervisors can inspect exact generation lag and checkpoint age without
+receiving an account ID, source fingerprint, archive path, or message content:
+
+```sh
+greenbubbles-restore replica-follow-status \
+  <private-handoff.json> <private-follow-state.json> <encrypted-replica.db> \
+  --replica-key-stdin
+```
+
+The status is `uninitialized`, `pending`, `current`, or
+`stateRecoveryRequired`. It verifies handoff/state monotonicity and the applied
+replica identity/checkpoint binding. To keep health checks bounded, it defers
+the potentially large whole-archive audit and seal verification until actual
+application and says so explicitly in the result.
+
 The follower requires:
 
 - a canonical absolute archive path;

@@ -76,6 +76,32 @@ pub struct ReplicaFollowReport {
     pub restoration_complete: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReplicaFollowerHealth {
+    Uninitialized,
+    Pending,
+    Current,
+    StateRecoveryRequired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ReplicaFollowerStatus {
+    pub format_version: u32,
+    pub privacy_safe_summary: bool,
+    pub health: ReplicaFollowerHealth,
+    pub published_generation: u64,
+    pub applied_generation: Option<u64>,
+    pub generation_lag: u64,
+    pub state_present: bool,
+    pub replica_present: bool,
+    pub replica_initialized: bool,
+    pub checkpoint_age_seconds: Option<u64>,
+    pub restoration_complete: Option<bool>,
+    pub archive_validation_deferred_until_application: bool,
+}
+
 pub fn publish_replica_handoff(
     archive_directory: &Path,
     handoff_path: &Path,
@@ -297,6 +323,109 @@ pub fn follow_replica_once(
         changed_count: changed,
         removed_count: removed,
         restoration_complete: after.restoration_complete.unwrap_or(false),
+    })
+}
+
+pub fn replica_follower_status(
+    handoff_path: &Path,
+    state_path: &Path,
+    replica_path: &Path,
+    key: &ReplicaKey,
+) -> Result<ReplicaFollowerStatus, RestoreError> {
+    let loaded = load_handoff(handoff_path)?;
+    let archive_directory = PathBuf::from(&loaded.value.archive_directory);
+    if !archive_directory.is_absolute() {
+        return Err(RestoreError::UnsafePath(
+            "replica handoff archive path must be absolute".to_string(),
+        ));
+    }
+    ensure_private_directory(&archive_directory)?;
+    let canonical_archive = fs::canonicalize(&archive_directory)?;
+    if canonical_archive != archive_directory {
+        return Err(RestoreError::Integrity(
+            "replica handoff archive path is not canonical".to_string(),
+        ));
+    }
+    ensure_target_outside_archive(&canonical_archive, handoff_path, "handoff")?;
+    ensure_target_outside_archive(&canonical_archive, state_path, "follow state")?;
+    ensure_target_outside_archive(&canonical_archive, replica_path, "replica")?;
+    let _lock = ControlLock::acquire(state_path, "follow-state")?;
+    let locked_handoff = load_handoff(handoff_path)?;
+    if locked_handoff.sha256 != loaded.sha256 {
+        return Err(RestoreError::Integrity(
+            "replica handoff changed while follower status was being read; retry".to_string(),
+        ));
+    }
+    let prior_state = state_path
+        .try_exists()?
+        .then(|| load_follow_state(state_path))
+        .transpose()?;
+    if let Some(state) = prior_state.as_ref() {
+        if loaded.value.generation < state.generation
+            || (loaded.value.generation == state.generation
+                && loaded.sha256 != state.handoff_sha256)
+        {
+            return Err(RestoreError::Integrity(
+                "replica handoff is a rollback or generation equivocation".to_string(),
+            ));
+        }
+    }
+
+    let replica_present = replica_path.try_exists()?;
+    let replica = replica_present
+        .then(|| replica_status(replica_path, key))
+        .transpose()?;
+    let replica_initialized = replica
+        .as_ref()
+        .is_some_and(|status| status.account_id.is_some());
+    if let Some(state) = prior_state.as_ref() {
+        let status = replica.as_ref().ok_or_else(|| {
+            RestoreError::Integrity("replica follow state has no corresponding replica".to_string())
+        })?;
+        if state.replica_id != status.replica_id
+            || status.current_source_fingerprint.as_deref()
+                != Some(state.source_fingerprint.as_str())
+            || status.checkpoint_revision.as_deref() != Some(state.checkpoint_revision.as_str())
+        {
+            return Err(RestoreError::Integrity(
+                "replica checkpoint diverged from the applied follow state".to_string(),
+            ));
+        }
+    }
+
+    let applied_generation = prior_state.as_ref().map(|state| state.generation);
+    let generation_lag = loaded
+        .value
+        .generation
+        .saturating_sub(applied_generation.unwrap_or(0));
+    let health = match (prior_state.as_ref(), replica_initialized, generation_lag) {
+        (Some(_), true, 0) => ReplicaFollowerHealth::Current,
+        (Some(_), true, _) => ReplicaFollowerHealth::Pending,
+        (None, true, _) => ReplicaFollowerHealth::StateRecoveryRequired,
+        (None, false, _) => ReplicaFollowerHealth::Uninitialized,
+        (Some(_), false, _) => {
+            return Err(RestoreError::Integrity(
+                "replica follow state references an uninitialized replica".to_string(),
+            ));
+        }
+    };
+    Ok(ReplicaFollowerStatus {
+        format_version: 1,
+        privacy_safe_summary: true,
+        health,
+        published_generation: loaded.value.generation,
+        applied_generation,
+        generation_lag,
+        state_present: prior_state.is_some(),
+        replica_present,
+        replica_initialized,
+        checkpoint_age_seconds: replica
+            .as_ref()
+            .and_then(|status| status.checkpoint_age_seconds),
+        restoration_complete: replica
+            .as_ref()
+            .and_then(|status| status.restoration_complete),
+        archive_validation_deferred_until_application: true,
     })
 }
 
