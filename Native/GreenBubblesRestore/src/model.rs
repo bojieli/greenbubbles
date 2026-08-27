@@ -197,6 +197,114 @@ pub struct CanonicalArtifact {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub enum CachedSurfaceCompleteness {
+    PartialLocalCache,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanonicalCachedMoment {
+    pub canonical_id: String,
+    pub account_id: String,
+    pub source_set_id: String,
+    pub source_logical_path: String,
+    pub source_table_id: String,
+    pub source_table_name: String,
+    pub source_row_id: i64,
+    pub timeline_id: RawSQLiteValue,
+    pub author_id: Option<String>,
+    pub author_source_identifier_base64: Option<String>,
+    pub created_at_unix: Option<i64>,
+    pub content_type: Option<i64>,
+    pub content_description_base64: Option<String>,
+    pub title_base64: Option<String>,
+    pub description_base64: Option<String>,
+    pub content_url_base64: Option<String>,
+    pub media_count: u64,
+    pub like_count: u64,
+    pub comment_count: u64,
+    pub raw_content_base64: Option<String>,
+    pub raw_pack_info_base64: Option<String>,
+    pub raw_columns: BTreeMap<String, RawSQLiteValue>,
+    pub semantic_decode_state: SemanticDecodeState,
+    pub semantic_gap_reason: Option<String>,
+    pub cache_completeness: CachedSurfaceCompleteness,
+    pub observed_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CachedMomentInteractionKind {
+    Comment,
+    Like,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanonicalCachedMomentInteraction {
+    pub canonical_id: String,
+    pub account_id: String,
+    pub source_set_id: String,
+    pub source_logical_path: String,
+    pub source_table_id: String,
+    pub source_table_name: String,
+    pub source_row_id: i64,
+    pub local_id: Option<i64>,
+    pub feed_id: RawSQLiteValue,
+    pub created_at_unix: Option<i64>,
+    pub kind: CachedMomentInteractionKind,
+    pub raw_type: Option<i64>,
+    pub from_participant_id: Option<String>,
+    pub from_source_identifier_base64: Option<String>,
+    pub from_nickname_base64: Option<String>,
+    pub to_participant_id: Option<String>,
+    pub to_source_identifier_base64: Option<String>,
+    pub to_nickname_base64: Option<String>,
+    pub content_base64: Option<String>,
+    pub raw_columns: BTreeMap<String, RawSQLiteValue>,
+    pub cache_completeness: CachedSurfaceCompleteness,
+    pub observed_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CachedSurfaceTableRole {
+    MomentTimeline,
+    MomentInteraction,
+    UnsupportedCandidate,
+    Other,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedSurfaceTableCoverage {
+    pub source_set_id: String,
+    pub source_logical_path: String,
+    pub source_table_id: String,
+    pub source_table_name: String,
+    pub columns: Vec<String>,
+    pub source_row_count: u64,
+    pub restored_row_count: u64,
+    pub role: CachedSurfaceTableRole,
+    pub classification_reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedSurfaceCoverage {
+    pub format_version: u32,
+    pub observed_at: String,
+    pub cache_completeness: CachedSurfaceCompleteness,
+    pub source_database_present: bool,
+    pub moment_count: u64,
+    pub interaction_count: u64,
+    pub semantic_gap_count: u64,
+    pub tables: Vec<CachedSurfaceTableCoverage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ConversationKind {
     Direct,
     Group,
@@ -357,6 +465,9 @@ pub struct RestorationIntegrity {
     pub entity_decode_gap_count: u64,
     pub missing_local_profile_count: u64,
     pub unresolved_conversation_count: u64,
+    pub cached_moment_count: u64,
+    pub cached_moment_interaction_count: u64,
+    pub cached_surface_semantic_gap_count: u64,
 }
 
 impl RestorationIntegrity {
@@ -384,6 +495,12 @@ pub struct RestorationReport {
     pub artifacts_path: String,
     pub conversations_path: String,
     pub participants_path: String,
+    #[serde(default)]
+    pub cached_moments_path: Option<String>,
+    #[serde(default)]
+    pub cached_moment_interactions_path: Option<String>,
+    #[serde(default)]
+    pub cached_surfaces_path: Option<String>,
     pub coverage_path: String,
     pub report_path: String,
     pub integrity: RestorationIntegrity,

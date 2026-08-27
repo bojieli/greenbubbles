@@ -12,13 +12,15 @@ use greenbubbles_restore::{
     reconcile::reconcile_archives,
     replica::{
         bootstrap_replica, get_replica_changes, get_replica_message, list_replica_conversations,
-        load_replica_message_filter, replica_coverage, replica_status, search_replica_messages,
-        synchronize_replica,
+        load_replica_message_filter, replica_coverage, replica_status,
+        search_replica_cached_moments, search_replica_messages, synchronize_replica,
+        ReplicaCachedMomentFilter,
     },
     restore_catalog,
     tools::{
-        create_tool_policy, ConversationToolScope, LocalToolService, ToolCapability,
-        ToolDataDestination, ToolMessageField,
+        create_tool_policy_with_cached_moments, CachedMomentField, CachedMomentsToolScope,
+        ConversationToolScope, LocalToolService, ToolCapability, ToolDataDestination,
+        ToolMessageField,
     },
     transport::{load_connector_request, run_mcp_adapter, send_unix_request, serve_unix},
     DatabasePassphrase, ReplicaKey, RestorationOptions,
@@ -194,6 +196,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 search_replica_messages(&replica, &key, &filter, cursor.as_deref(), limit)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        "replica-cached-moments" => {
+            let replica = required_path(arguments.next(), "replica path")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if !remaining.iter().any(|value| value == "--replica-key-stdin") {
+                return Err("replica keys must be supplied with --replica-key-stdin".into());
+            }
+            let filter = ReplicaCachedMomentFilter {
+                author_id: option_string(&remaining, "--author")?,
+                not_before_unix: option_i64(&remaining, "--not-before-unix")?,
+                not_after_unix: option_i64(&remaining, "--not-after-unix")?,
+                content_type: option_i64(&remaining, "--content-type")?,
+            };
+            let cursor = option_string(&remaining, "--cursor")?;
+            let limit = option_usize(&remaining, "--limit")?.unwrap_or(100);
+            let key = ReplicaKey::read_stdin()?;
+            let report =
+                search_replica_cached_moments(&replica, &key, &filter, cursor.as_deref(), limit)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         "replica-message" => {
             let replica = required_path(arguments.next(), "replica path")?;
             let canonical_id = arguments
@@ -266,9 +287,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .take_while(|value| !value.starts_with("--"))
                 .cloned()
                 .collect::<BTreeSet<_>>();
-            let capabilities = option_string(&remaining, "--capabilities")?
-                .ok_or_else(|| "missing --capabilities".to_string())
-                .and_then(|value| parse_capabilities(&value))?;
+            let capabilities = match option_string(&remaining, "--capabilities")? {
+                Some(value) => parse_capabilities(&value)?,
+                None if conversations.is_empty() => BTreeSet::new(),
+                None => return Err("missing --capabilities".into()),
+            };
             let message_fields = option_string(&remaining, "--fields")?
                 .map(|value| parse_message_fields(&value))
                 .transpose()?
@@ -293,10 +316,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     )
                 })
                 .collect::<BTreeMap<_, _>>();
-            let policy = create_tool_policy(
+            let cached_moments_scope = if remaining
+                .iter()
+                .any(|value| value == "--enable-cached-moments")
+            {
+                let fields = option_string(&remaining, "--cached-fields")?
+                    .ok_or_else(|| "missing --cached-fields".to_string())
+                    .and_then(|value| parse_cached_moment_fields(&value))?;
+                Some(CachedMomentsToolScope {
+                    fields,
+                    not_before_unix: option_i64(&remaining, "--cached-not-before-unix")?,
+                    not_after_unix: option_i64(&remaining, "--cached-not-after-unix")?,
+                    allow_remote_model: remaining
+                        .iter()
+                        .any(|value| value == "--allow-cached-remote-model"),
+                })
+            } else {
+                None
+            };
+            let policy = create_tool_policy_with_cached_moments(
                 &archive,
                 &policy_path,
                 scopes,
+                cached_moments_scope,
                 option_usize(&remaining, "--max-results")?.unwrap_or(100),
                 option_usize(&remaining, "--max-summary-bytes")?.unwrap_or(4_096),
                 option_usize(&remaining, "--max-draft-bytes")?.unwrap_or(16_384),
@@ -384,13 +426,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore replica-sync <archive> <replica-path> --replica-key-stdin\n",
                     "  greenbubbles-restore replica-changes <replica-path> --replica-key-stdin [--cursor <cursor>] [--limit <n>]\n",
                     "  greenbubbles-restore replica-search <replica-path> <private-filter-json> --replica-key-stdin [--cursor <cursor>] [--limit <n>]\n",
+                    "  greenbubbles-restore replica-cached-moments <replica-path> --replica-key-stdin [--author <opaque-id>] [--content-type <n>] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--cursor <cursor>] [--limit <n>]\n",
                     "  greenbubbles-restore replica-message <replica-path> <canonical-id> --replica-key-stdin\n",
                     "  greenbubbles-restore replica-conversations <replica-path> --replica-key-stdin [--limit <n>]\n",
                     "  greenbubbles-restore replica-coverage <replica-path> --replica-key-stdin\n",
                     "  greenbubbles-restore connector-serve <replica-path> <policy-file> <audit-log> <draft-directory> <socket-path> --replica-key-stdin\n",
                     "  greenbubbles-restore connector-call <socket-path> <private-request-json>\n",
                     "  greenbubbles-restore connector-mcp <socket-path> --requester <id> [--destination local|remote]\n",
-                    "  greenbubbles-restore tool-policy <archive> <policy-file> <conversation-id>... --capabilities list,read,search,draft [--fields sender,created-at,direction,type,content,attachments,relationships] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--max-results <n>] [--max-summary-bytes <n>] [--max-draft-bytes <n>]\n",
+                    "  greenbubbles-restore tool-policy <archive> <policy-file> [<conversation-id>...] [--capabilities list,read,search,draft] [--fields sender,created-at,direction,type,content,attachments,relationships] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--enable-cached-moments --cached-fields author,created-at,type,content,title,description,url,media-count,like-count,comment-count] [--cached-not-before-unix <seconds>] [--cached-not-after-unix <seconds>] [--allow-cached-remote-model] [--max-results <n>] [--max-summary-bytes <n>] [--max-draft-bytes <n>]\n",
                     "  greenbubbles-restore tool-list <archive> <policy-file> <audit-log> --requester <id> [--destination local|remote]\n",
                     "  greenbubbles-restore tool-recent <archive> <policy-file> <audit-log> <conversation-id> --requester <id> [--limit <n>] [--destination local|remote]\n",
                     "  greenbubbles-restore tool-search <archive> <policy-file> <audit-log> --requester <id> --query-stdin [--conversation <id>] [--limit <n>] [--destination local|remote]\n",
@@ -502,6 +545,29 @@ fn parse_message_fields(value: &str) -> Result<BTreeSet<ToolMessageField>, Strin
             "relationships" => ToolMessageField::Relationships,
             _ => return Err(format!("unsupported message field: {field}")),
         });
+    }
+    Ok(result)
+}
+
+fn parse_cached_moment_fields(value: &str) -> Result<BTreeSet<CachedMomentField>, String> {
+    let mut result = BTreeSet::new();
+    for field in value.split(',') {
+        result.insert(match field {
+            "author" => CachedMomentField::Author,
+            "created-at" => CachedMomentField::CreatedAt,
+            "type" => CachedMomentField::ContentType,
+            "content" => CachedMomentField::ContentDescription,
+            "title" => CachedMomentField::Title,
+            "description" => CachedMomentField::Description,
+            "url" => CachedMomentField::ContentUrl,
+            "media-count" => CachedMomentField::MediaCount,
+            "like-count" => CachedMomentField::LikeCount,
+            "comment-count" => CachedMomentField::CommentCount,
+            _ => return Err(format!("unsupported cached Moment field: {field}")),
+        });
+    }
+    if result.is_empty() {
+        return Err("at least one cached Moment field is required".to_string());
     }
     Ok(result)
 }

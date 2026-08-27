@@ -5,6 +5,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -12,8 +13,9 @@ use crate::archive::{
     ensure_private_directory, ensure_private_regular_file, load_conversation_ids, load_report,
 };
 use crate::{
-    ArtifactRole, CanonicalConversation, CanonicalMessage, ConversationKind, EntityDecodeState,
-    MessageDirection, MessageRelationshipKind, RestorationCompletion, RestoreError, TypedPayload,
+    ArtifactRole, CanonicalCachedMoment, CanonicalConversation, CanonicalMessage, ConversationKind,
+    EntityDecodeState, MessageDirection, MessageRelationshipKind, RestorationCompletion,
+    RestoreError, TypedPayload,
 };
 
 pub(crate) const MAX_TOOL_RESULTS: usize = 1_000;
@@ -59,6 +61,30 @@ pub struct ConversationToolScope {
     pub allow_remote_model: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CachedMomentField {
+    Author,
+    CreatedAt,
+    ContentType,
+    ContentDescription,
+    Title,
+    Description,
+    ContentUrl,
+    MediaCount,
+    LikeCount,
+    CommentCount,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CachedMomentsToolScope {
+    pub fields: BTreeSet<CachedMomentField>,
+    pub not_before_unix: Option<i64>,
+    pub not_after_unix: Option<i64>,
+    pub allow_remote_model: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolAuthorizationPolicy {
@@ -66,9 +92,38 @@ pub struct ToolAuthorizationPolicy {
     pub account_id: String,
     pub created_from_source_fingerprint: String,
     pub conversation_scopes: BTreeMap<String, ConversationToolScope>,
+    #[serde(default)]
+    pub cached_moments_scope: Option<CachedMomentsToolScope>,
     pub maximum_result_count: usize,
     pub maximum_message_summary_bytes: usize,
     pub maximum_draft_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MinimizedCachedMoment {
+    pub canonical_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at_unix: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub like_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment_count: Option<u64>,
+    pub text_truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,7 +268,28 @@ pub fn create_tool_policy(
     maximum_message_summary_bytes: usize,
     maximum_draft_bytes: usize,
 ) -> Result<ToolAuthorizationPolicy, RestoreError> {
-    validate_tool_scopes(&conversation_scopes)?;
+    create_tool_policy_with_cached_moments(
+        archive_directory,
+        policy_path,
+        conversation_scopes,
+        None,
+        maximum_result_count,
+        maximum_message_summary_bytes,
+        maximum_draft_bytes,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_tool_policy_with_cached_moments(
+    archive_directory: &Path,
+    policy_path: &Path,
+    conversation_scopes: BTreeMap<String, ConversationToolScope>,
+    cached_moments_scope: Option<CachedMomentsToolScope>,
+    maximum_result_count: usize,
+    maximum_message_summary_bytes: usize,
+    maximum_draft_bytes: usize,
+) -> Result<ToolAuthorizationPolicy, RestoreError> {
+    validate_tool_scopes(&conversation_scopes, cached_moments_scope.as_ref())?;
     let report = load_report(archive_directory)?;
     let known = load_conversation_ids(archive_directory)?;
     if let Some(unknown) = conversation_scopes
@@ -225,10 +301,11 @@ pub fn create_tool_policy(
         )));
     }
     let policy = ToolAuthorizationPolicy {
-        format_version: 2,
+        format_version: 3,
         account_id: report.account_id,
         created_from_source_fingerprint: report.source_fingerprint,
         conversation_scopes,
+        cached_moments_scope,
         maximum_result_count: maximum_result_count.clamp(1, MAX_TOOL_RESULTS),
         maximum_message_summary_bytes: maximum_message_summary_bytes
             .clamp(1, MAX_MESSAGE_SUMMARY_BYTES),
@@ -656,7 +733,7 @@ impl LocalToolService {
 pub(crate) fn load_tool_policy(path: &Path) -> Result<ToolAuthorizationPolicy, RestoreError> {
     ensure_private_regular_file(path)?;
     let policy: ToolAuthorizationPolicy = serde_json::from_slice(&fs::read(path)?)?;
-    if policy.format_version != 2
+    if !matches!(policy.format_version, 2 | 3)
         || policy.account_id.is_empty()
         || policy.maximum_result_count == 0
         || policy.maximum_result_count > MAX_TOOL_RESULTS
@@ -669,16 +746,21 @@ pub(crate) fn load_tool_policy(path: &Path) -> Result<ToolAuthorizationPolicy, R
             "unsupported or unsafe tool policy".to_string(),
         ));
     }
-    validate_tool_scopes(&policy.conversation_scopes)?;
+    validate_tool_scopes(
+        &policy.conversation_scopes,
+        policy.cached_moments_scope.as_ref(),
+    )?;
     Ok(policy)
 }
 
 fn validate_tool_scopes(
     conversation_scopes: &BTreeMap<String, ConversationToolScope>,
+    cached_moments_scope: Option<&CachedMomentsToolScope>,
 ) -> Result<(), RestoreError> {
-    if conversation_scopes.is_empty() {
+    if conversation_scopes.is_empty() && cached_moments_scope.is_none() {
         return Err(RestoreError::Integrity(
-            "at least one conversation tool scope must be explicitly enabled".to_string(),
+            "at least one conversation or cached-moments scope must be explicitly enabled"
+                .to_string(),
         ));
     }
     if let Some((conversation_id, _)) = conversation_scopes
@@ -717,6 +799,22 @@ fn validate_tool_scopes(
         return Err(RestoreError::Integrity(format!(
             "message search requires the content field: {conversation_id}"
         )));
+    }
+    if let Some(scope) = cached_moments_scope {
+        if scope.fields.is_empty() {
+            return Err(RestoreError::Integrity(
+                "cached-moments scope has no enabled fields".to_string(),
+            ));
+        }
+        if scope
+            .not_before_unix
+            .zip(scope.not_after_unix)
+            .is_some_and(|(start, end)| start > end)
+        {
+            return Err(RestoreError::Integrity(
+                "cached-moments scope has an inverted time range".to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -789,6 +887,96 @@ pub(crate) fn minimize_message(
     }
 }
 
+pub(crate) fn minimize_cached_moment(
+    moment: CanonicalCachedMoment,
+    maximum_text_bytes: usize,
+    fields: &BTreeSet<CachedMomentField>,
+) -> Result<MinimizedCachedMoment, RestoreError> {
+    let mut remaining = maximum_text_bytes;
+    let mut text_truncated = false;
+    let content_description = decode_cached_text_field(
+        fields
+            .contains(&CachedMomentField::ContentDescription)
+            .then_some(moment.content_description_base64)
+            .flatten(),
+        &mut remaining,
+        &mut text_truncated,
+    )?;
+    let title = decode_cached_text_field(
+        fields
+            .contains(&CachedMomentField::Title)
+            .then_some(moment.title_base64)
+            .flatten(),
+        &mut remaining,
+        &mut text_truncated,
+    )?;
+    let description = decode_cached_text_field(
+        fields
+            .contains(&CachedMomentField::Description)
+            .then_some(moment.description_base64)
+            .flatten(),
+        &mut remaining,
+        &mut text_truncated,
+    )?;
+    let content_url = decode_cached_text_field(
+        fields
+            .contains(&CachedMomentField::ContentUrl)
+            .then_some(moment.content_url_base64)
+            .flatten(),
+        &mut remaining,
+        &mut text_truncated,
+    )?;
+    Ok(MinimizedCachedMoment {
+        canonical_id: moment.canonical_id,
+        author_id: fields
+            .contains(&CachedMomentField::Author)
+            .then_some(moment.author_id)
+            .flatten(),
+        created_at_unix: fields
+            .contains(&CachedMomentField::CreatedAt)
+            .then_some(moment.created_at_unix)
+            .flatten(),
+        content_type: fields
+            .contains(&CachedMomentField::ContentType)
+            .then_some(moment.content_type)
+            .flatten(),
+        content_description,
+        title,
+        description,
+        content_url,
+        media_count: fields
+            .contains(&CachedMomentField::MediaCount)
+            .then_some(moment.media_count),
+        like_count: fields
+            .contains(&CachedMomentField::LikeCount)
+            .then_some(moment.like_count),
+        comment_count: fields
+            .contains(&CachedMomentField::CommentCount)
+            .then_some(moment.comment_count),
+        text_truncated,
+    })
+}
+
+fn decode_cached_text_field(
+    value: Option<String>,
+    remaining: &mut usize,
+    truncated: &mut bool,
+) -> Result<Option<String>, RestoreError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|_| {
+            RestoreError::Integrity("cached-moment minimized text is not valid base64".to_string())
+        })?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let (text, was_truncated) = truncate_utf8(text, *remaining);
+    *remaining = remaining.saturating_sub(text.len());
+    *truncated |= was_truncated;
+    Ok(Some(text))
+}
+
 fn summarize_payload(
     payload: &TypedPayload,
     maximum_bytes: usize,
@@ -856,6 +1044,24 @@ pub(crate) fn released_body_bytes(messages: &[MinimizedMessage]) -> usize {
         .iter()
         .filter_map(|message| message.payload_summary.as_ref())
         .map(String::len)
+        .sum()
+}
+
+pub(crate) fn released_cached_moment_body_bytes(moments: &[MinimizedCachedMoment]) -> usize {
+    moments
+        .iter()
+        .map(|moment| {
+            [
+                moment.content_description.as_ref(),
+                moment.title.as_ref(),
+                moment.description.as_ref(),
+                moment.content_url.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .map(String::len)
+            .sum::<usize>()
+        })
         .sum()
 }
 

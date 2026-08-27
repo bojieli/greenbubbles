@@ -59,6 +59,7 @@ The version-1 union contains:
 ```text
 capabilities                 status
 coverage                     getChanges
+getCachedMoments
 listConversations            searchMessages
 getMessages                  getMessage
 resolveContact               resolveConversation
@@ -73,8 +74,10 @@ workflow remains isolated in the CLI because it requires source snapshots and,
 for encrypted stores, an owner-supplied WeChat database passphrase. This keeps
 serving a replica from implicitly granting source acquisition.
 
-`capabilities` reports local passive read, authenticated active read, drafts,
-text send, reply send, and file send independently. Send and active-read
+`capabilities` reports local passive read, passive cached Moments,
+authenticated active read, drafts, text send, reply send, and file send
+independently. Cached-Moments permission does not inherit from conversation
+reads, and neither passive tier enables authenticated active reads. Send and active-read
 capabilities remain unavailable until their controlling Phase 0.5 gates pass.
 `status` includes exact client-build compatibility, authoritative checkpoint
 and revision, acquisition mode, decoder version, latest synchronization and
@@ -93,6 +96,30 @@ reading or releasing a record:
 - allowed normalized fields;
 - local versus remote-model destination;
 - configured result and byte limits.
+
+`getCachedMoments` uses its own policy scope with independent allowed fields,
+inclusive time range, local/remote destination permission, result limit, and
+text-byte limit. Its response contains only selected normalized fields. Raw
+columns, source identifiers, XML, pack-info blobs, local paths, and interaction
+records are never included in the AI-facing view. The cache observation time
+and `partialLocalCache` label remain visible so an agent cannot mistake a local
+cache for complete server history.
+The serving process also enforces a fixed rolling limit of 60 cached-Moments
+requests per minute; denied requests are recorded in the same body-free audit
+log.
+
+For example, a cached-only local policy can be created without granting any
+conversation reads:
+
+```text
+greenbubbles-restore tool-policy <archive> private/policy.json \
+  --enable-cached-moments \
+  --cached-fields author,created-at,type,content,title,url,media-count \
+  --cached-not-before-unix 1700000000
+```
+
+Remote release remains denied unless
+`--allow-cached-remote-model` is supplied separately.
 
 The server never accepts SQL, source paths, replica paths, arbitrary internal
 function names, or destination changes from message content. A remote-model

@@ -276,6 +276,7 @@ fn mcp_operation_kind(name: &str) -> Option<&'static str> {
         "greenbubbles_status" => "status",
         "greenbubbles_coverage" => "coverage",
         "greenbubbles_get_changes" => "getChanges",
+        "greenbubbles_get_cached_moments" => "getCachedMoments",
         "greenbubbles_list_conversations" => "listConversations",
         "greenbubbles_search_messages" => "searchMessages",
         "greenbubbles_get_messages" => "getMessages",
@@ -311,6 +312,18 @@ fn mcp_tools() -> Vec<Value> {
             "greenbubbles_get_changes",
             "Read the resumable conversation-scoped change stream",
             object_schema(&[("cursor", "string", false), ("limit", "integer", false)]),
+        ),
+        tool(
+            "greenbubbles_get_cached_moments",
+            "Page passive local cached Moments through an independent minimized policy scope",
+            object_schema(&[
+                ("authorId", "string", false),
+                ("notBeforeUnix", "integer", false),
+                ("notAfterUnix", "integer", false),
+                ("contentType", "integer", false),
+                ("cursor", "string", false),
+                ("limit", "integer", false),
+            ]),
         ),
         tool(
             "greenbubbles_list_conversations",
@@ -438,5 +451,48 @@ trait FileTypeSocket {
 impl FileTypeSocket for fs::FileType {
     fn is_socket(&self) -> bool {
         std::os::unix::fs::FileTypeExt::is_socket(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_lists_and_maps_the_independently_scoped_cached_moments_tool() {
+        let tools = mcp_tools();
+        let cached = tools
+            .iter()
+            .find(|tool| tool["name"] == "greenbubbles_get_cached_moments")
+            .expect("cached Moments tool is listed");
+        assert_eq!(
+            cached["inputSchema"]["additionalProperties"],
+            Value::Bool(false)
+        );
+        assert_eq!(
+            mcp_operation_kind("greenbubbles_get_cached_moments"),
+            Some("getCachedMoments")
+        );
+        let operation: ConnectorOperation = serde_json::from_value(json!({
+            "kind": mcp_operation_kind("greenbubbles_get_cached_moments").unwrap(),
+            "authorId": "opaque-author",
+            "notBeforeUnix": 1,
+            "notAfterUnix": 2,
+            "contentType": 6,
+            "cursor": null,
+            "limit": 10
+        }))
+        .unwrap();
+        assert!(matches!(
+            operation,
+            ConnectorOperation::GetCachedMoments {
+                author_id: Some(_),
+                not_before_unix: Some(1),
+                not_after_unix: Some(2),
+                content_type: Some(6),
+                cursor: None,
+                limit: Some(10)
+            }
+        ));
     }
 }

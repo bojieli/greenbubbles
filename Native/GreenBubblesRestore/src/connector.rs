@@ -1,8 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -13,13 +14,15 @@ use crate::archive::{ensure_private_directory, ensure_private_regular_file};
 use crate::replica::{
     get_replica_artifact, get_replica_changes, get_replica_conversation, get_replica_message,
     get_replica_participant, replica_conversation_references_artifact, replica_coverage,
-    replica_status, search_replica_messages, ReplicaCoverageView, ReplicaMessageFilter,
-    ReplicaStatus,
+    replica_status, search_replica_cached_moments, search_replica_messages,
+    ReplicaCachedMomentFilter, ReplicaCachedSurfaceAvailability, ReplicaCoverageView,
+    ReplicaMessageFilter, ReplicaStatus,
 };
 use crate::tools::{
-    load_tool_policy, minimize_message, released_body_bytes, ConversationToolScope,
-    MinimizedMessage, ToolAuthorizationPolicy, ToolCapability, ToolDataDestination,
-    ToolMessageField, MAX_SEARCH_QUERY_BYTES,
+    load_tool_policy, minimize_cached_moment, minimize_message, released_body_bytes,
+    released_cached_moment_body_bytes, CachedMomentsToolScope, ConversationToolScope,
+    MinimizedCachedMoment, MinimizedMessage, ToolAuthorizationPolicy, ToolCapability,
+    ToolDataDestination, ToolMessageField, MAX_SEARCH_QUERY_BYTES,
 };
 use crate::{
     ArtifactKind, ArtifactRole, CanonicalConversation, CanonicalParticipant, ConversationKind,
@@ -31,6 +34,7 @@ pub const CONNECTOR_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_DRAFT_EXPIRY_SECONDS: u64 = 24 * 60 * 60;
 const MAX_DRAFT_EXPIRY_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_REQUESTER_ID_BYTES: usize = 256;
+const MAX_CACHED_MOMENT_REQUESTS_PER_MINUTE: usize = 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,12 +66,24 @@ impl From<ConnectorDestination> for ToolDataDestination {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ConnectorOperation {
     Capabilities,
     Status,
     Coverage,
     GetChanges {
+        cursor: Option<String>,
+        limit: Option<usize>,
+    },
+    GetCachedMoments {
+        author_id: Option<String>,
+        not_before_unix: Option<i64>,
+        not_after_unix: Option<i64>,
+        content_type: Option<i64>,
         cursor: Option<String>,
         limit: Option<usize>,
     },
@@ -140,6 +156,7 @@ pub enum ConnectorResult {
     Status(ConnectorStatus),
     Coverage(ReplicaCoverageView),
     Changes(ScopedChangePage),
+    CachedMoments(ConnectorCachedMomentPage),
     Conversations(ConnectorConversationList),
     Messages(ConnectorMessagePage),
     Message(Option<MinimizedMessage>),
@@ -185,6 +202,7 @@ pub struct ConnectorCapabilities {
     pub connector_version: String,
     pub account_id: Option<String>,
     pub passive_read: CapabilityState,
+    pub cached_moments_read: CapabilityState,
     pub authenticated_active_read: CapabilityState,
     pub draft: CapabilityState,
     pub text_send: CapabilityState,
@@ -206,6 +224,8 @@ pub struct ConnectorStatus {
     pub enabled_conversation_ids: Vec<String>,
     pub locally_enabled_operation_count: usize,
     pub remotely_enabled_conversation_count: usize,
+    pub cached_moments_enabled: bool,
+    pub cached_moments_remote_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,6 +255,18 @@ pub struct ConnectorMessagePage {
     pub account_id: String,
     pub source_fingerprint: String,
     pub messages: Vec<MinimizedMessage>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorCachedMomentPage {
+    pub account_id: String,
+    pub source_fingerprint: String,
+    pub availability: ReplicaCachedSurfaceAvailability,
+    pub cache_completeness: Option<crate::CachedSurfaceCompleteness>,
+    pub observed_at: Option<String>,
+    pub moments: Vec<MinimizedCachedMoment>,
     pub next_cursor: Option<String>,
 }
 
@@ -396,6 +428,7 @@ pub struct ConnectorService<'a> {
     policy_sha256: String,
     audit_path: PathBuf,
     draft_directory: PathBuf,
+    cached_moment_request_times: Mutex<VecDeque<u128>>,
 }
 
 impl<'a> ConnectorService<'a> {
@@ -439,6 +472,7 @@ impl<'a> ConnectorService<'a> {
             policy_sha256,
             audit_path: audit_path.to_path_buf(),
             draft_directory: draft_directory.to_path_buf(),
+            cached_moment_request_times: Mutex::new(VecDeque::new()),
         })
     }
 
@@ -485,6 +519,24 @@ impl<'a> ConnectorService<'a> {
             ConnectorOperation::GetChanges { cursor, limit } => self
                 .changes(request, cursor.as_deref(), limit.unwrap_or(100))
                 .map(ConnectorResult::Changes),
+            ConnectorOperation::GetCachedMoments {
+                author_id,
+                not_before_unix,
+                not_after_unix,
+                content_type,
+                cursor,
+                limit,
+            } => self
+                .get_cached_moments(
+                    request,
+                    author_id.as_deref(),
+                    *not_before_unix,
+                    *not_after_unix,
+                    *content_type,
+                    cursor.as_deref(),
+                    limit.unwrap_or(20),
+                )
+                .map(ConnectorResult::CachedMoments),
             ConnectorOperation::ListConversations => self
                 .list_conversations(request)
                 .map(ConnectorResult::Conversations),
@@ -597,6 +649,11 @@ impl<'a> ConnectorService<'a> {
     fn capabilities(&self) -> Result<ConnectorCapabilities, RestoreError> {
         let status = replica_status(&self.replica_path, self.key)?;
         let initialized = status.account_id.is_some();
+        let cached_source_available = initialized
+            && replica_coverage(&self.replica_path, self.key)?
+                .cached_surfaces
+                .is_some_and(|coverage| coverage.source_database_present);
+        let cached_enabled = self.policy.cached_moments_scope.is_some();
         let draft_enabled = self
             .policy
             .conversation_scopes
@@ -648,6 +705,26 @@ impl<'a> ConnectorService<'a> {
             "phase05GateNotPassed",
             "Ordinary-contact actions are not implemented until the disposable-account, supportability, and legal gates pass",
         );
+        let cached_read = CapabilityState {
+            available: cached_source_available,
+            enabled: cached_source_available && cached_enabled,
+            reason_code: if !cached_source_available {
+                "cachedSurfaceUnavailable"
+            } else if !cached_enabled {
+                "notEnabledByPolicy"
+            } else {
+                "enabled"
+            }
+            .to_string(),
+            reason: if !cached_source_available {
+                "No supported passive local Moments cache is present in the authoritative replica"
+            } else if !cached_enabled {
+                "Passive cached Moments exist but have no independent policy scope"
+            } else {
+                "Passive cached Moments reads are available within their independent policy scope"
+            }
+            .to_string(),
+        };
         let mut operations = BTreeMap::new();
         for name in [
             "capabilities",
@@ -663,6 +740,7 @@ impl<'a> ConnectorService<'a> {
         ] {
             operations.insert(name.to_string(), read.clone());
         }
+        operations.insert("getCachedMoments".to_string(), cached_read.clone());
         for name in [
             "createMessageDraft",
             "createReplyDraft",
@@ -686,6 +764,7 @@ impl<'a> ConnectorService<'a> {
             connector_version: CONNECTOR_VERSION.to_string(),
             account_id: status.account_id,
             passive_read: read,
+            cached_moments_read: cached_read,
             authenticated_active_read: active_read,
             draft,
             text_send: send.clone(),
@@ -705,7 +784,7 @@ impl<'a> ConnectorService<'a> {
             .keys()
             .cloned()
             .collect::<Vec<_>>();
-        let locally_enabled_operation_count = self
+        let locally_enabled_operation_count: usize = self
             .policy
             .conversation_scopes
             .values()
@@ -717,6 +796,12 @@ impl<'a> ConnectorService<'a> {
             .values()
             .filter(|scope| scope.allow_remote_model)
             .count();
+        let cached_moments_enabled = self.policy.cached_moments_scope.is_some();
+        let cached_moments_remote_enabled = self
+            .policy
+            .cached_moments_scope
+            .as_ref()
+            .is_some_and(|scope| scope.allow_remote_model);
         Ok(ConnectorStatus {
             format_version: 1,
             api_version: CONNECTOR_API_VERSION.to_string(),
@@ -727,8 +812,91 @@ impl<'a> ConnectorService<'a> {
                 .created_from_source_fingerprint
                 .clone(),
             enabled_conversation_ids,
-            locally_enabled_operation_count,
+            locally_enabled_operation_count: locally_enabled_operation_count
+                + usize::from(cached_moments_enabled),
             remotely_enabled_conversation_count,
+            cached_moments_enabled,
+            cached_moments_remote_enabled,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn get_cached_moments(
+        &self,
+        request: &ConnectorRequest,
+        author_id: Option<&str>,
+        requested_not_before: Option<i64>,
+        requested_not_after: Option<i64>,
+        content_type: Option<i64>,
+        cursor: Option<&str>,
+        requested_limit: usize,
+    ) -> Result<ConnectorCachedMomentPage, ConnectorErrorBody> {
+        if requested_not_before
+            .zip(requested_not_after)
+            .is_some_and(|(start, end)| start > end)
+        {
+            return Err(invalid("cached Moments request has an inverted time range"));
+        }
+        let scope = self.authorize_cached_moments(request)?;
+        let not_before_unix = match (scope.not_before_unix, requested_not_before) {
+            (Some(scope), Some(requested)) => Some(scope.max(requested)),
+            (scope, requested) => scope.or(requested),
+        };
+        let not_after_unix = match (scope.not_after_unix, requested_not_after) {
+            (Some(scope), Some(requested)) => Some(scope.min(requested)),
+            (scope, requested) => scope.or(requested),
+        };
+        if not_before_unix
+            .zip(not_after_unix)
+            .is_some_and(|(start, end)| start > end)
+        {
+            return Err(invalid(
+                "cached Moments request does not overlap the authorized time range",
+            ));
+        }
+        self.enforce_cached_moment_rate(request)?;
+        let filter = ReplicaCachedMomentFilter {
+            author_id: author_id.map(str::to_string),
+            not_before_unix,
+            not_after_unix,
+            content_type,
+        };
+        let limit = requested_limit.clamp(1, self.policy.maximum_result_count);
+        let page =
+            search_replica_cached_moments(&self.replica_path, self.key, &filter, cursor, limit)
+                .map_err(integrity_error)?;
+        let moments = page
+            .items
+            .into_iter()
+            .map(|moment| {
+                minimize_cached_moment(
+                    moment,
+                    self.policy.maximum_message_summary_bytes,
+                    &scope.fields,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(integrity_error)?;
+        let released = released_cached_moment_body_bytes(&moments);
+        self.audit(
+            request,
+            "getCachedMoments",
+            None,
+            ConnectorAuditOutcome::Completed,
+            moments.len(),
+            released,
+            0,
+            None,
+            None,
+        )?;
+        Ok(ConnectorCachedMomentPage {
+            account_id: page.account_id,
+            source_fingerprint: page.source_fingerprint,
+            availability: page.availability,
+            cache_completeness: page.cache_completeness,
+            observed_at: page.observed_at,
+            moments,
+            next_cursor: page.next_cursor,
         })
     }
 
@@ -1583,6 +1751,71 @@ impl<'a> ConnectorService<'a> {
         Err(unauthorized(
             "operation is outside the authorized conversation or destination scope",
         ))
+    }
+
+    fn authorize_cached_moments(
+        &self,
+        request: &ConnectorRequest,
+    ) -> Result<&CachedMomentsToolScope, ConnectorErrorBody> {
+        let destination = ToolDataDestination::from(request.destination);
+        if let Some(scope) = self.policy.cached_moments_scope.as_ref().filter(|scope| {
+            destination == ToolDataDestination::LocalModel || scope.allow_remote_model
+        }) {
+            return Ok(scope);
+        }
+        let _ = self.audit(
+            request,
+            "getCachedMoments",
+            None,
+            ConnectorAuditOutcome::Denied,
+            0,
+            0,
+            0,
+            None,
+            None,
+        );
+        Err(unauthorized(
+            "cached Moments access is outside its independent policy or destination scope",
+        ))
+    }
+
+    fn enforce_cached_moment_rate(
+        &self,
+        request: &ConnectorRequest,
+    ) -> Result<(), ConnectorErrorBody> {
+        let now = unix_nanoseconds().map_err(integrity_error)?;
+        let window_start = now.saturating_sub(60 * 1_000_000_000);
+        let mut timestamps = self.cached_moment_request_times.lock().map_err(|_| {
+            integrity_error(RestoreError::Integrity(
+                "cached Moments rate limiter is unavailable".to_string(),
+            ))
+        })?;
+        while timestamps
+            .front()
+            .is_some_and(|timestamp| *timestamp < window_start)
+        {
+            timestamps.pop_front();
+        }
+        if timestamps.len() >= MAX_CACHED_MOMENT_REQUESTS_PER_MINUTE {
+            drop(timestamps);
+            let _ = self.audit(
+                request,
+                "getCachedMoments",
+                None,
+                ConnectorAuditOutcome::Denied,
+                0,
+                0,
+                0,
+                None,
+                None,
+            );
+            return Err(unavailable(
+                "cachedMomentsRateLimited",
+                "Passive cached Moments reads are limited to 60 requests per rolling minute",
+            ));
+        }
+        timestamps.push_back(now);
+        Ok(())
     }
 
     fn policy_decision_id(

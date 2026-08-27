@@ -97,6 +97,22 @@ fn serves_scoped_replica_reads_and_complete_non_executing_drafts() {
     assert!(!capabilities.text_send.available);
     assert!(!capabilities.reply_send.available);
     assert!(!capabilities.file_send.available);
+    assert!(!capabilities.cached_moments_read.available);
+    assert!(!capabilities.cached_moments_read.enabled);
+
+    let cached_denied = service.handle(connector_request(
+        "cached-denied",
+        ConnectorDestination::Local,
+        ConnectorOperation::GetCachedMoments {
+            author_id: None,
+            not_before_unix: None,
+            not_after_unix: None,
+            content_type: None,
+            cursor: None,
+            limit: Some(10),
+        },
+    ));
+    assert!(!cached_denied.ok);
 
     let listed = service.handle(connector_request(
         "list",
@@ -243,11 +259,13 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
     let first = bootstrap_replica(&archive, &replica, &key).unwrap();
     assert!(first.encrypted_at_rest);
     assert!(!first.idempotent);
-    assert_eq!(first.schema_version, 3);
+    assert_eq!(first.schema_version, 4);
     assert_eq!(first.conversation_count, 1);
     assert_eq!(first.participant_count, 1);
     assert_eq!(first.message_count, 1);
     assert_eq!(first.artifact_count, 1);
+    assert_eq!(first.cached_moment_count, 0);
+    assert_eq!(first.cached_moment_interaction_count, 0);
     assert_eq!(first.message_artifact_count, 1);
     assert_eq!(file_mode(&replica), 0o600);
 
@@ -550,7 +568,7 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
 
     downgrade_to_schema_1(&replica);
     let migrated = replica_status(&replica, &key).unwrap();
-    assert_eq!(migrated.schema_version, 3);
+    assert_eq!(migrated.schema_version, 4);
     let backup = fs::read_dir(&private)
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -602,6 +620,9 @@ fn build_archive(parent: &Path, name: &str, account: &str, fingerprint: &str) ->
         artifacts_path: "private".to_string(),
         conversations_path: "private".to_string(),
         participants_path: "private".to_string(),
+        cached_moments_path: None,
+        cached_moment_interactions_path: None,
+        cached_surfaces_path: None,
         coverage_path: "private".to_string(),
         report_path: "private".to_string(),
         integrity,
@@ -721,6 +742,13 @@ fn downgrade_to_schema_1(path: &Path) {
     connection
         .execute_batch(
             "PRAGMA foreign_keys = OFF;
+             DROP INDEX cached_moment_by_time;
+             DROP INDEX cached_moment_by_author_time;
+             DROP INDEX cached_moment_by_type_time;
+             DROP INDEX cached_interaction_by_time;
+             DROP TABLE cached_surface_state;
+             DROP TABLE cached_moment_interaction;
+             DROP TABLE cached_moment;
              DROP INDEX message_by_conversation_time;
              DROP INDEX message_by_sender;
              DROP INDEX message_by_type;

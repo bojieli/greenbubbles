@@ -1,6 +1,7 @@
 pub mod archive;
 pub mod artifact;
 pub mod benchmark;
+pub mod cached;
 pub mod catalog;
 pub mod connector;
 pub mod entities;

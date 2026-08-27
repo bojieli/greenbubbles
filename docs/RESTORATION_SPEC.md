@@ -59,6 +59,23 @@ zero or more relationship and artifact references
 Raw payloads are held inside the local trust boundary. AI-facing tools receive
 only policy-approved normalized fields, never the lossless archive by default.
 
+## Passive cached surfaces
+
+When a supported `sns/sns.db` is present, restoration also writes the
+owner-only triplet `cached-moments.ndjson`,
+`cached-moment-interactions.ndjson`, and `cached-surfaces.json`. Only the exact
+`SnsTimeLine` and `SnsMessage_tmp3` table/column signatures observed on the
+pinned client are normalized. Every other SNS table remains a schema-coverage
+record and is never guessed into a Moment or interaction.
+
+Cached records retain database/table/row provenance, opaque canonical
+identities, raw SQLite columns, original XML/blob bytes, best-effort typed
+fields, semantic decode state, and snapshot observation time. Their
+completeness is always `partialLocalCache`: absence is not evidence that a
+server-side Moment, like, or comment does not exist. This passive path does not
+load more content, contact WeChat servers, or imply authenticated active-read
+capability.
+
 ## Integrity report
 
 Each run produces counts that can be checked without printing message content:
@@ -151,3 +168,7 @@ to the prior authoritative fingerprint, replaces records by source-set
 identity, and recalculates global integrity before producing a new
 `authoritative` archive. This distinction prevents partial source selection
 from weakening the row equation or silently deleting history.
+
+Cached records and their table coverage follow the same source-set replacement
+rule. Untouched SNS sets are retained, selected sets are replaced, deleted sets
+are removed, and a partial cached-file triplet aborts the merge.

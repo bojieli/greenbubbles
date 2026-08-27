@@ -19,7 +19,7 @@ use crate::{
     RestorationCoverage, RestorationReport, RestoreError, TypedPayload,
 };
 
-const CURRENT_SCHEMA_VERSION: u32 = 3;
+const CURRENT_SCHEMA_VERSION: u32 = 4;
 const REPLICA_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +36,8 @@ pub struct ReplicaBootstrapReport {
     pub participant_count: u64,
     pub message_count: u64,
     pub artifact_count: u64,
+    pub cached_moment_count: u64,
+    pub cached_moment_interaction_count: u64,
     pub relationship_count: u64,
     pub message_artifact_count: u64,
     pub pre_migration_backup_file_name: Option<String>,
@@ -61,6 +63,8 @@ pub struct ReplicaStatus {
     pub participant_count: u64,
     pub message_count: u64,
     pub artifact_count: u64,
+    pub cached_moment_count: u64,
+    pub cached_moment_interaction_count: u64,
     pub last_checkpoint_unix_nanoseconds: Option<u128>,
     pub checkpoint_age_seconds: Option<u64>,
     pub last_sync_kind: Option<String>,
@@ -103,6 +107,8 @@ pub struct ReplicaSyncReport {
     pub participant_count: u64,
     pub message_count: u64,
     pub artifact_count: u64,
+    pub cached_moment_count: u64,
+    pub cached_moment_interaction_count: u64,
     pub committed_at_unix_nanoseconds: Option<u128>,
 }
 
@@ -191,6 +197,50 @@ pub struct ReplicaCoverageView {
     pub coverage: RestorationCoverage,
     pub integrity: crate::RestorationIntegrity,
     pub completion: crate::RestorationCompletion,
+    pub cached_surfaces: Option<crate::CachedSurfaceCoverage>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicaCachedMomentFilter {
+    pub author_id: Option<String>,
+    pub not_before_unix: Option<i64>,
+    pub not_after_unix: Option<i64>,
+    pub content_type: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicaCachedMomentCursor {
+    pub format_version: u32,
+    pub account_id: String,
+    pub replica_id: String,
+    pub source_fingerprint: String,
+    pub checkpoint_revision: String,
+    pub filter_sha256: String,
+    pub after_created_at_unix: i64,
+    pub after_canonical_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReplicaCachedSurfaceAvailability {
+    Unavailable,
+    AvailableEmpty,
+    Available,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicaCachedMomentPage {
+    pub account_id: String,
+    pub source_fingerprint: String,
+    pub checkpoint_revision: String,
+    pub availability: ReplicaCachedSurfaceAvailability,
+    pub cache_completeness: Option<crate::CachedSurfaceCompleteness>,
+    pub observed_at: Option<String>,
+    pub items: Vec<crate::CanonicalCachedMoment>,
+    pub next_cursor: Option<String>,
 }
 
 struct OpenedReplica {
@@ -207,6 +257,8 @@ struct ImportCounts {
     artifacts: u64,
     relationships: u64,
     message_artifacts: u64,
+    cached_moments: u64,
+    cached_moment_interactions: u64,
 }
 
 #[derive(Default)]
@@ -222,6 +274,12 @@ struct SyncHealth {
     last_started: Option<u128>,
     last_duration_milliseconds: Option<u64>,
     last_integrity_scan: Option<u128>,
+}
+
+struct CachedArchiveInputs {
+    moments_path: PathBuf,
+    interactions_path: PathBuf,
+    coverage: crate::CachedSurfaceCoverage,
 }
 
 pub fn bootstrap_replica(
@@ -282,6 +340,8 @@ pub fn bootstrap_replica(
         participant_count: counts.participants,
         message_count: counts.messages,
         artifact_count: counts.artifacts,
+        cached_moment_count: counts.cached_moments,
+        cached_moment_interaction_count: counts.cached_moment_interactions,
         relationship_count: counts.relationships,
         message_artifact_count: counts.message_artifacts,
         pre_migration_backup_file_name: opened.pre_migration_backup_file_name,
@@ -391,6 +451,11 @@ pub fn replica_status(
         participant_count: table_count(&opened.connection, "participant")?,
         message_count: table_count(&opened.connection, "message")?,
         artifact_count: table_count(&opened.connection, "artifact")?,
+        cached_moment_count: table_count(&opened.connection, "cached_moment")?,
+        cached_moment_interaction_count: table_count(
+            &opened.connection,
+            "cached_moment_interaction",
+        )?,
         last_checkpoint_unix_nanoseconds: checkpoint,
         checkpoint_age_seconds,
         last_sync_kind: sync_health.last_kind,
@@ -743,6 +808,159 @@ pub fn search_replica_messages(
     })
 }
 
+pub fn search_replica_cached_moments(
+    replica_path: &Path,
+    key: &ReplicaKey,
+    filter: &ReplicaCachedMomentFilter,
+    cursor: Option<&str>,
+    requested_limit: usize,
+) -> Result<ReplicaCachedMomentPage, RestoreError> {
+    validate_cached_moment_filter(filter)?;
+    let opened = open_replica(replica_path, key)?;
+    let (account_id, source_fingerprint, checkpoint_revision) =
+        current_replica_checkpoint(&opened.connection)?;
+    let generation = replica_id(&opened.connection)?;
+    let filter_sha256 = sha256(&serde_json::to_vec(filter)?);
+    let decoded = cursor.map(decode_cached_moment_cursor).transpose()?;
+    if decoded.as_ref().is_some_and(|cursor| {
+        cursor.format_version != 1
+            || cursor.account_id != account_id
+            || cursor.replica_id != generation
+            || cursor.source_fingerprint != source_fingerprint
+            || cursor.checkpoint_revision != checkpoint_revision
+            || cursor.filter_sha256 != filter_sha256
+    }) {
+        return Err(RestoreError::Integrity(
+            "cached-moment cursor belongs to another replica checkpoint or query".to_string(),
+        ));
+    }
+
+    let coverage: Option<Vec<u8>> = opened
+        .connection
+        .query_row(
+            "SELECT coverage_json FROM cached_surface_state WHERE account_id = ?1",
+            [&account_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let coverage: Option<crate::CachedSurfaceCoverage> = coverage
+        .map(|bytes| serde_json::from_slice(&bytes))
+        .transpose()?;
+    let availability = match coverage.as_ref() {
+        None => ReplicaCachedSurfaceAvailability::Unavailable,
+        Some(coverage) if !coverage.source_database_present => {
+            ReplicaCachedSurfaceAvailability::Unavailable
+        }
+        Some(coverage) if coverage.moment_count == 0 => {
+            ReplicaCachedSurfaceAvailability::AvailableEmpty
+        }
+        Some(_) => ReplicaCachedSurfaceAvailability::Available,
+    };
+    if availability == ReplicaCachedSurfaceAvailability::Unavailable {
+        if decoded.is_some() {
+            return Err(RestoreError::Integrity(
+                "cached-moment cursor cannot be resumed because the cached surface is unavailable"
+                    .to_string(),
+            ));
+        }
+        return Ok(ReplicaCachedMomentPage {
+            account_id,
+            source_fingerprint,
+            checkpoint_revision,
+            availability,
+            cache_completeness: coverage
+                .as_ref()
+                .map(|coverage| coverage.cache_completeness),
+            observed_at: coverage.map(|coverage| coverage.observed_at),
+            items: Vec::new(),
+            next_cursor: None,
+        });
+    }
+
+    let after_present = decoded.is_some();
+    let after_created_at = decoded
+        .as_ref()
+        .map(|cursor| cursor.after_created_at_unix)
+        .unwrap_or(i64::MIN);
+    let after_canonical_id = decoded
+        .as_ref()
+        .map(|cursor| cursor.after_canonical_id.as_str())
+        .unwrap_or("");
+    let limit = requested_limit.clamp(1, 1_000);
+    let query_limit = checked_usize_i64(limit.saturating_add(1))?;
+    let mut statement = opened.connection.prepare(
+        "SELECT record_json FROM cached_moment
+         WHERE account_id = :account
+           AND (:author IS NULL OR author_id = :author)
+           AND (:not_before IS NULL OR created_at_unix >= :not_before)
+           AND (:not_after IS NULL OR created_at_unix <= :not_after)
+           AND (:content_type IS NULL OR content_type = :content_type)
+           AND (
+             :after_present = 0
+             OR COALESCE(created_at_unix, -9223372036854775808) > :after_created_at
+             OR (
+               COALESCE(created_at_unix, -9223372036854775808) = :after_created_at
+               AND canonical_id > :after_canonical_id
+             )
+           )
+         ORDER BY COALESCE(created_at_unix, -9223372036854775808), canonical_id
+         LIMIT :limit",
+    )?;
+    let rows = statement.query_map(
+        named_params! {
+            ":account": account_id,
+            ":author": filter.author_id,
+            ":not_before": filter.not_before_unix,
+            ":not_after": filter.not_after_unix,
+            ":content_type": filter.content_type,
+            ":after_present": after_present,
+            ":after_created_at": after_created_at,
+            ":after_canonical_id": after_canonical_id,
+            ":limit": query_limit,
+        },
+        |row| row.get::<_, Vec<u8>>(0),
+    )?;
+    let mut items = rows
+        .map(
+            |row| -> Result<crate::CanonicalCachedMoment, RestoreError> {
+                let moment: crate::CanonicalCachedMoment = serde_json::from_slice(&row?)?;
+                require_account(&moment.account_id, &account_id)?;
+                Ok(moment)
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
+    let has_more = items.len() > limit;
+    items.truncate(limit);
+    let next_cursor = if has_more {
+        items.last().map(|moment| {
+            encode_cached_moment_cursor(&ReplicaCachedMomentCursor {
+                format_version: 1,
+                account_id: account_id.clone(),
+                replica_id: generation,
+                source_fingerprint: source_fingerprint.clone(),
+                checkpoint_revision: checkpoint_revision.clone(),
+                filter_sha256,
+                after_created_at_unix: moment.created_at_unix.unwrap_or(i64::MIN),
+                after_canonical_id: moment.canonical_id.clone(),
+            })
+        })
+    } else {
+        None
+    };
+    Ok(ReplicaCachedMomentPage {
+        account_id,
+        source_fingerprint,
+        checkpoint_revision,
+        availability,
+        cache_completeness: coverage
+            .as_ref()
+            .map(|coverage| coverage.cache_completeness),
+        observed_at: coverage.map(|coverage| coverage.observed_at),
+        items,
+        next_cursor,
+    })
+}
+
 pub fn load_replica_message_filter(path: &Path) -> Result<ReplicaMessageFilter, RestoreError> {
     ensure_private_regular_file(path)?;
     let filter: ReplicaMessageFilter = serde_json::from_slice(&fs::read(path)?)?;
@@ -954,6 +1172,17 @@ pub fn replica_coverage(
     )?;
     let coverage: RestorationCoverage = serde_json::from_slice(&coverage)?;
     let report: RestorationReport = serde_json::from_slice(&report)?;
+    let cached_surfaces: Option<Vec<u8>> = opened
+        .connection
+        .query_row(
+            "SELECT coverage_json FROM cached_surface_state WHERE account_id = ?1",
+            [&account_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let cached_surfaces = cached_surfaces
+        .map(|bytes| serde_json::from_slice(&bytes))
+        .transpose()?;
     require_account(&report.account_id, &account_id)?;
     Ok(ReplicaCoverageView {
         account_id,
@@ -961,6 +1190,7 @@ pub fn replica_coverage(
         coverage,
         integrity: report.integrity,
         completion: report.completion,
+        cached_surfaces,
     })
 }
 
@@ -1076,6 +1306,7 @@ fn apply_migrations(connection: &mut Connection, from: u32) -> Result<(), Restor
             1 => migration_1(&transaction)?,
             2 => migration_2(&transaction)?,
             3 => migration_3(&transaction)?,
+            4 => migration_4(&transaction)?,
             _ => unreachable!("all replica migrations are enumerated"),
         }
         transaction.commit()?;
@@ -1285,6 +1516,55 @@ fn migration_3(transaction: &Transaction<'_>) -> Result<(), RestoreError> {
     Ok(())
 }
 
+fn migration_4(transaction: &Transaction<'_>) -> Result<(), RestoreError> {
+    transaction.execute_batch(
+        "CREATE TABLE cached_moment(
+           account_id TEXT NOT NULL,
+           canonical_id TEXT NOT NULL,
+           author_id TEXT,
+           created_at_unix INTEGER,
+           content_type INTEGER,
+           record_sha256 TEXT NOT NULL,
+           record_json BLOB NOT NULL,
+           PRIMARY KEY(account_id, canonical_id),
+           FOREIGN KEY(account_id) REFERENCES replica_identity(account_id) ON DELETE CASCADE
+         ) WITHOUT ROWID;
+         CREATE TABLE cached_moment_interaction(
+           account_id TEXT NOT NULL,
+           canonical_id TEXT NOT NULL,
+           created_at_unix INTEGER,
+           interaction_kind TEXT NOT NULL,
+           from_participant_id TEXT,
+           to_participant_id TEXT,
+           record_sha256 TEXT NOT NULL,
+           record_json BLOB NOT NULL,
+           PRIMARY KEY(account_id, canonical_id),
+           FOREIGN KEY(account_id) REFERENCES replica_identity(account_id) ON DELETE CASCADE
+         ) WITHOUT ROWID;
+         CREATE TABLE cached_surface_state(
+           account_id TEXT PRIMARY KEY,
+           observed_at TEXT NOT NULL,
+           coverage_json BLOB NOT NULL,
+           FOREIGN KEY(account_id) REFERENCES replica_identity(account_id) ON DELETE CASCADE
+         ) WITHOUT ROWID;
+         CREATE INDEX cached_moment_by_time
+           ON cached_moment(account_id, created_at_unix, canonical_id);
+         CREATE INDEX cached_moment_by_author_time
+           ON cached_moment(account_id, author_id, created_at_unix, canonical_id);
+         CREATE INDEX cached_moment_by_type_time
+           ON cached_moment(account_id, content_type, created_at_unix, canonical_id);
+         CREATE INDEX cached_interaction_by_time
+           ON cached_moment_interaction(account_id, created_at_unix, canonical_id);
+         UPDATE replica_schema SET schema_version = 4 WHERE singleton = 1;",
+    )?;
+    record_migration(
+        transaction,
+        4,
+        "passive cached moments interactions and coverage",
+    )?;
+    Ok(())
+}
+
 fn record_migration(
     transaction: &Transaction<'_>,
     version: u32,
@@ -1361,6 +1641,7 @@ fn import_archive_transactionally(
         ensure_private_regular_file(path)?;
     }
     let coverage = load_archive_coverage(archive_directory)?;
+    let cached = load_cached_archive_inputs(archive_directory)?;
     let started = unix_nanoseconds()?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute(
@@ -1504,6 +1785,55 @@ fn import_archive_transactionally(
         Ok(())
     })?;
 
+    if let Some(cached) = cached.as_ref() {
+        for_each_ndjson::<crate::CanonicalCachedMoment>(&cached.moments_path, |moment, bytes| {
+            require_account(&moment.account_id, &report.account_id)?;
+            transaction.execute(
+                "INSERT INTO cached_moment VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    report.account_id,
+                    moment.canonical_id,
+                    moment.author_id,
+                    moment.created_at_unix,
+                    moment.content_type,
+                    sha256(&bytes),
+                    bytes,
+                ],
+            )?;
+            counts.cached_moments += 1;
+            Ok(())
+        })?;
+        for_each_ndjson::<crate::CanonicalCachedMomentInteraction>(
+            &cached.interactions_path,
+            |interaction, bytes| {
+                require_account(&interaction.account_id, &report.account_id)?;
+                transaction.execute(
+                    "INSERT INTO cached_moment_interaction VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        report.account_id,
+                        interaction.canonical_id,
+                        interaction.created_at_unix,
+                        json_enum(&interaction.kind)?,
+                        interaction.from_participant_id,
+                        interaction.to_participant_id,
+                        sha256(&bytes),
+                        bytes,
+                    ],
+                )?;
+                counts.cached_moment_interactions += 1;
+                Ok(())
+            },
+        )?;
+        transaction.execute(
+            "INSERT INTO cached_surface_state VALUES (?1, ?2, ?3)",
+            params![
+                report.account_id,
+                cached.coverage.observed_at,
+                serde_json::to_vec(&cached.coverage)?,
+            ],
+        )?;
+    }
+
     let committed = unix_nanoseconds()?;
     transaction.execute(
         "INSERT INTO coverage_state VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -1543,7 +1873,12 @@ fn import_archive_transactionally(
             started.to_string(),
             committed.to_string(),
             checked_i64(
-                counts.conversations + counts.participants + counts.messages + counts.artifacts
+                counts.conversations
+                    + counts.participants
+                    + counts.messages
+                    + counts.artifacts
+                    + counts.cached_moments
+                    + counts.cached_moment_interactions
             )?,
         ],
     )?;
@@ -1606,6 +1941,7 @@ fn reconcile_archive_transactionally(
         ensure_private_regular_file(path)?;
     }
     let coverage = load_archive_coverage(archive_directory)?;
+    let cached = load_cached_archive_inputs(archive_directory)?;
     let started = unix_nanoseconds()?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute("DELETE FROM sync_seen", [])?;
@@ -1871,6 +2207,8 @@ fn reconcile_archive_transactionally(
         Ok(())
     })?;
 
+    reconcile_cached_surfaces(&transaction, report, cached.as_ref(), &mut counts, started)?;
+
     remove_missing_messages(&transaction, report, &mut counts, started)?;
     remove_missing_entities(
         &transaction,
@@ -1896,6 +2234,43 @@ fn reconcile_archive_transactionally(
         "participant",
         "participant_id",
     )?;
+    remove_missing_cached(
+        &transaction,
+        report,
+        &mut counts,
+        started,
+        "cached_moment",
+        "cachedMoment",
+    )?;
+    remove_missing_cached(
+        &transaction,
+        report,
+        &mut counts,
+        started,
+        "cached_moment_interaction",
+        "cachedMomentInteraction",
+    )?;
+    match cached.as_ref() {
+        Some(cached) => {
+            transaction.execute(
+                "INSERT INTO cached_surface_state VALUES (?1, ?2, ?3)
+                 ON CONFLICT(account_id) DO UPDATE SET
+                   observed_at = excluded.observed_at,
+                   coverage_json = excluded.coverage_json",
+                params![
+                    report.account_id,
+                    cached.coverage.observed_at,
+                    serde_json::to_vec(&cached.coverage)?,
+                ],
+            )?;
+        }
+        None => {
+            transaction.execute(
+                "DELETE FROM cached_surface_state WHERE account_id = ?1",
+                [&report.account_id],
+            )?;
+        }
+    }
 
     let committed = next_checkpoint_revision(&transaction, &report.account_id)?;
     transaction.execute(
@@ -2106,6 +2481,205 @@ fn replace_message_links(
     Ok(())
 }
 
+fn reconcile_cached_surfaces(
+    transaction: &Transaction<'_>,
+    report: &RestorationReport,
+    cached: Option<&CachedArchiveInputs>,
+    counts: &mut SyncCounts,
+    observed_at: u128,
+) -> Result<(), RestoreError> {
+    let Some(cached) = cached else {
+        return Ok(());
+    };
+    for_each_ndjson::<crate::CanonicalCachedMoment>(&cached.moments_path, |moment, bytes| {
+        require_account(&moment.account_id, &report.account_id)?;
+        mark_seen(transaction, "cachedMoment", &moment.canonical_id)?;
+        let digest = sha256(&bytes);
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT record_sha256 FROM cached_moment
+                 WHERE account_id = ?1 AND canonical_id = ?2",
+                params![report.account_id, moment.canonical_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let kind = match existing.as_deref() {
+            None => {
+                transaction.execute(
+                    "INSERT INTO cached_moment VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        report.account_id,
+                        moment.canonical_id,
+                        moment.author_id,
+                        moment.created_at_unix,
+                        moment.content_type,
+                        digest,
+                        bytes,
+                    ],
+                )?;
+                Some("added")
+            }
+            Some(value) if value != digest => {
+                transaction.execute(
+                    "UPDATE cached_moment SET author_id = ?3, created_at_unix = ?4,
+                       content_type = ?5, record_sha256 = ?6, record_json = ?7
+                     WHERE account_id = ?1 AND canonical_id = ?2",
+                    params![
+                        report.account_id,
+                        moment.canonical_id,
+                        moment.author_id,
+                        moment.created_at_unix,
+                        moment.content_type,
+                        digest,
+                        bytes,
+                    ],
+                )?;
+                Some("changed")
+            }
+            Some(_) => None,
+        };
+        if let Some(kind) = kind {
+            record_change(
+                transaction,
+                counts,
+                &report.account_id,
+                &report.source_fingerprint,
+                kind,
+                "cachedMoment",
+                &moment.canonical_id,
+                None,
+                Some(&digest),
+                observed_at,
+            )?;
+        }
+        Ok(())
+    })?;
+    for_each_ndjson::<crate::CanonicalCachedMomentInteraction>(
+        &cached.interactions_path,
+        |interaction, bytes| {
+            require_account(&interaction.account_id, &report.account_id)?;
+            mark_seen(
+                transaction,
+                "cachedMomentInteraction",
+                &interaction.canonical_id,
+            )?;
+            let digest = sha256(&bytes);
+            let existing: Option<String> = transaction
+                .query_row(
+                    "SELECT record_sha256 FROM cached_moment_interaction
+                     WHERE account_id = ?1 AND canonical_id = ?2",
+                    params![report.account_id, interaction.canonical_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let kind = match existing.as_deref() {
+                None => {
+                    transaction.execute(
+                        "INSERT INTO cached_moment_interaction VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        params![
+                            report.account_id,
+                            interaction.canonical_id,
+                            interaction.created_at_unix,
+                            json_enum(&interaction.kind)?,
+                            interaction.from_participant_id,
+                            interaction.to_participant_id,
+                            digest,
+                            bytes,
+                        ],
+                    )?;
+                    Some("added")
+                }
+                Some(value) if value != digest => {
+                    transaction.execute(
+                        "UPDATE cached_moment_interaction SET
+                           created_at_unix = ?3, interaction_kind = ?4,
+                           from_participant_id = ?5, to_participant_id = ?6,
+                           record_sha256 = ?7, record_json = ?8
+                         WHERE account_id = ?1 AND canonical_id = ?2",
+                        params![
+                            report.account_id,
+                            interaction.canonical_id,
+                            interaction.created_at_unix,
+                            json_enum(&interaction.kind)?,
+                            interaction.from_participant_id,
+                            interaction.to_participant_id,
+                            digest,
+                            bytes,
+                        ],
+                    )?;
+                    Some("changed")
+                }
+                Some(_) => None,
+            };
+            if let Some(kind) = kind {
+                record_change(
+                    transaction,
+                    counts,
+                    &report.account_id,
+                    &report.source_fingerprint,
+                    kind,
+                    "cachedMomentInteraction",
+                    &interaction.canonical_id,
+                    None,
+                    Some(&digest),
+                    observed_at,
+                )?;
+            }
+            Ok(())
+        },
+    )?;
+    Ok(())
+}
+
+fn remove_missing_cached(
+    transaction: &Transaction<'_>,
+    report: &RestorationReport,
+    counts: &mut SyncCounts,
+    observed_at: u128,
+    table: &str,
+    entity_kind: &str,
+) -> Result<(), RestoreError> {
+    debug_assert!(matches!(
+        table,
+        "cached_moment" | "cached_moment_interaction"
+    ));
+    debug_assert!(matches!(
+        entity_kind,
+        "cachedMoment" | "cachedMomentInteraction"
+    ));
+    let query = format!(
+        "SELECT canonical_id, record_sha256 FROM {table}
+         WHERE account_id = ?1 AND NOT EXISTS(
+           SELECT 1 FROM sync_seen
+           WHERE entity_kind = ?2 AND entity_id = canonical_id
+         ) ORDER BY canonical_id"
+    );
+    let values = {
+        let mut statement = transaction.prepare(&query)?;
+        let rows = statement.query_map(params![report.account_id, entity_kind], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for (identifier, digest) in values {
+        record_change(
+            transaction,
+            counts,
+            &report.account_id,
+            &report.source_fingerprint,
+            "removed",
+            entity_kind,
+            &identifier,
+            None,
+            Some(&digest),
+            observed_at,
+        )?;
+        let delete = format!("DELETE FROM {table} WHERE account_id = ?1 AND canonical_id = ?2");
+        transaction.execute(&delete, params![report.account_id, identifier])?;
+    }
+    Ok(())
+}
+
 fn mark_seen(
     transaction: &Transaction<'_>,
     entity_kind: &str,
@@ -2291,6 +2865,8 @@ fn sync_report(
         participant_count: table_count(connection, "participant")?,
         message_count: table_count(connection, "message")?,
         artifact_count: table_count(connection, "artifact")?,
+        cached_moment_count: table_count(connection, "cached_moment")?,
+        cached_moment_interaction_count: table_count(connection, "cached_moment_interaction")?,
         committed_at_unix_nanoseconds,
     })
 }
@@ -2336,6 +2912,28 @@ fn validate_message_filter(filter: &ReplicaMessageFilter) -> Result<(), RestoreE
                 "{name} filter must be between 1 and 512 bytes"
             )));
         }
+    }
+    Ok(())
+}
+
+fn validate_cached_moment_filter(filter: &ReplicaCachedMomentFilter) -> Result<(), RestoreError> {
+    if filter
+        .not_before_unix
+        .zip(filter.not_after_unix)
+        .is_some_and(|(start, end)| start > end)
+    {
+        return Err(RestoreError::Integrity(
+            "cached-moment query has an inverted time range".to_string(),
+        ));
+    }
+    if filter
+        .author_id
+        .as_ref()
+        .is_some_and(|identifier| identifier.is_empty() || identifier.len() > 512)
+    {
+        return Err(RestoreError::Integrity(
+            "cached-moment author filter must be between 1 and 512 bytes".to_string(),
+        ));
     }
     Ok(())
 }
@@ -2404,6 +3002,20 @@ fn decode_message_cursor(value: &str) -> Result<ReplicaMessageCursor, RestoreErr
     Ok(serde_json::from_slice(&bytes)?)
 }
 
+fn encode_cached_moment_cursor(cursor: &ReplicaCachedMomentCursor) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(cursor).expect("cached-moment cursor serialization cannot fail"))
+}
+
+fn decode_cached_moment_cursor(value: &str) -> Result<ReplicaCachedMomentCursor, RestoreError> {
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| {
+            RestoreError::Integrity("cached-moment cursor is not valid base64url".to_string())
+        })?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
 fn bootstrap_report(
     opened: &OpenedReplica,
     report: &RestorationReport,
@@ -2421,6 +3033,11 @@ fn bootstrap_report(
         participant_count: table_count(&opened.connection, "participant")?,
         message_count: table_count(&opened.connection, "message")?,
         artifact_count: table_count(&opened.connection, "artifact")?,
+        cached_moment_count: table_count(&opened.connection, "cached_moment")?,
+        cached_moment_interaction_count: table_count(
+            &opened.connection,
+            "cached_moment_interaction",
+        )?,
         relationship_count: table_count(&opened.connection, "message_relationship")?,
         message_artifact_count: table_count(&opened.connection, "message_artifact")?,
         pre_migration_backup_file_name: opened.pre_migration_backup_file_name.clone(),
@@ -2564,6 +3181,36 @@ fn load_archive_coverage(archive_directory: &Path) -> Result<RestorationCoverage
     let path = archive_directory.join("coverage.json");
     ensure_private_regular_file(&path)?;
     Ok(serde_json::from_slice(&fs::read(path)?)?)
+}
+
+fn load_cached_archive_inputs(
+    archive_directory: &Path,
+) -> Result<Option<CachedArchiveInputs>, RestoreError> {
+    let moments_path = archive_directory.join("cached-moments.ndjson");
+    let interactions_path = archive_directory.join("cached-moment-interactions.ndjson");
+    let coverage_path = archive_directory.join("cached-surfaces.json");
+    let exists = [
+        moments_path.try_exists()?,
+        interactions_path.try_exists()?,
+        coverage_path.try_exists()?,
+    ];
+    if exists.iter().all(|value| !value) {
+        return Ok(None);
+    }
+    if !exists.iter().all(|value| *value) {
+        return Err(RestoreError::Integrity(
+            "cached-surface archive files are incomplete".to_string(),
+        ));
+    }
+    for path in [&moments_path, &interactions_path, &coverage_path] {
+        ensure_private_regular_file(path)?;
+    }
+    let coverage = serde_json::from_slice(&fs::read(coverage_path)?)?;
+    Ok(Some(CachedArchiveInputs {
+        moments_path,
+        interactions_path,
+        coverage,
+    }))
 }
 
 fn load_coverage_state(

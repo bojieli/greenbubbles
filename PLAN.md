@@ -605,15 +605,23 @@ explicitly unknown outcome.
 
 ## Phase 5 — optional cached and authenticated read surfaces
 
-Status: **deferred until the conversation replica and connector API are useful**
+Status: **passive cached reads implemented; authenticated active reads remain gated**
 
 ### 5A. Cached dynamic content
 
-- [ ] Locate and normalize Moments and public-account data that the official
+- [x] Locate and normalize Moments and public-account data that the official
   client has already cached only when it supports a proven user workflow.
-- [ ] Label cache completeness, observation time, and source explicitly.
+- [x] Label cache completeness, observation time, and source explicitly.
 - [ ] Parse public web articles only when normal URL access permits it; preserve
   authentication, robots, copyright, and paywall boundaries.
+
+The pinned client has an observed `sns/sns.db`. GreenBubbles now recognizes
+only the exact supported `SnsTimeLine` and `SnsMessage_tmp3` signatures,
+retains raw provenance for every normalized row, records every other SNS table
+as unsupported schema coverage, and labels all output `partialLocalCache`.
+Cached public-account messages in supported business-message shards already
+flow through the conversation model. Fetching an external article body is not
+implemented and is not inferred from a cached link.
 
 ### 5B. Active read feasibility gate
 
@@ -628,11 +636,19 @@ Status: **deferred until the conversation replica and connector API are useful**
 
 ### 5C. Narrow optional API
 
-- [ ] Add typed operations such as `get_cached_moments` and, only after the
+- [x] Add typed operations such as `get_cached_moments` and, only after the
   feasibility gate, `load_more_moments(cursor)`.
-- [ ] Bound pagination, rate, retention, and per-source authorization.
-- [ ] Keep active-read health, scopes, and failure independent from local
+- [x] Bound pagination, rate, retention, and per-source authorization.
+- [x] Keep active-read health, scopes, and failure independent from local
   conversation synchronization and write capabilities.
+
+`get_cached_moments` is available through the encrypted replica, connector
+JSON/Unix API, CLI, and MCP. Its cursor is checkpoint/filter bound; policy has
+independent fields, time retention, and destination scope; page and text sizes
+are capped; and the service applies a 60-request rolling minute limit. Raw
+columns/XML are never released by the AI-facing view. `load_more_moments` is
+unavailable because authenticated active-read feasibility has not passed Phase
+0.5.
 
 Exit gate: optional authenticated reads are isolated, version-gated, auditable,
 and cannot weaken the reliable local conversation path or authorize a write.

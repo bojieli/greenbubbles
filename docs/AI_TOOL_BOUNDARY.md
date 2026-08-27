@@ -7,7 +7,7 @@ documented in `CONNECTOR_API.md` and `MCP.md`.
 
 ## Policy dimensions
 
-Tool policy format 2 binds authorization to one opaque account ID and grants
+Tool policy format 3 binds authorization to one opaque account ID and grants
 each conversation an independent set of:
 
 - operations: list, read recent messages, exact-text search, and create draft;
@@ -16,6 +16,12 @@ each conversation an independent set of:
 - an optional inclusive Unix-time range;
 - local-model access, with remote-model release disabled unless explicitly
   enabled for that conversation.
+
+It may additionally grant one independent passive cached-Moments scope. That
+scope has its own fields, inclusive observation-content time range, and
+local/remote destination decision; it grants no conversation read, active read,
+or write capability. Format-2 policies remain readable and default this new
+scope to absent.
 
 The service checks these dimensions before reading message bodies. A policy for
 one account cannot be reused for another. Search requires content permission.
@@ -49,8 +55,8 @@ destination, outcome, result count, and byte counts. They omit queries,
 messages, and draft bodies. Symlinks, multiply linked files, and group- or
 world-accessible audit files are rejected.
 
-The current draft record binds the body to an account and conversation and is
-immutable by connector convention (`create_new`). Phase 3B still must add
-recipient display evidence, reply targets, attachment digests, connector
-version, expiry, policy-decision identity, and a separate preview operation
-before the plan's draft gate can be considered complete.
+Connector drafts bind the body to account/conversation and human-readable
+recipient evidence, optional reply target, attachment digests, connector/API
+version, expiry, requester, policy decision, and authoritative checkpoint.
+They are immutable (`create_new`) and have a separate preview operation, but no
+approval or execution operation exists before the Phase 4 gate.

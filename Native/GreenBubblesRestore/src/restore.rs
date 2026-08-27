@@ -7,6 +7,7 @@ use base64::Engine;
 use rusqlite::{types::ValueRef, Connection, OpenFlags, OptionalExtension, Row};
 use sha2::{Digest, Sha256};
 
+use crate::cached::restore_cached_surfaces;
 use crate::entities::{restore_entities, EntitySeeds};
 use crate::{
     artifact::ArtifactResolver, ArtifactAvailability, ArtifactDecodeState, CanonicalMessage,
@@ -395,6 +396,10 @@ pub fn restore_catalog(
     integrity.entity_decode_gap_count = entity_result.decode_gap_count;
     integrity.missing_local_profile_count = entity_result.missing_local_profile_count;
     integrity.unresolved_conversation_count = entity_result.unresolved_conversation_count;
+    let cached_surfaces = restore_cached_surfaces(catalog, &account_id, &options.output_directory)?;
+    integrity.cached_moment_count = cached_surfaces.coverage.moment_count;
+    integrity.cached_moment_interaction_count = cached_surfaces.coverage.interaction_count;
+    integrity.cached_surface_semantic_gap_count = cached_surfaces.coverage.semantic_gap_count;
 
     table_coverage.sort_by(|left, right| {
         (
@@ -472,6 +477,11 @@ pub fn restore_catalog(
         artifacts_path: artifacts_path.display().to_string(),
         conversations_path: entity_result.conversations_path.display().to_string(),
         participants_path: entity_result.participants_path.display().to_string(),
+        cached_moments_path: Some(cached_surfaces.moments_path.display().to_string()),
+        cached_moment_interactions_path: Some(
+            cached_surfaces.interactions_path.display().to_string(),
+        ),
+        cached_surfaces_path: Some(cached_surfaces.coverage_path.display().to_string()),
         coverage_path: coverage_path.display().to_string(),
         report_path: report_path.display().to_string(),
         integrity,

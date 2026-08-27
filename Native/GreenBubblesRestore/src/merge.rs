@@ -10,13 +10,14 @@ use sha2::{Digest, Sha256};
 
 use crate::archive::{ensure_private_directory, ensure_private_regular_file, load_report};
 use crate::{
-    ArtifactAvailability, ArtifactDecodeState, CanonicalArtifact, CanonicalConversation,
-    CanonicalMessage, CanonicalParticipant, ConversationKind, ConversationMembership,
-    ConversationMembershipRole, EntityDecodeState, EntitySourceRecord, LocalProfileState,
-    MessageDirection, MessageOrderingBasis, RejectedRow, RelationshipResolutionState,
-    RestorationArchiveScope, RestorationCompletion, RestorationCoverage, RestorationIntegrity,
-    RestorationMediaPhase, RestorationReport, RestoreError, SemanticDecodeState,
-    SnapshotAcquisitionMode, TableCoverageRole, TypedPayload,
+    ArtifactAvailability, ArtifactDecodeState, CachedSurfaceCompleteness, CachedSurfaceCoverage,
+    CanonicalArtifact, CanonicalCachedMoment, CanonicalCachedMomentInteraction,
+    CanonicalConversation, CanonicalMessage, CanonicalParticipant, ConversationKind,
+    ConversationMembership, ConversationMembershipRole, EntityDecodeState, EntitySourceRecord,
+    LocalProfileState, MessageDirection, MessageOrderingBasis, RejectedRow,
+    RelationshipResolutionState, RestorationArchiveScope, RestorationCompletion,
+    RestorationCoverage, RestorationIntegrity, RestorationMediaPhase, RestorationReport,
+    RestoreError, SemanticDecodeState, SnapshotAcquisitionMode, TableCoverageRole, TypedPayload,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -102,6 +103,8 @@ pub fn merge_incremental_archive(
     )?;
     let rejections = merge_rejections(previous_archive, fragment_archive, &selected, &affected)?;
     let coverage = merge_coverage(previous_archive, fragment_archive, &affected, &messages)?;
+    let cached_surfaces =
+        merge_cached_surfaces(previous_archive, fragment_archive, &selected, &affected)?;
     let integrity = calculate_integrity(
         acquisition.source_sets.len(),
         &messages,
@@ -110,6 +113,7 @@ pub fn merge_incremental_archive(
         &participants,
         &rejections,
         &coverage,
+        cached_surfaces.as_ref(),
     );
     if !integrity.row_equation_holds() {
         return Err(RestoreError::Integrity(
@@ -141,6 +145,34 @@ pub fn merge_incremental_archive(
     write_ndjson(&temporary.path().join("artifacts.ndjson"), &artifacts)?;
     write_ndjson(&temporary.path().join("rejections.ndjson"), &rejections)?;
     write_json(&temporary.path().join("coverage.json"), &coverage)?;
+    if let Some((moments, interactions, cached_coverage)) = &cached_surfaces {
+        write_ndjson(&temporary.path().join("cached-moments.ndjson"), moments)?;
+        write_ndjson(
+            &temporary.path().join("cached-moment-interactions.ndjson"),
+            interactions,
+        )?;
+        write_json(
+            &temporary.path().join("cached-surfaces.json"),
+            cached_coverage,
+        )?;
+    }
+
+    let cached_paths = cached_surfaces.as_ref().map(|_| {
+        (
+            output_archive
+                .join("cached-moments.ndjson")
+                .display()
+                .to_string(),
+            output_archive
+                .join("cached-moment-interactions.ndjson")
+                .display()
+                .to_string(),
+            output_archive
+                .join("cached-surfaces.json")
+                .display()
+                .to_string(),
+        )
+    });
 
     let final_report = RestorationReport {
         format_version: 4,
@@ -167,6 +199,9 @@ pub fn merge_incremental_archive(
             .join("participants.ndjson")
             .display()
             .to_string(),
+        cached_moments_path: cached_paths.as_ref().map(|paths| paths.0.clone()),
+        cached_moment_interactions_path: cached_paths.as_ref().map(|paths| paths.1.clone()),
+        cached_surfaces_path: cached_paths.as_ref().map(|paths| paths.2.clone()),
         coverage_path: output_archive.join("coverage.json").display().to_string(),
         report_path: output_archive.join("report.json").display().to_string(),
         integrity,
@@ -192,6 +227,223 @@ pub fn merge_incremental_archive(
         rejection_count: rejections.len() as u64,
         full_restoration_achieved: final_report.completion.full_restoration_achieved,
     })
+}
+
+type MergedCachedSurfaces = (
+    Vec<CanonicalCachedMoment>,
+    Vec<CanonicalCachedMomentInteraction>,
+    CachedSurfaceCoverage,
+);
+
+fn merge_cached_surfaces(
+    previous_archive: &Path,
+    fragment_archive: &Path,
+    selected: &BTreeSet<String>,
+    affected: &BTreeSet<String>,
+) -> Result<Option<MergedCachedSurfaces>, RestoreError> {
+    let previous = load_cached_surfaces(previous_archive)?;
+    let fragment = load_cached_surfaces(fragment_archive)?;
+    if previous.is_none() && fragment.is_none() {
+        return Ok(None);
+    }
+
+    let mut moments = BTreeMap::new();
+    if let Some((previous_moments, _, _)) = previous.as_ref() {
+        for moment in previous_moments
+            .iter()
+            .filter(|moment| !affected.contains(&moment.source_set_id))
+        {
+            insert_unique(
+                &mut moments,
+                moment.canonical_id.clone(),
+                moment.clone(),
+                "cached moment",
+            )?;
+        }
+    }
+    if let Some((fragment_moments, _, _)) = fragment.as_ref() {
+        for moment in fragment_moments {
+            if !selected.contains(&moment.source_set_id) {
+                return Err(RestoreError::Integrity(
+                    "incremental fragment contains a cached moment from an unselected source set"
+                        .to_string(),
+                ));
+            }
+            insert_unique(
+                &mut moments,
+                moment.canonical_id.clone(),
+                moment.clone(),
+                "cached moment",
+            )?;
+        }
+    }
+
+    let mut interactions = BTreeMap::new();
+    if let Some((_, previous_interactions, _)) = previous.as_ref() {
+        for interaction in previous_interactions
+            .iter()
+            .filter(|interaction| !affected.contains(&interaction.source_set_id))
+        {
+            insert_unique(
+                &mut interactions,
+                interaction.canonical_id.clone(),
+                interaction.clone(),
+                "cached moment interaction",
+            )?;
+        }
+    }
+    if let Some((_, fragment_interactions, _)) = fragment.as_ref() {
+        for interaction in fragment_interactions {
+            if !selected.contains(&interaction.source_set_id) {
+                return Err(RestoreError::Integrity(
+                    "incremental fragment contains a cached moment interaction from an unselected source set"
+                        .to_string(),
+                ));
+            }
+            insert_unique(
+                &mut interactions,
+                interaction.canonical_id.clone(),
+                interaction.clone(),
+                "cached moment interaction",
+            )?;
+        }
+    }
+
+    let mut tables = Vec::new();
+    if let Some((_, _, previous_coverage)) = previous.as_ref() {
+        tables.extend(
+            previous_coverage
+                .tables
+                .iter()
+                .filter(|table| !affected.contains(&table.source_set_id))
+                .cloned(),
+        );
+    }
+    if let Some((_, _, fragment_coverage)) = fragment.as_ref() {
+        if fragment_coverage
+            .tables
+            .iter()
+            .any(|table| !selected.contains(&table.source_set_id))
+        {
+            return Err(RestoreError::Integrity(
+                "incremental fragment contains cached-surface coverage from an unselected source set"
+                    .to_string(),
+            ));
+        }
+        tables.extend(fragment_coverage.tables.iter().cloned());
+    }
+    tables.sort_by(|left, right| {
+        (
+            &left.source_logical_path,
+            &left.source_table_name,
+            &left.source_set_id,
+        )
+            .cmp(&(
+                &right.source_logical_path,
+                &right.source_table_name,
+                &right.source_set_id,
+            ))
+    });
+    let unique_tables = tables
+        .iter()
+        .map(|table| (&table.source_set_id, &table.source_table_id))
+        .collect::<BTreeSet<_>>();
+    if unique_tables.len() != tables.len() {
+        return Err(RestoreError::Integrity(
+            "merged cached-surface coverage contains duplicate table identities".to_string(),
+        ));
+    }
+
+    let cached_was_reobserved = previous.as_ref().is_some_and(|(_, _, coverage)| {
+        coverage
+            .tables
+            .iter()
+            .any(|table| affected.contains(&table.source_set_id))
+    }) || fragment.as_ref().is_some_and(|(_, _, coverage)| {
+        coverage
+            .tables
+            .iter()
+            .any(|table| selected.contains(&table.source_set_id))
+    });
+    let observed_at = if cached_was_reobserved {
+        fragment
+            .as_ref()
+            .map(|(_, _, coverage)| coverage.observed_at.clone())
+            .or_else(|| {
+                previous
+                    .as_ref()
+                    .map(|(_, _, coverage)| coverage.observed_at.clone())
+            })
+    } else {
+        previous
+            .as_ref()
+            .map(|(_, _, coverage)| coverage.observed_at.clone())
+            .or_else(|| {
+                fragment
+                    .as_ref()
+                    .map(|(_, _, coverage)| coverage.observed_at.clone())
+            })
+    }
+    .ok_or_else(|| {
+        RestoreError::Integrity("cached-surface observation time is absent".to_string())
+    })?;
+    let source_database_present = !tables.is_empty()
+        || (!cached_was_reobserved
+            && previous
+                .as_ref()
+                .is_some_and(|(_, _, coverage)| coverage.source_database_present))
+        || (cached_was_reobserved
+            && fragment
+                .as_ref()
+                .is_some_and(|(_, _, coverage)| coverage.source_database_present));
+    let moments = moments.into_values().collect::<Vec<_>>();
+    let interactions = interactions.into_values().collect::<Vec<_>>();
+    let coverage = CachedSurfaceCoverage {
+        format_version: fragment
+            .as_ref()
+            .map(|(_, _, coverage)| coverage.format_version)
+            .or_else(|| {
+                previous
+                    .as_ref()
+                    .map(|(_, _, coverage)| coverage.format_version)
+            })
+            .unwrap_or(1),
+        observed_at,
+        cache_completeness: CachedSurfaceCompleteness::PartialLocalCache,
+        source_database_present,
+        moment_count: moments.len() as u64,
+        interaction_count: interactions.len() as u64,
+        semantic_gap_count: moments
+            .iter()
+            .filter(|moment| moment.semantic_decode_state != SemanticDecodeState::Complete)
+            .count() as u64,
+        tables,
+    };
+    Ok(Some((moments, interactions, coverage)))
+}
+
+fn load_cached_surfaces(archive: &Path) -> Result<Option<MergedCachedSurfaces>, RestoreError> {
+    let moments = archive.join("cached-moments.ndjson");
+    let interactions = archive.join("cached-moment-interactions.ndjson");
+    let coverage = archive.join("cached-surfaces.json");
+    let exists = [
+        moments.try_exists()?,
+        interactions.try_exists()?,
+        coverage.try_exists()?,
+    ];
+    if exists.iter().all(|exists| !exists) {
+        return Ok(None);
+    }
+    if !exists.iter().all(|exists| *exists) {
+        return Err(RestoreError::Integrity(
+            "cached-surface archive files are incomplete".to_string(),
+        ));
+    }
+    Ok(Some((
+        read_ndjson(&moments)?,
+        read_ndjson(&interactions)?,
+        read_json(&coverage)?,
+    )))
 }
 
 fn validate_merge_inputs(
@@ -770,6 +1022,7 @@ fn merge_coverage(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn calculate_integrity(
     database_count: usize,
     messages: &[CanonicalMessage],
@@ -778,6 +1031,7 @@ fn calculate_integrity(
     participants: &[CanonicalParticipant],
     rejections: &[RejectedRow],
     coverage: &RestorationCoverage,
+    cached_surfaces: Option<&MergedCachedSurfaces>,
 ) -> RestorationIntegrity {
     let mut integrity = RestorationIntegrity {
         database_count: database_count as u64,
@@ -824,6 +1078,15 @@ fn calculate_integrity(
             .iter()
             .filter(|conversation| conversation.kind == ConversationKind::Unresolved)
             .count() as u64,
+        cached_moment_count: cached_surfaces
+            .map(|(moments, _, _)| moments.len() as u64)
+            .unwrap_or_default(),
+        cached_moment_interaction_count: cached_surfaces
+            .map(|(_, interactions, _)| interactions.len() as u64)
+            .unwrap_or_default(),
+        cached_surface_semantic_gap_count: cached_surfaces
+            .map(|(_, _, coverage)| coverage.semantic_gap_count)
+            .unwrap_or_default(),
         ..Default::default()
     };
     let counts = message_type_counts(messages);

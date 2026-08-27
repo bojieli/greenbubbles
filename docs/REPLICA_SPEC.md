@@ -24,7 +24,7 @@ accept it as a command argument, or silently fall back to plaintext.
 
 ## Schema and provenance
 
-Replica schema version 3 stores:
+Replica schema version 4 stores:
 
 - the account and current source fingerprint;
 - canonical conversations, participants, memberships, messages, artifacts,
@@ -33,6 +33,7 @@ Replica schema version 3 stores:
 - normalized fields needed for exact filters and FTS5 text;
 - the restoration report and complete schema/type coverage document;
 - source checkpoints, synchronization runs, and an ordered change log.
+- passive cached Moments/interactions and their explicit partial-cache coverage.
 
 Unknown payloads, original source identities, raw SQLite values, exact verified
 artifact paths, semantic gaps, and missing-media states remain in the encrypted
@@ -56,13 +57,14 @@ absolute location—is the only backup reference exposed in normal reports.
 Synthetic tests prove that plaintext headers, message text, and stable artifact
 paths do not appear in the database bytes; unkeyed and wrong-key reads fail;
 cross-account bootstrap fails; same-checkpoint bootstrap is idempotent; and a
-schema-1 database is backed up in encrypted form before migration to schema 3.
+schema-1 database is backed up in encrypted form before migration to schema 4.
 
 ## Transactional reconciliation and changes
 
 `replica-sync` compares canonical SHA-256 record identities inside an immediate
 encrypted transaction. It mutates only added, changed, or removed conversations,
-participants, messages, and artifacts. Message FTS rows, quote/reply/recall
+participants, messages, artifacts, cached Moments, and cached Moment
+interactions. Message FTS rows, quote/reply/recall
 relationships, and artifact links are replaced only when their message changes.
 An encrypted `sync_seen` table makes deletions explicit without writing IDs to
 plaintext temporary files.
@@ -137,6 +139,14 @@ producing a mixed-state page. Change cursors deliberately remain resumable
 across those commits.
 `replica-message`, `replica-conversations`, and `replica-coverage` provide
 stable JSON access to exact canonical data and machine-readable coverage.
+
+`replica-cached-moments` provides author/type/time filters and bounded,
+checkpoint-consistent pagination. Its cursor binds the filter, account, random
+replica generation, source fingerprint, and checkpoint revision. The response
+distinguishes `unavailable`, `availableEmpty`, and `available`; it also reports
+the exact observation time and `partialLocalCache` label. The raw canonical CLI
+surface remains local/private. Connector and MCP consumers receive a separately
+authorized minimized view instead.
 
 `replica-status` exposes the schema/cipher, opaque account and source
 fingerprints, exact client-build compatibility state and mismatched fields,

@@ -24,6 +24,9 @@ The current passive-read slice provides:
   voice payloads to verified local artifact records;
 - records non-downloaded, ambiguous, unsafe, or undecodable artifacts
   explicitly instead of silently omitting them.
+- restores the pinned client's passive local Moments cache and interactions
+  with raw provenance, explicit partial-cache semantics, encrypted replica
+  storage, and a separately authorized minimized connector/MCP view.
 
 See [PLAN.md](PLAN.md) for the phased roadmap and safety gates.
 
@@ -171,6 +174,20 @@ and attachment absence. Search cursors fail closed when the filter, replica,
 account, or committed source checkpoint changes. `replica-status` and
 `replica-coverage` expose freshness and known restoration limitations.
 
+Passive cached Moments can be inspected locally without granting an AI tool
+access to the raw XML or columns:
+
+```sh
+printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  replica-cached-moments /path/to/private-replica-directory/greenbubbles.db \
+  --replica-key-stdin --limit 50
+```
+
+The response always distinguishes an unavailable cache from an observed empty
+cache and labels observed data `partialLocalCache`. This is passive local state,
+not complete server history and not an active `load more` API.
+
 Conversation reads require a separate owner-only policy. Creating one is an
 explicit local authorization step; cursors are bound to both the archive
 fingerprint and the selected conversation:
@@ -214,6 +231,12 @@ cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
   tool-policy <private-output-directory> /private/greenbubbles-tools/policy.json \
   <enabled-conversation-id> --capabilities list,read,search,draft \
   --fields sender,created-at,direction,type,content,attachments,relationships
+
+# Optional and independent: passive cached Moments, local destination only.
+cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  tool-policy <private-output-directory> /private/greenbubbles-tools/moments-policy.json \
+  --enable-cached-moments \
+  --cached-fields author,created-at,type,content,title,url,media-count
 
 cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
   tool-recent <private-output-directory> /private/greenbubbles-tools/policy.json \

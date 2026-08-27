@@ -7,11 +7,13 @@ use std::path::{Path, PathBuf};
 use greenbubbles_restore::merge::merge_incremental_archive;
 use greenbubbles_restore::replica::bootstrap_replica;
 use greenbubbles_restore::{
-    ArtifactAvailability, ArtifactDecodeState, ArtifactKind, ArtifactRole, CanonicalArtifact,
-    CanonicalConversation, CanonicalMessage, CanonicalParticipant, ConversationKind,
-    ConversationMembership, ConversationMembershipRole, DirectionEvidence, EntityDecodeState,
-    LocalProfileState, MessageArtifactReference, MessageDirection, MessageOrderingBasis,
-    MessageRelationship, MessageRelationshipKind, RelationshipResolutionState, ReplicaKey,
+    ArtifactAvailability, ArtifactDecodeState, ArtifactKind, ArtifactRole,
+    CachedSurfaceCompleteness, CachedSurfaceCoverage, CachedSurfaceTableCoverage,
+    CachedSurfaceTableRole, CanonicalArtifact, CanonicalCachedMoment, CanonicalConversation,
+    CanonicalMessage, CanonicalParticipant, ConversationKind, ConversationMembership,
+    ConversationMembershipRole, DirectionEvidence, EntityDecodeState, LocalProfileState,
+    MessageArtifactReference, MessageDirection, MessageOrderingBasis, MessageRelationship,
+    MessageRelationshipKind, RawSQLiteValue, RelationshipResolutionState, ReplicaKey,
     RestorationArchiveScope, RestorationCompletion, RestorationCoverage, RestorationIntegrity,
     RestorationReport, SemanticDecodeState, SnapshotAcquisitionEvidence, SnapshotAcquisitionMode,
     SnapshotSourceSetInventory, TableCoverageRole, TableSchemaCoverage, TypedPayload,
@@ -76,6 +78,19 @@ fn merges_selected_source_sets_reorders_globally_and_resolves_cross_shard_relati
     assert!(merged_report.integrity.row_equation_holds());
     assert_eq!(merged_report.integrity.source_row_count, 2);
     assert_eq!(merged_report.integrity.restored_row_count, 2);
+    assert_eq!(merged_report.integrity.cached_moment_count, 2);
+    assert!(merged_report.cached_moments_path.is_some());
+    let cached = read_ndjson::<CanonicalCachedMoment>(&output.join("cached-moments.ndjson"));
+    assert_eq!(
+        cached
+            .iter()
+            .map(|moment| moment.canonical_id.as_str())
+            .collect::<Vec<_>>(),
+        ["cached-b", "cached-new-a"]
+    );
+    let cached_coverage: CachedSurfaceCoverage = read_json(&output.join("cached-surfaces.json"));
+    assert_eq!(cached_coverage.moment_count, 2);
+    assert_eq!(cached_coverage.tables.len(), 2);
 
     let coverage: RestorationCoverage = read_json(&output.join("coverage.json"));
     assert_eq!(coverage.message_tables.len(), 2);
@@ -95,6 +110,7 @@ fn merges_selected_source_sets_reorders_globally_and_resolves_cross_shard_relati
     let replica = private.join("merged-replica.db");
     let bootstrapped = bootstrap_replica(&output, &replica, &key).unwrap();
     assert_eq!(bootstrapped.message_count, 2);
+    assert_eq!(bootstrapped.cached_moment_count, 2);
 }
 
 #[test]
@@ -135,6 +151,14 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
             message("message-b", "set-b", 2, 75, false),
         ]
     };
+    let cached_moments = if fragment {
+        vec![cached_moment("cached-new-a", "set-a", 1)]
+    } else {
+        vec![
+            cached_moment("cached-old-a", "set-a", 1),
+            cached_moment("cached-b", "set-b", 2),
+        ]
+    };
     let integrity = RestorationIntegrity {
         database_count: if fragment { 1 } else { 2 },
         message_table_count: if fragment { 1 } else { 2 },
@@ -142,6 +166,7 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
         restored_row_count: messages.len() as u64,
         conversation_count: 1,
         participant_count: 1,
+        cached_moment_count: cached_moments.len() as u64,
         ..Default::default()
     };
     let report = RestorationReport {
@@ -161,6 +186,9 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
         artifacts_path: "private".to_string(),
         conversations_path: "private".to_string(),
         participants_path: "private".to_string(),
+        cached_moments_path: Some("private".to_string()),
+        cached_moment_interactions_path: Some("private".to_string()),
+        cached_surfaces_path: Some("private".to_string()),
         coverage_path: "private".to_string(),
         report_path: "private".to_string(),
         completion: RestorationCompletion::evaluate(&integrity),
@@ -205,6 +233,38 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
         logical_sub_type_counts: BTreeMap::from([("1:0".to_string(), messages.len() as u64)]),
         unknown_payload_reason_counts: BTreeMap::new(),
         semantic_gap_reason_counts: BTreeMap::new(),
+    };
+    let cached_coverage = CachedSurfaceCoverage {
+        format_version: 1,
+        observed_at: if fragment {
+            "2026-08-27T04:00:00Z"
+        } else {
+            "2026-08-27T03:00:00Z"
+        }
+        .to_string(),
+        cache_completeness: CachedSurfaceCompleteness::PartialLocalCache,
+        source_database_present: true,
+        moment_count: cached_moments.len() as u64,
+        interaction_count: 0,
+        semantic_gap_count: 0,
+        tables: source_sets
+            .iter()
+            .map(|source_set| CachedSurfaceTableCoverage {
+                source_set_id: (*source_set).to_string(),
+                source_logical_path: format!("sns/{source_set}.db"),
+                source_table_id: format!("sns-table-{source_set}"),
+                source_table_name: "SnsTimeLine".to_string(),
+                columns: vec![
+                    "tid".to_string(),
+                    "user_name".to_string(),
+                    "content".to_string(),
+                ],
+                source_row_count: 1,
+                restored_row_count: 1,
+                role: CachedSurfaceTableRole::MomentTimeline,
+                classification_reason: "synthetic exact signature".to_string(),
+            })
+            .collect(),
     };
     let conversation = CanonicalConversation {
         conversation_id: "conversation-a".to_string(),
@@ -267,6 +327,12 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
     write_ndjson(&archive.join("conversations.ndjson"), &[conversation]);
     write_ndjson(&archive.join("participants.ndjson"), &[participant]);
     write_ndjson(&archive.join("artifacts.ndjson"), &[artifact]);
+    write_ndjson(&archive.join("cached-moments.ndjson"), &cached_moments);
+    write_ndjson::<greenbubbles_restore::CanonicalCachedMomentInteraction>(
+        &archive.join("cached-moment-interactions.ndjson"),
+        &[],
+    );
+    write_json(&archive.join("cached-surfaces.json"), &cached_coverage);
     write_ndjson::<greenbubbles_restore::RejectedRow>(&archive.join("rejections.ndjson"), &[]);
     archive
 }
@@ -350,6 +416,41 @@ fn message(
             role: ArtifactRole::VoicePayload,
             preferred: true,
         }],
+    }
+}
+
+fn cached_moment(
+    canonical_id: &str,
+    source_set_id: &str,
+    source_row_id: i64,
+) -> CanonicalCachedMoment {
+    CanonicalCachedMoment {
+        canonical_id: canonical_id.to_string(),
+        account_id: ACCOUNT.to_string(),
+        source_set_id: source_set_id.to_string(),
+        source_logical_path: format!("sns/{source_set_id}.db"),
+        source_table_id: format!("sns-table-{source_set_id}"),
+        source_table_name: "SnsTimeLine".to_string(),
+        source_row_id,
+        timeline_id: RawSQLiteValue::Integer(source_row_id),
+        author_id: Some("cached-author".to_string()),
+        author_source_identifier_base64: None,
+        created_at_unix: Some(1_700_000_000 + source_row_id),
+        content_type: Some(1),
+        content_description_base64: Some("c3ludGhldGlj".to_string()),
+        title_base64: None,
+        description_base64: None,
+        content_url_base64: None,
+        media_count: 0,
+        like_count: 0,
+        comment_count: 0,
+        raw_content_base64: Some("PHhtbC8+".to_string()),
+        raw_pack_info_base64: None,
+        raw_columns: BTreeMap::new(),
+        semantic_decode_state: SemanticDecodeState::Complete,
+        semantic_gap_reason: None,
+        cache_completeness: CachedSurfaceCompleteness::PartialLocalCache,
+        observed_at: "2026-08-27T03:00:00Z".to_string(),
     }
 }
 
