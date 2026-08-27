@@ -39,9 +39,14 @@ struct SnapshotAcquisitionPlannerTests {
     #expect(plan.evidence.reconciliationSourceSetIDs.isEmpty)
     #expect(plan.selectedSets.map(\.logicalPath) == ["message/second.db"])
 
+    try Data([0, 1, 2, 3, 4]).write(to: second)
     let incremental = try snapshotter.createSnapshot(of: plan, cleanUpOnDeinit: false)
     defer { try? incremental.cleanUp() }
     #expect(incremental.manifest.entries.count == 1)
+    #expect(incremental.manifest.entries[0].fingerprint.byteCount == 5)
+    #expect(
+      incremental.manifest.acquisition?.sourceSets
+        .first { $0.logicalPath == "message/second.db" }?.files[0].fingerprint.byteCount == 5)
     #expect(incremental.manifest.acquisition?.sourceSets.count == 2)
     #expect(incremental.manifest.sourceFingerprint != bootstrap.manifest.sourceFingerprint)
 
@@ -56,6 +61,31 @@ struct SnapshotAcquisitionPlannerTests {
     defer { try? unchanged.cleanUp() }
     #expect(unchanged.manifest.entries.isEmpty)
     #expect(unchanged.manifest.sourceFingerprint == incremental.manifest.sourceFingerprint)
+  }
+
+  @Test
+  func rejectsAnUnselectedSourceThatChangesAfterPlanning() throws {
+    let fixture = try AcquisitionFixture()
+    defer { fixture.remove() }
+    let first = try fixture.createFile("source/first.db", bytes: [1])
+    let second = try fixture.createFile("source/second.db", bytes: [2])
+    let sets = [DatabaseFileSet(database: first), DatabaseFileSet(database: second)]
+    let snapshotter = ReadOnlySnapshotter(baseDirectory: fixture.snapshots, maxRetries: 0)
+    let bootstrap = try snapshotter.createSnapshot(of: sets, cleanUpOnDeinit: false)
+    defer { try? bootstrap.cleanUp() }
+    try Data([3]).write(to: second)
+    let plan = try SnapshotAcquisitionPlanner().plan(
+      sets: sets,
+      previousManifest: bootstrap.manifest,
+      reconciliationWindow: 1,
+      now: Date().addingTimeInterval(3_600)
+    )
+    #expect(plan.selectedSets.count == 1)
+
+    try Data([4, 5]).write(to: first)
+    #expect(throws: SnapshotAcquisitionPlannerError.self) {
+      _ = try snapshotter.createSnapshot(of: plan)
+    }
   }
 
   @Test

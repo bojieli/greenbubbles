@@ -339,6 +339,15 @@ order is official portable export/backup, then owner-supplied plaintext or
 passphrase, then stop; there is no invasive fallback. See
 `docs/ACQUISITION_FEASIBILITY.md`.
 
+Owner-authorized local validation now adds real passive acquisition evidence:
+two redacted account roots produced consistent 25-set and 15-set bootstrap
+snapshots, every copied database was independently digest-verified and
+classified as the pinned encrypted WCDB family, the idle account produced a
+true no-op incremental, and an active-account incremental captured 7 changed
+sets as 21 descriptor-based atomic APFS clones. No database was decrypted, so
+this does not satisfy useful-content, semantic/media restoration, or real sync
+latency requirements. See `docs/LOCAL_ACQUISITION_VALIDATION.md`.
+
 ### Ordinary-contact action feasibility gate
 
 - [ ] On a disposable test account and pinned client, determine whether the

@@ -2,6 +2,7 @@
 name = "greenbubbles-restore"
 version = "0.1.0"
 edition = "2021"
+default-run = "greenbubbles-restore"
 license = "Proprietary"
 publish = false
 

@@ -32,6 +32,7 @@ struct ReadOnlySnapshotTests {
       ])
     #expect(lease.manifest.sourceFingerprint.count == 64)
     #expect(lease.manifest.entries.allSatisfy { $0.source.path == nil })
+    #expect(lease.manifest.entries.allSatisfy { $0.captureMethod != nil })
     #expect(
       try Data(contentsOf: lease.directory.appending(path: "sets/0000/database.db"))
         == Data([1, 2, 3, 4]))
@@ -67,6 +68,25 @@ struct ReadOnlySnapshotTests {
     }
     let remaining = try FileManager.default.contentsOfDirectory(atPath: fixture.snapshots.path)
     #expect(remaining.isEmpty)
+  }
+
+  @Test func verifiedByteCopyFallbackRetainsOwnerOnlySnapshot() throws {
+    let fixture = try SnapshotFixture()
+    defer { fixture.remove() }
+    let database = try fixture.createFile("source/messages.db", bytes: [1, 2, 3, 4])
+    let lease = try ReadOnlySnapshotter(
+      baseDirectory: fixture.snapshots,
+      maxRetries: 0,
+      includeSourcePaths: false,
+      hooks: SnapshotHooks(allowAtomicClone: false)
+    ).createSnapshot(of: [DatabaseFileSet(database: database)])
+
+    #expect(lease.manifest.entries.count == 1)
+    #expect(lease.manifest.entries[0].captureMethod == .verifiedByteCopy)
+    #expect(
+      try Data(contentsOf: lease.directory.appending(path: "sets/0000/database.db"))
+        == Data([1, 2, 3, 4]))
+    #expect(try permissions(lease.directory.appending(path: "sets/0000/database.db")) == 0o600)
   }
 
   @Test func plannerGroupsSQLiteSidecars() throws {

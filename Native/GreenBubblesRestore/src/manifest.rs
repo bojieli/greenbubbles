@@ -11,6 +11,7 @@ use crate::RestoreError;
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotManifest {
     pub manifest_format_version: u32,
+    #[serde(rename = "snapshotID", alias = "snapshotId")]
     pub snapshot_id: String,
     pub created_at: String,
     pub source_fingerprint: String,
@@ -28,9 +29,11 @@ pub struct ClientBuildFingerprint {
     pub bundle_identifier: String,
     pub marketing_version: String,
     pub build_version: String,
+    #[serde(rename = "executableSHA256", alias = "executableSha256")]
     pub executable_sha256: String,
     pub signing_identifier: String,
     pub team_identifier: String,
+    #[serde(rename = "codeDirectorySHA256", alias = "codeDirectorySha256")]
     pub code_directory_sha256: String,
     pub architectures: Vec<String>,
     pub hardened_runtime: bool,
@@ -87,12 +90,14 @@ pub enum SnapshotAcquisitionMode {
 pub struct SnapshotSourceFileInventory {
     pub role: SnapshotFileRole,
     pub fingerprint: SourceFileFingerprint,
+    #[serde(rename = "contentSHA256", alias = "contentSha256")]
     pub content_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotSourceSetInventory {
+    #[serde(rename = "sourceSetID", alias = "sourceSetId")]
     pub source_set_id: String,
     pub logical_path: String,
     pub files: Vec<SnapshotSourceFileInventory>,
@@ -105,8 +110,14 @@ pub struct SnapshotAcquisitionEvidence {
     pub mode: SnapshotAcquisitionMode,
     pub previous_source_fingerprint: Option<String>,
     pub reconciliation_window_seconds: u64,
+    #[serde(rename = "changedSourceSetIDs", alias = "changedSourceSetIds")]
     pub changed_source_set_ids: Vec<String>,
+    #[serde(
+        rename = "reconciliationSourceSetIDs",
+        alias = "reconciliationSourceSetIds"
+    )]
     pub reconciliation_source_set_ids: Vec<String>,
+    #[serde(rename = "deletedSourceSetIDs", alias = "deletedSourceSetIds")]
     pub deleted_source_set_ids: Vec<String>,
     pub source_sets: Vec<SnapshotSourceSetInventory>,
     #[serde(default)]
@@ -117,6 +128,7 @@ pub struct SnapshotAcquisitionEvidence {
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotEntry {
     pub source: PathReference,
+    #[serde(rename = "sourceSetID", alias = "sourceSetId")]
     pub source_set_id: String,
     pub logical_path: String,
     pub relative_path: String,
@@ -128,6 +140,7 @@ pub struct SnapshotEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PathReference {
+    #[serde(rename = "opaqueID", alias = "opaqueId")]
     pub opaque_id: String,
     #[serde(default)]
     pub path: Option<String>,
@@ -136,7 +149,9 @@ pub struct PathReference {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceFileFingerprint {
+    #[serde(rename = "deviceID", alias = "deviceId")]
     pub device_id: u64,
+    #[serde(rename = "fileID", alias = "fileId")]
     pub file_id: u64,
     pub byte_count: i64,
     pub modified_seconds: i64,
@@ -673,5 +688,104 @@ mod tests {
         fs::write(path, serde_json::to_vec(&manifest(2, Some(build))).unwrap()).unwrap();
         let error = SnapshotManifest::load(directory.path()).unwrap_err();
         assert!(error.to_string().contains("incomplete or malformed"));
+    }
+
+    #[test]
+    fn swift_manifest_acronyms_round_trip_and_legacy_spellings_load() {
+        let fingerprint = SourceFileFingerprint {
+            device_id: 1,
+            file_id: 2,
+            byte_count: 3,
+            modified_seconds: 4,
+            modified_nanoseconds: 5,
+        };
+        let source_set = SnapshotSourceSetInventory {
+            source_set_id: "set".to_string(),
+            logical_path: "message/message_0.db".to_string(),
+            files: vec![SnapshotSourceFileInventory {
+                role: SnapshotFileRole::Database,
+                fingerprint: fingerprint.clone(),
+                content_sha256: Some("a".repeat(64)),
+            }],
+        };
+        let swift = SnapshotManifest {
+            manifest_format_version: 3,
+            snapshot_id: "snapshot".to_string(),
+            created_at: "2026-08-27T00:00:00Z".to_string(),
+            source_fingerprint: "b".repeat(64),
+            client_build: Some(supported_client_build()),
+            acquisition: Some(SnapshotAcquisitionEvidence {
+                format_version: 2,
+                mode: SnapshotAcquisitionMode::Bootstrap,
+                previous_source_fingerprint: None,
+                reconciliation_window_seconds: 900,
+                changed_source_set_ids: vec!["set".to_string()],
+                reconciliation_source_set_ids: Vec::new(),
+                deleted_source_set_ids: Vec::new(),
+                source_sets: vec![source_set],
+                last_integrity_scan_at: Some("2026-08-27T00:00:00Z".to_string()),
+            }),
+            entries: vec![SnapshotEntry {
+                source: PathReference {
+                    opaque_id: "opaque".to_string(),
+                    path: None,
+                },
+                source_set_id: "set".to_string(),
+                logical_path: "message/message_0.db".to_string(),
+                relative_path: "sets/0000/database.db".to_string(),
+                role: SnapshotFileRole::Database,
+                fingerprint,
+                sha256: "a".repeat(64),
+            }],
+        };
+
+        let value = serde_json::to_value(&swift).unwrap();
+        assert_eq!(value["snapshotID"], "snapshot");
+        assert_eq!(
+            value["clientBuild"]["executableSHA256"],
+            SUPPORTED_EXECUTABLE_SHA256
+        );
+        assert_eq!(
+            value["clientBuild"]["codeDirectorySHA256"],
+            SUPPORTED_CODE_DIRECTORY_SHA256
+        );
+        assert_eq!(value["acquisition"]["changedSourceSetIDs"][0], "set");
+        assert_eq!(value["acquisition"]["sourceSets"][0]["sourceSetID"], "set");
+        assert_eq!(
+            value["acquisition"]["sourceSets"][0]["files"][0]["contentSHA256"],
+            "a".repeat(64)
+        );
+        assert_eq!(value["entries"][0]["source"]["opaqueID"], "opaque");
+        assert_eq!(value["entries"][0]["sourceSetID"], "set");
+        assert_eq!(value["entries"][0]["fingerprint"]["deviceID"], 1);
+        assert_eq!(value["entries"][0]["fingerprint"]["fileID"], 2);
+        let decoded: SnapshotManifest = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.snapshot_id, "snapshot");
+        assert_eq!(decoded.entries[0].source_set_id, "set");
+
+        let legacy = serde_json::json!({
+            "manifestFormatVersion": 1,
+            "snapshotId": "legacy",
+            "createdAt": "2026-08-27T00:00:00Z",
+            "sourceFingerprint": "legacy-source",
+            "entries": [{
+                "source": {"opaqueId": "opaque"},
+                "sourceSetId": "set",
+                "logicalPath": "message/message_0.db",
+                "relativePath": "sets/0000/database.db",
+                "role": "database",
+                "fingerprint": {
+                    "deviceId": 1,
+                    "fileId": 2,
+                    "byteCount": 3,
+                    "modifiedSeconds": 4,
+                    "modifiedNanoseconds": 5
+                },
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }]
+        });
+        let decoded_legacy: SnapshotManifest = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded_legacy.snapshot_id, "legacy");
+        assert_eq!(decoded_legacy.entries[0].source.opaque_id, "opaque");
     }
 }

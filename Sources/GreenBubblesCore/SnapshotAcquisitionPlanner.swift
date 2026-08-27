@@ -143,24 +143,28 @@ public struct SnapshotAcquisitionPlanner: Sendable {
     let currentInventory = try orderedSets.map { set in
       try inventory(for: set, carrying: previousInventory)
     }
-    let currentByID = Dictionary(uniqueKeysWithValues: currentInventory.map { ($0.sourceSetID, $0) })
+    let currentByID = Dictionary(
+      uniqueKeysWithValues: currentInventory.map { ($0.sourceSetID, $0) })
     let currentIDs = Set(currentByID.keys)
     let previousIDs = Set(previousInventory.keys)
     let previousIntegrityScanAt = previousManifest.flatMap { manifest in
       manifest.acquisition?.lastIntegrityScanAt
-        ?? ((manifest.acquisition?.mode == .bootstrap || manifest.acquisition?.mode == .integrityScan)
+        ?? ((manifest.acquisition?.mode == .bootstrap
+          || manifest.acquisition?.mode == .integrityScan)
           ? manifest.createdAt : nil)
     }
-    let integrityScanDue = integrityScanInterval.map { interval in
-      previousIntegrityScanAt.map { now.timeIntervalSince($0) >= interval } ?? true
-    } ?? false
-    let mode: SnapshotAcquisitionMode = if previousManifest == nil {
-      .bootstrap
-    } else if forceIntegrityScan || integrityScanDue {
-      .integrityScan
-    } else {
-      .incremental
-    }
+    let integrityScanDue =
+      integrityScanInterval.map { interval in
+        previousIntegrityScanAt.map { now.timeIntervalSince($0) >= interval } ?? true
+      } ?? false
+    let mode: SnapshotAcquisitionMode =
+      if previousManifest == nil {
+        .bootstrap
+      } else if forceIntegrityScan || integrityScanDue {
+        .integrityScan
+      } else {
+        .incremental
+      }
 
     var changed = Set<String>()
     var reconciliation = Set<String>()
@@ -218,22 +222,44 @@ public struct SnapshotAcquisitionPlanner: Sendable {
     }
   }
 
+  func verifyForSnapshot(_ plan: SnapshotAcquisitionPlan) throws {
+    let expected = Dictionary(
+      uniqueKeysWithValues: plan.evidence.sourceSets.map { ($0.sourceSetID, $0) })
+    let current = try plan.allSets.map { try inventory(for: $0, carrying: expected) }
+    guard current.count == expected.count else {
+      throw SnapshotAcquisitionPlannerError.sourceChanged("source-set-count")
+    }
+    let selected = Set(plan.evidence.selectedSourceSetIDs)
+    for item in current {
+      guard let prior = expected[item.sourceSetID] else {
+        throw SnapshotAcquisitionPlannerError.sourceChanged(item.sourceSetID)
+      }
+      let matches =
+        selected.contains(item.sourceSetID)
+        ? rolesEquivalent(prior, item)
+        : metadataEquivalent(prior, item)
+      guard matches else {
+        throw SnapshotAcquisitionPlannerError.sourceChanged(item.sourceSetID)
+      }
+    }
+  }
+
   func finalizedEvidence(
     for plan: SnapshotAcquisitionPlan,
     entries: [SnapshotEntry]
   ) throws -> SnapshotAcquisitionEvidence {
-    let digests = Dictionary(
-      uniqueKeysWithValues: entries.map { ("\($0.sourceSetID):\($0.role.rawValue)", $0.sha256) })
+    let captured = Dictionary(
+      uniqueKeysWithValues: entries.map { ("\($0.sourceSetID):\($0.role.rawValue)", $0) })
     let finalized = plan.evidence.sourceSets.map { sourceSet in
       SnapshotSourceSetInventory(
         sourceSetID: sourceSet.sourceSetID,
         logicalPath: sourceSet.logicalPath,
         files: sourceSet.files.map { file in
-          SnapshotSourceFileInventory(
+          let entry = captured["\(sourceSet.sourceSetID):\(file.role.rawValue)"]
+          return SnapshotSourceFileInventory(
             role: file.role,
-            fingerprint: file.fingerprint,
-            contentSHA256: digests["\(sourceSet.sourceSetID):\(file.role.rawValue)"]
-              ?? file.contentSHA256
+            fingerprint: entry?.fingerprint ?? file.fingerprint,
+            contentSHA256: entry?.sha256 ?? file.contentSHA256
           )
         }
       )
@@ -356,7 +382,18 @@ public struct SnapshotAcquisitionPlanner: Sendable {
     }
   }
 
-  private func inventoryBySet(from manifest: SnapshotManifest) -> [String: SnapshotSourceSetInventory] {
+  private func rolesEquivalent(
+    _ previous: SnapshotSourceSetInventory,
+    _ current: SnapshotSourceSetInventory
+  ) -> Bool {
+    previous.sourceSetID == current.sourceSetID
+      && previous.logicalPath == current.logicalPath
+      && previous.files.map(\.role) == current.files.map(\.role)
+  }
+
+  private func inventoryBySet(from manifest: SnapshotManifest) -> [String:
+    SnapshotSourceSetInventory]
+  {
     if let acquisition = manifest.acquisition {
       return Dictionary(uniqueKeysWithValues: acquisition.sourceSets.map { ($0.sourceSetID, $0) })
     }
@@ -378,8 +415,8 @@ public struct SnapshotAcquisitionPlanner: Sendable {
   }
 }
 
-private extension SourceFileFingerprint {
-  var modifiedDate: Date {
+extension SourceFileFingerprint {
+  fileprivate var modifiedDate: Date {
     Date(
       timeIntervalSince1970: TimeInterval(modifiedSeconds)
         + TimeInterval(modifiedNanoseconds) / 1_000_000_000

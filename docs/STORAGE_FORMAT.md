@@ -56,6 +56,16 @@ memory. The engine has no runtime network client. Decrypted databases exist
 only in an owner-only temporary directory and are removed when the catalog is
 dropped.
 
+Before a passphrase is requested, `greenbubbles-restore preflight <snapshot>`
+loads and validates the cross-language manifest, verifies the digest of every
+copied database/WAL/SHM entry, and reads only the first 16 bytes of each copied
+database through a regular-file, single-link, no-symlink descriptor. It reports
+ordinary SQLite versus the pinned WCDB/SQLCipher family and the resulting
+passphrase requirement without decrypting or enumerating any schema or content.
+Swift's encoded acronym keys (`snapshotID`, `sourceSetID`, `deviceID`, `fileID`,
+and `SHA256` fields) are canonical; the Rust reader also accepts the older
+`Id`/`Sha256` spellings so existing synthetic archives remain readable.
+
 Snapshot manifest format 3 separates the complete source-set inventory from
 the database sets copied in a particular acquisition. Database, WAL, and SHM
 presence and full file identity determine change selection. The format records
@@ -63,6 +73,19 @@ bootstrap, incremental, or integrity-scan mode, the bounded reconciliation
 window, selected sets, deleted sets, and a verified SHA-256 for every current
 source file. Rust validates that the selected entries exactly match this
 inventory before opening a database.
+
+On APFS, the snapshotter opens each source with `O_RDONLY`, `O_NOFOLLOW`, and
+`O_CLOEXEC`, then passes that descriptor to `fclonefileat`. The copy-on-write
+clone captures one file atomically without widening the capture window while a
+large file is hashed. A database and its WAL/SHM sidecars are captured
+consecutively; the database identity must remain stable through the group.
+Sidecars may continue advancing after their atomic capture. Each clone is mode
+`0600`, is hashed only after the group is captured, and records
+`captureMethod: atomicCopyOnWriteClone`. Unsupported filesystems fall back to a
+descriptor byte copy, for which every source in the group must remain stable
+through the complete copy. The finalized authoritative inventory uses the
+captured fingerprints and digests for selected sets and carried verified
+evidence for unselected sets.
 
 Acquisition evidence format 2 records the last bootstrap/integrity-scan anchor.
 The planner automatically selects every current set after the configured

@@ -17,7 +17,10 @@ pub mod secret;
 pub mod tools;
 pub mod transport;
 
-pub use catalog::{prepare_catalog, PreparedCatalog, PreparedDatabase, StorageFamily};
+pub use catalog::{
+    preflight_snapshot, prepare_catalog, PreparedCatalog, PreparedDatabase,
+    SnapshotStoragePreflightDatabase, SnapshotStoragePreflightReport, StorageFamily,
+};
 pub use error::RestoreError;
 pub use manifest::{
     ClientBuildCompatibilityEvidence, ClientBuildCompatibilityState, ClientBuildFingerprint,

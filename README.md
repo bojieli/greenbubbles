@@ -44,7 +44,9 @@ active-read assessment is in
 acquisition assessment and non-invasive stop rule are in
 [docs/ACQUISITION_FEASIBILITY.md](docs/ACQUISITION_FEASIBILITY.md). Every
 remaining external gate and its required resumption evidence is mapped in
-[docs/GATE_READINESS.md](docs/GATE_READINESS.md).
+[docs/GATE_READINESS.md](docs/GATE_READINESS.md). Aggregate evidence from the
+owner-authorized, content-free local snapshot validation is in
+[docs/LOCAL_ACQUISITION_VALIDATION.md](docs/LOCAL_ACQUISITION_VALIDATION.md).
 
 ## Build and test
 
@@ -98,6 +100,14 @@ database/WAL/SHM set into an owner-only temporary directory, rejects concurrent
 mutation, prints a redacted manifest, and automatically removes the copy when
 the command exits.
 
+On APFS, snapshot acquisition first uses descriptor-based atomic copy-on-write
+file clones and records `atomicCopyOnWriteClone` on each captured entry. It
+captures a database and its WAL/SHM sidecars as one bounded group, requires the
+database to remain unchanged through that group, and hashes the immutable clones
+after capture. A verified byte copy is used on volumes without clone support and
+retains the stricter whole-group mutation check. Unselected source sets must
+remain identical to the prior manifest in either mode.
+
 For format work, first select the opaque ID reported by `accounts`. Supplying a
 snapshot base is an explicit request to preserve the encrypted snapshot instead
 of deleting it at process exit:
@@ -127,10 +137,23 @@ The native restoration engine works only from such a snapshot. A database
 passphrase must never be placed on the command line:
 
 ```sh
-cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  preflight <snapshot-directory>
+
+cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
   restore <snapshot-directory> <private-output-directory> \
   --account-root <authorized-account-directory> --passphrase-stdin
 ```
+
+`preflight` verifies every copied database/WAL/SHM digest and reports the
+current source-set count, copied database storage families, exact pinned-client
+compatibility, and whether the copied databases require a passphrase. It does
+not decrypt a database, inspect tables or rows, emit source paths, or accept a
+secret. For incremental snapshots, “current source sets” describes the complete
+authoritative inventory while “copied databases” describes only the selected
+change fragment.
 
 The output directory is owner-only and contains canonical message NDJSON,
 artifact NDJSON with exact verified local locations, a rejection ledger, a
@@ -151,7 +174,8 @@ does.
 For low-latency text publication, media traversal and decoding can be deferred:
 
 ```sh
-cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
   restore <snapshot> <private-text-archive> --defer-media --passphrase-stdin
 ```
 
@@ -175,22 +199,26 @@ passphrase. The key is accepted only through standard input:
 ```sh
 mkdir -m 700 /path/to/private-replica-directory
 printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
-  --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
   replica-bootstrap <private-output-directory> \
   /path/to/private-replica-directory/greenbubbles.db --replica-key-stdin
 
 printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
-  --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
   replica-status /path/to/private-replica-directory/greenbubbles.db \
   --replica-key-stdin
 
 printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
-  --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
   replica-sync <new-private-output-directory> \
   /path/to/private-replica-directory/greenbubbles.db --replica-key-stdin
 
 printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
-  --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
   replica-changes /path/to/private-replica-directory/greenbubbles.db \
   --replica-key-stdin --limit 100
 ```
@@ -220,7 +248,8 @@ Exact retrieval uses an owner-only JSON filter. Any field can be omitted:
 ```sh
 chmod 600 /path/to/private-filter.json
 printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
-  --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
   replica-search /path/to/private-replica-directory/greenbubbles.db \
   /path/to/private-filter.json --replica-key-stdin --limit 50
 ```
@@ -235,7 +264,8 @@ access to the raw XML or columns:
 
 ```sh
 printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
-  --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
   replica-cached-moments /path/to/private-replica-directory/greenbubbles.db \
   --replica-key-stdin --limit 50
 ```
@@ -249,11 +279,13 @@ explicit local authorization step; cursors are bound to both the archive
 fingerprint and the selected conversation:
 
 ```sh
-cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
   policy <private-output-directory> <policy-file> \
   <enabled-conversation-id> --max-page-size 100
 
-cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
   read <private-output-directory> <policy-file> \
   <enabled-conversation-id> --limit 50
 ```
@@ -282,7 +314,8 @@ an automatic fallback.
 Periodic archive reconciliation is authoritative for incoming/change events:
 
 ```sh
-cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
   reconcile <previous-archive> <current-archive> <policy-file> <events-output>
 ```
 
@@ -299,24 +332,28 @@ needed fields and operations:
 ```sh
 mkdir -m 700 /private/greenbubbles-tools /private/greenbubbles-tools/drafts
 
-cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
   tool-policy <private-output-directory> /private/greenbubbles-tools/policy.json \
   <enabled-conversation-id> --capabilities list,read,search,draft \
   --fields sender,created-at,direction,type,content,attachments,relationships
 
 # Optional and independent: passive cached Moments, local destination only.
-cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
   tool-policy <private-output-directory> /private/greenbubbles-tools/moments-policy.json \
   --enable-cached-moments \
   --cached-fields author,created-at,type,content,title,url,media-count
 
-cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
   tool-recent <private-output-directory> /private/greenbubbles-tools/policy.json \
   /private/greenbubbles-tools/audit.ndjson <enabled-conversation-id> \
   --requester local-agent --limit 20
 
 printf '%s' 'search terms' | cargo run \
-  --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
   tool-search <private-output-directory> /private/greenbubbles-tools/policy.json \
   /private/greenbubbles-tools/audit.ndjson --requester local-agent --query-stdin
 ```

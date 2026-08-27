@@ -8,7 +8,7 @@ use greenbubbles_restore::{
     benchmark::{run_synthetic_benchmark, SyntheticBenchmarkConfig},
     connector::{ConnectorDestination, ConnectorService},
     merge::merge_incremental_archive,
-    prepare_catalog,
+    preflight_snapshot, prepare_catalog,
     reconcile::reconcile_archives,
     replica::{
         bootstrap_replica, get_replica_changes, get_replica_message, list_replica_conversations,
@@ -70,6 +70,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "storageFamilies": catalog.storage_family_counts(),
                 "databases": catalog.databases,
             });
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "preflight" => {
+            let snapshot = required_path(arguments.next(), "snapshot directory")?;
+            let report = preflight_snapshot(&snapshot)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "restore" => {
@@ -415,6 +420,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 concat!(
                     "Usage:\n",
                     "  greenbubbles-restore synthetic-benchmark <private-work-directory> [--samples <n>] [--small-messages <n>] [--large-messages <n>] [--burst-messages <n>]\n",
+                    "  greenbubbles-restore preflight <snapshot>\n",
                     "  greenbubbles-restore probe <snapshot> [--passphrase-stdin]\n",
                     "  greenbubbles-restore restore <snapshot> <output> [--account-root <path>] [--defer-media] [--passphrase-stdin]\n",
                     "  greenbubbles-restore policy <archive> <policy-file> <conversation-id>... [--max-page-size <n>]\n",

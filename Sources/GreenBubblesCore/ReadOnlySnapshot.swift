@@ -8,6 +8,11 @@ public enum SnapshotFileRole: String, Codable, Sendable {
   case sharedMemory
 }
 
+public enum SnapshotCaptureMethod: String, Codable, Sendable {
+  case atomicCopyOnWriteClone
+  case verifiedByteCopy
+}
+
 public struct SourceFileFingerprint: Codable, Equatable, Sendable {
   public let deviceID: UInt64
   public let fileID: UInt64
@@ -38,6 +43,7 @@ public struct SnapshotEntry: Codable, Equatable, Sendable {
   public let role: SnapshotFileRole
   public let fingerprint: SourceFileFingerprint
   public let sha256: String
+  public let captureMethod: SnapshotCaptureMethod?
 
   public init(
     source: PathReference,
@@ -46,7 +52,8 @@ public struct SnapshotEntry: Codable, Equatable, Sendable {
     relativePath: String,
     role: SnapshotFileRole,
     fingerprint: SourceFileFingerprint,
-    sha256: String
+    sha256: String,
+    captureMethod: SnapshotCaptureMethod? = nil
   ) {
     self.source = source
     self.sourceSetID = sourceSetID
@@ -55,6 +62,7 @@ public struct SnapshotEntry: Codable, Equatable, Sendable {
     self.role = role
     self.fingerprint = fingerprint
     self.sha256 = sha256
+    self.captureMethod = captureMethod
   }
 }
 
@@ -229,6 +237,7 @@ public final class SnapshotLease: @unchecked Sendable {
 
 struct SnapshotHooks: Sendable {
   var afterCopy: @Sendable (URL) -> Void = { _ in }
+  var allowAtomicClone = true
 }
 
 public struct ReadOnlySnapshotter: Sendable {
@@ -319,46 +328,67 @@ public struct ReadOnlySnapshotter: Sendable {
     into directory: URL
   ) throws -> SnapshotManifest {
     let acquisitionPlanner = SnapshotAcquisitionPlanner(includeSourcePaths: privacy.includePaths)
-    try acquisitionPlanner.verify(plan)
-    let sources = try plan.selectedSets.enumerated().flatMap { index, set in
-      try plannedFiles(for: set, setIndex: index)
-    }
-    let baseline = try Dictionary(
-      uniqueKeysWithValues: sources.map { source in
-        (source.source.standardizedFileURL.path, try fingerprint(at: source.source))
-      })
+    try acquisitionPlanner.verifyForSnapshot(plan)
+    var captured:
+      [(
+        source: PlannedFile,
+        fingerprint: SourceFileFingerprint,
+        captureMethod: SnapshotCaptureMethod
+      )] = []
 
-    var entries: [SnapshotEntry] = []
-    for source in sources {
-      let destination = directory.appending(path: source.relativePath)
-      try ensureOwnerOnlyDirectory(destination.deletingLastPathComponent())
-      let result = try copyFromReadOnlyDescriptor(source.source, to: destination)
-      guard result.fingerprint == baseline[source.source.path] else {
-        throw SnapshotError.sourceChanged(privacy.reference(for: source.source).opaqueID)
+    for (index, set) in plan.selectedSets.enumerated() {
+      let sources = try plannedFiles(for: set, setIndex: index)
+      let baseline = try Dictionary(
+        uniqueKeysWithValues: sources.map { source in
+          (source.source.standardizedFileURL.path, try fingerprint(at: source.source))
+        })
+      var copied: [(source: PlannedFile, fingerprint: SourceFileFingerprint, cloned: Bool)] = []
+      for source in sources {
+        let destination = directory.appending(path: source.relativePath)
+        try ensureOwnerOnlyDirectory(destination.deletingLastPathComponent())
+        let result = try cloneOrCopyFromReadOnlyDescriptor(source.source, to: destination)
+        guard result.fingerprint == baseline[source.source.path] else {
+          throw SnapshotError.sourceChanged(privacy.reference(for: source.source).opaqueID)
+        }
+        hooks.afterCopy(source.source)
+        copied.append((source, result.fingerprint, result.usedAtomicClone))
       }
-      hooks.afterCopy(source.source)
-      entries.append(
-        SnapshotEntry(
-          source: privacy.reference(for: source.source),
-          sourceSetID: source.setID,
-          logicalPath: source.logicalPath,
-          relativePath: source.relativePath,
-          role: source.role,
-          fingerprint: result.fingerprint,
-          sha256: result.sha256
-        ))
-    }
 
-    for source in sources {
-      let after = try fingerprint(at: source.source)
-      guard after == baseline[source.source.path] else {
-        throw SnapshotError.sourceChanged(privacy.reference(for: source.source).opaqueID)
+      let sourcesRequiringGroupStability =
+        copied.allSatisfy(\.cloned)
+        ? copied.filter { $0.source.role == .database }
+        : copied
+      for item in sourcesRequiringGroupStability {
+        let after = try fingerprint(at: item.source.source)
+        guard after == baseline[item.source.source.path] else {
+          throw SnapshotError.sourceChanged(privacy.reference(for: item.source.source).opaqueID)
+        }
       }
+      captured.append(
+        contentsOf: copied.map {
+          (
+            $0.source,
+            $0.fingerprint,
+            $0.cloned ? .atomicCopyOnWriteClone : .verifiedByteCopy
+          )
+        })
     }
 
-    try acquisitionPlanner.verify(plan)
+    try acquisitionPlanner.verifyForSnapshot(plan)
 
-    let sortedEntries = entries.sorted { $0.relativePath < $1.relativePath }
+    let sortedEntries = try captured.map { item in
+      let destination = directory.appending(path: item.source.relativePath)
+      return SnapshotEntry(
+        source: privacy.reference(for: item.source.source),
+        sourceSetID: item.source.setID,
+        logicalPath: item.source.logicalPath,
+        relativePath: item.source.relativePath,
+        role: item.source.role,
+        fingerprint: item.fingerprint,
+        sha256: try sha256(ofSnapshotFile: destination, expected: item.fingerprint),
+        captureMethod: item.captureMethod
+      )
+    }.sorted { $0.relativePath < $1.relativePath }
     let acquisition = try acquisitionPlanner.finalizedEvidence(for: plan, entries: sortedEntries)
     let manifest = SnapshotManifest(
       snapshotID: snapshotID,
@@ -415,10 +445,10 @@ public struct ReadOnlySnapshotter: Sendable {
     return files
   }
 
-  private func copyFromReadOnlyDescriptor(
+  private func cloneOrCopyFromReadOnlyDescriptor(
     _ source: URL,
     to destination: URL
-  ) throws -> (fingerprint: SourceFileFingerprint, sha256: String) {
+  ) throws -> (fingerprint: SourceFileFingerprint, usedAtomicClone: Bool) {
     let sourceDescriptor = Darwin.open(source.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
     guard sourceDescriptor >= 0 else {
       throw SnapshotError.posix(operation: "open source read-only", code: errno)
@@ -426,6 +456,39 @@ public struct ReadOnlySnapshotter: Sendable {
     defer { Darwin.close(sourceDescriptor) }
 
     let before = try fingerprint(descriptor: sourceDescriptor, source: source)
+    let destinationDirectory = destination.deletingLastPathComponent()
+    let destinationDirectoryDescriptor = Darwin.open(
+      destinationDirectory.path,
+      O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW
+    )
+    guard destinationDirectoryDescriptor >= 0 else {
+      throw SnapshotError.posix(operation: "open snapshot directory", code: errno)
+    }
+    defer { Darwin.close(destinationDirectoryDescriptor) }
+
+    var cloneError = ENOTSUP
+    if hooks.allowAtomicClone {
+      let cloneResult = destination.lastPathComponent.withCString { name in
+        fclonefileat(sourceDescriptor, destinationDirectoryDescriptor, name, 0)
+      }
+      if cloneResult == 0 {
+        guard Darwin.chmod(destination.path, S_IRUSR | S_IWUSR) == 0 else {
+          throw SnapshotError.posix(operation: "secure cloned snapshot", code: errno)
+        }
+        let after = try fingerprint(descriptor: sourceDescriptor, source: source)
+        guard before == after else {
+          throw SnapshotError.sourceChanged(privacy.reference(for: source).opaqueID)
+        }
+        return (before, true)
+      }
+      cloneError = errno
+    }
+    guard
+      cloneError == ENOTSUP || cloneError == EXDEV || cloneError == EINVAL || cloneError == ENOSYS
+    else {
+      throw SnapshotError.posix(operation: "clone snapshot", code: cloneError)
+    }
+
     let destinationDescriptor = Darwin.open(
       destination.path,
       O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
@@ -436,7 +499,6 @@ public struct ReadOnlySnapshotter: Sendable {
     }
     defer { Darwin.close(destinationDescriptor) }
 
-    var hasher = SHA256()
     var buffer = [UInt8](repeating: 0, count: 128 * 1024)
     while true {
       let readCount = Darwin.read(sourceDescriptor, &buffer, buffer.count)
@@ -446,7 +508,6 @@ public struct ReadOnlySnapshotter: Sendable {
         throw SnapshotError.posix(operation: "read source", code: errno)
       }
 
-      hasher.update(data: Data(buffer[0..<readCount]))
       var written = 0
       while written < readCount {
         let writeCount = buffer.withUnsafeBytes { bytes in
@@ -471,7 +532,34 @@ public struct ReadOnlySnapshotter: Sendable {
     guard before == after else {
       throw SnapshotError.sourceChanged(privacy.reference(for: source).opaqueID)
     }
-    return (before, hasher.finalize().map { String(format: "%02x", $0) }.joined())
+    return (before, false)
+  }
+
+  private func sha256(
+    ofSnapshotFile url: URL,
+    expected: SourceFileFingerprint
+  ) throws -> String {
+    let descriptor = Darwin.open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+    guard descriptor >= 0 else {
+      throw SnapshotError.posix(operation: "open snapshot for verification", code: errno)
+    }
+    defer { Darwin.close(descriptor) }
+    let observed = try fingerprint(descriptor: descriptor, source: url)
+    guard observed.byteCount == expected.byteCount else {
+      throw SnapshotError.sourceChanged(privacy.reference(for: url).opaqueID)
+    }
+    var hasher = SHA256()
+    var buffer = [UInt8](repeating: 0, count: 128 * 1024)
+    while true {
+      let count = Darwin.read(descriptor, &buffer, buffer.count)
+      if count == 0 { break }
+      if count < 0 {
+        if errno == EINTR { continue }
+        throw SnapshotError.posix(operation: "hash snapshot", code: errno)
+      }
+      hasher.update(data: Data(buffer[0..<count]))
+    }
+    return hasher.finalize().map { String(format: "%02x", $0) }.joined()
   }
 
   private func fingerprint(at url: URL) throws -> SourceFileFingerprint {
