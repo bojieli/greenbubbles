@@ -632,6 +632,14 @@ unexpected history fails closed and requires restoration of a known-good
 encrypted backup or explicit rebootstrap rather than silently legitimizing the
 state.
 
+A separate key-gated `audit-replica` transaction now independently verifies
+SQLCipher/SQLite integrity, foreign keys, migration identities, every canonical
+record hash and indexed projection, exact membership/relationship/artifact
+links, the one-to-one FTS projection, checkpoint/coverage/completion identity,
+sync/change history, and empty reconciliation staging. Its output is
+aggregate-only and it never repairs state or replaces authoritative archive and
+real-corpus audits. See `docs/REPLICA_AUDIT.md`.
+
 ## Phase 3 — agent-neutral connector service and drafts
 
 Status: **complete for replica-backed reads and non-executing drafts**

@@ -11,9 +11,10 @@ use greenbubbles_restore::follow::{
     ReplicaFollowerHealth,
 };
 use greenbubbles_restore::replica::{
-    bootstrap_replica, get_replica_changes, get_replica_message, list_replica_conversations,
-    replica_conversation_references_artifact_in_range, replica_coverage, replica_status,
-    search_replica_messages, synchronize_replica, ReplicaMessageFilter,
+    audit_replica, bootstrap_replica, get_replica_changes, get_replica_message,
+    list_replica_conversations, replica_conversation_references_artifact_in_range,
+    replica_coverage, replica_status, search_replica_messages, synchronize_replica,
+    ReplicaMessageFilter,
 };
 use greenbubbles_restore::tools::{
     create_tool_policy, ConversationToolScope, ToolCapability, ToolMessageField,
@@ -903,6 +904,9 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
         .last_integrity_scan_unix_nanoseconds
         .is_some());
     assert!(integrity_status.integrity_scan_age_seconds.is_some());
+    let synchronized_audit = audit_replica(&replica, &key).unwrap();
+    assert_eq!(synchronized_audit.message_count, 1);
+    assert!(synchronized_audit.change_count > 1);
 
     let connection = keyed_connection(&replica);
     let retained_fts: i64 = connection
@@ -1033,6 +1037,145 @@ fn rejects_tampered_migration_identity_before_creating_a_recovery_backup() {
     drop(connection);
     assert_eq!(replica_status(&replica, &key).unwrap().schema_version, 4);
     assert_eq!(migration_backup_count(&private), backup_count + 1);
+}
+
+#[test]
+fn independently_audits_encrypted_replica_records_indexes_and_checkpoint() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private-replica-audit");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive = build_archive(&private, "archive", "account-a", "source-a");
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+    bootstrap_replica(&archive, &replica, &key).unwrap();
+
+    let report = audit_replica(&replica, &key).unwrap();
+    assert!(report.privacy_safe_summary);
+    assert!(report.initialized);
+    assert!(report.sqlite_integrity_verified);
+    assert!(report.foreign_keys_verified);
+    assert!(report.migration_ledger_verified);
+    assert!(report.identity_checkpoint_verified);
+    assert!(report.record_digests_verified);
+    assert!(report.indexed_projections_verified);
+    assert!(report.message_links_verified);
+    assert!(report.full_text_index_verified);
+    assert!(report.coverage_state_verified);
+    assert!(report.change_stream_verified);
+    assert!(report.transient_state_empty);
+    assert_eq!(report.message_count, 1);
+    let output = serde_json::to_string(&report).unwrap();
+    for private_value in [
+        "account-a",
+        "source-a",
+        PRIVATE_TEXT,
+        replica.to_str().unwrap(),
+    ] {
+        assert!(!output.contains(private_value));
+    }
+    let mut audit_process = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .arg("audit-replica")
+        .arg(&replica)
+        .arg("--replica-key-stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    audit_process
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{}\n", "31".repeat(32)).as_bytes())
+        .unwrap();
+    let audit_output = audit_process.wait_with_output().unwrap();
+    assert!(
+        audit_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&audit_output.stderr)
+    );
+    let audit_json: serde_json::Value = serde_json::from_slice(&audit_output.stdout).unwrap();
+    assert_eq!(audit_json["privacySafeSummary"], true);
+    assert_eq!(audit_json["messageCount"], 1);
+    let audit_text = String::from_utf8(audit_output.stdout).unwrap();
+    for private_value in [
+        "account-a",
+        "source-a",
+        PRIVATE_TEXT,
+        replica.to_str().unwrap(),
+    ] {
+        assert!(!audit_text.contains(private_value));
+    }
+
+    let connection = keyed_connection(&replica);
+    connection
+        .execute("UPDATE message SET search_text = 'corrupt projection'", [])
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    assert!(audit_replica(&replica, &key).is_err());
+    let connection = keyed_connection(&replica);
+    connection
+        .execute("UPDATE message SET search_text = ?1", [PRIVATE_TEXT])
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    assert!(audit_replica(&replica, &key).is_ok());
+
+    let connection = keyed_connection(&replica);
+    connection.execute("DELETE FROM message_fts", []).unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    assert!(audit_replica(&replica, &key).is_err());
+    let connection = keyed_connection(&replica);
+    connection
+        .execute(
+            "INSERT INTO message_fts(account_id, canonical_id, conversation_id, search_text)
+             SELECT account_id, canonical_id, conversation_id, search_text FROM message",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    assert!(audit_replica(&replica, &key).is_ok());
+
+    let connection = keyed_connection(&replica);
+    connection
+        .execute("UPDATE source_checkpoint SET message_count = 99", [])
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    assert!(audit_replica(&replica, &key).is_err());
+    let connection = keyed_connection(&replica);
+    connection
+        .execute("UPDATE source_checkpoint SET message_count = 1", [])
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    assert!(audit_replica(&replica, &key).is_ok());
+
+    let connection = keyed_connection(&replica);
+    connection
+        .execute("UPDATE change_log SET sequence = 2 WHERE sequence = 1", [])
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    assert!(audit_replica(&replica, &key).is_err());
 }
 
 #[test]

@@ -329,6 +329,12 @@ printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
   --bin greenbubbles-restore -- \
   replica-changes /path/to/private-replica-directory/greenbubbles.db \
   --replica-key-stdin --limit 100
+
+printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  audit-replica /path/to/private-replica-directory/greenbubbles.db \
+  --replica-key-stdin
 ```
 
 An offline restoration operator can atomically publish successive authoritative
@@ -388,6 +394,12 @@ or incomplete history fails before another backup is created. Synchronization
 mutates only changed canonical records and commits them with the checkpoint;
 the body-free change stream is ordered and resumable. See
 [docs/REPLICA_SPEC.md](docs/REPLICA_SPEC.md).
+
+`audit-replica` is a read-only, aggregate-only deep check over SQLCipher/SQLite
+integrity, foreign keys, migration identities, canonical record hashes and
+projections, exact links, FTS, checkpoint/coverage state, and sync/change
+history. It never repairs a mismatch. See
+[docs/REPLICA_AUDIT.md](docs/REPLICA_AUDIT.md).
 
 Exact retrieval uses an owner-only JSON filter. Any field can be omitted:
 

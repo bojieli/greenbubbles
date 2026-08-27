@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader};
 use std::os::unix::ffi::OsStringExt;
@@ -88,6 +88,36 @@ pub struct ReplicaStatus {
     pub artifact_decode_gap_count: Option<u64>,
     pub entity_decode_gap_count: Option<u64>,
     pub semantic_decode_coverage_ratio: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ReplicaAuditReport {
+    pub format_version: u32,
+    pub privacy_safe_summary: bool,
+    pub initialized: bool,
+    pub schema_version: u32,
+    pub encrypted_at_rest: bool,
+    pub sqlite_integrity_verified: bool,
+    pub foreign_keys_verified: bool,
+    pub migration_ledger_verified: bool,
+    pub identity_checkpoint_verified: bool,
+    pub record_digests_verified: bool,
+    pub indexed_projections_verified: bool,
+    pub message_links_verified: bool,
+    pub full_text_index_verified: bool,
+    pub coverage_state_verified: bool,
+    pub change_stream_verified: bool,
+    pub transient_state_empty: bool,
+    pub conversation_count: u64,
+    pub participant_count: u64,
+    pub message_count: u64,
+    pub artifact_count: u64,
+    pub cached_moment_count: u64,
+    pub cached_moment_interaction_count: u64,
+    pub relationship_count: u64,
+    pub message_artifact_count: u64,
+    pub change_count: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -486,6 +516,149 @@ pub fn replica_status(
         entity_decode_gap_count: stored_report
             .map(|report| report.integrity.entity_decode_gap_count),
         semantic_decode_coverage_ratio,
+    })
+}
+
+pub fn audit_replica(
+    replica_path: &Path,
+    key: &ReplicaKey,
+) -> Result<ReplicaAuditReport, RestoreError> {
+    verify_private_replica_files(replica_path)?;
+    let (mut connection, _) = open_existing_replica_read_only(replica_path, key)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+    let connection = &*transaction;
+    let version = schema_version(connection)?;
+    if version != CURRENT_SCHEMA_VERSION {
+        return Err(RestoreError::Integrity(format!(
+            "replica audit requires current schema version {CURRENT_SCHEMA_VERSION}"
+        )));
+    }
+    validate_replica_migration_ledger(connection, version)?;
+    verify_sqlite_integrity(connection)?;
+    verify_foreign_keys(connection)?;
+    let _ = replica_id(connection)?;
+
+    let conversation_count = table_count(connection, "conversation")?;
+    let participant_count = table_count(connection, "participant")?;
+    let message_count = table_count(connection, "message")?;
+    let artifact_count = table_count(connection, "artifact")?;
+    let cached_moment_count = table_count(connection, "cached_moment")?;
+    let cached_moment_interaction_count = table_count(connection, "cached_moment_interaction")?;
+    let relationship_count = table_count(connection, "message_relationship")?;
+    let message_artifact_count = table_count(connection, "message_artifact")?;
+    let change_count = table_count(connection, "change_log")?;
+    let transient_count = table_count(connection, "sync_seen")?;
+    if transient_count != 0 {
+        return Err(RestoreError::Integrity(
+            "replica reconciliation staging is not empty".to_string(),
+        ));
+    }
+
+    let identity_count = table_count(connection, "replica_identity")?;
+    if identity_count > 1 {
+        return Err(RestoreError::Integrity(
+            "replica contains multiple account identities".to_string(),
+        ));
+    }
+    let initialized = identity_count == 1;
+    if initialized {
+        let identity: (String, String, bool, String, String) = connection.query_row(
+            "SELECT account_id, current_source_fingerprint, restoration_complete,
+                    created_at_unix_nanoseconds, updated_at_unix_nanoseconds
+             FROM replica_identity WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )?;
+        verify_positive_timestamp(&identity.3, "replica creation")?;
+        verify_positive_timestamp(&identity.4, "replica update")?;
+        if identity.0.is_empty() || identity.1.is_empty() {
+            return Err(RestoreError::Integrity(
+                "replica identity is incomplete".to_string(),
+            ));
+        }
+        let record_audit = audit_replica_records(connection, &identity.0)?;
+        if record_audit.conversation_count != conversation_count
+            || record_audit.participant_count != participant_count
+            || record_audit.message_count != message_count
+            || record_audit.artifact_count != artifact_count
+            || record_audit.cached_moment_count != cached_moment_count
+            || record_audit.cached_moment_interaction_count != cached_moment_interaction_count
+        {
+            return Err(RestoreError::Integrity(
+                "replica record audit counts changed during verification".to_string(),
+            ));
+        }
+        verify_replica_message_links(connection, &identity.0, &record_audit)?;
+        verify_replica_fts(connection, &identity.0, message_count)?;
+        verify_replica_checkpoint_and_coverage(
+            connection,
+            &identity,
+            &record_audit,
+            conversation_count,
+            participant_count,
+            message_count,
+            artifact_count,
+            cached_moment_count,
+            cached_moment_interaction_count,
+        )?;
+        verify_replica_change_stream(connection, &identity.0, change_count)?;
+    } else {
+        let content_count = conversation_count
+            .saturating_add(participant_count)
+            .saturating_add(message_count)
+            .saturating_add(artifact_count)
+            .saturating_add(cached_moment_count)
+            .saturating_add(cached_moment_interaction_count)
+            .saturating_add(relationship_count)
+            .saturating_add(message_artifact_count)
+            .saturating_add(change_count)
+            .saturating_add(table_count(connection, "conversation_participant")?)
+            .saturating_add(table_count(connection, "coverage_state")?)
+            .saturating_add(table_count(connection, "source_checkpoint")?)
+            .saturating_add(table_count(connection, "sync_run")?)
+            .saturating_add(table_count(connection, "cached_surface_state")?)
+            .saturating_add(table_count(connection, "message_fts")?);
+        if content_count != 0 {
+            return Err(RestoreError::Integrity(
+                "uninitialized replica contains orphan serving state".to_string(),
+            ));
+        }
+    }
+    transaction.rollback()?;
+    Ok(ReplicaAuditReport {
+        format_version: 1,
+        privacy_safe_summary: true,
+        initialized,
+        schema_version: version,
+        encrypted_at_rest: true,
+        sqlite_integrity_verified: true,
+        foreign_keys_verified: true,
+        migration_ledger_verified: true,
+        identity_checkpoint_verified: true,
+        record_digests_verified: true,
+        indexed_projections_verified: true,
+        message_links_verified: true,
+        full_text_index_verified: true,
+        coverage_state_verified: true,
+        change_stream_verified: true,
+        transient_state_empty: true,
+        conversation_count,
+        participant_count,
+        message_count,
+        artifact_count,
+        cached_moment_count,
+        cached_moment_interaction_count,
+        relationship_count,
+        message_artifact_count,
+        change_count,
     })
 }
 
@@ -1292,6 +1465,730 @@ pub fn replica_coverage(
     })
 }
 
+#[derive(Default)]
+struct ReplicaRecordAudit {
+    conversation_count: u64,
+    participant_count: u64,
+    message_count: u64,
+    artifact_count: u64,
+    cached_moment_count: u64,
+    cached_moment_interaction_count: u64,
+    memberships: BTreeSet<Vec<u8>>,
+    relationships: BTreeSet<Vec<u8>>,
+    message_artifacts: BTreeSet<Vec<u8>>,
+}
+
+fn verify_private_replica_files(path: &Path) -> Result<(), RestoreError> {
+    ensure_private_regular_file(path)?;
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| RestoreError::UnsafePath("replica filename is invalid".to_string()))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| RestoreError::UnsafePath("replica has no parent".to_string()))?;
+    ensure_private_directory(parent)?;
+    for sidecar in [format!("{name}-wal"), format!("{name}-shm")] {
+        let sidecar = parent.join(sidecar);
+        match fs::symlink_metadata(&sidecar) {
+            Ok(_) => ensure_private_regular_file(&sidecar)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn open_existing_replica_read_only(
+    path: &Path,
+    key: &ReplicaKey,
+) -> Result<(Connection, String), RestoreError> {
+    ensure_private_regular_file(path)?;
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    configure_keyed_connection(&connection, key, false)?;
+    let cipher_version =
+        connection.pragma_query_value(None, "cipher_version", |row| row.get::<_, String>(0))?;
+    if cipher_version.is_empty() {
+        return Err(RestoreError::Integrity(
+            "replica SQLite build does not provide SQLCipher".to_string(),
+        ));
+    }
+    Ok((connection, cipher_version))
+}
+
+fn verify_sqlite_integrity(connection: &Connection) -> Result<(), RestoreError> {
+    let mut statement = connection.prepare("PRAGMA integrity_check")?;
+    let results = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if results.as_slice() != ["ok"] {
+        return Err(RestoreError::Integrity(
+            "encrypted replica failed SQLite integrity verification".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_foreign_keys(connection: &Connection) -> Result<(), RestoreError> {
+    let mut statement = connection.prepare("PRAGMA foreign_key_check")?;
+    if statement.query([])?.next()?.is_some() {
+        return Err(RestoreError::Integrity(
+            "encrypted replica failed foreign-key verification".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_positive_timestamp(value: &str, label: &str) -> Result<u128, RestoreError> {
+    value
+        .parse::<u128>()
+        .ok()
+        .filter(|timestamp| *timestamp > 0)
+        .ok_or_else(|| RestoreError::Integrity(format!("{label} timestamp is invalid")))
+}
+
+fn verify_stored_record<T: DeserializeOwned + Serialize>(
+    bytes: &[u8],
+    digest: &str,
+) -> Result<T, RestoreError> {
+    if digest.len() != 64
+        || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || sha256(bytes) != digest
+    {
+        return Err(RestoreError::Integrity(
+            "replica canonical record digest is invalid".to_string(),
+        ));
+    }
+    let value: T = serde_json::from_slice(bytes)?;
+    if serde_json::to_vec(&value)? != bytes {
+        return Err(RestoreError::Integrity(
+            "replica canonical record encoding is not stable".to_string(),
+        ));
+    }
+    Ok(value)
+}
+
+fn audit_replica_records(
+    connection: &Connection,
+    account_id: &str,
+) -> Result<ReplicaRecordAudit, RestoreError> {
+    let mut audit = ReplicaRecordAudit::default();
+    {
+        let mut statement = connection.prepare(
+            "SELECT account_id, conversation_id, kind, entity_decode_state,
+                    participant_count, record_sha256, record_json
+             FROM conversation ORDER BY conversation_id",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let stored_account: String = row.get(0)?;
+            let stored_id: String = row.get(1)?;
+            let kind: String = row.get(2)?;
+            let decode_state: String = row.get(3)?;
+            let participant_count: i64 = row.get(4)?;
+            let digest: String = row.get(5)?;
+            let bytes: Vec<u8> = row.get(6)?;
+            let value: CanonicalConversation = verify_stored_record(&bytes, &digest)?;
+            if stored_account != account_id
+                || value.account_id != account_id
+                || stored_id != value.conversation_id
+                || kind != json_enum(&value.kind)?
+                || decode_state != json_enum(&value.entity_decode_state)?
+                || u64::try_from(participant_count).ok() != Some(value.participant_ids.len() as u64)
+            {
+                return Err(RestoreError::Integrity(
+                    "replica conversation projection differs from its canonical record".to_string(),
+                ));
+            }
+            for membership in value.memberships {
+                audit.memberships.insert(serde_json::to_vec(&(
+                    account_id,
+                    &stored_id,
+                    membership.participant_id,
+                    json_enum(&membership.role)?,
+                    membership.display_name_base64,
+                ))?);
+            }
+            audit.conversation_count = audit.conversation_count.saturating_add(1);
+        }
+    }
+    {
+        let mut statement = connection.prepare(
+            "SELECT account_id, participant_id, local_profile_state,
+                    record_sha256, record_json
+             FROM participant ORDER BY participant_id",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let stored_account: String = row.get(0)?;
+            let stored_id: String = row.get(1)?;
+            let state: String = row.get(2)?;
+            let digest: String = row.get(3)?;
+            let bytes: Vec<u8> = row.get(4)?;
+            let value: CanonicalParticipant = verify_stored_record(&bytes, &digest)?;
+            if stored_account != account_id
+                || value.account_id != account_id
+                || stored_id != value.participant_id
+                || state != json_enum(&value.local_profile_state)?
+            {
+                return Err(RestoreError::Integrity(
+                    "replica participant projection differs from its canonical record".to_string(),
+                ));
+            }
+            audit.participant_count = audit.participant_count.saturating_add(1);
+        }
+    }
+    {
+        let mut statement = connection.prepare(
+            "SELECT account_id, artifact_id, kind, role, availability,
+                    source_sha256, decoded_sha256, record_sha256, record_json
+             FROM artifact ORDER BY artifact_id",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let stored_account: String = row.get(0)?;
+            let stored_id: String = row.get(1)?;
+            let kind: String = row.get(2)?;
+            let role: String = row.get(3)?;
+            let availability: String = row.get(4)?;
+            let source_sha: Option<String> = row.get(5)?;
+            let decoded_sha: Option<String> = row.get(6)?;
+            let digest: String = row.get(7)?;
+            let bytes: Vec<u8> = row.get(8)?;
+            let value: CanonicalArtifact = verify_stored_record(&bytes, &digest)?;
+            if stored_account != account_id
+                || stored_id != value.artifact_id
+                || kind != json_enum(&value.kind)?
+                || role != json_enum(&value.role)?
+                || availability != json_enum(&value.availability)?
+                || source_sha != value.source_sha256
+                || decoded_sha != value.decoded_sha256
+            {
+                return Err(RestoreError::Integrity(
+                    "replica artifact projection differs from its canonical record".to_string(),
+                ));
+            }
+            audit.artifact_count = audit.artifact_count.saturating_add(1);
+        }
+    }
+    {
+        let mut statement = connection.prepare(
+            "SELECT account_id, canonical_id, conversation_id, sender_id,
+                    conversation_ordinal, created_at_unix, direction, logical_type,
+                    sub_type, semantic_decode_state, search_text, record_sha256, record_json
+             FROM message ORDER BY canonical_id",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let stored_account: String = row.get(0)?;
+            let stored_id: String = row.get(1)?;
+            let conversation_id: String = row.get(2)?;
+            let sender_id: Option<String> = row.get(3)?;
+            let ordinal: i64 = row.get(4)?;
+            let created_at: Option<i64> = row.get(5)?;
+            let direction: String = row.get(6)?;
+            let logical_type: Option<i64> = row.get(7)?;
+            let sub_type: Option<i64> = row.get(8)?;
+            let decode_state: String = row.get(9)?;
+            let search_text: String = row.get(10)?;
+            let digest: String = row.get(11)?;
+            let bytes: Vec<u8> = row.get(12)?;
+            let value: CanonicalMessage = verify_stored_record(&bytes, &digest)?;
+            if stored_account != account_id
+                || value.account_id != account_id
+                || stored_id != value.canonical_id
+                || conversation_id != value.conversation_id
+                || sender_id != value.sender_id
+                || u64::try_from(ordinal).ok() != Some(value.conversation_ordinal)
+                || created_at != value.created_at_unix
+                || direction != json_enum(&value.direction)?
+                || logical_type != value.logical_type.map(i64::from)
+                || sub_type != value.sub_type.map(i64::from)
+                || decode_state != json_enum(&value.semantic_decode_state)?
+                || search_text != message_search_text(&value)
+            {
+                return Err(RestoreError::Integrity(
+                    "replica message projection differs from its canonical record".to_string(),
+                ));
+            }
+            for (index, relationship) in value.relationships.iter().enumerate() {
+                audit.relationships.insert(serde_json::to_vec(&(
+                    account_id,
+                    &stored_id,
+                    index as u64,
+                    json_enum(&relationship.kind)?,
+                    &relationship.target_canonical_id,
+                    relationship.resolved,
+                    serde_json::to_vec(relationship)?,
+                ))?);
+            }
+            for (index, reference) in value.artifact_references.iter().enumerate() {
+                audit.message_artifacts.insert(serde_json::to_vec(&(
+                    account_id,
+                    &stored_id,
+                    index as u64,
+                    &reference.artifact_id,
+                    json_enum(&reference.role)?,
+                    reference.preferred,
+                ))?);
+            }
+            audit.message_count = audit.message_count.saturating_add(1);
+        }
+    }
+    audit_cached_records(connection, account_id, &mut audit)?;
+    Ok(audit)
+}
+
+fn audit_cached_records(
+    connection: &Connection,
+    account_id: &str,
+    audit: &mut ReplicaRecordAudit,
+) -> Result<(), RestoreError> {
+    let mut statement = connection.prepare(
+        "SELECT account_id, canonical_id, author_id, created_at_unix, content_type,
+                record_sha256, record_json
+         FROM cached_moment ORDER BY canonical_id",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let stored_account: String = row.get(0)?;
+        let stored_id: String = row.get(1)?;
+        let author: Option<String> = row.get(2)?;
+        let created: Option<i64> = row.get(3)?;
+        let content_type: Option<i64> = row.get(4)?;
+        let digest: String = row.get(5)?;
+        let bytes: Vec<u8> = row.get(6)?;
+        let value: crate::CanonicalCachedMoment = verify_stored_record(&bytes, &digest)?;
+        if stored_account != account_id
+            || value.account_id != account_id
+            || stored_id != value.canonical_id
+            || author != value.author_id
+            || created != value.created_at_unix
+            || content_type != value.content_type
+        {
+            return Err(RestoreError::Integrity(
+                "replica cached moment projection differs from its canonical record".to_string(),
+            ));
+        }
+        audit.cached_moment_count = audit.cached_moment_count.saturating_add(1);
+    }
+    drop(rows);
+    drop(statement);
+    let mut statement = connection.prepare(
+        "SELECT account_id, canonical_id, created_at_unix, interaction_kind,
+                from_participant_id, to_participant_id, record_sha256, record_json
+         FROM cached_moment_interaction ORDER BY canonical_id",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let stored_account: String = row.get(0)?;
+        let stored_id: String = row.get(1)?;
+        let created: Option<i64> = row.get(2)?;
+        let kind: String = row.get(3)?;
+        let from: Option<String> = row.get(4)?;
+        let to: Option<String> = row.get(5)?;
+        let digest: String = row.get(6)?;
+        let bytes: Vec<u8> = row.get(7)?;
+        let value: crate::CanonicalCachedMomentInteraction = verify_stored_record(&bytes, &digest)?;
+        if stored_account != account_id
+            || value.account_id != account_id
+            || stored_id != value.canonical_id
+            || created != value.created_at_unix
+            || kind != json_enum(&value.kind)?
+            || from != value.from_participant_id
+            || to != value.to_participant_id
+        {
+            return Err(RestoreError::Integrity(
+                "replica cached interaction projection differs from its canonical record"
+                    .to_string(),
+            ));
+        }
+        audit.cached_moment_interaction_count =
+            audit.cached_moment_interaction_count.saturating_add(1);
+    }
+    Ok(())
+}
+
+fn verify_replica_message_links(
+    connection: &Connection,
+    account_id: &str,
+    audit: &ReplicaRecordAudit,
+) -> Result<(), RestoreError> {
+    let mut memberships = BTreeSet::new();
+    let mut statement = connection.prepare(
+        "SELECT account_id, conversation_id, participant_id, membership_role,
+                display_name_base64
+         FROM conversation_participant
+         ORDER BY conversation_id, participant_id, membership_role",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let account: String = row.get(0)?;
+        if account != account_id {
+            return Err(RestoreError::Integrity(
+                "replica membership crossed the account boundary".to_string(),
+            ));
+        }
+        memberships.insert(serde_json::to_vec(&(
+            account,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+        ))?);
+    }
+    if memberships != audit.memberships {
+        return Err(RestoreError::Integrity(
+            "replica membership projection differs from canonical conversations".to_string(),
+        ));
+    }
+    drop(rows);
+    drop(statement);
+
+    let mut relationships = BTreeSet::new();
+    let mut statement = connection.prepare(
+        "SELECT account_id, source_canonical_id, relationship_ordinal, kind,
+                target_canonical_id, resolved, record_json
+         FROM message_relationship
+         ORDER BY source_canonical_id, relationship_ordinal",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let account: String = row.get(0)?;
+        let ordinal: i64 = row.get(2)?;
+        if account != account_id || ordinal < 0 {
+            return Err(RestoreError::Integrity(
+                "replica relationship identity is invalid".to_string(),
+            ));
+        }
+        relationships.insert(serde_json::to_vec(&(
+            account,
+            row.get::<_, String>(1)?,
+            ordinal as u64,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, bool>(5)?,
+            row.get::<_, Vec<u8>>(6)?,
+        ))?);
+    }
+    if relationships != audit.relationships {
+        return Err(RestoreError::Integrity(
+            "replica relationship projection differs from canonical messages".to_string(),
+        ));
+    }
+    drop(rows);
+    drop(statement);
+
+    let mut artifacts = BTreeSet::new();
+    let mut statement = connection.prepare(
+        "SELECT account_id, canonical_id, artifact_ordinal, artifact_id, role, preferred
+         FROM message_artifact ORDER BY canonical_id, artifact_ordinal",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let account: String = row.get(0)?;
+        let ordinal: i64 = row.get(2)?;
+        if account != account_id || ordinal < 0 {
+            return Err(RestoreError::Integrity(
+                "replica message-artifact identity is invalid".to_string(),
+            ));
+        }
+        artifacts.insert(serde_json::to_vec(&(
+            account,
+            row.get::<_, String>(1)?,
+            ordinal as u64,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, bool>(5)?,
+        ))?);
+    }
+    if artifacts != audit.message_artifacts {
+        return Err(RestoreError::Integrity(
+            "replica message-artifact projection differs from canonical messages".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_replica_fts(
+    connection: &Connection,
+    account_id: &str,
+    message_count: u64,
+) -> Result<(), RestoreError> {
+    if table_count(connection, "message_fts")? != message_count {
+        return Err(RestoreError::Integrity(
+            "replica full-text row count differs from canonical messages".to_string(),
+        ));
+    }
+    let missing: i64 = connection.query_row(
+        "SELECT count(*) FROM message m
+         WHERE m.account_id = ?1 AND NOT EXISTS (
+           SELECT 1 FROM message_fts f
+           WHERE f.account_id = m.account_id
+             AND f.canonical_id = m.canonical_id
+             AND f.conversation_id = m.conversation_id
+             AND f.search_text = m.search_text
+         )",
+        [account_id],
+        |row| row.get(0),
+    )?;
+    let extra: i64 = connection.query_row(
+        "SELECT count(*) FROM message_fts f
+         WHERE f.account_id != ?1 OR NOT EXISTS (
+           SELECT 1 FROM message m
+           WHERE m.account_id = f.account_id
+             AND m.canonical_id = f.canonical_id
+             AND m.conversation_id = f.conversation_id
+             AND m.search_text = f.search_text
+         )",
+        [account_id],
+        |row| row.get(0),
+    )?;
+    let duplicate: Option<i64> = connection
+        .query_row(
+            "SELECT count(*) FROM message_fts
+             GROUP BY account_id, canonical_id HAVING count(*) != 1 LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if missing != 0 || extra != 0 || duplicate.is_some() {
+        return Err(RestoreError::Integrity(
+            "replica full-text projection differs from canonical messages".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_replica_checkpoint_and_coverage(
+    connection: &Connection,
+    identity: &(String, String, bool, String, String),
+    audit: &ReplicaRecordAudit,
+    conversation_count: u64,
+    participant_count: u64,
+    message_count: u64,
+    artifact_count: u64,
+    cached_moment_count: u64,
+    cached_moment_interaction_count: u64,
+) -> Result<(), RestoreError> {
+    let checkpoint: (String, String, i64, i64, i64, i64) = connection.query_row(
+        "SELECT source_fingerprint, committed_at_unix_nanoseconds,
+                conversation_count, participant_count, message_count, artifact_count
+         FROM source_checkpoint WHERE account_id = ?1",
+        [&identity.0],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        },
+    )?;
+    let checkpoint_timestamp = verify_positive_timestamp(&checkpoint.1, "replica checkpoint")?;
+    if table_count(connection, "source_checkpoint")? != 1
+        || checkpoint.0 != identity.1
+        || u64::try_from(checkpoint.2).ok() != Some(conversation_count)
+        || u64::try_from(checkpoint.3).ok() != Some(participant_count)
+        || u64::try_from(checkpoint.4).ok() != Some(message_count)
+        || u64::try_from(checkpoint.5).ok() != Some(artifact_count)
+    {
+        return Err(RestoreError::Integrity(
+            "replica checkpoint differs from committed canonical state".to_string(),
+        ));
+    }
+    let mut matching_checkpoint_run = false;
+    let mut statement = connection
+        .prepare("SELECT source_fingerprint, committed_at_unix_nanoseconds FROM sync_run")?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let source: String = row.get(0)?;
+        let committed =
+            verify_positive_timestamp(&row.get::<_, String>(1)?, "replica synchronization commit")?;
+        if committed > checkpoint_timestamp {
+            return Err(RestoreError::Integrity(
+                "replica synchronization history leads its checkpoint".to_string(),
+            ));
+        }
+        if committed == checkpoint_timestamp && source == identity.1 {
+            matching_checkpoint_run = true;
+        }
+    }
+    if !matching_checkpoint_run {
+        return Err(RestoreError::Integrity(
+            "replica checkpoint does not match the latest synchronization run".to_string(),
+        ));
+    }
+    let (coverage_source, coverage_bytes, report_bytes, stored_complete): (
+        String,
+        Vec<u8>,
+        Vec<u8>,
+        bool,
+    ) = connection.query_row(
+        "SELECT source_fingerprint, coverage_json, report_json,
+                full_restoration_achieved
+         FROM coverage_state WHERE account_id = ?1",
+        [&identity.0],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    if table_count(connection, "coverage_state")? != 1 {
+        return Err(RestoreError::Integrity(
+            "replica coverage state is not singular".to_string(),
+        ));
+    }
+    let coverage: RestorationCoverage = serde_json::from_slice(&coverage_bytes)?;
+    let report: RestorationReport = serde_json::from_slice(&report_bytes)?;
+    validate_restoration_coverage_schema(&coverage)?;
+    if coverage_source != identity.1
+        || report.account_id != identity.0
+        || report.source_fingerprint != identity.1
+        || report.archive_scope != crate::RestorationArchiveScope::Authoritative
+        || report.completion.full_restoration_achieved != identity.2
+        || stored_complete != identity.2
+        || !report.integrity.row_equation_holds()
+        || report.integrity.conversation_count != conversation_count
+        || report.integrity.participant_count != participant_count
+        || report.integrity.unique_artifact_count != artifact_count
+        || report.integrity.cached_moment_count != cached_moment_count
+        || report.integrity.cached_moment_interaction_count != cached_moment_interaction_count
+        || audit.conversation_count != conversation_count
+        || audit.participant_count != participant_count
+        || audit.message_count != message_count
+        || audit.artifact_count != artifact_count
+    {
+        return Err(RestoreError::Integrity(
+            "replica coverage state differs from committed canonical state".to_string(),
+        ));
+    }
+    let cached_state_count = table_count(connection, "cached_surface_state")?;
+    if cached_state_count > 1 {
+        return Err(RestoreError::Integrity(
+            "replica cached coverage state is not singular".to_string(),
+        ));
+    }
+    if cached_state_count == 1 {
+        let (account, observed_at, bytes): (String, String, Vec<u8>) = connection.query_row(
+            "SELECT account_id, observed_at, coverage_json FROM cached_surface_state",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let cached: crate::CachedSurfaceCoverage = serde_json::from_slice(&bytes)?;
+        validate_cached_coverage_schema(&cached)?;
+        if account != identity.0 || observed_at != cached.observed_at {
+            return Err(RestoreError::Integrity(
+                "replica cached coverage projection is inconsistent".to_string(),
+            ));
+        }
+    } else if cached_moment_count != 0 || cached_moment_interaction_count != 0 {
+        return Err(RestoreError::Integrity(
+            "replica cached records have no coverage state".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_replica_change_stream(
+    connection: &Connection,
+    account_id: &str,
+    change_count: u64,
+) -> Result<(), RestoreError> {
+    if change_count == 0 {
+        return Err(RestoreError::Integrity(
+            "initialized replica has no checkpoint change event".to_string(),
+        ));
+    }
+    let (minimum, maximum): (i64, i64) = connection.query_row(
+        "SELECT min(sequence), max(sequence) FROM change_log",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if minimum != 1 || u64::try_from(maximum).ok() != Some(change_count) {
+        return Err(RestoreError::Integrity(
+            "replica change stream sequence is not contiguous".to_string(),
+        ));
+    }
+    let mut statement = connection.prepare(
+        "SELECT account_id, source_fingerprint, change_kind, entity_kind,
+                record_sha256, observed_at_unix_nanoseconds
+         FROM change_log ORDER BY sequence",
+    )?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let account: String = row.get(0)?;
+        let source: String = row.get(1)?;
+        let change_kind: String = row.get(2)?;
+        let entity_kind: String = row.get(3)?;
+        let digest: Option<String> = row.get(4)?;
+        let timestamp: String = row.get(5)?;
+        if account != account_id
+            || source.is_empty()
+            || !matches!(
+                change_kind.as_str(),
+                "bootstrap" | "added" | "changed" | "removed"
+            )
+            || !matches!(
+                entity_kind.as_str(),
+                "checkpoint"
+                    | "conversation"
+                    | "participant"
+                    | "message"
+                    | "artifact"
+                    | "cachedMoment"
+                    | "cachedMomentInteraction"
+            )
+            || digest.as_deref().is_some_and(|value| {
+                value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        {
+            return Err(RestoreError::Integrity(
+                "replica change stream entry is malformed".to_string(),
+            ));
+        }
+        verify_positive_timestamp(&timestamp, "replica change")?;
+    }
+    let mut statement = connection.prepare(
+        "SELECT account_id, mode, source_fingerprint, started_at_unix_nanoseconds,
+                committed_at_unix_nanoseconds, changed_record_count
+         FROM sync_run ORDER BY committed_at_unix_nanoseconds",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut run_count = 0_u64;
+    while let Some(row) = rows.next()? {
+        let account: String = row.get(0)?;
+        let mode: String = row.get(1)?;
+        let source: String = row.get(2)?;
+        let started = verify_positive_timestamp(&row.get::<_, String>(3)?, "sync start")?;
+        let committed = verify_positive_timestamp(&row.get::<_, String>(4)?, "sync commit")?;
+        let changed: i64 = row.get(5)?;
+        if account != account_id
+            || source.is_empty()
+            || !matches!(
+                mode.as_str(),
+                "bootstrap" | "incrementalMerge" | "integrityScan" | "fullScan" | "reconcile"
+            )
+            || committed < started
+            || changed < 0
+        {
+            return Err(RestoreError::Integrity(
+                "replica synchronization history is malformed".to_string(),
+            ));
+        }
+        run_count = run_count.saturating_add(1);
+    }
+    if run_count == 0 {
+        return Err(RestoreError::Integrity(
+            "initialized replica has no synchronization history".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn open_replica(path: &Path, key: &ReplicaKey) -> Result<OpenedReplica, RestoreError> {
     let existed = path.try_exists()?;
     if existed {
@@ -1359,6 +2256,15 @@ fn open_keyed_connection(path: &Path, key: &ReplicaKey) -> Result<Connection, Re
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
+    configure_keyed_connection(&connection, key, true)?;
+    Ok(connection)
+}
+
+fn configure_keyed_connection(
+    connection: &Connection,
+    key: &ReplicaKey,
+    writable: bool,
+) -> Result<(), RestoreError> {
     let mut key_hex = hex::encode(key.expose_for_replica_operation());
     let key_statement = Zeroizing::new(format!("PRAGMA key = \"x'{key_hex}'\";"));
     key_hex.zeroize();
@@ -1370,12 +2276,14 @@ fn open_keyed_connection(path: &Path, key: &ReplicaKey) -> Result<Connection, Re
     connection.execute_batch(
         "PRAGMA foreign_keys = ON;
          PRAGMA trusted_schema = OFF;
-         PRAGMA temp_store = MEMORY;
-         PRAGMA secure_delete = ON;",
+         PRAGMA temp_store = MEMORY;",
     )?;
+    if writable {
+        connection.execute_batch("PRAGMA secure_delete = ON;")?;
+    }
     connection.busy_timeout(Duration::from_secs(5))?;
     connection.query_row("SELECT count(*) FROM sqlite_schema", [], |_| Ok(()))?;
-    Ok(connection)
+    Ok(())
 }
 
 fn schema_version(connection: &Connection) -> Result<u32, RestoreError> {

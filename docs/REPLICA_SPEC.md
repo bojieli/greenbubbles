@@ -90,6 +90,13 @@ They also prove that changed migration digests, invalid format versions, and
 malformed migration timestamps are rejected without creating a misleading new
 backup.
 
+`audit-replica` is the independent read-only serving-state check. In one
+consistent encrypted transaction it re-derives every canonical record digest
+and indexed projection, exact memberships/relationships/artifact links, FTS,
+checkpoint counts, coverage/completion identity, synchronization/change
+history, SQLite integrity, foreign keys, and empty staging. It returns only
+aggregate counts and verdicts and performs no repair. See `REPLICA_AUDIT.md`.
+
 ## Transactional reconciliation and changes
 
 `replica-sync` compares canonical SHA-256 record identities inside an immediate

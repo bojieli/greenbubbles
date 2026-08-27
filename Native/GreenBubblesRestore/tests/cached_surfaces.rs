@@ -13,7 +13,7 @@ use greenbubbles_restore::{
     },
     prepare_catalog,
     replica::{
-        bootstrap_replica, get_replica_changes, replica_coverage, replica_status,
+        audit_replica, bootstrap_replica, get_replica_changes, replica_coverage, replica_status,
         search_replica_cached_moments, synchronize_replica, ReplicaCachedMomentFilter,
         ReplicaCachedSurfaceAvailability,
     },
@@ -234,6 +234,9 @@ fn restores_cached_moments_and_interactions_without_claiming_cache_completeness(
         replica_status(&replica, &key).unwrap().cached_moment_count,
         2
     );
+    let replica_audit = audit_replica(&replica, &key).unwrap();
+    assert_eq!(replica_audit.cached_moment_count, 2);
+    assert_eq!(replica_audit.cached_moment_interaction_count, 2);
     assert!(
         replica_coverage(&replica, &key)
             .unwrap()
