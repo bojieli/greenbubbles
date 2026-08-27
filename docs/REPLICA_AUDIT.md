@@ -51,3 +51,9 @@ This audit proves internal encrypted-replica consistency. The authoritative
 `audit-archive` remains responsible for source restoration ledgers and exact
 recorded media files, and real-corpus completeness/latency gates remain
 separate.
+
+Older retained recovery points use the schema-aware
+`audit-replica-backup`. A passing backup can be copied and migrated into a
+separate deep-audited candidate with `prepare-replica-recovery`; neither command
+performs active cutover. See `REPLICA_BACKUP_AUDIT.md` and
+`REPLICA_RECOVERY.md`.
