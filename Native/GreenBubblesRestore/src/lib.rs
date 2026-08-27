@@ -8,6 +8,7 @@ pub mod model;
 pub mod reconcile;
 pub mod restore;
 pub mod secret;
+pub mod tools;
 
 pub use catalog::{prepare_catalog, PreparedCatalog, PreparedDatabase, StorageFamily};
 pub use error::RestoreError;

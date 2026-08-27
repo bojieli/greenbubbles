@@ -120,6 +120,36 @@ metadata only for enabled conversations. Filesystem and optional notification
 hints merely decide when to run this reconciliation. See
 [docs/NOTIFICATION_HINTS.md](docs/NOTIFICATION_HINTS.md).
 
+An experimental local AI-tool kernel adds operation, account, conversation,
+field, time-range, and local/remote-destination checks. It has no send
+capability. Create its private working directory first, then grant only the
+needed fields and operations:
+
+```sh
+mkdir -m 700 /private/greenbubbles-tools /private/greenbubbles-tools/drafts
+
+cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  tool-policy <private-output-directory> /private/greenbubbles-tools/policy.json \
+  <enabled-conversation-id> --capabilities list,read,search,draft \
+  --fields sender,created-at,direction,type,content,attachments,relationships
+
+cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  tool-recent <private-output-directory> /private/greenbubbles-tools/policy.json \
+  /private/greenbubbles-tools/audit.ndjson <enabled-conversation-id> \
+  --requester local-agent --limit 20
+
+printf '%s' 'search terms' | cargo run \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  tool-search <private-output-directory> /private/greenbubbles-tools/policy.json \
+  /private/greenbubbles-tools/audit.ndjson --requester local-agent --query-stdin
+```
+
+Remote-model release is denied unless the policy was created with the explicit
+`--allow-remote-model` flag. Raw source fields and paths are never part of the
+minimized tool response. Search queries, message bodies, and draft bodies are
+omitted from the append-only audit JSONL. See
+[docs/AI_TOOL_BOUNDARY.md](docs/AI_TOOL_BOUNDARY.md).
+
 ## Scope and authorization
 
 Use GreenBubbles only with data and accounts you own or are explicitly

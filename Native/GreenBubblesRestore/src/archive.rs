@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -166,7 +166,9 @@ pub(crate) fn load_policy(policy_path: &Path) -> Result<ConversationReadPolicy, 
     Ok(policy)
 }
 
-fn load_conversation_ids(archive_directory: &Path) -> Result<BTreeSet<String>, RestoreError> {
+pub(crate) fn load_conversation_ids(
+    archive_directory: &Path,
+) -> Result<BTreeSet<String>, RestoreError> {
     let path = archive_directory.join("conversations.ndjson");
     ensure_private_regular_file(&path)?;
     let reader = BufReader::new(File::open(path)?);
@@ -216,6 +218,7 @@ pub(crate) fn ensure_private_regular_file(path: &Path) -> Result<(), RestoreErro
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
         || metadata.permissions().mode() & 0o077 != 0
+        || metadata.nlink() != 1
     {
         return Err(RestoreError::Integrity(format!(
             "private archive input is not an owner-only regular file: {}",
