@@ -4,8 +4,18 @@ GreenBubbles is an experimental, local-first bridge for making a user's own
 WeChat data available to narrowly scoped AI tools on macOS.
 
 The project currently implements passive, read-only discovery, consistent
-database snapshots, and an offline restoration engine. It does **not** inject
-code into WeChat, call private network APIs, or send messages.
+database snapshots, and an offline restoration engine. That pipeline does
+**not** inject code into WeChat, call private network APIs, or send messages.
+
+Separately, and only under explicit owner authorization, the
+`greenbubbles-acquire` helper can capture the owner's own database passphrase
+by attaching `lldb` to the owner's own running WeChat client during a
+logout/re-login. It is gated by an explicit `--owner-authorized` flag, a manual
+owner-run re-sign of the client, and a pinned-build check, and it proves
+correctness against every database's SQLCipher4 page-1 HMAC. It exists because
+the owner reversed the project's previous blanket prohibition on
+debugger-based acquisition on 2026-08-27. See
+[docs/PASSPHRASE_ACQUISITION.md](docs/PASSPHRASE_ACQUISITION.md).
 
 ## Current milestone
 
@@ -40,15 +50,25 @@ The current passive-read slice provides:
   build, adapter, approval, idempotency, rate, kill-switch, and lifecycle
   checks without exposing approval, attempt, or send operations.
 
+Separately from that passive slice, one explicitly gated active helper exists:
+owner-authorized passphrase capture (`greenbubbles-acquire`), validated live on
+2026-08-27 against the owner's own account on the pinned build (26/26
+databases HMAC-verified). It requires root, a manual owner-run client re-sign,
+and the `--owner-authorized` flag, and fails closed on any unpinned build. See
+[docs/PASSPHRASE_ACQUISITION.md](docs/PASSPHRASE_ACQUISITION.md).
+
 See [PLAN.md](PLAN.md) for the phased roadmap and safety gates.
 The implemented downstream protocol and validation evidence are in
 [docs/SOURCE_CONNECTOR_CONTRACT.md](docs/SOURCE_CONNECTOR_CONTRACT.md),
 [docs/DOWNSTREAM_CONSUMER.md](docs/DOWNSTREAM_CONSUMER.md), and
 [docs/ECOSYSTEM_VALIDATION.md](docs/ECOSYSTEM_VALIDATION.md). The bounded static
 active-read assessment is in
-[docs/ACTIVE_READ_FEASIBILITY.md](docs/ACTIVE_READ_FEASIBILITY.md). The passive
-acquisition assessment and non-invasive stop rule are in
-[docs/ACQUISITION_FEASIBILITY.md](docs/ACQUISITION_FEASIBILITY.md). Every
+[docs/ACTIVE_READ_FEASIBILITY.md](docs/ACTIVE_READ_FEASIBILITY.md). The
+acquisition assessment and the three-path owner-controlled acquisition model
+are in
+[docs/ACQUISITION_FEASIBILITY.md](docs/ACQUISITION_FEASIBILITY.md); the gated
+active capture path is documented in
+[docs/PASSPHRASE_ACQUISITION.md](docs/PASSPHRASE_ACQUISITION.md). Every
 remaining external gate and its required resumption evidence is mapped in
 [docs/GATE_READINESS.md](docs/GATE_READINESS.md). Aggregate evidence from the
 owner-authorized, content-free local snapshot validation is in
@@ -77,11 +97,40 @@ swift run greenbubbles integration-surfaces
 swift run greenbubbles inventory
 swift run greenbubbles snapshot
 swift run greenbubbles-public-article /private/owner-only-request.json
+swift run greenbubbles-acquire preflight
+swift run greenbubbles-acquire capture --output <owner-only-passphrase-file> \
+  --owner-authorized
+swift run greenbubbles-acquire verify --passphrase-stdin
 swift scripts/check-pinned-build-profile.swift
 swift scripts/check-distribution-inventory.swift
+swift scripts/check-secret-hygiene.swift
 cd Native/GreenBubblesRestore
 cargo test --locked --all-targets
 ```
+
+One-time repository setup: enable the pre-commit secret-hygiene hook so
+extracted key material can never enter local history:
+
+```sh
+git config core.hooksPath scripts/git-hooks
+```
+
+The hook runs `scripts/check-secret-hygiene.swift --staged` against staged
+content; the same check runs over all tracked files in CI. It blocks banned
+secret-file names and secret-shaped content patterns (raw-key literals, JSON
+passphrase fields, `PRAGMA key` hex literals); ordinary 64-hex strings such as
+pinned build hashes remain allowed.
+
+`greenbubbles-acquire` is the owner-authorized active acquisition helper,
+separate from the passive pipeline. `preflight` reports pinned-build,
+hardening, process, privilege, and salt-inventory readiness and prints the
+exact manual re-sign command when required; `capture` refuses without
+`--owner-authorized`, waits for an owner logout/re-login, and writes the
+passphrase only to the owner-specified `--output` file (mode `0600`, parent
+`0700`, no silent overwrite without `--overwrite`); `verify` re-checks a stored
+passphrase from standard input against every database's page-1 HMAC. The
+passphrase never appears on the command line, in JSON reports, or in logs. See
+[docs/PASSPHRASE_ACQUISITION.md](docs/PASSPHRASE_ACQUISITION.md).
 
 `inventory` reports opaque path identifiers by default. For local debugging,
 `--include-paths` may be used explicitly. Do not paste that output into issues
@@ -182,7 +231,19 @@ attribution are missing, so it cannot falsely satisfy the 60-second end-to-end
 gate. See [docs/LATENCY_EVIDENCE.md](docs/LATENCY_EVIDENCE.md).
 
 The native restoration engine works only from such a snapshot. A database
-passphrase must never be placed on the command line:
+passphrase must never be placed on the command line. A passphrase file
+produced by `greenbubbles-acquire capture --output <file>` can be piped
+directly, keeping the value out of arguments and shell history:
+
+```sh
+cat <owner-only-passphrase-file> | cargo run \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  restore <snapshot-directory> <private-output-directory> \
+  --account-root <authorized-account-directory> --passphrase-stdin
+```
+
+The full restoration command set:
 
 ```sh
 cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml \
@@ -572,6 +633,13 @@ Use GreenBubbles only with data and accounts you own or are explicitly
 authorized to access. Group chats contain other people's data even when the
 database belongs to the local user. The connector must enforce per-conversation
 consent and data minimization before any model integration is enabled.
+
+The `greenbubbles-acquire` capture helper must only ever be used against the
+owner's own WeChat account on the owner's own device, with the explicit
+`--owner-authorized` flag, after the owner has personally performed any
+required client re-signing. Using it against any other account, device, or
+person is outside the scope of this project and of any authorization recorded
+here.
 
 This repository is private and no open-source license has been selected yet.
 No permission to redistribute the code is granted until a license is added.

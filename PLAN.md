@@ -303,15 +303,21 @@ This gate applies before adding automated key acquisition, private-client
 modification, active reads, write automation, or public source/binary
 distribution. Existing restoration work that accepts an owner-supplied
 passphrase does not by itself answer whether a complete public acquisition path
-is technically and legally supportable.
+is technically and legally supportable. By explicit owner decision on
+2026-08-27, one bounded exception to this ordering now exists: the
+`greenbubbles-acquire` owner-authorized passphrase-capture helper
+(`docs/PASSPHRASE_ACQUISITION.md`) for the owner's own account and device,
+private-development only. It does not pass any part of this gate, and the
+legal/distribution and action items below remain fully in force.
 
 ### Technical acquisition gate
 
 - [ ] Confirm that useful conversation and attachment data exists on a pinned,
   current WeChat macOS version and document its locally available coverage.
-- [ ] Determine whether restoration can work without modifying or re-signing
-  WeChat, attaching to its process, scanning process memory, or exporting
-  reusable session credentials.
+- [ ] Determine whether a lawful owner-authorized acquisition route exists —
+  including, as a separately gated fallback, re-signing WeChat and attaching to
+  its process under explicit owner authorization; memory scanning and reusable
+  session-credential export remain prohibited.
 - [x] Evaluate user-created official backups, exports, and owner-supplied
   plaintext/passphrase workflows before any more invasive alternative.
 - [ ] Prove bootstrap and incremental synchronization on disposable test data;
@@ -339,12 +345,13 @@ the two implementations.
 The bounded acquisition assessment statically confirms that the pinned client
 contains user-mediated backup/restore, chat-history migration, device-transfer,
 and file-export workflows. It does not prove a portable plaintext export,
-official-backup compatibility, or complete conversation/media coverage.
-GreenBubbles accepts only owner-supplied plaintext snapshots or a passphrase
-through standard input and has no automated key acquisition. The preferred
-order is official portable export/backup, then owner-supplied plaintext or
-passphrase, then stop; there is no invasive fallback. See
-`docs/ACQUISITION_FEASIBILITY.md`.
+official-backup compatibility, or complete conversation/media coverage. The
+preferred acquisition order is official portable export/backup, then
+owner-supplied plaintext or passphrase through standard input, then the gated
+owner-authorized `greenbubbles-acquire` capture; if none is available or
+authorized, acquisition for that account stops. The passive pipeline itself
+still performs no automated key acquisition. See
+`docs/ACQUISITION_FEASIBILITY.md` and `docs/PASSPHRASE_ACQUISITION.md`.
 
 Owner-authorized local validation now adds real passive acquisition evidence:
 two redacted account roots produced consistent 25-set and 15-set bootstrap
@@ -364,12 +371,18 @@ it did not inspect content or prove message linkage. See
 `docs/LOCAL_ACQUISITION_VALIDATION.md`.
 
 A refreshed public-project survey found no ordinary user-visible or officially
-documented source for the current macOS database passphrase. Available projects
-either instrument or scan a live client, weaken platform protections, re-sign
-the application, require an already known key, target older mobile backups, or
-use a separate bot relationship. This reinforces the existing stop rule rather
-than authorizing automated key extraction. See
-`docs/ACQUISITION_FEASIBILITY.md`.
+documented non-invasive source for the current macOS database passphrase.
+Available projects either instrument or scan a live client, weaken platform
+protections, re-sign the application, require an already known key, target
+older mobile backups, or use a separate bot relationship. That finding remains
+factually true. By explicit owner decision on 2026-08-27, the previous blanket
+prohibition on debugger-based acquisition was lifted: the LLDB
+`CCKeyDerivationPBKDF` capture mechanism was validated live on the owner's own
+machine and account (26/26 databases HMAC-verified on the pinned 4.1.12 build)
+and is embedded as the explicitly gated third acquisition path. Memory
+scanning, injection, reusable session-credential export, automated re-signing,
+and anti-detection work remain prohibited. See
+`docs/ACQUISITION_FEASIBILITY.md` and `docs/PASSPHRASE_ACQUISITION.md`.
 
 A fresh owner-authorized bootstrap/incremental pair independently reproduces
 the incremental's 8 changed sets from the two complete 25-set content
@@ -1031,8 +1044,9 @@ It does not initially include:
 ## Near-term work queue
 
 1. Keep the repository private. Obtain an authorized disposable/test corpus by
-   official portable export/backup, owner-supplied plaintext, or passphrase
-   through standard input; do not add an invasive fallback.
+   official portable export/backup, owner-supplied plaintext, passphrase
+   through standard input, or the gated owner-authorized `greenbubbles-acquire`
+   capture, in that preference order.
 2. Verify discovery on Intel and Apple Silicon across two explicitly
    fingerprinted client versions using redacted metadata only.
 3. On one immutable pinned-current-version corpus, close row accounting,

@@ -1,9 +1,12 @@
 # Passive acquisition feasibility
 
 This document records the Phase 0.5 evaluation of official, user-mediated
-acquisition workflows and owner-supplied inputs. It does not establish that an
-official workflow produces a portable GreenBubbles archive, and it does not
-authorize a more invasive fallback.
+acquisition workflows and owner-supplied inputs, and the owner-authorized
+active capture path added after that evaluation. It does not establish that an
+official workflow produces a portable GreenBubbles archive. The previous
+blanket prohibition on debugger-based acquisition was lifted by explicit owner
+decision on 2026-08-27; the resulting gated path is documented in
+[PASSPHRASE_ACQUISITION.md](PASSPHRASE_ACQUISITION.md).
 
 ## Pinned static evidence
 
@@ -56,17 +59,27 @@ absence produces `notObserved`; it never becomes inferred support.
 
 ## Inputs GreenBubbles supports
 
-GreenBubbles currently supports two non-invasive, owner-controlled acquisition
-paths:
+GreenBubbles currently supports three owner-controlled acquisition paths, in
+preference order:
 
-1. An owner-authorized consistent copy of the local SQLite database, WAL, and
-   SHM sets, decrypted offline with a stable 32-byte passphrase supplied only
-   through standard input. The passphrase is never accepted on the command
-   line, written into an archive, or emitted in JSON.
-2. Owner-supplied plaintext SQLite snapshots that already satisfy the snapshot
-   and source-integrity contract. GreenBubbles does not need to know how the
-   owner lawfully obtained a plaintext export, but it still validates the
-   pinned schema and reports incomplete coverage rather than guessing.
+1. An official user-created portable export or backup, if its documented
+   format and full conversation/media coverage can be established. No such
+   coverage is proven today.
+2. An owner-supplied plaintext SQLite snapshot that already satisfies the
+   snapshot and source-integrity contract, or an owner-authorized consistent
+   copy of the local SQLite database, WAL, and SHM sets, decrypted offline
+   with a stable 32-byte passphrase supplied only through standard input. The
+   passphrase is never accepted on the command line, written into an archive,
+   or emitted in JSON. GreenBubbles does not need to know how the owner
+   lawfully obtained a plaintext export, but it still validates the pinned
+   schema and reports incomplete coverage rather than guessing.
+3. An owner-authorized active passphrase capture through the separate
+   `greenbubbles-acquire` executable, explicitly gated by the
+   `--owner-authorized` flag, a manual owner-run re-sign of the client, a
+   pinned-build check, and SQLCipher4 page-1 HMAC proof of correctness. See
+   [PASSPHRASE_ACQUISITION.md](PASSPHRASE_ACQUISITION.md). The passive
+   pipeline itself — discovery, snapshot, restore, replica, connector — never
+   invokes this path and retains its non-invasive guarantees unchanged.
 
 The restoration result remains incomplete until a real, authorized current-
 version corpus proves every message-bearing table, logical message type,
@@ -75,19 +88,22 @@ satisfy that requirement.
 
 ## Preferred acquisition order and stop rule
 
-The engineering order is:
+The engineering order is the three paths above: official export first, then
+the passive owner-supplied boundary, then the gated owner-authorized capture.
+If none of the three is available or authorized for an account, acquisition
+work for that account stops.
 
-1. Prefer an official user-created portable export or backup if its documented
-   format and full conversation/media coverage can be established.
-2. Otherwise accept an owner-supplied plaintext snapshot or database
-   passphrase through the existing passive, offline boundary.
-3. If neither path is available, stop acquisition work for that account.
-
-GreenBubbles has no automated passphrase or key acquisition. It will not fall
-back to process attachment, memory scanning, debugger use, injection,
-re-signing, reusable session-credential export, security-control bypass, or
+The owner-authorized capture in path 3 is a deliberate policy reversal decided
+by the owner on 2026-08-27, after the LLDB-based mechanism was validated live
+on the owner's own machine and account (26/26 databases HMAC-verified on the
+pinned 4.1.12 build). It is strictly bounded: it attaches a debugger once to
+read one register-pointed value, requires manual owner re-signing that the
+tool never automates, fails closed on any unpinned build, and writes the
+passphrase only to an owner-specified permission-locked file. GreenBubbles
+still performs no memory scanning, injection, reusable session-credential
+export, security-control bypass beyond the owner's own explicit re-sign, or
 anti-detection work. Static evidence that an internal workflow exists does not
-change this stop rule.
+change the preference order.
 
 ## Current public-project survey
 
@@ -124,11 +140,19 @@ source for the macOS 4.1.12 database passphrase:
   desktop conversation archive or its database key.
 
 This survey is descriptive, not an endorsement or legal conclusion. It also
-does not prove that every private or future route is impossible. It establishes
-that “other projects can decrypt WeChat” currently means either an invasive key
+does not prove that every private or future route is impossible. Its core
+finding remains factually true: no documented **non-invasive** source for the
+current macOS database passphrase exists in the surveyed projects. “Other
+projects can decrypt WeChat” currently means either an invasive key
 acquisition mechanism, an already supplied key, a different/older backup
-surface, or a different bot relationship. GreenBubbles will not download, run,
-port, or automate the invasive mechanisms.
+surface, or a different bot relationship. Following the owner's 2026-08-27
+decision, GreenBubbles now embeds one such mechanism — the LLDB
+`CCKeyDerivationPBKDF` capture ported from the MIT-licensed
+[`TANGandXUE/wcdb-key-tool`](https://github.com/TANGandXUE/wcdb-key-tool) — as
+the gated, owner-authorized path 3 described above and in
+[PASSPHRASE_ACQUISITION.md](PASSPHRASE_ACQUISITION.md). The standalone
+external tools surveyed here remain unused, undownloaded, and unautomated by
+GreenBubbles.
 
 ## Remaining evidence required
 

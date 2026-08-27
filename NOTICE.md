@@ -24,3 +24,15 @@ Transitive Rust and Swift dependencies retain their respective licenses. Run
 The reviewed factual inventory and fail-closed baseline are documented in
 [`docs/DISTRIBUTION_INVENTORY.md`](docs/DISTRIBUTION_INVENTORY.md). This notice
 is not yet a complete public binary notice bundle.
+
+The `greenbubbles-acquire` passphrase-capture implementation is derived from
+[`TANGandXUE/wcdb-key-tool`](https://github.com/TANGandXUE/wcdb-key-tool),
+which is MIT-licensed and credits kkocdko, wxchat-export, and
+ylytdeng/wechat-decrypt. The upstream copyright and permission notice reads:
+"Copyright (c) 2025 CloudDreamAI / TANGandXUE", released under the MIT License;
+that notice must be included in all copies or substantial portions of the
+derived implementation. GreenBubbles reimplements only the LLDB
+`CCKeyDerivationPBKDF` capture, PBKDF2-HMAC-SHA512 derivation, and SQLCipher4
+page-1 HMAC verification; the standalone upstream tool is not downloaded, run,
+or automated. See
+[`docs/PASSPHRASE_ACQUISITION.md`](docs/PASSPHRASE_ACQUISITION.md).
