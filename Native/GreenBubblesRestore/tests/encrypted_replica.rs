@@ -970,18 +970,28 @@ fn follows_monotonic_authoritative_archive_handoffs_with_crash_safe_state() {
     assert!(published.privacy_safe_summary);
     assert_eq!(published.generation, 1);
     assert_eq!(file_mode(&handoff), 0o600);
+    let handoff_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&handoff).unwrap()).unwrap();
+    assert_eq!(handoff_json["formatVersion"], 3);
+    assert!(handoff_json["publishedAtUnixNanoseconds"]
+        .as_str()
+        .is_some_and(|value| value.parse::<u128>().is_ok()));
     let uninitialized = replica_follower_status(&handoff, &state, &replica, &key).unwrap();
     assert_eq!(uninitialized.health, ReplicaFollowerHealth::Uninitialized);
     assert_eq!(uninitialized.generation_lag, 1);
     assert!(!uninitialized.replica_present);
     let first = follow_replica_once(&handoff, &state, &replica, &key).unwrap();
+    assert_eq!(first.format_version, 2);
     assert_eq!(first.outcome, ReplicaFollowOutcome::Bootstrapped);
     assert!(first.source_advanced);
+    assert!(first.publication_to_checkpoint_milliseconds.is_some());
     assert_eq!(file_mode(&state), 0o600);
     let current = replica_follower_status(&handoff, &state, &replica, &key).unwrap();
     assert_eq!(current.health, ReplicaFollowerHealth::Current);
     assert_eq!(current.applied_generation, Some(1));
     assert_eq!(current.generation_lag, 0);
+    assert!(current.published_generation_age_seconds.is_some());
+    assert!(current.publication_to_checkpoint_milliseconds.is_some());
     let mut status_process = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
         .arg("replica-follow-status")
         .args([&handoff, &state, &replica])
@@ -1004,6 +1014,7 @@ fn follows_monotonic_authoritative_archive_handoffs_with_crash_safe_state() {
         String::from_utf8_lossy(&status_output.stderr)
     );
     let status_json: serde_json::Value = serde_json::from_slice(&status_output.stdout).unwrap();
+    assert_eq!(status_json["formatVersion"], 2);
     assert_eq!(status_json["health"], "current");
     assert_eq!(status_json["privacySafeSummary"], true);
     let status_text = String::from_utf8(status_output.stdout).unwrap();
@@ -1025,6 +1036,7 @@ fn follows_monotonic_authoritative_archive_handoffs_with_crash_safe_state() {
     assert_eq!(pending.published_generation, 2);
     assert_eq!(pending.applied_generation, Some(1));
     assert_eq!(pending.generation_lag, 1);
+    assert!(pending.publication_to_checkpoint_milliseconds.is_none());
     let synchronized = follow_replica_once(&handoff, &state, &replica, &key).unwrap();
     assert_eq!(synchronized.outcome, ReplicaFollowOutcome::Synchronized);
     assert!(synchronized.source_advanced);

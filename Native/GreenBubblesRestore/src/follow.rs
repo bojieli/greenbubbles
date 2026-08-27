@@ -2,7 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -14,7 +14,7 @@ use crate::replica::{
 };
 use crate::{ReplicaKey, RestoreError};
 
-const HANDOFF_FORMAT_VERSION: u32 = 2;
+const HANDOFF_FORMAT_VERSION: u32 = 3;
 const FOLLOW_STATE_FORMAT_VERSION: u32 = 1;
 const MAX_CONTROL_FILE_BYTES: u64 = 64 * 1_024;
 const MAX_ARCHIVE_SEAL_FILE_COUNT: usize = 1_000_000;
@@ -30,6 +30,8 @@ pub struct ReplicaArchiveHandoff {
     pub archive_seal_sha256: String,
     pub archive_file_count: u64,
     pub archive_byte_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at_unix_nanoseconds: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +76,8 @@ pub struct ReplicaFollowReport {
     pub changed_count: u64,
     pub removed_count: u64,
     pub restoration_complete: bool,
+    pub apply_duration_milliseconds: u64,
+    pub publication_to_checkpoint_milliseconds: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +102,8 @@ pub struct ReplicaFollowerStatus {
     pub replica_present: bool,
     pub replica_initialized: bool,
     pub checkpoint_age_seconds: Option<u64>,
+    pub published_generation_age_seconds: Option<u64>,
+    pub publication_to_checkpoint_milliseconds: Option<u64>,
     pub restoration_complete: Option<bool>,
     pub archive_validation_deferred_until_application: bool,
 }
@@ -259,6 +265,7 @@ fn publish_replica_handoff_locked(
         archive_seal_sha256: seal.sha256,
         archive_file_count: seal.file_count,
         archive_byte_count: seal.byte_count,
+        published_at_unix_nanoseconds: Some(unix_nanoseconds()?.to_string()),
     };
     write_atomic_owner_json(handoff_path, &handoff, "handoff")?;
     Ok(ReplicaHandoffReceipt {
@@ -276,6 +283,7 @@ pub fn follow_replica_once(
     replica_path: &Path,
     key: &ReplicaKey,
 ) -> Result<ReplicaFollowReport, RestoreError> {
+    let apply_started = Instant::now();
     let loaded = load_handoff(handoff_path)?;
     let archive_directory = PathBuf::from(&loaded.value.archive_directory);
     if !archive_directory.is_absolute() {
@@ -347,7 +355,7 @@ pub fn follow_replica_once(
                 ));
             }
             return Ok(ReplicaFollowReport {
-                format_version: 1,
+                format_version: 2,
                 privacy_safe_summary: true,
                 generation: state.generation,
                 outcome: ReplicaFollowOutcome::AlreadyApplied,
@@ -357,6 +365,11 @@ pub fn follow_replica_once(
                 changed_count: 0,
                 removed_count: 0,
                 restoration_complete: before.restoration_complete.unwrap_or(false),
+                apply_duration_milliseconds: elapsed_milliseconds(apply_started),
+                publication_to_checkpoint_milliseconds: publication_to_checkpoint_milliseconds(
+                    &loaded.value,
+                    before.last_checkpoint_unix_nanoseconds,
+                ),
             });
         }
     }
@@ -416,6 +429,10 @@ pub fn follow_replica_once(
             "replica follow result does not match the published archive".to_string(),
         ));
     }
+    let publication_to_checkpoint_milliseconds = publication_to_checkpoint_milliseconds(
+        &loaded.value,
+        after.last_checkpoint_unix_nanoseconds,
+    );
     let state = ReplicaFollowState {
         format_version: FOLLOW_STATE_FORMAT_VERSION,
         replica_id: after.replica_id,
@@ -426,7 +443,7 @@ pub fn follow_replica_once(
     };
     write_atomic_owner_json(state_path, &state, "follow-state")?;
     Ok(ReplicaFollowReport {
-        format_version: 1,
+        format_version: 2,
         privacy_safe_summary: true,
         generation: state.generation,
         outcome,
@@ -437,6 +454,8 @@ pub fn follow_replica_once(
         changed_count: changed,
         removed_count: removed,
         restoration_complete: after.restoration_complete.unwrap_or(false),
+        apply_duration_milliseconds: elapsed_milliseconds(apply_started),
+        publication_to_checkpoint_milliseconds,
     })
 }
 
@@ -523,8 +542,25 @@ pub fn replica_follower_status(
             ));
         }
     };
+    let published_generation_age_seconds = loaded
+        .value
+        .published_at_unix_nanoseconds
+        .as_deref()
+        .and_then(|value| value.parse::<u128>().ok())
+        .and_then(|published| unix_nanoseconds().ok()?.checked_sub(published))
+        .map(|nanoseconds| saturating_u64(nanoseconds / 1_000_000_000));
+    let publication_to_checkpoint_milliseconds = (generation_lag == 0)
+        .then(|| {
+            publication_to_checkpoint_milliseconds(
+                &loaded.value,
+                replica
+                    .as_ref()
+                    .and_then(|status| status.last_checkpoint_unix_nanoseconds),
+            )
+        })
+        .flatten();
     Ok(ReplicaFollowerStatus {
-        format_version: 1,
+        format_version: 2,
         privacy_safe_summary: true,
         health,
         published_generation: loaded.value.generation,
@@ -536,6 +572,8 @@ pub fn replica_follower_status(
         checkpoint_age_seconds: replica
             .as_ref()
             .and_then(|status| status.checkpoint_age_seconds),
+        published_generation_age_seconds,
+        publication_to_checkpoint_milliseconds,
         restoration_complete: replica
             .as_ref()
             .and_then(|status| status.restoration_complete),
@@ -599,13 +637,27 @@ impl Drop for ControlLock {
 fn load_handoff(path: &Path) -> Result<LoadedHandoff, RestoreError> {
     let bytes = read_owner_only_control_file(path)?;
     let value: ReplicaArchiveHandoff = serde_json::from_slice(&bytes)?;
-    if value.format_version != HANDOFF_FORMAT_VERSION
+    if !matches!(value.format_version, 2 | HANDOFF_FORMAT_VERSION)
         || value.generation == 0
         || value.archive_directory.is_empty()
         || value.source_fingerprint.is_empty()
         || !valid_sha256(&value.report_sha256)
         || !valid_sha256(&value.archive_seal_sha256)
         || value.archive_file_count == 0
+        || match value.format_version {
+            2 => value.published_at_unix_nanoseconds.is_some(),
+            HANDOFF_FORMAT_VERSION => {
+                !value
+                    .published_at_unix_nanoseconds
+                    .as_deref()
+                    .is_some_and(|timestamp| {
+                        timestamp
+                            .parse::<u128>()
+                            .is_ok_and(|nanoseconds| nanoseconds > 0)
+                    })
+            }
+            _ => true,
+        }
     {
         return Err(RestoreError::Integrity(
             "replica archive handoff is malformed".to_string(),
@@ -730,6 +782,34 @@ fn valid_sha256(value: &str) -> bool {
 
 fn valid_replica_id(value: &str) -> bool {
     value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn unix_nanoseconds() -> Result<u128, RestoreError> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| RestoreError::Integrity("system clock predates Unix epoch".to_string()))?
+        .as_nanos())
+}
+
+fn elapsed_milliseconds(started: Instant) -> u64 {
+    saturating_u64(started.elapsed().as_millis())
+}
+
+fn publication_to_checkpoint_milliseconds(
+    handoff: &ReplicaArchiveHandoff,
+    checkpoint: Option<u128>,
+) -> Option<u64> {
+    let published = handoff
+        .published_at_unix_nanoseconds
+        .as_deref()?
+        .parse::<u128>()
+        .ok()?;
+    let elapsed = checkpoint?.checked_sub(published)?;
+    Some(saturating_u64(elapsed / 1_000_000))
+}
+
+fn saturating_u64(value: u128) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 fn ensure_target_outside_archive(
@@ -865,6 +945,14 @@ mod tests {
         let handoff = fixture.path().join("handoff.json");
 
         publish_replica_handoff(&first, &handoff, 1).unwrap();
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&fs::read(&handoff).unwrap()).unwrap();
+        legacy["formatVersion"] = serde_json::json!(2);
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("publishedAtUnixNanoseconds");
+        fs::write(&handoff, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
         let predecessor = capture_publication_predecessor(&handoff, Some(&first)).unwrap();
         publish_replica_handoff(&concurrent, &handoff, 2).unwrap();
         let error =

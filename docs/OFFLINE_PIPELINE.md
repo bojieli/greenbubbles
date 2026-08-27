@@ -67,7 +67,10 @@ generation, media/completion state, and aggregate coverage counts. It omits
 account IDs, source fingerprints, local paths, table names, and content. The
 handoff remains owner-private because it necessarily contains the authoritative
 archive path and source fingerprint. Replica application and its distinct key
-remain isolated in `replica-follow`.
+remain isolated in `replica-follow`. Monotonic durations separately cover input
+validation, catalog preparation/decryption, restoration/merge, final
+audit/publication, and the complete command. They enable later latency evidence
+without disclosing absolute activity times.
 
 This workflow supplies deterministic sequencing and synthetic fault coverage;
 it does not satisfy the plan's real disposable-account corpus, semantic/media

@@ -330,7 +330,10 @@ atomic handoff and full production archive, and then bootstraps or synchronizes
 transactionally. It cannot acquire the WeChat passphrase, snapshot a live
 store, or accept an incremental fragment. The aggregate-only status reports
 published/applied generations, generation lag, checkpoint age, and whether
-state recovery is required without disclosing account or source identities. See
+state recovery is required without disclosing account or source identities.
+Format-3 handoffs additionally yield publication age, publication-to-checkpoint
+latency, and follower runtime as relative durations rather than absolute
+timestamps. See
 [docs/REPLICA_FOLLOW.md](docs/REPLICA_FOLLOW.md).
 
 Avoid placing a real key literally in shell history; pipe it from an

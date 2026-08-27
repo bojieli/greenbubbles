@@ -66,6 +66,7 @@ fn restores_audits_merges_and_monotonically_publishes_offline_snapshots() {
         String::from_utf8_lossy(&output.stderr)
     );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["formatVersion"], 2);
     assert_eq!(report["acquisitionMode"], "incremental");
     assert_eq!(report["generation"], 2);
     assert_eq!(report["previousChainVerified"], true);
@@ -73,6 +74,15 @@ fn restores_audits_merges_and_monotonically_publishes_offline_snapshots() {
     assert_eq!(report["incrementalFragmentVerified"], true);
     assert_eq!(report["authoritativeArchiveVerified"], true);
     assert_eq!(report["privacySafeSummary"], true);
+    for field in [
+        "inputValidationDurationMilliseconds",
+        "catalogPreparationDurationMilliseconds",
+        "restorationDurationMilliseconds",
+        "publicationValidationDurationMilliseconds",
+        "totalDurationMilliseconds",
+    ] {
+        assert!(report[field].as_u64().is_some());
+    }
     let output_text = String::from_utf8(output.stdout).unwrap();
     for private_value in [
         bootstrap_snapshot.to_str().unwrap(),
@@ -87,6 +97,9 @@ fn restores_audits_merges_and_monotonically_publishes_offline_snapshots() {
     let handoff_json: serde_json::Value =
         serde_json::from_slice(&fs::read(&handoff).unwrap()).unwrap();
     assert_eq!(handoff_json["generation"], 2);
+    assert!(handoff_json["publishedAtUnixNanoseconds"]
+        .as_str()
+        .is_some_and(|value| value.parse::<u128>().is_ok()));
 
     let integrity_snapshot = build_integrity_snapshot(
         &private,

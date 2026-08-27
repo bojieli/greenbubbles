@@ -155,9 +155,11 @@ advance the encrypted replica checkpoint.
 between the isolated offline restoration process and the encrypted replica.
 The publisher atomically binds an authoritative archive's canonical path,
 source fingerprint, exact report digest, and monotonically increasing
-generation. A deterministic seal binds every archive-owned file path, size, and
-content digest and is rechecked before and after application. Production
-archives pass `audit-archive` before publication and again before application.
+generation. Format 3 additionally records the private publication timestamp; a
+deterministic seal binds every archive-owned file path, size, and content digest
+and is rechecked before and after application. Production archives pass
+`audit-archive` before publication and again before application. Legacy format
+2 remains readable without timing evidence.
 
 `restore-publish` is the upstream offline transaction for format-3 snapshots.
 It pins the client build, proves non-bootstrap acquisition continuity against
@@ -181,9 +183,10 @@ restoration-revision comparison. See
 
 `replica-follow-status` provides a bounded, key-gated supervisor check over the
 handoff/state/checkpoint binding. It reports aggregate published and applied
-generations, lag, checkpoint age, initialization, and recovery state without
-identities or local paths. Whole-archive validation remains on the application
-path rather than every health probe.
+generations, lag, checkpoint age, publication age,
+publication-to-checkpoint latency, initialization, and recovery state without
+identities, absolute timestamps, or local paths. Whole-archive validation
+remains on the application path rather than every health probe.
 
 ## Exact retrieval and health
 

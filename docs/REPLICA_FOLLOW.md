@@ -27,11 +27,12 @@ The publisher requires an owner-only canonical archive directory and an
 authoritative restoration report. Production-format archives pass the complete
 independent archive audit before publication. The publisher also
 descriptor-hashes every archive-owned regular file into a deterministic seal.
-The mode-`0600` format-2 handoff binds the canonical absolute archive location,
-source fingerprint, exact report digest, seal/count/bytes, and generation, then
-replaces the prior handoff atomically under an owner-only lock. Equal or lower
-generations fail closed. Handoff, state, and replica files must live outside
-the sealed archive.
+The mode-`0600` format-3 handoff binds the canonical absolute archive location,
+source fingerprint, exact report digest, seal/count/bytes, generation, and
+publication time, then replaces the prior handoff atomically under an owner-only
+lock. Equal or lower generations fail closed. Legacy format-2 handoffs remain
+readable but have no timing evidence. Handoff, state, and replica files must
+live outside the sealed archive.
 
 The command returns only the generation and aggregate verdicts. The handoff
 itself is private because it contains the local archive path and source
@@ -68,7 +69,11 @@ The status is `uninitialized`, `pending`, `current`, or
 `stateRecoveryRequired`. It verifies handoff/state monotonicity and the applied
 replica identity/checkpoint binding. To keep health checks bounded, it defers
 the potentially large whole-archive audit and seal verification until actual
-application and says so explicitly in the result.
+application and says so explicitly in the result. It reports the current
+publication age and, when that generation produced a later checkpoint, the
+publication-to-checkpoint latency. Each follower application report also
+includes its monotonic local runtime. No absolute timestamp is emitted by these
+aggregate reports.
 
 The follower requires:
 
@@ -105,4 +110,6 @@ objective by itself. That measurement still requires a disposable-account
 corpus and an owner-supplied plaintext/passphrase workflow that can produce
 successive semantic archives. The upstream acquisition process must continue
 to follow the snapshot, incremental merge, reconciliation-window, and integrity
-scan rules; wake-up hints never become authority.
+scan rules; wake-up hints never become authority. Format-3 timing deltas make
+that future publication-to-searchable measurement reproducible but are not a
+substitute for the missing real run.

@@ -1,6 +1,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +46,11 @@ pub struct OfflineRestorePublishReport {
     pub message_candidate_gap_count: u64,
     pub missing_artifact_count: u64,
     pub artifact_decode_gap_count: u64,
+    pub input_validation_duration_milliseconds: u64,
+    pub catalog_preparation_duration_milliseconds: u64,
+    pub restoration_duration_milliseconds: u64,
+    pub publication_validation_duration_milliseconds: u64,
+    pub total_duration_milliseconds: u64,
 }
 
 pub fn restore_snapshot_and_publish(
@@ -52,6 +58,7 @@ pub fn restore_snapshot_and_publish(
     options: &OfflineRestorePublishOptions,
     passphrase: Option<&DatabasePassphrase>,
 ) -> Result<OfflineRestorePublishReport, RestoreError> {
+    let total_started = Instant::now();
     let manifest = SnapshotManifest::load(snapshot)?;
     let manifest_binding = serde_json::to_vec(&manifest)?;
     let compatibility = manifest.client_build_compatibility();
@@ -126,13 +133,17 @@ pub fn restore_snapshot_and_publish(
         &options.handoff_path,
         options.previous_archive.as_deref(),
     )?;
+    let input_validation_duration_milliseconds = elapsed_milliseconds(total_started);
 
+    let catalog_started = Instant::now();
     let catalog = prepare_catalog(snapshot, passphrase)?;
     if serde_json::to_vec(&catalog.manifest)? != manifest_binding {
         return Err(RestoreError::Integrity(
             "snapshot manifest changed during offline publication".to_string(),
         ));
     }
+    let catalog_preparation_duration_milliseconds = elapsed_milliseconds(catalog_started);
+    let restoration_started = Instant::now();
     let mut incremental_fragment_verified = false;
     match acquisition.mode {
         SnapshotAcquisitionMode::Incremental => {
@@ -182,7 +193,9 @@ pub fn restore_snapshot_and_publish(
             }
         }
     }
+    let restoration_duration_milliseconds = elapsed_milliseconds(restoration_started);
 
+    let publication_started = Instant::now();
     let archive_audit = audit_archive(&options.output_archive)?;
     if archive_audit.archive_scope != RestorationArchiveScope::Authoritative
         || !archive_audit.report_matches_archive
@@ -200,8 +213,9 @@ pub fn restore_snapshot_and_publish(
         &options.handoff_path,
         &publication_predecessor,
     )?;
+    let publication_validation_duration_milliseconds = elapsed_milliseconds(publication_started);
     Ok(OfflineRestorePublishReport {
-        format_version: 1,
+        format_version: 2,
         privacy_safe_summary: true,
         acquisition_mode: acquisition.mode,
         previous_chain_verified,
@@ -218,5 +232,14 @@ pub fn restore_snapshot_and_publish(
         message_candidate_gap_count: report.integrity.message_candidate_gap_count,
         missing_artifact_count: report.integrity.missing_artifact_count,
         artifact_decode_gap_count: report.integrity.artifact_decode_gap_count,
+        input_validation_duration_milliseconds,
+        catalog_preparation_duration_milliseconds,
+        restoration_duration_milliseconds,
+        publication_validation_duration_milliseconds,
+        total_duration_milliseconds: elapsed_milliseconds(total_started),
     })
+}
+
+fn elapsed_milliseconds(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
