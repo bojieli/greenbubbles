@@ -81,12 +81,14 @@ fn merges_selected_source_sets_reorders_globally_and_resolves_cross_shard_relati
     assert_eq!(merged_report.integrity.cached_moment_count, 2);
     assert!(merged_report.cached_moments_path.is_some());
     let cached = read_ndjson::<CanonicalCachedMoment>(&output.join("cached-moments.ndjson"));
+    let mut expected_cached_ids = vec![cached_id("set-a", 1), cached_id("set-b", 2)];
+    expected_cached_ids.sort();
     assert_eq!(
         cached
             .iter()
-            .map(|moment| moment.canonical_id.as_str())
+            .map(|moment| moment.canonical_id.clone())
             .collect::<Vec<_>>(),
-        ["cached-b", "cached-new-a"]
+        expected_cached_ids
     );
     let cached_coverage: CachedSurfaceCoverage = read_json(&output.join("cached-surfaces.json"));
     assert_eq!(cached_coverage.moment_count, 2);
@@ -175,12 +177,9 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
         ]
     };
     let cached_moments = if fragment {
-        vec![cached_moment("cached-new-a", "set-a", 1)]
+        vec![cached_moment("set-a", 1)]
     } else {
-        vec![
-            cached_moment("cached-old-a", "set-a", 1),
-            cached_moment("cached-b", "set-b", 2),
-        ]
+        vec![cached_moment("set-a", 1), cached_moment("set-b", 2)]
     };
     let integrity = RestorationIntegrity {
         database_count: if fragment { 1 } else { 2 },
@@ -236,7 +235,7 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
             )))),
         })
         .collect::<Vec<_>>();
-    let all_tables = message_tables
+    let mut all_tables = message_tables
         .iter()
         .map(|table| TableSchemaCoverage {
             source_set_id: table.source_set_id.clone(),
@@ -248,7 +247,23 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
             role: TableCoverageRole::Message,
             classification_reason: "synthetic".to_string(),
         })
-        .collect();
+        .collect::<Vec<_>>();
+    all_tables.extend(source_sets.iter().map(|source_set| TableSchemaCoverage {
+        source_set_id: (*source_set).to_string(),
+        source_logical_path: "sns/sns.db".to_string(),
+        source_table_id: format!("sns-table-{source_set}"),
+        source_table_name: "SnsTimeLine".to_string(),
+        columns: vec![
+            "tid".to_string(),
+            "user_name".to_string(),
+            "content".to_string(),
+        ],
+        schema_fingerprint: Some(hex::encode(sha2::Sha256::digest(format!(
+            "sns-schema-{source_set}"
+        )))),
+        role: TableCoverageRole::Other,
+        classification_reason: "synthetic cached table".to_string(),
+    }));
     let coverage = RestorationCoverage {
         format_version: 2,
         decoder_name: "synthetic".to_string(),
@@ -280,7 +295,7 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
             .iter()
             .map(|source_set| CachedSurfaceTableCoverage {
                 source_set_id: (*source_set).to_string(),
-                source_logical_path: format!("sns/{source_set}.db"),
+                source_logical_path: "sns/sns.db".to_string(),
                 source_table_id: format!("sns-table-{source_set}"),
                 source_table_name: "SnsTimeLine".to_string(),
                 columns: vec![
@@ -428,7 +443,16 @@ fn message(
         content_base64: Some("c3ludGhldGlj".to_string()),
         packed_info_base64: None,
         compression_type: None,
-        raw_columns: BTreeMap::new(),
+        raw_columns: BTreeMap::from([
+            (
+                "local_id".to_string(),
+                RawSQLiteValue::Integer(source_row_id),
+            ),
+            (
+                "message_content".to_string(),
+                RawSQLiteValue::TextBase64("c3ludGhldGlj".to_string()),
+            ),
+        ]),
         typed_payload: TypedPayload::Decoded(json!({"Text": canonical_id})),
         semantic_decode_state: SemanticDecodeState::Complete,
         semantic_gap_reason: None,
@@ -452,22 +476,18 @@ fn message(
     }
 }
 
-fn cached_moment(
-    canonical_id: &str,
-    source_set_id: &str,
-    source_row_id: i64,
-) -> CanonicalCachedMoment {
+fn cached_moment(source_set_id: &str, source_row_id: i64) -> CanonicalCachedMoment {
     CanonicalCachedMoment {
-        canonical_id: canonical_id.to_string(),
+        canonical_id: cached_id(source_set_id, source_row_id),
         account_id: ACCOUNT.to_string(),
         source_set_id: source_set_id.to_string(),
-        source_logical_path: format!("sns/{source_set_id}.db"),
+        source_logical_path: "sns/sns.db".to_string(),
         source_table_id: format!("sns-table-{source_set_id}"),
         source_table_name: "SnsTimeLine".to_string(),
         source_row_id,
         timeline_id: RawSQLiteValue::Integer(source_row_id),
-        author_id: Some("cached-author".to_string()),
-        author_source_identifier_base64: None,
+        author_id: Some(scoped_id(ACCOUNT, b"cached-author")),
+        author_source_identifier_base64: Some("Y2FjaGVkLWF1dGhvcg==".to_string()),
         created_at_unix: Some(1_700_000_000 + source_row_id),
         content_type: Some(1),
         content_description_base64: Some("c3ludGhldGlj".to_string()),
@@ -485,6 +505,20 @@ fn cached_moment(
         cache_completeness: CachedSurfaceCompleteness::PartialLocalCache,
         observed_at: "2026-08-27T03:00:00Z".to_string(),
     }
+}
+
+fn cached_id(source_set_id: &str, source_row_id: i64) -> String {
+    hex::encode(sha2::Sha256::digest(format!(
+        "{source_set_id}:sns-table-{source_set_id}:{source_row_id}"
+    )))
+}
+
+fn scoped_id(scope: &str, value: &[u8]) -> String {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(scope.as_bytes());
+    hasher.update([0]);
+    hasher.update(value);
+    hex::encode(hasher.finalize())
 }
 
 fn read_ndjson<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {

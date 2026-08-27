@@ -148,6 +148,13 @@ table)` identity. A globally balanced total cannot conceal a missing row in one
 table and an extra row in another, and one source row cannot appear in both the
 restored and rejected ledgers.
 
+Every restored message must also point back to the exact covered source table:
+source set, logical database path, table identity/name, and the complete raw
+column-name set must agree. Cached Moments and interactions receive the same
+per-table accounting and schema-ledger check. Their canonical row identities
+and source-participant identities are re-derived from preserved source evidence,
+and interaction kinds are checked against their raw types.
+
 Relationship completion also requires that no relationship remain in the
 transient `pending` state. Every unresolved relationship must be independently
 accounted for as target-not-present-locally, missing-identifier, or ambiguous;

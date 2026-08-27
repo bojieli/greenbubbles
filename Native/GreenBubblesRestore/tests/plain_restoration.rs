@@ -154,6 +154,20 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
     assert!(Path::new(&report.report_path).is_absolute());
 
     let message_path = output.join("messages.ndjson");
+    let mut provenance_tampered = lines.clone();
+    provenance_tampered[0]["sourceTableName"] = json!("substituted-source-table");
+    let bytes = provenance_tampered
+        .iter()
+        .map(|message| serde_json::to_string(message).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(&message_path, bytes).unwrap();
+    assert!(audit_archive(&output)
+        .unwrap_err()
+        .to_string()
+        .contains("row provenance disagrees"));
+
     let mut tampered = lines;
     tampered[0]["contentBase64"] = json!("not-base64!");
     let bytes = tampered

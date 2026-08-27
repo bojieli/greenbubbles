@@ -45,7 +45,8 @@ The auditor fails closed unless all of these checks pass:
   and `report.json`;
 - the complete table ledger, supported message-table subset, source-row
   counts, message-candidate gaps, per-table schema fingerprints, and aggregate
-  schema-profile fingerprint agree;
+  schema-profile fingerprint agree; every message row's source table name and
+  raw-column set agree with that ledger;
 - conversations are deterministically grouped, per-conversation ordinals are
   contiguous, and one conversation does not silently change ordering basis;
 - every message conversation and sender resolves to the account-scoped entity
@@ -61,8 +62,10 @@ The auditor fails closed unless all of these checks pass:
 - every database-materialized or decoded derivative stays beneath the archive,
   traverses no symlink, remains owner-only and single-link, and matches its
   recorded size and SHA-256;
-- cached-surface row equations, schema profile, record counts, account binding,
-  and partial-cache evidence agree; and
+- cached-surface row equations hold independently for every timeline and
+  interaction table; canonical row and participant identities are reproduced
+  from source evidence; interaction kind agrees with raw type; and its complete
+  table/schema ledger agrees with the restoration archive;
 - the component and top-level completion verdicts are no stronger than the
   independently reproduced evidence permits.
 

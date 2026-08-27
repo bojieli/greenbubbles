@@ -181,6 +181,16 @@ fn restores_cached_moments_and_interactions_without_claiming_cache_completeness(
     assert_eq!(archive_audit.cached_moment_interaction_count, 2);
     assert!(archive_audit.report_matches_archive);
 
+    let mut identity_tampered = moments.clone();
+    identity_tampered[0]["canonicalId"] = json!("substituted-cached-identity");
+    write_ndjson(&output.join("cached-moments.ndjson"), &identity_tampered);
+    assert!(audit_archive(&output)
+        .unwrap_err()
+        .to_string()
+        .contains("canonical identity is not source-deterministic"));
+    write_ndjson(&output.join("cached-moments.ndjson"), &moments);
+    assert!(audit_archive(&output).is_ok());
+
     let replica_directory = fixture.path().join("replica-private");
     fs::create_dir(&replica_directory).unwrap();
     fs::set_permissions(&replica_directory, fs::Permissions::from_mode(0o700)).unwrap();

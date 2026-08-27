@@ -150,7 +150,7 @@ pub fn audit_archive(archive_directory: &Path) -> Result<ArchiveAuditReport, Res
     )?;
     verify_entities(&conversations, &participants, &report)?;
 
-    let messages = audit_messages(&archive_root.join("messages.ndjson"), &report)?;
+    let messages = audit_messages(&archive_root.join("messages.ndjson"), &report, &coverage)?;
     verify_message_entities(&messages, &conversations, &participants)?;
 
     let rejections = audit_rejections(&archive_root.join("rejections.ndjson"))?;
@@ -172,7 +172,7 @@ pub fn audit_archive(archive_directory: &Path) -> Result<ArchiveAuditReport, Res
     )?;
 
     let (cached_moment_count, cached_interaction_count) =
-        audit_cached_surfaces(&archive_root, &report)?;
+        audit_cached_surfaces(&archive_root, &report, &coverage)?;
     if cached_moment_count != report.integrity.cached_moment_count
         || cached_interaction_count != report.integrity.cached_moment_interaction_count
     {
@@ -281,7 +281,9 @@ fn verify_coverage(
     report: &RestorationReport,
 ) -> Result<(), RestoreError> {
     let mut all_table_ids = HashSet::new();
+    let mut all_tables = HashMap::new();
     let mut message_table_ids = HashSet::new();
+    let mut message_source_ids = HashSet::new();
     let mut schema_counts = BTreeMap::new();
     let mut candidate_gaps = 0_u64;
     for table in &coverage.all_tables {
@@ -290,13 +292,21 @@ fn verify_coverage(
             table.source_logical_path.clone(),
             table.source_table_id.clone(),
         );
-        if !all_table_ids.insert(identity.clone()) {
+        if table.source_set_id.is_empty()
+            || table.source_logical_path.is_empty()
+            || table.source_table_id.is_empty()
+            || table.source_table_name.is_empty()
+            || table.columns.iter().any(String::is_empty)
+            || table.columns.iter().collect::<HashSet<_>>().len() != table.columns.len()
+            || !all_table_ids.insert(identity.clone())
+            || all_tables.insert(identity.clone(), table).is_some()
+        {
             return Err(integrity("coverage contains a duplicate table identity"));
         }
         if table
             .schema_fingerprint
             .as_deref()
-            .is_none_or(|value| value.len() != 64)
+            .is_none_or(|value| !is_lower_hex(value, 64))
         {
             return Err(integrity(
                 "coverage table lacks a complete schema fingerprint",
@@ -305,6 +315,13 @@ fn verify_coverage(
         match table.role {
             TableCoverageRole::Message => {
                 message_table_ids.insert(identity);
+                if !message_source_ids
+                    .insert((table.source_set_id.clone(), table.source_table_id.clone()))
+                {
+                    return Err(integrity(
+                        "message coverage contains an ambiguous source-table identity",
+                    ));
+                }
                 *schema_counts
                     .entry(table.schema_fingerprint.clone().unwrap())
                     .or_default() += 1;
@@ -330,6 +347,24 @@ fn verify_coverage(
         return Err(integrity(
             "message-table coverage does not match the complete table ledger",
         ));
+    }
+    for table in &coverage.message_tables {
+        let identity = (
+            table.source_set_id.clone(),
+            table.source_logical_path.clone(),
+            table.source_table_id.clone(),
+        );
+        let complete = all_tables
+            .get(&identity)
+            .ok_or_else(|| integrity("message table is absent from complete coverage"))?;
+        if complete.source_table_name != table.source_table_name
+            || complete.columns != table.columns
+            || complete.schema_fingerprint != table.schema_fingerprint
+        {
+            return Err(integrity(
+                "message-table provenance disagrees with complete coverage",
+            ));
+        }
     }
     let source_rows = coverage
         .message_tables
@@ -360,8 +395,26 @@ fn verify_coverage(
     Ok(())
 }
 
-fn audit_messages(path: &Path, report: &RestorationReport) -> Result<MessageAudit, RestoreError> {
+fn audit_messages(
+    path: &Path,
+    report: &RestorationReport,
+    coverage: &RestorationCoverage,
+) -> Result<MessageAudit, RestoreError> {
     let mut result = MessageAudit::default();
+    let covered_tables = coverage
+        .message_tables
+        .iter()
+        .map(|table| {
+            (
+                (
+                    table.source_set_id.as_str(),
+                    table.source_logical_path.as_str(),
+                    table.source_table_id.as_str(),
+                ),
+                table,
+            )
+        })
+        .collect::<HashMap<_, _>>();
     let mut previous_conversation: Option<String> = None;
     let mut expected_ordinal = 0_u64;
     let mut conversation_basis = None;
@@ -377,6 +430,30 @@ fn audit_messages(path: &Path, report: &RestorationReport) -> Result<MessageAudi
         validate_optional_base64(message.content_base64.as_deref())?;
         validate_optional_base64(message.packed_info_base64.as_deref())?;
         validate_raw_columns(&message.raw_columns)?;
+        let source_table = covered_tables
+            .get(&(
+                message.source_set_id.as_str(),
+                message.source_logical_path.as_str(),
+                message.source_table_id.as_str(),
+            ))
+            .ok_or_else(|| integrity("message provenance is absent from table coverage"))?;
+        let raw_column_names = message
+            .raw_columns
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let covered_column_names = source_table
+            .columns
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if message.source_table_name != source_table.source_table_name
+            || raw_column_names != covered_column_names
+        {
+            return Err(integrity(
+                "message row provenance disagrees with its covered source table",
+            ));
+        }
         if !result.canonical_ids.insert(message.canonical_id.clone())
             || !result.source_identities.insert((
                 message.source_set_id.clone(),
@@ -1183,6 +1260,7 @@ fn verify_integrity_counts(
 fn audit_cached_surfaces(
     root: &Path,
     report: &RestorationReport,
+    restoration_coverage: &RestorationCoverage,
 ) -> Result<(u64, u64), RestoreError> {
     let coverage: CachedSurfaceCoverage = read_json(&root.join("cached-surfaces.json"))?;
     if !matches!(coverage.format_version, 1 | 2) {
@@ -1198,18 +1276,38 @@ fn audit_cached_surfaces(
         |value| value.canonical_id.clone(),
         "cached Moment interaction",
     )?;
-    if moments
-        .values()
-        .any(|value| value.account_id != report.account_id)
-        || interactions
-            .values()
-            .any(|value| value.account_id != report.account_id)
-    {
-        return Err(integrity(
-            "cached-surface record belongs to another account",
-        ));
-    }
+    let mut moment_source_rows = HashSet::new();
+    let mut interaction_source_rows = HashSet::new();
+    let mut moment_table_counts = HashMap::<(String, String, String), u64>::new();
+    let mut interaction_table_counts = HashMap::<(String, String, String), u64>::new();
+    let mut observed_semantic_gaps = 0_u64;
     for moment in moments.values() {
+        if moment.canonical_id.is_empty()
+            || moment.account_id != report.account_id
+            || moment.source_set_id.is_empty()
+            || moment.source_logical_path.is_empty()
+            || moment.source_table_id.is_empty()
+            || moment.source_table_name.is_empty()
+            || moment.observed_at.is_empty()
+            || !moment_source_rows.insert((
+                moment.source_set_id.clone(),
+                moment.source_table_id.clone(),
+                moment.source_row_id,
+            ))
+        {
+            return Err(integrity(
+                "cached Moment identity, provenance, or observation time is invalid",
+            ));
+        }
+        let identity = format!(
+            "{}:{}:{}",
+            moment.source_set_id, moment.source_table_id, moment.source_row_id
+        );
+        if moment.canonical_id != hex::encode(Sha256::digest(identity.as_bytes())) {
+            return Err(integrity(
+                "cached Moment canonical identity is not source-deterministic",
+            ));
+        }
         validate_optional_base64(moment.author_source_identifier_base64.as_deref())?;
         validate_optional_base64(moment.content_description_base64.as_deref())?;
         validate_optional_base64(moment.title_base64.as_deref())?;
@@ -1217,28 +1315,116 @@ fn audit_cached_surfaces(
         validate_optional_base64(moment.content_url_base64.as_deref())?;
         validate_optional_base64(moment.raw_content_base64.as_deref())?;
         validate_optional_base64(moment.raw_pack_info_base64.as_deref())?;
+        validate_raw_value(&moment.timeline_id)?;
         validate_raw_columns(&moment.raw_columns)?;
+        validate_scoped_identifier(
+            &report.account_id,
+            moment.author_source_identifier_base64.as_deref(),
+            moment.author_id.as_deref(),
+            "cached Moment author",
+        )?;
+        if moment.semantic_decode_state != SemanticDecodeState::Complete {
+            if moment
+                .semantic_gap_reason
+                .as_deref()
+                .is_none_or(str::is_empty)
+            {
+                return Err(integrity(
+                    "cached Moment semantic gap lacks an explicit reason",
+                ));
+            }
+            observed_semantic_gaps += 1;
+        } else if moment.semantic_gap_reason.is_some() {
+            return Err(integrity(
+                "complete cached Moment unexpectedly records a semantic gap",
+            ));
+        }
+        *moment_table_counts
+            .entry((
+                moment.source_set_id.clone(),
+                moment.source_logical_path.clone(),
+                moment.source_table_id.clone(),
+            ))
+            .or_default() += 1;
     }
     for interaction in interactions.values() {
+        if interaction.canonical_id.is_empty()
+            || interaction.account_id != report.account_id
+            || interaction.source_set_id.is_empty()
+            || interaction.source_logical_path.is_empty()
+            || interaction.source_table_id.is_empty()
+            || interaction.source_table_name.is_empty()
+            || interaction.observed_at.is_empty()
+            || !interaction_source_rows.insert((
+                interaction.source_set_id.clone(),
+                interaction.source_table_id.clone(),
+                interaction.source_row_id,
+            ))
+        {
+            return Err(integrity(
+                "cached interaction identity, provenance, or observation time is invalid",
+            ));
+        }
+        let identity = format!(
+            "{}:{}:{}",
+            interaction.source_set_id, interaction.source_table_id, interaction.source_row_id
+        );
+        if interaction.canonical_id != hex::encode(Sha256::digest(identity.as_bytes())) {
+            return Err(integrity(
+                "cached interaction canonical identity is not source-deterministic",
+            ));
+        }
         validate_optional_base64(interaction.from_source_identifier_base64.as_deref())?;
         validate_optional_base64(interaction.from_nickname_base64.as_deref())?;
         validate_optional_base64(interaction.to_source_identifier_base64.as_deref())?;
         validate_optional_base64(interaction.to_nickname_base64.as_deref())?;
         validate_optional_base64(interaction.content_base64.as_deref())?;
+        validate_raw_value(&interaction.feed_id)?;
         validate_raw_columns(&interaction.raw_columns)?;
+        validate_scoped_identifier(
+            &report.account_id,
+            interaction.from_source_identifier_base64.as_deref(),
+            interaction.from_participant_id.as_deref(),
+            "cached interaction source participant",
+        )?;
+        validate_scoped_identifier(
+            &report.account_id,
+            interaction.to_source_identifier_base64.as_deref(),
+            interaction.to_participant_id.as_deref(),
+            "cached interaction target participant",
+        )?;
+        let expected_kind = match interaction.raw_type {
+            Some(1) => crate::CachedMomentInteractionKind::Comment,
+            Some(2) => crate::CachedMomentInteractionKind::Like,
+            _ => crate::CachedMomentInteractionKind::Unknown,
+        };
+        if interaction.kind != expected_kind {
+            return Err(integrity(
+                "cached interaction kind disagrees with its raw type",
+            ));
+        }
+        *interaction_table_counts
+            .entry((
+                interaction.source_set_id.clone(),
+                interaction.source_logical_path.clone(),
+                interaction.source_table_id.clone(),
+            ))
+            .or_default() += 1;
     }
     let mut table_ids = HashSet::new();
     let mut moment_rows = 0_u64;
     let mut interaction_rows = 0_u64;
     for table in &coverage.tables {
-        if !table_ids.insert((
+        let identity = (
             table.source_set_id.clone(),
             table.source_logical_path.clone(),
             table.source_table_id.clone(),
-        )) || table
-            .schema_fingerprint
-            .as_deref()
-            .is_none_or(|value| value.len() != 64)
+        );
+        if !table_ids.insert(identity.clone())
+            || table
+                .schema_fingerprint
+                .as_deref()
+                .is_none_or(|value| !is_lower_hex(value, 64))
         {
             return Err(integrity(
                 "cached coverage has duplicate or incomplete table evidence",
@@ -1247,17 +1433,92 @@ fn audit_cached_surfaces(
         match table.role {
             CachedSurfaceTableRole::MomentTimeline => {
                 moment_rows += table.restored_row_count;
-                if table.source_row_count != table.restored_row_count {
+                if table.source_row_count != table.restored_row_count
+                    || moment_table_counts
+                        .get(&identity)
+                        .copied()
+                        .unwrap_or_default()
+                        != table.restored_row_count
+                {
                     return Err(integrity("cached Moment table row equation failed"));
                 }
             }
             CachedSurfaceTableRole::MomentInteraction => {
                 interaction_rows += table.restored_row_count;
-                if table.source_row_count != table.restored_row_count {
+                if table.source_row_count != table.restored_row_count
+                    || interaction_table_counts
+                        .get(&identity)
+                        .copied()
+                        .unwrap_or_default()
+                        != table.restored_row_count
+                {
                     return Err(integrity("cached interaction table row equation failed"));
                 }
             }
-            CachedSurfaceTableRole::UnsupportedCandidate | CachedSurfaceTableRole::Other => {}
+            CachedSurfaceTableRole::UnsupportedCandidate | CachedSurfaceTableRole::Other => {
+                if table.restored_row_count != 0
+                    || moment_table_counts.contains_key(&identity)
+                    || interaction_table_counts.contains_key(&identity)
+                {
+                    return Err(integrity(
+                        "unsupported cached table unexpectedly has canonical records",
+                    ));
+                }
+            }
+        }
+    }
+    if moment_table_counts
+        .keys()
+        .chain(interaction_table_counts.keys())
+        .any(|identity| !table_ids.contains(identity))
+    {
+        return Err(integrity(
+            "cached record belongs to a table absent from cached coverage",
+        ));
+    }
+    let restoration_cached_tables = restoration_coverage
+        .all_tables
+        .iter()
+        .filter(|table| {
+            let logical = table.source_logical_path.to_ascii_lowercase();
+            logical == "sns/sns.db" || logical.ends_with("/sns.db") || logical == "sns.db"
+        })
+        .map(|table| {
+            (
+                (
+                    table.source_set_id.clone(),
+                    table.source_logical_path.clone(),
+                    table.source_table_id.clone(),
+                ),
+                table,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    if restoration_cached_tables.len() != table_ids.len()
+        || table_ids
+            .iter()
+            .any(|identity| !restoration_cached_tables.contains_key(identity))
+    {
+        return Err(integrity(
+            "cached table ledger does not match complete restoration coverage",
+        ));
+    }
+    for table in &coverage.tables {
+        let identity = (
+            table.source_set_id.clone(),
+            table.source_logical_path.clone(),
+            table.source_table_id.clone(),
+        );
+        let source = restoration_cached_tables
+            .get(&identity)
+            .ok_or_else(|| integrity("cached table is absent from restoration coverage"))?;
+        if source.source_table_name != table.source_table_name
+            || source.columns != table.columns
+            || source.schema_fingerprint != table.schema_fingerprint
+        {
+            return Err(integrity(
+                "cached table provenance disagrees with restoration coverage",
+            ));
         }
     }
     let profile = schema_profile_fingerprint(coverage.tables.iter().map(|table| {
@@ -1272,6 +1533,7 @@ fn audit_cached_surfaces(
         || interaction_rows != interactions.len() as u64
         || coverage.moment_count != moments.len() as u64
         || coverage.interaction_count != interactions.len() as u64
+        || observed_semantic_gaps != coverage.semantic_gap_count
         || coverage.semantic_gap_count != report.integrity.cached_surface_semantic_gap_count
     {
         return Err(integrity(
@@ -1392,14 +1654,50 @@ fn open_private_readonly(path: &Path) -> Result<File, RestoreError> {
 
 fn validate_raw_columns(values: &BTreeMap<String, RawSQLiteValue>) -> Result<(), RestoreError> {
     for value in values.values() {
-        match value {
-            RawSQLiteValue::TextBase64(value) | RawSQLiteValue::BlobBase64(value) => {
-                validate_base64(value)?
-            }
-            RawSQLiteValue::Null | RawSQLiteValue::Integer(_) | RawSQLiteValue::Real(_) => {}
-        }
+        validate_raw_value(value)?;
     }
     Ok(())
+}
+
+fn validate_raw_value(value: &RawSQLiteValue) -> Result<(), RestoreError> {
+    match value {
+        RawSQLiteValue::TextBase64(value) | RawSQLiteValue::BlobBase64(value) => {
+            validate_base64(value)
+        }
+        RawSQLiteValue::Null | RawSQLiteValue::Integer(_) | RawSQLiteValue::Real(_) => Ok(()),
+    }
+}
+
+fn validate_scoped_identifier(
+    account_id: &str,
+    source_base64: Option<&str>,
+    identifier: Option<&str>,
+    kind: &str,
+) -> Result<(), RestoreError> {
+    match (source_base64, identifier) {
+        (None, None) => Ok(()),
+        (Some(source), Some(identifier)) => {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(source)
+                .map_err(|_| {
+                    integrity("archive contains a malformed source-preserving base64 field")
+                })?;
+            let mut hasher = Sha256::new();
+            hasher.update(account_id.as_bytes());
+            hasher.update([0]);
+            hasher.update(bytes);
+            if hex::encode(hasher.finalize()) == identifier {
+                Ok(())
+            } else {
+                Err(integrity(format!(
+                    "{kind} identity is not account-scoped and source-deterministic"
+                )))
+            }
+        }
+        _ => Err(integrity(format!(
+            "{kind} identity and source evidence are incomplete"
+        ))),
+    }
 }
 
 fn validate_optional_base64(value: Option<&str>) -> Result<(), RestoreError> {
