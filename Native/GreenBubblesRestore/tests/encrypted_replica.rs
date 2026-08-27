@@ -292,6 +292,7 @@ fn build_archive(parent: &Path, name: &str, account: &str, fingerprint: &str) ->
         source_fingerprint: fingerprint.to_string(),
         client_build_compatibility: Default::default(),
         acquisition: None,
+        archive_scope: Default::default(),
         messages_path: "private".to_string(),
         rejections_path: "private".to_string(),
         artifacts_path: "private".to_string(),

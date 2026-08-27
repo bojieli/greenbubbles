@@ -439,20 +439,24 @@ pub fn restore_catalog(
     {
         completion.full_restoration_achieved = false;
     }
-    if catalog
+    let archive_scope = if catalog
         .manifest
         .acquisition
         .as_ref()
         .is_some_and(|acquisition| !acquisition.is_full_scan())
     {
         completion.full_restoration_achieved = false;
-    }
+        crate::RestorationArchiveScope::IncrementalFragment
+    } else {
+        crate::RestorationArchiveScope::Authoritative
+    };
     let report = RestorationReport {
         format_version: 3,
         account_id,
         source_fingerprint: catalog.manifest.source_fingerprint.clone(),
         client_build_compatibility,
         acquisition: catalog.manifest.acquisition.clone(),
+        archive_scope,
         messages_path: messages_path.display().to_string(),
         rejections_path: rejections_path.display().to_string(),
         artifacts_path: artifacts_path.display().to_string(),

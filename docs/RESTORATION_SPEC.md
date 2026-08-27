@@ -134,9 +134,12 @@ additions, changes, and removals; repeating the same comparison produces the
 same event IDs. This is the recovery path for missed or duplicated wake-up
 hints.
 
-Snapshot acquisition mode is retained in `report.json`. Bootstrap and integrity
-scan inputs are authoritative full source inventories. An incremental input is
-a fragment even though its manifest fingerprints the complete source tree, so
-its `fullRestorationAchieved` flag is forced false and it cannot directly
-replace or reconcile a replica. This distinction prevents partial source
-selection from weakening the row equation or silently deleting history.
+Snapshot acquisition mode and archive scope are retained in `report.json`.
+Bootstrap and integrity-scan inputs are authoritative full source inventories.
+An incremental input is a fragment even though its manifest fingerprints the
+complete source tree, so its `fullRestorationAchieved` flag is forced false and
+it cannot directly replace or reconcile a replica. `merge-incremental` binds it
+to the prior authoritative fingerprint, replaces records by source-set
+identity, and recalculates global integrity before producing a new
+`authoritative` archive. This distinction prevents partial source selection
+from weakening the row equation or silently deleting history.

@@ -1407,11 +1407,7 @@ fn import_archive_transactionally(
 }
 
 fn require_authoritative_archive(report: &RestorationReport) -> Result<(), RestoreError> {
-    if report
-        .acquisition
-        .as_ref()
-        .is_some_and(|acquisition| !acquisition.is_full_scan())
-    {
+    if report.archive_scope != crate::RestorationArchiveScope::Authoritative {
         return Err(RestoreError::Integrity(
             "incremental acquisition must be merged with its prior authoritative state before replica mutation"
                 .to_string(),

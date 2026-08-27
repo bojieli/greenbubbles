@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use greenbubbles_restore::{
     archive::{create_conversation_policy, read_conversation_page},
+    merge::merge_incremental_archive,
     prepare_catalog,
     reconcile::reconcile_archives,
     replica::{
@@ -104,6 +105,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let policy = required_path(arguments.next(), "policy path")?;
             let events = required_path(arguments.next(), "events output path")?;
             let report = reconcile_archives(&previous, &current, &policy, &events)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "merge-incremental" => {
+            let previous = required_path(arguments.next(), "previous archive directory")?;
+            let fragment = required_path(arguments.next(), "incremental fragment directory")?;
+            let output = required_path(arguments.next(), "merged archive directory")?;
+            let report = merge_incremental_archive(&previous, &fragment, &output)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "replica-bootstrap" => {
@@ -319,6 +327,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore policy <archive> <policy-file> <conversation-id>... [--max-page-size <n>]\n",
                     "  greenbubbles-restore read <archive> <policy-file> <conversation-id> [--cursor <cursor>] [--limit <n>]\n",
                     "  greenbubbles-restore reconcile <previous-archive> <current-archive> <policy-file> <events-output>\n",
+                    "  greenbubbles-restore merge-incremental <previous-archive> <fragment-archive> <output-archive>\n",
                     "  greenbubbles-restore replica-bootstrap <archive> <replica-path> --replica-key-stdin\n",
                     "  greenbubbles-restore replica-status <replica-path> --replica-key-stdin\n",
                     "  greenbubbles-restore replica-sync <archive> <replica-path> --replica-key-stdin\n",

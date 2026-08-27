@@ -464,6 +464,9 @@ Status: **planned**
 - [x] Advance source checkpoints and replica mutations in one transaction.
 - [x] Reconcile additions, edits, recalls, deletions, attachment availability,
   and late-arriving rows without emitting duplicate logical events.
+- [x] Merge selected changed-shard fragments into the prior authoritative
+  archive by source identity before replica mutation; recompute global ordering,
+  relationships, coverage, and verified connector-owned media paths.
 - [ ] Run occasional bounded integrity scans to recover from missed hints,
   timestamp anomalies, decoder upgrades, and checkpoint damage.
 - [ ] Keep attachment extraction, media decoding, thumbnails, and indexing off

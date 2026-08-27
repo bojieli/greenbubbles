@@ -96,12 +96,20 @@ The manifest source fingerprint covers the complete current inventory and its
 content digests, not merely the copied fragment. Repeating a no-op plan
 therefore retains the same authoritative source identity.
 
-Incremental restoration fragments are deliberately not accepted by
-`replica-bootstrap` or `replica-sync` yet. They must first be merged with the
-prior authoritative normalized state using source-set identities; otherwise an
-unseen row from an unchanged shard could be misreported as deleted. This is an
-explicit fail-closed boundary while normalized fragment merging is completed,
-not a claim that changed-shard synchronization is already end-to-end.
+Incremental restoration fragments are deliberately not accepted directly by
+`replica-bootstrap` or `replica-sync`. `merge-incremental` first binds the
+fragment to the exact prior source fingerprint, removes prior records only from
+selected or deleted source sets, and combines it with untouched canonical
+state. It then recomputes conversation-wide ordering, cross-shard relationship
+resolution, referenced artifacts, schema/type coverage, integrity counts, and
+the row equation before marking the result authoritative.
+
+The merge is staged in an owner-only sibling directory, syncs its files, and is
+renamed into place only after validation. Connector-owned materialized and
+decoded media needed by the merged history is copied into the new archive and
+verified against its recorded SHA-256, so deleting the input fragment cannot
+silently break artifact locations. Only the resulting authoritative archive can
+advance the encrypted replica checkpoint.
 
 ## Exact retrieval and health
 

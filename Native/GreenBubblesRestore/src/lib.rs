@@ -4,6 +4,7 @@ pub mod catalog;
 pub mod entities;
 pub mod error;
 pub mod manifest;
+pub mod merge;
 pub mod model;
 pub mod reconcile;
 pub mod replica;

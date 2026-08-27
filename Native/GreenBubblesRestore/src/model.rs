@@ -375,6 +375,8 @@ pub struct RestorationReport {
     pub client_build_compatibility: crate::ClientBuildCompatibilityEvidence,
     #[serde(default)]
     pub acquisition: Option<crate::SnapshotAcquisitionEvidence>,
+    #[serde(default)]
+    pub archive_scope: RestorationArchiveScope,
     pub messages_path: String,
     pub rejections_path: String,
     pub artifacts_path: String,
@@ -384,6 +386,14 @@ pub struct RestorationReport {
     pub report_path: String,
     pub integrity: RestorationIntegrity,
     pub completion: RestorationCompletion,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RestorationArchiveScope {
+    #[default]
+    Authoritative,
+    IncrementalFragment,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
