@@ -11,10 +11,10 @@ use greenbubbles_restore::follow::{
     ReplicaFollowerHealth,
 };
 use greenbubbles_restore::replica::{
-    audit_replica, bootstrap_replica, get_replica_changes, get_replica_message,
-    list_replica_conversations, replica_conversation_references_artifact_in_range,
-    replica_coverage, replica_status, search_replica_messages, synchronize_replica,
-    ReplicaMessageFilter,
+    audit_replica, audit_replica_backup, bootstrap_replica, get_replica_changes,
+    get_replica_message, list_replica_conversations,
+    replica_conversation_references_artifact_in_range, replica_coverage, replica_status,
+    search_replica_messages, synchronize_replica, ReplicaMessageFilter,
 };
 use greenbubbles_restore::tools::{
     create_tool_policy, ConversationToolScope, ToolCapability, ToolMessageField,
@@ -939,7 +939,7 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
         .find(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.contains("pre-migration-v1"))
+                .is_some_and(|name| name.contains("pre-migration-v1") && name.ends_with(".db"))
         })
         .unwrap();
     assert_eq!(file_mode(&backup), 0o600);
@@ -1037,6 +1037,200 @@ fn rejects_tampered_migration_identity_before_creating_a_recovery_backup() {
     drop(connection);
     assert_eq!(replica_status(&replica, &key).unwrap().schema_version, 4);
     assert_eq!(migration_backup_count(&private), backup_count + 1);
+}
+
+#[test]
+fn audits_pre_migration_backup_without_mutation_or_private_output() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private-backup-audit");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive = build_archive(&private, "archive", "account-a", "source-a");
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+    bootstrap_replica(&archive, &replica, &key).unwrap();
+    downgrade_to_schema_1(&replica);
+    assert_eq!(replica_status(&replica, &key).unwrap().schema_version, 4);
+
+    let backup = migration_backup_path(&private, 1);
+    let before = fs::read(&backup).unwrap();
+    let report = audit_replica_backup(&backup, &key).unwrap();
+    assert_eq!(report.format_version, 1);
+    assert!(report.privacy_safe_summary);
+    assert_eq!(report.schema_version, 1);
+    assert!(report.initialized);
+    assert!(report.encrypted_at_rest);
+    assert!(report.sqlite_integrity_verified);
+    assert!(report.foreign_keys_verified);
+    assert!(report.migration_ledger_verified);
+    assert!(report.record_digests_verified);
+    assert!(report.indexed_projections_verified);
+    assert!(report.message_links_verified);
+    assert!(report.coverage_state_verified);
+    assert!(report.transient_state_empty);
+    assert_eq!(report.conversation_count, 1);
+    assert_eq!(report.participant_count, 1);
+    assert_eq!(report.message_count, 1);
+    assert_eq!(report.artifact_count, 1);
+    assert_eq!(report.message_artifact_count, 1);
+    assert!(audit_replica_backup(&backup, &ReplicaKey::from_bytes(WRONG_KEY_BYTES)).is_err());
+    assert!(audit_replica_backup(&replica, &key).is_err());
+
+    let mut audit_process = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .arg("audit-replica-backup")
+        .arg(&backup)
+        .arg("--replica-key-stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    audit_process
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{}\n", "31".repeat(32)).as_bytes())
+        .unwrap();
+    let audit_output = audit_process.wait_with_output().unwrap();
+    assert!(
+        audit_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&audit_output.stderr)
+    );
+    let audit_json: serde_json::Value = serde_json::from_slice(&audit_output.stdout).unwrap();
+    assert_eq!(audit_json["privacySafeSummary"], true);
+    assert_eq!(audit_json["schemaVersion"], 1);
+    assert_eq!(audit_json["messageCount"], 1);
+    let audit_text = String::from_utf8(audit_output.stdout).unwrap();
+    for private_value in [
+        "account-a",
+        "source-a",
+        PRIVATE_TEXT,
+        backup.to_str().unwrap(),
+    ] {
+        assert!(!audit_text.contains(private_value));
+    }
+    assert_eq!(fs::read(&backup).unwrap(), before);
+    assert!(!PathBuf::from(format!("{}-wal", backup.display())).exists());
+    assert!(!PathBuf::from(format!("{}-shm", backup.display())).exists());
+    let backup_connection = keyed_connection(&backup);
+    let version: i64 = backup_connection
+        .query_row(
+            "SELECT schema_version FROM replica_schema WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, 1);
+    drop(backup_connection);
+
+    let connection = keyed_connection(&backup);
+    connection
+        .execute(
+            "UPDATE migration_history SET migration_sha256 = '00' WHERE schema_version = 1",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(audit_replica_backup(&backup, &key).is_err());
+    let expected_digest = hex::encode(Sha256::digest(b"canonical replica base schema"));
+    let connection = keyed_connection(&backup);
+    connection
+        .execute(
+            "UPDATE migration_history SET migration_sha256 = ?1 WHERE schema_version = 1",
+            [&expected_digest],
+        )
+        .unwrap();
+    connection
+        .execute("UPDATE message SET search_text = 'corrupt projection'", [])
+        .unwrap();
+    drop(connection);
+    assert!(audit_replica_backup(&backup, &key).is_err());
+    let connection = keyed_connection(&backup);
+    connection
+        .execute("UPDATE message SET search_text = ?1", [PRIVATE_TEXT])
+        .unwrap();
+    drop(connection);
+    assert!(audit_replica_backup(&backup, &key).is_ok());
+
+    let symlink = private.join("backup-symlink.db");
+    std::os::unix::fs::symlink(&backup, &symlink).unwrap();
+    assert!(audit_replica_backup(&symlink, &key).is_err());
+    fs::remove_file(&symlink).unwrap();
+
+    let hard_link = private.join("backup-hard-link.db");
+    fs::hard_link(&backup, &hard_link).unwrap();
+    assert!(audit_replica_backup(&hard_link, &key).is_err());
+    fs::remove_file(&hard_link).unwrap();
+
+    let unsafe_permissions = private.join("backup-unsafe-permissions.db");
+    fs::copy(&backup, &unsafe_permissions).unwrap();
+    fs::set_permissions(&unsafe_permissions, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(audit_replica_backup(&unsafe_permissions, &key).is_err());
+}
+
+#[test]
+fn refuses_migration_when_the_recovery_backup_fails_its_content_audit() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private-backup-creation-audit");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive = build_archive(&private, "archive", "account-a", "source-a");
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+    bootstrap_replica(&archive, &replica, &key).unwrap();
+    downgrade_to_schema_1(&replica);
+
+    let connection = keyed_connection(&replica);
+    connection
+        .execute("UPDATE message SET search_text = 'corrupt projection'", [])
+        .unwrap();
+    drop(connection);
+    let backup_count = migration_backup_count(&private);
+    assert!(replica_status(&replica, &key).is_err());
+    assert_eq!(migration_backup_count(&private), backup_count);
+    let connection = keyed_connection(&replica);
+    let version: i64 = connection
+        .query_row(
+            "SELECT schema_version FROM replica_schema WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, 1);
+    connection
+        .execute("UPDATE message SET search_text = ?1", [PRIVATE_TEXT])
+        .unwrap();
+    drop(connection);
+    assert_eq!(replica_status(&replica, &key).unwrap().schema_version, 4);
+    assert_eq!(migration_backup_count(&private), backup_count + 1);
+}
+
+#[test]
+fn audits_every_supported_pre_migration_schema_generation() {
+    for version in [2, 3] {
+        let fixture = tempfile::tempdir().unwrap();
+        let private = fixture.path().join(format!("private-schema-{version}"));
+        fs::create_dir(&private).unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+        let archive = build_archive(&private, "archive", "account-a", "source-a");
+        let replica = private.join("replica.db");
+        let key = ReplicaKey::from_bytes(KEY_BYTES);
+        bootstrap_replica(&archive, &replica, &key).unwrap();
+        match version {
+            2 => downgrade_to_schema_2(&replica),
+            3 => downgrade_to_schema_3(&replica),
+            _ => unreachable!(),
+        }
+        assert_eq!(replica_status(&replica, &key).unwrap().schema_version, 4);
+        let report = audit_replica_backup(&migration_backup_path(&private, version), &key).unwrap();
+        assert_eq!(report.schema_version, version);
+        assert!(report.checkpoint_state_verified);
+        assert!(report.full_text_index_verified);
+        assert!(report.change_stream_verified);
+        assert!(report.transient_state_empty);
+        assert_eq!(report.message_count, 1);
+    }
 }
 
 #[test]
@@ -1562,6 +1756,40 @@ fn downgrade_to_schema_1(path: &Path) {
         .unwrap();
 }
 
+fn downgrade_to_schema_2(path: &Path) {
+    downgrade_to_schema_3(path);
+    let connection = keyed_connection(path);
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             DROP TABLE sync_seen;
+             DROP TABLE replica_generation;
+             DELETE FROM migration_history WHERE schema_version >= 3;
+             UPDATE replica_schema SET schema_version = 2 WHERE singleton = 1;
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+}
+
+fn downgrade_to_schema_3(path: &Path) {
+    let connection = keyed_connection(path);
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             DROP INDEX cached_moment_by_time;
+             DROP INDEX cached_moment_by_author_time;
+             DROP INDEX cached_moment_by_type_time;
+             DROP INDEX cached_interaction_by_time;
+             DROP TABLE cached_surface_state;
+             DROP TABLE cached_moment_interaction;
+             DROP TABLE cached_moment;
+             DELETE FROM migration_history WHERE schema_version >= 4;
+             UPDATE replica_schema SET schema_version = 3 WHERE singleton = 1;
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+}
+
 fn clone_archive(source: &Path, parent: &Path, name: &str, fingerprint: &str) -> PathBuf {
     let destination = parent.join(name);
     fs::create_dir(&destination).unwrap();
@@ -1655,9 +1883,26 @@ fn migration_backup_count(directory: &Path) -> usize {
             entry
                 .file_name()
                 .to_str()
-                .is_some_and(|name| name.contains(".pre-migration-v"))
+                .is_some_and(|name| name.contains(".pre-migration-v") && name.ends_with(".db"))
         })
         .count()
+}
+
+fn migration_backup_path(directory: &Path, version: u32) -> PathBuf {
+    let marker = format!(".pre-migration-v{version}-");
+    let matches = fs::read_dir(directory)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.contains(&marker) && name.ends_with(".db"))
+                .then_some(entry.path())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(matches.len(), 1);
+    matches.into_iter().next().unwrap()
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {

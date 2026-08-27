@@ -640,6 +640,15 @@ sync/change history, and empty reconciliation staging. Its output is
 aggregate-only and it never repairs state or replaces authoritative archive and
 real-corpus audits. See `docs/REPLICA_AUDIT.md`.
 
+Pre-migration backup creation now converts each encrypted recovery database to
+a self-contained rollback-journal file, closes it, and runs a schema-aware
+read-only content audit before migration begins. The same aggregate-only
+`audit-replica-backup` command lets an operator recheck retained schemas 1–3;
+wrong keys, unsafe file identities, current schemas, migration drift, record or
+projection corruption, link/coverage inconsistency, and available
+checkpoint/FTS/change-stream damage fail closed without rewriting the backup.
+See `docs/REPLICA_BACKUP_AUDIT.md`.
+
 ## Phase 3 — agent-neutral connector service and drafts
 
 Status: **complete for replica-backed reads and non-executing drafts**

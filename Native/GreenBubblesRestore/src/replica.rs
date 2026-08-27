@@ -120,6 +120,34 @@ pub struct ReplicaAuditReport {
     pub change_count: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ReplicaBackupAuditReport {
+    pub format_version: u32,
+    pub privacy_safe_summary: bool,
+    pub schema_version: u32,
+    pub replica_format_version: u32,
+    pub initialized: bool,
+    pub encrypted_at_rest: bool,
+    pub sqlite_integrity_verified: bool,
+    pub foreign_keys_verified: bool,
+    pub migration_ledger_verified: bool,
+    pub record_digests_verified: bool,
+    pub indexed_projections_verified: bool,
+    pub message_links_verified: bool,
+    pub coverage_state_verified: bool,
+    pub checkpoint_state_verified: bool,
+    pub full_text_index_verified: bool,
+    pub change_stream_verified: bool,
+    pub transient_state_empty: bool,
+    pub conversation_count: u64,
+    pub participant_count: u64,
+    pub message_count: u64,
+    pub artifact_count: u64,
+    pub relationship_count: u64,
+    pub message_artifact_count: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ReplicaHealthState {
@@ -584,7 +612,7 @@ pub fn audit_replica(
                 "replica identity is incomplete".to_string(),
             ));
         }
-        let record_audit = audit_replica_records(connection, &identity.0)?;
+        let record_audit = audit_replica_records(connection, &identity.0, true)?;
         if record_audit.conversation_count != conversation_count
             || record_audit.participant_count != participant_count
             || record_audit.message_count != message_count
@@ -659,6 +687,147 @@ pub fn audit_replica(
         relationship_count,
         message_artifact_count,
         change_count,
+    })
+}
+
+pub fn audit_replica_backup(
+    backup_path: &Path,
+    key: &ReplicaKey,
+) -> Result<ReplicaBackupAuditReport, RestoreError> {
+    verify_private_replica_files(backup_path)?;
+    let (mut connection, _) = open_existing_replica_read_only(backup_path, key)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+    let connection = &*transaction;
+    let version = schema_version(connection)?;
+    if version == 0 || version >= CURRENT_SCHEMA_VERSION {
+        return Err(RestoreError::Integrity(
+            "replica backup audit requires a non-empty older supported schema".to_string(),
+        ));
+    }
+    validate_replica_migration_ledger(connection, version)?;
+    verify_sqlite_integrity(connection)?;
+    verify_foreign_keys(connection)?;
+    let replica_format_version: i64 = connection.query_row(
+        "SELECT replica_format_version FROM replica_schema WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    let replica_format_version = u32::try_from(replica_format_version)
+        .map_err(|_| RestoreError::Integrity("replica backup format is invalid".to_string()))?;
+    let identity_count = table_count(connection, "replica_identity")?;
+    if identity_count > 1 {
+        return Err(RestoreError::Integrity(
+            "replica backup contains multiple account identities".to_string(),
+        ));
+    }
+    let initialized = identity_count == 1;
+    let mut record_audit = ReplicaRecordAudit::default();
+    let mut checkpoint_state_verified = version < 2;
+    let mut full_text_index_verified = version < 2;
+    let mut change_stream_verified = version < 2;
+    let mut transient_state_empty = version < 3;
+    if initialized {
+        let identity: (String, String, bool, String, String) = connection.query_row(
+            "SELECT account_id, current_source_fingerprint, restoration_complete,
+                    created_at_unix_nanoseconds, updated_at_unix_nanoseconds
+             FROM replica_identity WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )?;
+        verify_positive_timestamp(&identity.3, "replica backup creation")?;
+        verify_positive_timestamp(&identity.4, "replica backup update")?;
+        if identity.0.is_empty() || identity.1.is_empty() {
+            return Err(RestoreError::Integrity(
+                "replica backup identity is incomplete".to_string(),
+            ));
+        }
+        record_audit = audit_replica_records(connection, &identity.0, false)?;
+        verify_replica_message_links(connection, &identity.0, &record_audit)?;
+        verify_legacy_replica_coverage(connection, &identity, &record_audit)?;
+        if version >= 2 {
+            verify_legacy_replica_checkpoint(connection, &identity, &record_audit)?;
+            verify_replica_fts(connection, &identity.0, record_audit.message_count)?;
+            verify_replica_change_stream(
+                connection,
+                &identity.0,
+                table_count(connection, "change_log")?,
+            )?;
+            checkpoint_state_verified = true;
+            full_text_index_verified = true;
+            change_stream_verified = true;
+        }
+        if version >= 3 {
+            let _ = replica_id(connection)?;
+            if table_count(connection, "sync_seen")? != 0 {
+                return Err(RestoreError::Integrity(
+                    "replica backup contains reconciliation staging".to_string(),
+                ));
+            }
+            transient_state_empty = true;
+        }
+    } else {
+        let mut content_count = table_count(connection, "conversation")?
+            .saturating_add(table_count(connection, "participant")?)
+            .saturating_add(table_count(connection, "message")?)
+            .saturating_add(table_count(connection, "artifact")?)
+            .saturating_add(table_count(connection, "conversation_participant")?)
+            .saturating_add(table_count(connection, "message_relationship")?)
+            .saturating_add(table_count(connection, "message_artifact")?)
+            .saturating_add(table_count(connection, "coverage_state")?);
+        if version >= 2 {
+            content_count = content_count
+                .saturating_add(table_count(connection, "source_checkpoint")?)
+                .saturating_add(table_count(connection, "sync_run")?)
+                .saturating_add(table_count(connection, "change_log")?)
+                .saturating_add(table_count(connection, "message_fts")?);
+            checkpoint_state_verified = true;
+            full_text_index_verified = true;
+            change_stream_verified = true;
+        }
+        if version >= 3 {
+            let _ = replica_id(connection)?;
+            content_count = content_count.saturating_add(table_count(connection, "sync_seen")?);
+            transient_state_empty = true;
+        }
+        if content_count != 0 {
+            return Err(RestoreError::Integrity(
+                "uninitialized replica backup contains orphan serving state".to_string(),
+            ));
+        }
+    }
+    transaction.rollback()?;
+    Ok(ReplicaBackupAuditReport {
+        format_version: 1,
+        privacy_safe_summary: true,
+        schema_version: version,
+        replica_format_version,
+        initialized,
+        encrypted_at_rest: true,
+        sqlite_integrity_verified: true,
+        foreign_keys_verified: true,
+        migration_ledger_verified: true,
+        record_digests_verified: true,
+        indexed_projections_verified: true,
+        message_links_verified: true,
+        coverage_state_verified: true,
+        checkpoint_state_verified,
+        full_text_index_verified,
+        change_stream_verified,
+        transient_state_empty,
+        conversation_count: record_audit.conversation_count,
+        participant_count: record_audit.participant_count,
+        message_count: record_audit.message_count,
+        artifact_count: record_audit.artifact_count,
+        relationship_count: record_audit.relationships.len() as u64,
+        message_artifact_count: record_audit.message_artifacts.len() as u64,
     })
 }
 
@@ -1574,6 +1743,7 @@ fn verify_stored_record<T: DeserializeOwned + Serialize>(
 fn audit_replica_records(
     connection: &Connection,
     account_id: &str,
+    include_cached: bool,
 ) -> Result<ReplicaRecordAudit, RestoreError> {
     let mut audit = ReplicaRecordAudit::default();
     {
@@ -1738,7 +1908,9 @@ fn audit_replica_records(
             audit.message_count = audit.message_count.saturating_add(1);
         }
     }
-    audit_cached_records(connection, account_id, &mut audit)?;
+    if include_cached {
+        audit_cached_records(connection, account_id, &mut audit)?;
+    }
     Ok(audit)
 }
 
@@ -2045,16 +2217,23 @@ fn verify_replica_checkpoint_and_coverage(
     let coverage: RestorationCoverage = serde_json::from_slice(&coverage_bytes)?;
     let report: RestorationReport = serde_json::from_slice(&report_bytes)?;
     validate_restoration_coverage_schema(&coverage)?;
+    let recomputed_completion = crate::RestorationCompletion::evaluate(&report.integrity);
     if coverage_source != identity.1
         || report.account_id != identity.0
         || report.source_fingerprint != identity.1
         || report.archive_scope != crate::RestorationArchiveScope::Authoritative
         || report.completion.full_restoration_achieved != identity.2
         || stored_complete != identity.2
+        || serde_json::to_vec(&recomputed_completion)? != serde_json::to_vec(&report.completion)?
         || !report.integrity.row_equation_holds()
+        || report.integrity.restored_row_count != message_count
         || report.integrity.conversation_count != conversation_count
         || report.integrity.participant_count != participant_count
         || report.integrity.unique_artifact_count != artifact_count
+        || (report.format_version >= 3
+            && (report.integrity.relationship_reference_count != audit.relationships.len() as u64
+                || report.integrity.artifact_reference_count
+                    != audit.message_artifacts.len() as u64))
         || report.integrity.cached_moment_count != cached_moment_count
         || report.integrity.cached_moment_interaction_count != cached_moment_interaction_count
         || audit.conversation_count != conversation_count
@@ -2088,6 +2267,105 @@ fn verify_replica_checkpoint_and_coverage(
     } else if cached_moment_count != 0 || cached_moment_interaction_count != 0 {
         return Err(RestoreError::Integrity(
             "replica cached records have no coverage state".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_legacy_replica_coverage(
+    connection: &Connection,
+    identity: &(String, String, bool, String, String),
+    audit: &ReplicaRecordAudit,
+) -> Result<(), RestoreError> {
+    if table_count(connection, "coverage_state")? != 1 {
+        return Err(RestoreError::Integrity(
+            "replica backup coverage state is not singular".to_string(),
+        ));
+    }
+    let (source, coverage_bytes, report_bytes, stored_complete): (String, Vec<u8>, Vec<u8>, bool) =
+        connection.query_row(
+            "SELECT source_fingerprint, coverage_json, report_json,
+                full_restoration_achieved
+         FROM coverage_state WHERE account_id = ?1",
+            [&identity.0],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+    let coverage: RestorationCoverage = serde_json::from_slice(&coverage_bytes)?;
+    let report: RestorationReport = serde_json::from_slice(&report_bytes)?;
+    validate_restoration_coverage_schema(&coverage)?;
+    let recomputed_completion = crate::RestorationCompletion::evaluate(&report.integrity);
+    if source != identity.1
+        || report.account_id != identity.0
+        || report.source_fingerprint != identity.1
+        || report.archive_scope != crate::RestorationArchiveScope::Authoritative
+        || report.completion.full_restoration_achieved != identity.2
+        || stored_complete != identity.2
+        || serde_json::to_vec(&recomputed_completion)? != serde_json::to_vec(&report.completion)?
+        || report.integrity.restored_row_count != audit.message_count
+        || report.integrity.conversation_count != audit.conversation_count
+        || report.integrity.participant_count != audit.participant_count
+        || report.integrity.unique_artifact_count != audit.artifact_count
+        || (report.format_version >= 3
+            && (report.integrity.relationship_reference_count != audit.relationships.len() as u64
+                || report.integrity.artifact_reference_count
+                    != audit.message_artifacts.len() as u64))
+        || !report.integrity.row_equation_holds()
+    {
+        return Err(RestoreError::Integrity(
+            "replica backup coverage differs from its canonical state".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn verify_legacy_replica_checkpoint(
+    connection: &Connection,
+    identity: &(String, String, bool, String, String),
+    audit: &ReplicaRecordAudit,
+) -> Result<(), RestoreError> {
+    if table_count(connection, "source_checkpoint")? != 1 {
+        return Err(RestoreError::Integrity(
+            "replica backup checkpoint is not singular".to_string(),
+        ));
+    }
+    let checkpoint: (String, String, i64, i64, i64, i64) = connection.query_row(
+        "SELECT source_fingerprint, committed_at_unix_nanoseconds,
+                conversation_count, participant_count, message_count, artifact_count
+         FROM source_checkpoint WHERE account_id = ?1",
+        [&identity.0],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        },
+    )?;
+    let checkpoint_timestamp =
+        verify_positive_timestamp(&checkpoint.1, "replica backup checkpoint")?;
+    if checkpoint.0 != identity.1
+        || u64::try_from(checkpoint.2).ok() != Some(audit.conversation_count)
+        || u64::try_from(checkpoint.3).ok() != Some(audit.participant_count)
+        || u64::try_from(checkpoint.4).ok() != Some(audit.message_count)
+        || u64::try_from(checkpoint.5).ok() != Some(audit.artifact_count)
+    {
+        return Err(RestoreError::Integrity(
+            "replica backup checkpoint differs from canonical state".to_string(),
+        ));
+    }
+    let matching_run: i64 = connection.query_row(
+        "SELECT count(*) FROM sync_run
+         WHERE account_id = ?1 AND source_fingerprint = ?2
+           AND committed_at_unix_nanoseconds = ?3",
+        params![identity.0, identity.1, checkpoint_timestamp.to_string()],
+        |row| row.get(0),
+    )?;
+    if matching_run == 0 {
+        return Err(RestoreError::Integrity(
+            "replica backup checkpoint has no matching synchronization run".to_string(),
         ));
     }
     Ok(())
@@ -2674,8 +2952,19 @@ fn create_pre_migration_backup(
         let backup = Backup::new(source, &mut destination)?;
         backup.run_to_completion(128, Duration::from_millis(2), None)?;
         drop(backup);
-        destination.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        destination.execute_batch(
+            "PRAGMA wal_checkpoint(TRUNCATE);
+             PRAGMA journal_mode = DELETE;
+             PRAGMA synchronous = FULL;",
+        )?;
+        drop(destination);
         secure_replica_files(&path)?;
+        let audit = audit_replica_backup(&path, key)?;
+        if audit.schema_version != version {
+            return Err(RestoreError::Integrity(
+                "pre-migration backup schema changed during verification".to_string(),
+            ));
+        }
         Ok(())
     })();
     if result.is_err() {

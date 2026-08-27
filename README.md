@@ -335,6 +335,13 @@ printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
   --bin greenbubbles-restore -- \
   audit-replica /path/to/private-replica-directory/greenbubbles.db \
   --replica-key-stdin
+
+printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  audit-replica-backup \
+  /path/to/private-replica-directory/.greenbubbles.db.pre-migration-v1-....db \
+  --replica-key-stdin
 ```
 
 An offline restoration operator can atomically publish successive authoritative
@@ -400,6 +407,12 @@ integrity, foreign keys, migration identities, canonical record hashes and
 projections, exact links, FTS, checkpoint/coverage state, and sync/change
 history. It never repairs a mismatch. See
 [docs/REPLICA_AUDIT.md](docs/REPLICA_AUDIT.md).
+
+`audit-replica-backup` verifies a retained schema-1 through schema-3 recovery
+database without migrating or rewriting it. Backup creation runs this same
+schema-aware audit before the serving replica is upgraded; an invalid candidate
+aborts migration and is removed. See
+[docs/REPLICA_BACKUP_AUDIT.md](docs/REPLICA_BACKUP_AUDIT.md).
 
 Exact retrieval uses an owner-only JSON filter. Any field can be omitted:
 

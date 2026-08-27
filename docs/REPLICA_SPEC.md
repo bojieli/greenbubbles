@@ -69,8 +69,11 @@ restoration evidence.
 Every numbered migration is transactional and recorded with a migration
 identity digest. Before upgrading an existing non-empty schema, GreenBubbles
 uses SQLite's online backup API to create a same-key encrypted, mode-`0600`
-pre-migration database in the replica directory. The backup filename—not its
-absolute location—is the only backup reference exposed in normal reports.
+pre-migration database in the replica directory. It converts that database to
+rollback-journal mode, closes it, and performs an independent schema-aware,
+read-only content audit before changing the serving schema. A failed candidate
+is removed and migration does not begin. The backup filename—not its absolute
+location—is the only backup reference exposed in normal reports.
 
 Opening a non-empty replica now verifies the singleton schema row, replica
 format, exact contiguous migration sequence, positive recorded timestamps, and
@@ -96,6 +99,13 @@ and indexed projection, exact memberships/relationships/artifact links, FTS,
 checkpoint counts, coverage/completion identity, synchronization/change
 history, SQLite integrity, foreign keys, and empty staging. It returns only
 aggregate counts and verdicts and performs no repair. See `REPLICA_AUDIT.md`.
+
+`audit-replica-backup` applies the historical subset of those invariants to a
+retained, non-empty schema-1 through schema-3 recovery database. It verifies
+canonical records, projections, links, coverage/completion, and every
+checkpoint/FTS/change/staging feature present in that schema without migrating
+or rewriting it. It rejects current-schema serving replicas and emits only
+aggregate verdicts. See `REPLICA_BACKUP_AUDIT.md`.
 
 ## Transactional reconciliation and changes
 
