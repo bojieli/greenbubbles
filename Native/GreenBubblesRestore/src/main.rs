@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use greenbubbles_restore::{
     acquisition_audit::audit_acquisition_chain,
@@ -9,6 +11,7 @@ use greenbubbles_restore::{
     audit::audit_archive,
     benchmark::{run_synthetic_benchmark, SyntheticBenchmarkConfig},
     connector::{audit_connector_log, ConnectorDestination, ConnectorService},
+    follow::{follow_replica_once, publish_replica_handoff},
     merge::merge_incremental_archive,
     preflight_snapshot, prepare_catalog,
     reconcile::reconcile_archives,
@@ -205,6 +208,62 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let key = ReplicaKey::read_stdin()?;
             let report = synchronize_replica(&archive, &replica, &key)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "replica-publish" => {
+            let archive = required_path(arguments.next(), "authoritative archive directory")?;
+            let handoff = required_path(arguments.next(), "replica handoff path")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            let generation = required_u64_option(&remaining, "--generation")?;
+            let report = publish_replica_handoff(&archive, &handoff, generation)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "replica-follow-once" => {
+            let handoff = required_path(arguments.next(), "replica handoff path")?;
+            let state = required_path(arguments.next(), "replica follow state path")?;
+            let replica = required_path(arguments.next(), "replica path")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if !remaining.iter().any(|value| value == "--replica-key-stdin") {
+                return Err("replica keys must be supplied with --replica-key-stdin".into());
+            }
+            let key = ReplicaKey::read_stdin()?;
+            let report = follow_replica_once(&handoff, &state, &replica, &key)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "replica-follow" => {
+            let handoff = required_path(arguments.next(), "replica handoff path")?;
+            let state = required_path(arguments.next(), "replica follow state path")?;
+            let replica = required_path(arguments.next(), "replica path")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if !remaining.iter().any(|value| value == "--replica-key-stdin") {
+                return Err("replica keys must be supplied with --replica-key-stdin".into());
+            }
+            let poll_milliseconds = option_u64(&remaining, "--poll-milliseconds")?.unwrap_or(1_000);
+            if !(100..=60_000).contains(&poll_milliseconds) {
+                return Err("--poll-milliseconds must be between 100 and 60000".into());
+            }
+            let maximum_polls = option_u64(&remaining, "--maximum-polls")?;
+            if maximum_polls == Some(0) {
+                return Err("--maximum-polls must be positive".into());
+            }
+            let key = ReplicaKey::read_stdin()?;
+            let mut last_marker = None;
+            let mut polls = 0_u64;
+            loop {
+                let marker = handoff_poll_marker(&handoff)?;
+                if marker.is_some() && marker != last_marker {
+                    let report = follow_replica_once(&handoff, &state, &replica, &key)?;
+                    let mut output = io::stdout().lock();
+                    serde_json::to_writer(&mut output, &report)?;
+                    output.write_all(b"\n")?;
+                    output.flush()?;
+                    last_marker = marker;
+                }
+                polls = polls.saturating_add(1);
+                if maximum_polls.is_some_and(|maximum| polls >= maximum) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(poll_milliseconds));
+            }
         }
         "replica-changes" => {
             let replica = required_path(arguments.next(), "replica path")?;
@@ -466,6 +525,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore replica-bootstrap <archive> <replica-path> --replica-key-stdin\n",
                     "  greenbubbles-restore replica-status <replica-path> --replica-key-stdin\n",
                     "  greenbubbles-restore replica-sync <archive> <replica-path> --replica-key-stdin\n",
+                    "  greenbubbles-restore replica-publish <authoritative-archive> <handoff-file> --generation <positive-integer>\n",
+                    "  greenbubbles-restore replica-follow-once <handoff-file> <follow-state-file> <replica-path> --replica-key-stdin\n",
+                    "  greenbubbles-restore replica-follow <handoff-file> <follow-state-file> <replica-path> --replica-key-stdin [--poll-milliseconds <100..60000>] [--maximum-polls <n>]\n",
                     "  greenbubbles-restore replica-changes <replica-path> --replica-key-stdin [--cursor <cursor>] [--limit <n>]\n",
                     "  greenbubbles-restore replica-search <replica-path> <private-filter-json> --replica-key-stdin [--cursor <cursor>] [--limit <n>]\n",
                     "  greenbubbles-restore replica-cached-moments <replica-path> --replica-key-stdin [--author <opaque-id>] [--content-type <n>] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--cursor <cursor>] [--limit <n>]\n",
@@ -503,11 +565,32 @@ fn required_option(arguments: &[String], option: &str) -> Result<String, String>
     option_string(arguments, option)?.ok_or_else(|| format!("missing {option}"))
 }
 
+fn required_u64_option(arguments: &[String], option: &str) -> Result<u64, String> {
+    required_option(arguments, option)?
+        .parse::<u64>()
+        .map_err(|_| format!("invalid positive integer for {option}"))
+        .and_then(|value| {
+            (value > 0)
+                .then_some(value)
+                .ok_or_else(|| format!("invalid positive integer for {option}"))
+        })
+}
+
 fn option_usize(arguments: &[String], option: &str) -> Result<Option<usize>, String> {
     option_string(arguments, option)?
         .map(|value| {
             value
                 .parse::<usize>()
+                .map_err(|_| format!("invalid integer for {option}"))
+        })
+        .transpose()
+}
+
+fn option_u64(arguments: &[String], option: &str) -> Result<Option<u64>, String> {
+    option_string(arguments, option)?
+        .map(|value| {
+            value
+                .parse::<u64>()
                 .map_err(|_| format!("invalid integer for {option}"))
         })
         .transpose()
@@ -626,4 +709,34 @@ fn read_utf8_stdin_limited(
         return Err(format!("standard input exceeds {maximum_bytes} bytes").into());
     }
     Ok(Zeroizing::new(String::from_utf8(bytes.to_vec())?))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct HandoffPollMarker {
+    device: u64,
+    inode: u64,
+    byte_count: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+}
+
+fn handoff_poll_marker(
+    path: &std::path::Path,
+) -> Result<Option<HandoffPollMarker>, Box<dyn std::error::Error>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err("replica handoff hint is not a regular file".into());
+            }
+            Ok(Some(HandoffPollMarker {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                byte_count: metadata.len(),
+                modified_seconds: metadata.mtime(),
+                modified_nanoseconds: metadata.mtime_nsec(),
+            }))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }

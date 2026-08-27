@@ -550,6 +550,42 @@ pub fn synchronize_replica(
     )
 }
 
+pub fn replica_matches_authoritative_archive(
+    archive_directory: &Path,
+    replica_path: &Path,
+    key: &ReplicaKey,
+) -> Result<bool, RestoreError> {
+    ensure_private_directory(archive_directory)?;
+    let report = load_report(archive_directory)?;
+    require_authoritative_archive(&report)?;
+    let incoming_coverage = load_archive_coverage(archive_directory)?;
+    let opened = open_replica(replica_path, key)?;
+    let identity: Option<(String, Option<String>)> = opened
+        .connection
+        .query_row(
+            "SELECT account_id, current_source_fingerprint
+             FROM replica_identity WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((account_id, source_fingerprint)) = identity else {
+        return Ok(false);
+    };
+    if account_id != report.account_id
+        || source_fingerprint.as_deref() != Some(report.source_fingerprint.as_str())
+    {
+        return Ok(false);
+    }
+    let stored_state = load_coverage_state(&opened.connection, &account_id)?;
+    Ok(stored_state
+        .as_ref()
+        .is_some_and(|(stored_report, stored_coverage)| {
+            archive_revision_digest(stored_report, stored_coverage)
+                == archive_revision_digest(&report, &incoming_coverage)
+        }))
+}
+
 pub fn get_replica_changes(
     replica_path: &Path,
     key: &ReplicaKey,

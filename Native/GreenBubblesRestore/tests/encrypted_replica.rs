@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
+use greenbubbles_restore::follow::{
+    follow_replica_once, publish_replica_handoff, ReplicaFollowOutcome,
+};
 use greenbubbles_restore::replica::{
     bootstrap_replica, get_replica_changes, get_replica_message, list_replica_conversations,
     replica_conversation_references_artifact_in_range, replica_coverage, replica_status,
@@ -946,6 +949,142 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
         )
         .unwrap();
     assert_eq!(backup_version, 1);
+}
+
+#[test]
+fn follows_monotonic_authoritative_archive_handoffs_with_crash_safe_state() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private-follow");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive_a = build_archive(&private, "archive-follow-a", "account-a", "source-a");
+    let handoff = private.join("handoff.json");
+    let state = private.join("follow-state.json");
+    let replica = private.join("follow-replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+
+    assert!(publish_replica_handoff(&archive_a, &archive_a.join("handoff.json"), 1).is_err());
+
+    let published = publish_replica_handoff(&archive_a, &handoff, 1).unwrap();
+    assert!(published.privacy_safe_summary);
+    assert_eq!(published.generation, 1);
+    assert_eq!(file_mode(&handoff), 0o600);
+    let first = follow_replica_once(&handoff, &state, &replica, &key).unwrap();
+    assert_eq!(first.outcome, ReplicaFollowOutcome::Bootstrapped);
+    assert!(first.source_advanced);
+    assert_eq!(file_mode(&state), 0o600);
+    let repeated = follow_replica_once(&handoff, &state, &replica, &key).unwrap();
+    assert_eq!(repeated.outcome, ReplicaFollowOutcome::AlreadyApplied);
+    assert!(repeated.idempotent);
+
+    let archive_b = clone_archive(&archive_a, &private, "archive-follow-b", "source-b");
+    let mut messages = read_ndjson::<CanonicalMessage>(&archive_b.join("messages.ndjson"));
+    messages[0].typed_payload = TypedPayload::Decoded(json!({"Text": "followed edit"}));
+    messages[0].content_base64 = Some("Zm9sbG93ZWQgZWRpdA==".to_string());
+    overwrite_ndjson(&archive_b.join("messages.ndjson"), &messages);
+    publish_replica_handoff(&archive_b, &handoff, 2).unwrap();
+    let synchronized = follow_replica_once(&handoff, &state, &replica, &key).unwrap();
+    assert_eq!(synchronized.outcome, ReplicaFollowOutcome::Synchronized);
+    assert!(synchronized.source_advanced);
+    assert_eq!(synchronized.changed_count, 1);
+    assert_eq!(
+        replica_status(&replica, &key)
+            .unwrap()
+            .current_source_fingerprint
+            .as_deref(),
+        Some("source-b")
+    );
+
+    let supervised_state = private.join("supervised-state.json");
+    let supervised_replica = private.join("supervised-replica.db");
+    let mut supervised = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .arg("replica-follow")
+        .args([&handoff, &supervised_state, &supervised_replica])
+        .args([
+            "--replica-key-stdin",
+            "--poll-milliseconds",
+            "100",
+            "--maximum-polls",
+            "1",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    supervised
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{}\n", "31".repeat(32)).as_bytes())
+        .unwrap();
+    let supervised_output = supervised.wait_with_output().unwrap();
+    assert!(
+        supervised_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&supervised_output.stderr)
+    );
+    let supervised_report: serde_json::Value =
+        serde_json::from_slice(&supervised_output.stdout).unwrap();
+    assert_eq!(supervised_report["generation"], 2);
+    assert_eq!(supervised_report["privacySafeSummary"], true);
+    assert_eq!(file_mode(&supervised_state), 0o600);
+    let supervised_text = String::from_utf8(supervised_output.stdout).unwrap();
+    for private_value in ["account-a", "source-b", archive_b.to_str().unwrap()] {
+        assert!(!supervised_text.contains(private_value));
+    }
+
+    let published_by_cli = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .arg("replica-publish")
+        .args([&archive_b, &handoff])
+        .args(["--generation", "3"])
+        .output()
+        .unwrap();
+    assert!(
+        published_by_cli.status.success(),
+        "{}",
+        String::from_utf8_lossy(&published_by_cli.stderr)
+    );
+    let publish_receipt: serde_json::Value =
+        serde_json::from_slice(&published_by_cli.stdout).unwrap();
+    assert_eq!(publish_receipt["generation"], 3);
+    assert_eq!(publish_receipt["privacySafeSummary"], true);
+    let publish_text = String::from_utf8(published_by_cli.stdout).unwrap();
+    for private_value in ["account-a", "source-b", archive_b.to_str().unwrap()] {
+        assert!(!publish_text.contains(private_value));
+    }
+    let generation_three = follow_replica_once(&handoff, &state, &replica, &key).unwrap();
+    assert_eq!(generation_three.generation, 3);
+    assert_eq!(generation_three.outcome, ReplicaFollowOutcome::Synchronized);
+    assert!(generation_three.idempotent);
+
+    fs::remove_file(&state).unwrap();
+    let recovered_after_state_loss = follow_replica_once(&handoff, &state, &replica, &key).unwrap();
+    assert_eq!(
+        recovered_after_state_loss.outcome,
+        ReplicaFollowOutcome::Synchronized
+    );
+    assert!(recovered_after_state_loss.idempotent);
+    let replacement_replica = private.join("follow-replacement.db");
+    bootstrap_replica(&archive_b, &replacement_replica, &key).unwrap();
+    assert!(follow_replica_once(&handoff, &state, &replacement_replica, &key).is_err());
+
+    let state_before = fs::read(&state).unwrap();
+    let archive_c = clone_archive(&archive_b, &private, "archive-follow-c", "source-c");
+    publish_replica_handoff(&archive_c, &handoff, 4).unwrap();
+    let mut changed_after_publish =
+        read_ndjson::<CanonicalMessage>(&archive_c.join("messages.ndjson"));
+    changed_after_publish[0].content_base64 = Some("Y2hhbmdlZCBhZnRlciBwdWJsaXNo".to_string());
+    overwrite_ndjson(&archive_c.join("messages.ndjson"), &changed_after_publish);
+    assert!(follow_replica_once(&handoff, &state, &replica, &key).is_err());
+    assert_eq!(fs::read(&state).unwrap(), state_before);
+    assert!(publish_replica_handoff(&archive_a, &handoff, 4).is_err());
+    let mut equivocated: serde_json::Value =
+        serde_json::from_slice(&fs::read(&handoff).unwrap()).unwrap();
+    equivocated["sourceFingerprint"] = json!("source-a");
+    fs::write(&handoff, serde_json::to_vec_pretty(&equivocated).unwrap()).unwrap();
+    assert!(follow_replica_once(&handoff, &state, &replica, &key).is_err());
+    assert_eq!(fs::read(&state).unwrap(), state_before);
 }
 
 fn build_archive(parent: &Path, name: &str, account: &str, fingerprint: &str) -> PathBuf {

@@ -291,6 +291,24 @@ printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
   --replica-key-stdin --limit 100
 ```
 
+An offline restoration operator can atomically publish successive authoritative
+archives to the long-running replica follower:
+
+```sh
+greenbubbles-restore replica-publish \
+  <authoritative-archive> <private-handoff.json> --generation 1
+
+greenbubbles-restore replica-follow \
+  <private-handoff.json> <private-follow-state.json> <encrypted-replica.db> \
+  --replica-key-stdin --poll-milliseconds 1000
+```
+
+The follower polls only handoff metadata while idle, validates a monotonic
+atomic handoff and full production archive, and then bootstraps or synchronizes
+transactionally. It cannot acquire the WeChat passphrase, snapshot a live
+store, or accept an incremental fragment. See
+[docs/REPLICA_FOLLOW.md](docs/REPLICA_FOLLOW.md).
+
 Avoid placing a real key literally in shell history; pipe it from an
 owner-controlled secret manager. The example value is a placeholder. Bootstrap
 atomically stores canonical records, provenance, coverage, FTS, and its source

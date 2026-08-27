@@ -81,6 +81,11 @@ workflow remains isolated in the CLI because it requires source snapshots and,
 for encrypted stores, an owner-supplied WeChat database passphrase. This keeps
 serving a replica from implicitly granting source acquisition.
 
+The separate `replica-publish`/`replica-follow` operator path can continuously
+apply already restored authoritative generations to the encrypted replica. It
+does not make these agent-facing operations available and cannot acquire a
+source passphrase or accept an incremental fragment. See `REPLICA_FOLLOW.md`.
+
 `capabilities` reports local passive read, passive cached Moments,
 authenticated active read, drafts, text send, reply send, and file send
 independently. Cached-Moments permission does not inherit from conversation

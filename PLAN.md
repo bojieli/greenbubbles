@@ -573,6 +573,16 @@ copied entries, compares complete source inventories, and fails closed when the
 baseline, build, deletion set, changed-set classification, or
 reconciliation-only classification disagrees.
 
+The continuous operator path now accepts atomic, generation-monotonic handoffs
+from the isolated restoration process. A low-idle-overhead follower validates
+each authoritative archive, bootstraps or synchronizes the encrypted replica,
+and records crash-safe state bound to the random replica ID and committed
+checkpoint. It cannot acquire a WeChat passphrase, inspect live stores, or
+accept an unmerged incremental fragment. Synthetic restart, rollback,
+equivocation, replacement, idempotency, bootstrap, and synchronization behavior
+is covered; real disposable-account latency evidence remains required. See
+`docs/REPLICA_FOLLOW.md`.
+
 ## Phase 3 — agent-neutral connector service and drafts
 
 Status: **complete for replica-backed reads and non-executing drafts**

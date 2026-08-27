@@ -9,6 +9,7 @@ pub mod catalog;
 pub mod connector;
 pub mod entities;
 pub mod error;
+pub mod follow;
 pub mod manifest;
 pub mod merge;
 pub mod model;

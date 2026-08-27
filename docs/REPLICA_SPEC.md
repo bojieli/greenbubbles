@@ -149,6 +149,27 @@ verified against its recorded SHA-256, so deleting the input fragment cannot
 silently break artifact locations. Only the resulting authoritative archive can
 advance the encrypted replica checkpoint.
 
+## Continuous authoritative handoff
+
+`replica-publish` and `replica-follow` provide the long-running operator path
+between the isolated offline restoration process and the encrypted replica.
+The publisher atomically binds an authoritative archive's canonical path,
+source fingerprint, exact report digest, and monotonically increasing
+generation. A deterministic seal binds every archive-owned file path, size, and
+content digest and is rechecked before and after application. Production
+archives pass `audit-archive` before publication and again before application.
+
+The follower watches only the owner-only handoff metadata while idle. It
+serializes state transitions with an owner-only lock, bootstraps or calls the
+same transactional synchronization path, verifies the committed account/source
+checkpoint, then atomically records the applied handoff digest, generation,
+random replica ID, and checkpoint revision. Rollback, same-generation
+equivocation, replacement replicas, state/checkpoint divergence, partial JSON,
+or a non-authoritative fragment fail closed. A crash after replica commit but
+before state replacement recovers only after a read-only exact source and
+restoration-revision comparison. See
+`REPLICA_FOLLOW.md`.
+
 ## Exact retrieval and health
 
 `replica-search` combines encrypted FTS5 with deterministic structured filters:
