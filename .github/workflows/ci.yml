@@ -26,3 +26,14 @@ jobs:
 
       - name: Build release executable
         run: swift build -c release
+
+      - name: Show Rust version
+        run: rustc --version && cargo --version
+
+      - name: Check Rust formatting
+        working-directory: Native/GreenBubblesRestore
+        run: cargo fmt --check
+
+      - name: Run restoration-engine tests
+        working-directory: Native/GreenBubblesRestore
+        run: cargo test --locked --all-targets

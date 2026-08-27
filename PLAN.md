@@ -67,12 +67,12 @@ Status: **in progress**
 
 ### 1B. Consistent read-only snapshots
 
-- [ ] Define a snapshot manifest containing source fingerprint, file identity,
+- [x] Define a snapshot manifest containing source fingerprint, file identity,
   size, modification time, and cryptographic digest.
-- [ ] Copy database/WAL/SHM sets into an owner-only temporary directory.
-- [ ] Detect mutation during copying and retry or reject inconsistent snapshots.
-- [ ] Prove with tests that the source tree is never opened for writing.
-- [ ] Securely clean up connector-created snapshots on expiration.
+- [x] Copy database/WAL/SHM sets into an owner-only temporary directory.
+- [x] Detect mutation during copying and retry or reject inconsistent snapshots.
+- [x] Prove with tests that the source tree is never opened for writing.
+- [x] Securely clean up connector-created snapshots on expiration.
 
 ### 1C. Storage format research
 
@@ -86,11 +86,19 @@ Status: **in progress**
 
 ### 1D. Normalized conversation reader
 
+- [x] Define the lossless restoration and integrity contract in
+  `docs/RESTORATION_SPEC.md`.
 - [ ] Define stable models for accounts, conversations, participants, messages,
   attachments, quotes, recalls, and provenance.
 - [ ] Implement cursor-based incremental reads and deterministic deduplication.
 - [ ] Reconcile contact/group identifiers without leaking identifiers into logs.
 - [ ] Expose only explicitly enabled conversations.
+- [ ] Enumerate every message-bearing shard/table and prove
+  `source rows = restored rows + rejected rows` with zero silent drops.
+- [ ] Decode every observed logical message type while retaining unknown raw
+  payloads and treating unknown types as an incomplete semantic restoration.
+- [ ] Resolve every locally downloaded multimodal/file artifact to a verified
+  local path and represent missing/remote-only media explicitly.
 
 ### 1E. Incoming event reconciler
 

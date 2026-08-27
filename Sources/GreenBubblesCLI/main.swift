@@ -20,14 +20,18 @@ enum CLIError: Error, CustomStringConvertible {
 
 struct Arguments {
   enum Command: String {
+    case accounts
     case discover
     case inventory
+    case snapshot
     case help
   }
 
   var command: Command = .discover
   var includePaths = false
   var roots: [URL] = []
+  var accountID: String?
+  var snapshotBase: URL?
   var maxDepth = 10
   var maxArtifacts = 10_000
 
@@ -51,6 +55,14 @@ struct Arguments {
         index += 1
         guard index < arguments.count else { throw CLIError.missingValue(option) }
         roots.append(URL(fileURLWithPath: arguments[index]))
+      case "--account":
+        index += 1
+        guard index < arguments.count else { throw CLIError.missingValue(option) }
+        accountID = arguments[index]
+      case "--snapshot-base":
+        index += 1
+        guard index < arguments.count else { throw CLIError.missingValue(option) }
+        snapshotBase = URL(fileURLWithPath: arguments[index])
       case "--max-depth", "--max-artifacts":
         index += 1
         guard index < arguments.count else { throw CLIError.missingValue(option) }
@@ -74,12 +86,16 @@ private let usage = """
   Usage: greenbubbles <command> [options]
 
   Commands:
+    accounts             Find account-scoped database and attachment roots
     discover             Find known WeChat installations and data roots (default)
     inventory            Classify candidate artifacts without opening their contents
+    snapshot             Verify a consistent, temporary read-only database snapshot
     help                 Show this help
 
   Options:
     --root <path>        Inventory a supplied root instead of discovered roots; repeatable
+    --account <id>       Scope snapshot discovery to one opaque account ID
+    --snapshot-base <p>  Preserve a snapshot under this owner-only base directory
     --include-paths      Include sensitive filesystem paths in local output
     --max-depth <n>      Limit recursive traversal depth (default: 10)
     --max-artifacts <n>  Stop after this many classified artifacts (default: 10000)
@@ -104,6 +120,8 @@ do {
   switch arguments.command {
   case .help:
     print(usage)
+  case .accounts:
+    try printJSON(WeChatAccountDiscovery(includePaths: arguments.includePaths).discover())
   case .discover:
     let discovery = WeChatDiscovery(includePaths: arguments.includePaths)
     try printJSON(discovery.discover())
@@ -123,9 +141,38 @@ do {
         includePaths: arguments.includePaths
       ))
     try printJSON(inventory.inventory(roots: roots))
+  case .snapshot:
+    let roots: [URL]
+    if arguments.roots.isEmpty {
+      roots = WeChatAccountDiscovery(includePaths: arguments.includePaths)
+        .databaseRoots(accountID: arguments.accountID)
+    } else {
+      roots = arguments.roots
+    }
+    let sets = DatabaseSetPlanner().findDatabaseSets(in: roots, maxDepth: arguments.maxDepth)
+    let lease = try ReadOnlySnapshotter(
+      baseDirectory: arguments.snapshotBase
+        ?? FileManager.default.temporaryDirectory
+        .appending(path: "greenbubbles-snapshots", directoryHint: .isDirectory),
+      includeSourcePaths: arguments.includePaths
+    ).createSnapshot(of: sets, cleanUpOnDeinit: arguments.snapshotBase == nil)
+    try printJSON(
+      SnapshotCommandReport(
+        databaseSetCount: sets.count,
+        manifest: lease.manifest,
+        automaticallyCleanedUp: arguments.snapshotBase == nil,
+        snapshotDirectory: arguments.snapshotBase == nil ? nil : lease.directory.path
+      ))
   }
 } catch {
   printError(String(describing: error))
   printError("Run greenbubbles help for usage.")
   exit(2)
+}
+
+private struct SnapshotCommandReport: Encodable {
+  let databaseSetCount: Int
+  let manifest: SnapshotManifest
+  let automaticallyCleanedUp: Bool
+  let snapshotDirectory: String?
 }
