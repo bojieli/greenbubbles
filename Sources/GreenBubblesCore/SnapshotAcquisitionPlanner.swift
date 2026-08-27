@@ -49,16 +49,18 @@ public struct SnapshotAcquisitionEvidence: Codable, Equatable, Sendable {
   public let reconciliationSourceSetIDs: [String]
   public let deletedSourceSetIDs: [String]
   public let sourceSets: [SnapshotSourceSetInventory]
+  public let lastIntegrityScanAt: Date?
 
   public init(
-    formatVersion: Int = 1,
+    formatVersion: Int = 2,
     mode: SnapshotAcquisitionMode,
     previousSourceFingerprint: String?,
     reconciliationWindowSeconds: Int,
     changedSourceSetIDs: [String],
     reconciliationSourceSetIDs: [String],
     deletedSourceSetIDs: [String],
-    sourceSets: [SnapshotSourceSetInventory]
+    sourceSets: [SnapshotSourceSetInventory],
+    lastIntegrityScanAt: Date? = nil
   ) {
     self.formatVersion = formatVersion
     self.mode = mode
@@ -68,6 +70,7 @@ public struct SnapshotAcquisitionEvidence: Codable, Equatable, Sendable {
     self.reconciliationSourceSetIDs = reconciliationSourceSetIDs.sorted()
     self.deletedSourceSetIDs = deletedSourceSetIDs.sorted()
     self.sourceSets = sourceSets.sorted { $0.sourceSetID < $1.sourceSetID }
+    self.lastIntegrityScanAt = lastIntegrityScanAt
   }
 
   public var selectedSourceSetIDs: [String] {
@@ -91,6 +94,7 @@ public struct SnapshotAcquisitionPlan: Sendable {
 public enum SnapshotAcquisitionPlannerError: Error, Equatable, CustomStringConvertible {
   case noDatabaseSets
   case invalidReconciliationWindow
+  case invalidIntegrityScanInterval
   case unsafeSource(String)
   case sourceChanged(String)
 
@@ -100,6 +104,8 @@ public enum SnapshotAcquisitionPlannerError: Error, Equatable, CustomStringConve
       return "No database sets were supplied"
     case .invalidReconciliationWindow:
       return "The reconciliation window must not be negative"
+    case .invalidIntegrityScanInterval:
+      return "The integrity-scan interval must be positive"
     case .unsafeSource(let sourceID):
       return "A snapshot source is missing, symbolic, or not a regular file: \(sourceID)"
     case .sourceChanged(let sourceID):
@@ -119,12 +125,18 @@ public struct SnapshotAcquisitionPlanner: Sendable {
     sets: [DatabaseFileSet],
     previousManifest: SnapshotManifest? = nil,
     forceIntegrityScan: Bool = false,
+    integrityScanInterval: TimeInterval? = nil,
     reconciliationWindow: TimeInterval = 15 * 60,
     now: Date = Date()
   ) throws -> SnapshotAcquisitionPlan {
     guard !sets.isEmpty else { throw SnapshotAcquisitionPlannerError.noDatabaseSets }
     guard reconciliationWindow >= 0, reconciliationWindow <= Double(Int.max) else {
       throw SnapshotAcquisitionPlannerError.invalidReconciliationWindow
+    }
+    if let integrityScanInterval,
+      integrityScanInterval <= 0 || integrityScanInterval > Double(Int.max)
+    {
+      throw SnapshotAcquisitionPlannerError.invalidIntegrityScanInterval
     }
     let orderedSets = sets.sorted { $0.database.path < $1.database.path }
     let previousInventory = previousManifest.map(inventoryBySet(from:)) ?? [:]
@@ -134,9 +146,17 @@ public struct SnapshotAcquisitionPlanner: Sendable {
     let currentByID = Dictionary(uniqueKeysWithValues: currentInventory.map { ($0.sourceSetID, $0) })
     let currentIDs = Set(currentByID.keys)
     let previousIDs = Set(previousInventory.keys)
+    let previousIntegrityScanAt = previousManifest.flatMap { manifest in
+      manifest.acquisition?.lastIntegrityScanAt
+        ?? ((manifest.acquisition?.mode == .bootstrap || manifest.acquisition?.mode == .integrityScan)
+          ? manifest.createdAt : nil)
+    }
+    let integrityScanDue = integrityScanInterval.map { interval in
+      previousIntegrityScanAt.map { now.timeIntervalSince($0) >= interval } ?? true
+    } ?? false
     let mode: SnapshotAcquisitionMode = if previousManifest == nil {
       .bootstrap
-    } else if forceIntegrityScan {
+    } else if forceIntegrityScan || integrityScanDue {
       .integrityScan
     } else {
       .incremental
@@ -174,7 +194,8 @@ public struct SnapshotAcquisitionPlanner: Sendable {
       changedSourceSetIDs: Array(changed),
       reconciliationSourceSetIDs: Array(reconciliation),
       deletedSourceSetIDs: Array(previousIDs.subtracting(currentIDs)),
-      sourceSets: currentInventory
+      sourceSets: currentInventory,
+      lastIntegrityScanAt: mode == .incremental ? previousIntegrityScanAt : now
     )
     return SnapshotAcquisitionPlan(
       evidence: evidence,
@@ -227,7 +248,8 @@ public struct SnapshotAcquisitionPlanner: Sendable {
       changedSourceSetIDs: plan.evidence.changedSourceSetIDs,
       reconciliationSourceSetIDs: plan.evidence.reconciliationSourceSetIDs,
       deletedSourceSetIDs: plan.evidence.deletedSourceSetIDs,
-      sourceSets: finalized
+      sourceSets: finalized,
+      lastIntegrityScanAt: plan.evidence.lastIntegrityScanAt
     )
   }
 

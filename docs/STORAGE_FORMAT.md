@@ -64,6 +64,11 @@ window, selected sets, deleted sets, and a verified SHA-256 for every current
 source file. Rust validates that the selected entries exactly match this
 inventory before opening a database.
 
+Acquisition evidence format 2 records the last bootstrap/integrity-scan anchor.
+The planner automatically selects every current set after the configured
+maximum interval, while incrementals preserve the anchor. This scheduling
+metadata is part of the manifest, not inferred from filesystem wake-up hints.
+
 ## Message and auxiliary stores
 
 Message tables are discovered by both hashed `Msg_`/`Chat_` naming and required

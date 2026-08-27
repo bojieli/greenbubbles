@@ -358,6 +358,7 @@ fn acquisition() -> SnapshotAcquisitionEvidence {
                 files: Vec::new(),
             },
         ],
+        last_integrity_scan_at: None,
     }
 }
 

@@ -109,6 +109,8 @@ pub struct SnapshotAcquisitionEvidence {
     pub reconciliation_source_set_ids: Vec<String>,
     pub deleted_source_set_ids: Vec<String>,
     pub source_sets: Vec<SnapshotSourceSetInventory>,
+    #[serde(default)]
+    pub last_integrity_scan_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -310,7 +312,7 @@ impl SnapshotAcquisitionEvidence {
     }
 
     fn validate(&self, manifest: &SnapshotManifest) -> Result<(), RestoreError> {
-        if self.format_version != 1 {
+        if !matches!(self.format_version, 1 | 2) {
             return Err(RestoreError::Manifest(
                 "unsupported acquisition evidence version".to_string(),
             ));

@@ -36,6 +36,7 @@ struct Arguments {
   var snapshotBase: URL?
   var previousManifest: URL?
   var integrityScan = false
+  var integrityScanIntervalSeconds = 7 * 24 * 60 * 60
   var reconciliationWindowSeconds = 15 * 60
   var maxDepth = 10
   var maxArtifacts = 10_000
@@ -74,7 +75,8 @@ struct Arguments {
         previousManifest = URL(fileURLWithPath: arguments[index])
       case "--integrity-scan":
         integrityScan = true
-      case "--max-depth", "--max-artifacts", "--reconciliation-window-seconds":
+      case "--max-depth", "--max-artifacts", "--reconciliation-window-seconds",
+        "--integrity-scan-interval-seconds":
         index += 1
         guard index < arguments.count else { throw CLIError.missingValue(option) }
         let value = arguments[index]
@@ -85,6 +87,9 @@ struct Arguments {
         if option == "--max-artifacts" { maxArtifacts = number }
         if option == "--reconciliation-window-seconds" {
           reconciliationWindowSeconds = number
+        }
+        if option == "--integrity-scan-interval-seconds" {
+          integrityScanIntervalSeconds = number
         }
       case "-h", "--help":
         command = .help
@@ -114,6 +119,9 @@ private let usage = """
     --previous-manifest <p>
                          Plan a change-proportional snapshot from this prior manifest
     --integrity-scan     Select every current database set despite a prior manifest
+    --integrity-scan-interval-seconds <n>
+                         Automatically select every set when the last full
+                         integrity scan is this old (default: 604800)
     --reconciliation-window-seconds <n>
                          Revisit recently modified sets (default: 900)
     --include-paths      Include sensitive filesystem paths in local output
@@ -178,6 +186,7 @@ do {
       sets: sets,
       previousManifest: previousManifest,
       forceIntegrityScan: arguments.integrityScan,
+      integrityScanInterval: TimeInterval(arguments.integrityScanIntervalSeconds),
       reconciliationWindow: TimeInterval(arguments.reconciliationWindowSeconds)
     )
     let lease = try ReadOnlySnapshotter(

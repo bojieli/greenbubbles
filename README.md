@@ -67,6 +67,19 @@ swift run greenbubbles snapshot --account <opaque-id> \
   --snapshot-base "$HOME/Library/Application Support/GreenBubbles/Snapshots"
 ```
 
+For subsequent change-proportional snapshots, supply the prior manifest. The
+planner revisits changed/recent sets and automatically schedules a full
+integrity scan when the carried full-scan anchor is seven days old:
+
+```sh
+swift run greenbubbles snapshot --account <opaque-id> \
+  --previous-manifest /private/prior-snapshot/manifest.json \
+  --snapshot-base /private/next-snapshot-base
+```
+
+Use `--integrity-scan` to force a scan immediately or
+`--integrity-scan-interval-seconds <n>` to change the maximum interval.
+
 The preserved directory is mode `0700`; copied files and its manifest are mode
 `0600`. Remove it when no longer needed.
 

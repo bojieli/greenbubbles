@@ -523,6 +523,7 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
         reconciliation_source_set_ids: Vec::new(),
         deleted_source_set_ids: Vec::new(),
         source_sets: Vec::new(),
+        last_integrity_scan_at: None,
     });
     fs::write(
         integrity_archive.join("report.json"),

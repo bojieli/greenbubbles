@@ -108,6 +108,14 @@ The manifest source fingerprint covers the complete current inventory and its
 content digests, not merely the copied fragment. Repeating a no-op plan
 therefore retains the same authoritative source identity.
 
+Acquisition evidence format 2 also carries the last full-scan anchor. When a
+prior manifest is supplied, the snapshot CLI automatically selects integrity
+scan mode once that anchor reaches the configured maximum age (seven days by
+default, adjustable with `--integrity-scan-interval-seconds`). A bootstrap and
+each integrity scan establish a new anchor; incrementals carry it forward.
+`--integrity-scan` remains an immediate override. Frequent wake-up-driven
+incrementals therefore cannot postpone a full comparison forever.
+
 Incremental restoration fragments are deliberately not accepted directly by
 `replica-bootstrap` or `replica-sync`. `merge-incremental` first binds the
 fragment to the exact prior source fingerprint, removes prior records only from

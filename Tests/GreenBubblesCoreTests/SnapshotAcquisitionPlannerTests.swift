@@ -88,6 +88,32 @@ struct SnapshotAcquisitionPlannerTests {
     #expect(integrity.evidence.mode == .integrityScan)
     #expect(integrity.evidence.changedSourceSetIDs.count == 2)
     #expect(integrity.selectedSets.count == 2)
+
+    let scheduled = try SnapshotAcquisitionPlanner().plan(
+      sets: sets,
+      previousManifest: bootstrap.manifest,
+      integrityScanInterval: 3_600,
+      reconciliationWindow: 1,
+      now: bootstrap.manifest.createdAt.addingTimeInterval(7_200)
+    )
+    #expect(scheduled.evidence.mode == .integrityScan)
+    #expect(scheduled.evidence.lastIntegrityScanAt != nil)
+    #expect(scheduled.selectedSets.count == 2)
+
+    let scheduledSnapshot = try snapshotter.createSnapshot(
+      of: scheduled,
+      cleanUpOnDeinit: false
+    )
+    defer { try? scheduledSnapshot.cleanUp() }
+    let notDue = try SnapshotAcquisitionPlanner().plan(
+      sets: sets,
+      previousManifest: scheduledSnapshot.manifest,
+      integrityScanInterval: 3_600,
+      reconciliationWindow: 1,
+      now: scheduled.evidence.lastIntegrityScanAt!.addingTimeInterval(1_800)
+    )
+    #expect(notDue.evidence.mode == .incremental)
+    #expect(notDue.evidence.lastIntegrityScanAt == scheduled.evidence.lastIntegrityScanAt)
   }
 
   @Test

@@ -467,7 +467,7 @@ Status: **in progress; canonical replica and transactional synchronization are i
 - [x] Merge selected changed-shard fragments into the prior authoritative
   archive by source identity before replica mutation; recompute global ordering,
   relationships, coverage, and verified connector-owned media paths.
-- [ ] Run occasional bounded integrity scans to recover from missed hints,
+- [x] Run occasional bounded integrity scans to recover from missed hints,
   timestamp anomalies, decoder upgrades, and checkpoint damage.
 - [x] Keep attachment extraction, media decoding, thumbnails, and indexing off
   the path that makes new text searchable.
@@ -492,6 +492,14 @@ Exit gate: a supported account can remain synchronized without repeated full
 exports, new locally persisted text is searchable within 60 seconds at p95,
 idle overhead is negligible, checkpoints survive crashes without silent loss,
 and coverage/freshness limitations are machine-readable.
+
+Acquisition evidence format 2 carries the last full integrity-scan anchor. A
+snapshot planned from a prior manifest automatically becomes an integrity scan
+when the configured maximum age is reached (seven days by default), selects
+every current database/WAL/SHM set, and records a new anchor. Normal
+incrementals carry the anchor forward, while `--integrity-scan` remains an
+explicit immediate override. Replica status separately reports the last
+committed integrity-scan time and age.
 
 ## Phase 3 — agent-neutral connector service and drafts
 
