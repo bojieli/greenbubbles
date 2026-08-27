@@ -79,3 +79,25 @@ sequence. Cursors remain valid across later synchronizations of that replica;
 cross-account use and reuse against a replacement replica fail closed.
 Downstream consumers bootstrap canonical data through scoped APIs, then use
 this stream to know which stable entities require refresh.
+
+## Exact retrieval and health
+
+`replica-search` combines encrypted FTS5 with deterministic structured filters:
+conversation, sender/participant, direction, logical type/subtype, inclusive
+time range, relationship target, and attachment presence. Its filter document
+is an owner-only JSON file so private search terms need not appear in process
+arguments. Results are canonical lossless records, not generated summaries.
+
+Message cursors bind the exact filter digest, account, replica generation, and
+current source fingerprint. Changing the query or committing another source
+checkpoint invalidates pagination rather than producing a mixed-state page.
+`replica-message`, `replica-conversations`, and `replica-coverage` provide
+stable JSON access to exact canonical data and machine-readable coverage.
+
+`replica-status` exposes the schema/cipher, opaque account and source
+fingerprints, canonical counts, authoritative checkpoint age, completion
+state, source/restored row counts, semantic/message-candidate gaps, missing and
+undecoded artifacts, entity gaps, and the calculated semantic-decoder coverage
+ratio. A current replica with known gaps is reported as
+`currentWithCoverageGaps`; it is never labeled complete merely because the
+latest synchronization committed successfully.

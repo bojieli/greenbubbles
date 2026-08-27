@@ -126,6 +126,33 @@ encrypted pre-migration backup. Synchronization mutates only changed canonical
 records and commits them with the checkpoint; the body-free change stream is
 ordered and resumable. See [docs/REPLICA_SPEC.md](docs/REPLICA_SPEC.md).
 
+Exact retrieval uses an owner-only JSON filter. Any field can be omitted:
+
+```json
+{
+  "conversationId": "<opaque-id>",
+  "senderId": "<opaque-id>",
+  "direction": "incoming",
+  "logicalType": 1,
+  "notBeforeUnix": 1700000000,
+  "hasAttachment": true,
+  "fullTextQuery": "requested document"
+}
+```
+
+```sh
+chmod 600 /path/to/private-filter.json
+printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  replica-search /path/to/private-replica-directory/greenbubbles.db \
+  /path/to/private-filter.json --replica-key-stdin --limit 50
+```
+
+Structured filters also cover subtype, inclusive upper time bound, reply target,
+and attachment absence. Search cursors fail closed when the filter, replica,
+account, or committed source checkpoint changes. `replica-status` and
+`replica-coverage` expose freshness and known restoration limitations.
+
 Conversation reads require a separate owner-only policy. Creating one is an
 explicit local authorization step; cursors are bound to both the archive
 fingerprint and the selected conversation:

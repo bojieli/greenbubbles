@@ -5,7 +5,9 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use greenbubbles_restore::replica::{
-    bootstrap_replica, get_replica_changes, replica_status, synchronize_replica,
+    bootstrap_replica, get_replica_changes, get_replica_message, list_replica_conversations,
+    replica_coverage, replica_status, search_replica_messages, synchronize_replica,
+    ReplicaMessageFilter,
 };
 use greenbubbles_restore::{
     ArtifactAvailability, ArtifactDecodeState, ArtifactKind, ArtifactRole, CanonicalArtifact,
@@ -90,6 +92,69 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
     assert_eq!(synchronized.removed_count, 0);
     assert_eq!(synchronized.message_count, 2);
 
+    let exact_filter = ReplicaMessageFilter {
+        conversation_id: Some("conversation-a".to_string()),
+        sender_id: Some("participant-a".to_string()),
+        direction: Some(MessageDirection::Incoming),
+        logical_type: Some(1),
+        sub_type: Some(0),
+        not_before_unix: Some(1_700_000_001),
+        not_after_unix: Some(1_700_000_001),
+        reply_target_canonical_id: None,
+        has_attachment: Some(true),
+        full_text_query: Some("second".to_string()),
+    };
+    let exact = search_replica_messages(&replica, &key, &exact_filter, None, 10).unwrap();
+    assert_eq!(exact.items.len(), 1);
+    assert_eq!(exact.items[0].canonical_id, "message-b");
+    assert_eq!(
+        get_replica_message(&replica, &key, "message-b")
+            .unwrap()
+            .unwrap()
+            .canonical_id,
+        "message-b"
+    );
+    assert!(get_replica_message(&replica, &key, "missing")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        list_replica_conversations(&replica, &key, 10)
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    assert_eq!(
+        replica_coverage(&replica, &key).unwrap().source_fingerprint,
+        "source-sync-b"
+    );
+    let message_first =
+        search_replica_messages(&replica, &key, &ReplicaMessageFilter::default(), None, 1).unwrap();
+    assert_eq!(message_first.items.len(), 1);
+    assert!(message_first.next_cursor.is_some());
+    let message_second = search_replica_messages(
+        &replica,
+        &key,
+        &ReplicaMessageFilter::default(),
+        message_first.next_cursor.as_deref(),
+        1,
+    )
+    .unwrap();
+    assert_eq!(message_second.items.len(), 1);
+    assert_ne!(
+        message_first.items[0].canonical_id,
+        message_second.items[0].canonical_id
+    );
+    assert!(search_replica_messages(
+        &replica,
+        &key,
+        &exact_filter,
+        message_first.next_cursor.as_deref(),
+        10,
+    )
+    .is_err());
+    let pre_sync_message_cursor = message_first.next_cursor.clone();
+
     let first_changes = get_replica_changes(&replica, &key, None, 1).unwrap();
     assert_eq!(first_changes.items.len(), 1);
     assert!(first_changes.next_cursor.is_some());
@@ -139,6 +204,14 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
     assert_eq!(deletion.changed_count, 1);
     assert_eq!(deletion.removed_count, 1);
     assert_eq!(deletion.message_count, 1);
+    assert!(search_replica_messages(
+        &replica,
+        &key,
+        &ReplicaMessageFilter::default(),
+        pre_sync_message_cursor.as_deref(),
+        10,
+    )
+    .is_err());
     let idempotent_sync = synchronize_replica(&archive_d, &replica, &key).unwrap();
     assert!(idempotent_sync.idempotent);
     assert_eq!(idempotent_sync.added_count, 0);

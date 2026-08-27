@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use rusqlite::backup::Backup;
-use rusqlite::{params, Connection, OpenFlags, Transaction, TransactionBehavior};
+use rusqlite::{named_params, params, Connection, OpenFlags, Transaction, TransactionBehavior};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
@@ -56,7 +56,25 @@ pub struct ReplicaStatus {
     pub message_count: u64,
     pub artifact_count: u64,
     pub last_checkpoint_unix_nanoseconds: Option<u128>,
+    pub checkpoint_age_seconds: Option<u64>,
     pub restoration_complete: Option<bool>,
+    pub health: ReplicaHealthState,
+    pub source_row_count: Option<u64>,
+    pub restored_row_count: Option<u64>,
+    pub semantic_gap_count: Option<u64>,
+    pub message_candidate_gap_count: Option<u64>,
+    pub unavailable_artifact_count: Option<u64>,
+    pub artifact_decode_gap_count: Option<u64>,
+    pub entity_decode_gap_count: Option<u64>,
+    pub semantic_decode_coverage_ratio: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReplicaHealthState {
+    Uninitialized,
+    CurrentComplete,
+    CurrentWithCoverageGaps,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +123,61 @@ pub struct ReplicaChangePage {
     pub account_id: String,
     pub items: Vec<ReplicaChange>,
     pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicaMessageFilter {
+    pub conversation_id: Option<String>,
+    pub sender_id: Option<String>,
+    pub direction: Option<crate::MessageDirection>,
+    pub logical_type: Option<u32>,
+    pub sub_type: Option<u32>,
+    pub not_before_unix: Option<i64>,
+    pub not_after_unix: Option<i64>,
+    pub reply_target_canonical_id: Option<String>,
+    pub has_attachment: Option<bool>,
+    pub full_text_query: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicaMessageCursor {
+    pub format_version: u32,
+    pub account_id: String,
+    pub replica_id: String,
+    pub source_fingerprint: String,
+    pub filter_sha256: String,
+    pub after_sort_time: i64,
+    pub after_conversation_id: String,
+    pub after_conversation_ordinal: u64,
+    pub after_canonical_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicaMessagePage {
+    pub account_id: String,
+    pub source_fingerprint: String,
+    pub items: Vec<CanonicalMessage>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicaConversationPage {
+    pub account_id: String,
+    pub items: Vec<CanonicalConversation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicaCoverageView {
+    pub account_id: String,
+    pub source_fingerprint: String,
+    pub coverage: RestorationCoverage,
+    pub integrity: crate::RestorationIntegrity,
+    pub completion: crate::RestorationCompletion,
 }
 
 struct OpenedReplica {
@@ -233,6 +306,51 @@ pub fn replica_status(
     } else {
         None
     };
+    let stored_report: Option<RestorationReport> = if let Some((account, _, _)) = identity.as_ref()
+    {
+        let bytes: Option<Vec<u8>> = opened
+            .connection
+            .query_row(
+                "SELECT report_json FROM coverage_state WHERE account_id = ?1",
+                [account],
+                |row| row.get(0),
+            )
+            .optional()?;
+        bytes
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(RestoreError::from))
+            .transpose()?
+    } else {
+        None
+    };
+    let checkpoint_age_seconds = checkpoint
+        .map(|timestamp| {
+            unix_nanoseconds()
+                .map(|now| now.saturating_sub(timestamp) / 1_000_000_000)
+                .and_then(|seconds| {
+                    u64::try_from(seconds).map_err(|_| {
+                        RestoreError::Integrity(
+                            "checkpoint age exceeds supported range".to_string(),
+                        )
+                    })
+                })
+        })
+        .transpose()?;
+    let semantic_decode_coverage_ratio = stored_report.as_ref().and_then(|report| {
+        (report.integrity.restored_row_count > 0).then(|| {
+            let covered = report
+                .integrity
+                .restored_row_count
+                .saturating_sub(report.integrity.semantic_gap_count);
+            covered as f64 / report.integrity.restored_row_count as f64
+        })
+    });
+    let health = match stored_report.as_ref() {
+        None => ReplicaHealthState::Uninitialized,
+        Some(report) if report.completion.full_restoration_achieved => {
+            ReplicaHealthState::CurrentComplete
+        }
+        Some(_) => ReplicaHealthState::CurrentWithCoverageGaps,
+    };
     Ok(ReplicaStatus {
         format_version: REPLICA_FORMAT_VERSION,
         schema_version: CURRENT_SCHEMA_VERSION,
@@ -246,7 +364,31 @@ pub fn replica_status(
         message_count: table_count(&opened.connection, "message")?,
         artifact_count: table_count(&opened.connection, "artifact")?,
         last_checkpoint_unix_nanoseconds: checkpoint,
+        checkpoint_age_seconds,
         restoration_complete: identity.and_then(|value| value.2),
+        health,
+        source_row_count: stored_report
+            .as_ref()
+            .map(|report| report.integrity.source_row_count),
+        restored_row_count: stored_report
+            .as_ref()
+            .map(|report| report.integrity.restored_row_count),
+        semantic_gap_count: stored_report
+            .as_ref()
+            .map(|report| report.integrity.semantic_gap_count),
+        message_candidate_gap_count: stored_report
+            .as_ref()
+            .map(|report| report.integrity.message_candidate_gap_count),
+        unavailable_artifact_count: stored_report
+            .as_ref()
+            .map(|report| report.integrity.missing_artifact_count),
+        artifact_decode_gap_count: stored_report
+            .as_ref()
+            .map(|report| report.integrity.artifact_decode_gap_count),
+        entity_decode_gap_count: stored_report
+            .as_ref()
+            .map(|report| report.integrity.entity_decode_gap_count),
+        semantic_decode_coverage_ratio,
     })
 }
 
@@ -401,6 +543,249 @@ pub fn get_replica_changes(
         account_id,
         items,
         next_cursor,
+    })
+}
+
+pub fn search_replica_messages(
+    replica_path: &Path,
+    key: &ReplicaKey,
+    filter: &ReplicaMessageFilter,
+    cursor: Option<&str>,
+    requested_limit: usize,
+) -> Result<ReplicaMessagePage, RestoreError> {
+    validate_message_filter(filter)?;
+    let opened = open_replica(replica_path, key)?;
+    let (account_id, source_fingerprint) = current_replica_identity(&opened.connection)?;
+    let generation = replica_id(&opened.connection)?;
+    let filter_sha256 = sha256(&serde_json::to_vec(filter)?);
+    let decoded = cursor.map(decode_message_cursor).transpose()?;
+    if decoded.as_ref().is_some_and(|cursor| {
+        cursor.format_version != 1
+            || cursor.account_id != account_id
+            || cursor.replica_id != generation
+            || cursor.source_fingerprint != source_fingerprint
+            || cursor.filter_sha256 != filter_sha256
+    }) {
+        return Err(RestoreError::Integrity(
+            "message cursor belongs to another replica checkpoint or query".to_string(),
+        ));
+    }
+    let after_present = decoded.is_some();
+    let after_sort_time = decoded
+        .as_ref()
+        .map(|cursor| cursor.after_sort_time)
+        .unwrap_or(i64::MIN);
+    let after_conversation = decoded
+        .as_ref()
+        .map(|cursor| cursor.after_conversation_id.as_str())
+        .unwrap_or("");
+    let after_ordinal = decoded
+        .as_ref()
+        .map(|cursor| checked_i64(cursor.after_conversation_ordinal))
+        .transpose()?
+        .unwrap_or(0);
+    let after_canonical = decoded
+        .as_ref()
+        .map(|cursor| cursor.after_canonical_id.as_str())
+        .unwrap_or("");
+    let direction = filter.direction.as_ref().map(json_enum).transpose()?;
+    let logical_type = filter.logical_type.map(i64::from);
+    let sub_type = filter.sub_type.map(i64::from);
+    let limit = requested_limit.clamp(1, 1_000);
+    let query_limit = checked_usize_i64(limit.saturating_add(1))?;
+    let mut statement = opened.connection.prepare(
+        "SELECT m.record_json
+         FROM message AS m
+         WHERE m.account_id = :account
+           AND (:conversation IS NULL OR m.conversation_id = :conversation)
+           AND (:sender IS NULL OR m.sender_id = :sender)
+           AND (:direction IS NULL OR m.direction = :direction)
+           AND (:logical_type IS NULL OR m.logical_type = :logical_type)
+           AND (:sub_type IS NULL OR m.sub_type = :sub_type)
+           AND (:not_before IS NULL OR m.created_at_unix >= :not_before)
+           AND (:not_after IS NULL OR m.created_at_unix <= :not_after)
+           AND (:reply_target IS NULL OR EXISTS(
+             SELECT 1 FROM message_relationship AS r
+             WHERE r.account_id = m.account_id
+               AND r.source_canonical_id = m.canonical_id
+               AND r.target_canonical_id = :reply_target
+           ))
+           AND (
+             :has_attachment IS NULL
+             OR (:has_attachment = 1 AND EXISTS(
+               SELECT 1 FROM message_artifact AS a
+               WHERE a.account_id = m.account_id AND a.canonical_id = m.canonical_id
+             ))
+             OR (:has_attachment = 0 AND NOT EXISTS(
+               SELECT 1 FROM message_artifact AS a
+               WHERE a.account_id = m.account_id AND a.canonical_id = m.canonical_id
+             ))
+           )
+           AND (:full_text IS NULL OR EXISTS(
+             SELECT 1 FROM message_fts
+             WHERE message_fts.account_id = m.account_id
+               AND message_fts.canonical_id = m.canonical_id
+               AND message_fts MATCH :full_text
+           ))
+           AND (
+             :after_present = 0
+             OR COALESCE(m.created_at_unix, -9223372036854775808) > :after_time
+             OR (
+               COALESCE(m.created_at_unix, -9223372036854775808) = :after_time
+               AND m.conversation_id > :after_conversation
+             )
+             OR (
+               COALESCE(m.created_at_unix, -9223372036854775808) = :after_time
+               AND m.conversation_id = :after_conversation
+               AND m.conversation_ordinal > :after_ordinal
+             )
+             OR (
+               COALESCE(m.created_at_unix, -9223372036854775808) = :after_time
+               AND m.conversation_id = :after_conversation
+               AND m.conversation_ordinal = :after_ordinal
+               AND m.canonical_id > :after_canonical
+             )
+           )
+         ORDER BY COALESCE(m.created_at_unix, -9223372036854775808),
+                  m.conversation_id, m.conversation_ordinal, m.canonical_id
+         LIMIT :limit",
+    )?;
+    let rows = statement.query_map(
+        named_params! {
+            ":account": account_id,
+            ":conversation": filter.conversation_id,
+            ":sender": filter.sender_id,
+            ":direction": direction,
+            ":logical_type": logical_type,
+            ":sub_type": sub_type,
+            ":not_before": filter.not_before_unix,
+            ":not_after": filter.not_after_unix,
+            ":reply_target": filter.reply_target_canonical_id,
+            ":has_attachment": filter.has_attachment,
+            ":full_text": filter.full_text_query,
+            ":after_present": after_present,
+            ":after_time": after_sort_time,
+            ":after_conversation": after_conversation,
+            ":after_ordinal": after_ordinal,
+            ":after_canonical": after_canonical,
+            ":limit": query_limit,
+        },
+        |row| row.get::<_, Vec<u8>>(0),
+    )?;
+    let mut items = rows
+        .map(|row| -> Result<CanonicalMessage, RestoreError> {
+            let message: CanonicalMessage = serde_json::from_slice(&row?)?;
+            require_account(&message.account_id, &account_id)?;
+            Ok(message)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let has_more = items.len() > limit;
+    items.truncate(limit);
+    let next_cursor = if has_more {
+        items.last().map(|message| {
+            encode_message_cursor(&ReplicaMessageCursor {
+                format_version: 1,
+                account_id: account_id.clone(),
+                replica_id: generation,
+                source_fingerprint: source_fingerprint.clone(),
+                filter_sha256,
+                after_sort_time: message.created_at_unix.unwrap_or(i64::MIN),
+                after_conversation_id: message.conversation_id.clone(),
+                after_conversation_ordinal: message.conversation_ordinal,
+                after_canonical_id: message.canonical_id.clone(),
+            })
+        })
+    } else {
+        None
+    };
+    Ok(ReplicaMessagePage {
+        account_id,
+        source_fingerprint,
+        items,
+        next_cursor,
+    })
+}
+
+pub fn load_replica_message_filter(path: &Path) -> Result<ReplicaMessageFilter, RestoreError> {
+    ensure_private_regular_file(path)?;
+    let filter: ReplicaMessageFilter = serde_json::from_slice(&fs::read(path)?)?;
+    validate_message_filter(&filter)?;
+    Ok(filter)
+}
+
+pub fn get_replica_message(
+    replica_path: &Path,
+    key: &ReplicaKey,
+    canonical_id: &str,
+) -> Result<Option<CanonicalMessage>, RestoreError> {
+    if canonical_id.is_empty() {
+        return Err(RestoreError::Integrity(
+            "canonical message ID cannot be empty".to_string(),
+        ));
+    }
+    let opened = open_replica(replica_path, key)?;
+    let (account_id, _) = current_replica_identity(&opened.connection)?;
+    let bytes: Option<Vec<u8>> = opened
+        .connection
+        .query_row(
+            "SELECT record_json FROM message
+             WHERE account_id = ?1 AND canonical_id = ?2",
+            params![account_id, canonical_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    bytes
+        .map(|bytes| {
+            let message: CanonicalMessage = serde_json::from_slice(&bytes)?;
+            require_account(&message.account_id, &account_id)?;
+            Ok(message)
+        })
+        .transpose()
+}
+
+pub fn list_replica_conversations(
+    replica_path: &Path,
+    key: &ReplicaKey,
+    requested_limit: usize,
+) -> Result<ReplicaConversationPage, RestoreError> {
+    let opened = open_replica(replica_path, key)?;
+    let (account_id, _) = current_replica_identity(&opened.connection)?;
+    let limit = checked_usize_i64(requested_limit.clamp(1, 1_000))?;
+    let mut statement = opened.connection.prepare(
+        "SELECT record_json FROM conversation
+         WHERE account_id = ?1 ORDER BY conversation_id LIMIT ?2",
+    )?;
+    let rows = statement.query_map(params![account_id, limit], |row| row.get::<_, Vec<u8>>(0))?;
+    let items = rows
+        .map(|row| -> Result<CanonicalConversation, RestoreError> {
+            let conversation: CanonicalConversation = serde_json::from_slice(&row?)?;
+            require_account(&conversation.account_id, &account_id)?;
+            Ok(conversation)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ReplicaConversationPage { account_id, items })
+}
+
+pub fn replica_coverage(
+    replica_path: &Path,
+    key: &ReplicaKey,
+) -> Result<ReplicaCoverageView, RestoreError> {
+    let opened = open_replica(replica_path, key)?;
+    let (account_id, source_fingerprint) = current_replica_identity(&opened.connection)?;
+    let (coverage, report): (Vec<u8>, Vec<u8>) = opened.connection.query_row(
+        "SELECT coverage_json, report_json FROM coverage_state WHERE account_id = ?1",
+        [&account_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let coverage: RestorationCoverage = serde_json::from_slice(&coverage)?;
+    let report: RestorationReport = serde_json::from_slice(&report)?;
+    require_account(&report.account_id, &account_id)?;
+    Ok(ReplicaCoverageView {
+        account_id,
+        source_fingerprint,
+        coverage,
+        integrity: report.integrity,
+        completion: report.completion,
     })
 }
 
@@ -1732,6 +2117,73 @@ fn decode_change_cursor(value: &str) -> Result<ReplicaChangeCursor, RestoreError
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(value)
         .map_err(|_| RestoreError::Integrity("change cursor is not valid base64url".to_string()))?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn validate_message_filter(filter: &ReplicaMessageFilter) -> Result<(), RestoreError> {
+    if filter
+        .not_before_unix
+        .zip(filter.not_after_unix)
+        .is_some_and(|(start, end)| start > end)
+    {
+        return Err(RestoreError::Integrity(
+            "message query has an inverted time range".to_string(),
+        ));
+    }
+    if filter
+        .full_text_query
+        .as_ref()
+        .is_some_and(|query| query.is_empty() || query.len() > 4_096)
+    {
+        return Err(RestoreError::Integrity(
+            "full-text query must be between 1 and 4096 bytes".to_string(),
+        ));
+    }
+    for (name, value) in [
+        ("conversation", filter.conversation_id.as_deref()),
+        ("sender", filter.sender_id.as_deref()),
+        ("reply target", filter.reply_target_canonical_id.as_deref()),
+    ] {
+        if value.is_some_and(|value| value.is_empty() || value.len() > 512) {
+            return Err(RestoreError::Integrity(format!(
+                "{name} filter must be between 1 and 512 bytes"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn current_replica_identity(connection: &Connection) -> Result<(String, String), RestoreError> {
+    connection
+        .query_row(
+            "SELECT account_id, current_source_fingerprint
+             FROM replica_identity WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .map_err(RestoreError::from)
+        .and_then(|(account, fingerprint)| {
+            fingerprint
+                .map(|fingerprint| (account, fingerprint))
+                .ok_or_else(|| {
+                    RestoreError::Integrity(
+                        "replica has no authoritative source checkpoint".to_string(),
+                    )
+                })
+        })
+}
+
+fn encode_message_cursor(cursor: &ReplicaMessageCursor) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(cursor).expect("message cursor serialization cannot fail"))
+}
+
+fn decode_message_cursor(value: &str) -> Result<ReplicaMessageCursor, RestoreError> {
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| {
+            RestoreError::Integrity("message cursor is not valid base64url".to_string())
+        })?;
     Ok(serde_json::from_slice(&bytes)?)
 }
 

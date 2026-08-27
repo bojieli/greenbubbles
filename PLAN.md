@@ -473,7 +473,7 @@ Status: **planned**
 
 ### 2C. Retrieval and operational evidence
 
-- [ ] Add exact full-text search and structured filters for conversation,
+- [x] Add exact full-text search and structured filters for conversation,
   participant, direction, message type, time, reply target, and attachment.
 - [ ] Report synchronization health, last authoritative checkpoint, lag,
   supported version, enabled scope, known coverage gaps, and semantic decoder
