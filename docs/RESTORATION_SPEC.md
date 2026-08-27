@@ -143,6 +143,11 @@ unless the archive is authoritative, media-resolved, pinned-build compatible,
 and already satisfies every strict completion component. See
 `docs/ARCHIVE_AUDIT.md`.
 
+Row accounting is enforced independently for each `(source set, message
+table)` identity. A globally balanced total cannot conceal a missing row in one
+table and an extra row in another, and one source row cannot appear in both the
+restored and rejected ledgers.
+
 Relationship completion also requires that no relationship remain in the
 transient `pending` state. Every unresolved relationship must be independently
 accounted for as target-not-present-locally, missing-identifier, or ambiguous;

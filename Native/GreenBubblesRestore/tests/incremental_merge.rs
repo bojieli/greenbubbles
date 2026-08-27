@@ -117,6 +117,19 @@ fn merges_selected_source_sets_reorders_globally_and_resolves_cross_shard_relati
     assert!(Path::new(&merged_report.messages_path).is_absolute());
     assert!(Path::new(&merged_report.report_path).is_absolute());
 
+    let coverage_path = output.join("coverage.json");
+    let original_coverage = fs::read(&coverage_path).unwrap();
+    let mut shifted_coverage = coverage.clone();
+    shifted_coverage.message_tables[0].source_row_count = 2;
+    shifted_coverage.message_tables[1].source_row_count = 0;
+    overwrite_json(&coverage_path, &shifted_coverage);
+    assert!(audit_archive(&output)
+        .unwrap_err()
+        .to_string()
+        .contains("per-table source row accounting"));
+    fs::write(&coverage_path, original_coverage).unwrap();
+    assert!(audit_archive(&output).is_ok());
+
     let replica = private.join("merged-replica.db");
     let bootstrapped = bootstrap_replica(&output, &replica, &key).unwrap();
     assert_eq!(bootstrapped.message_count, 2);

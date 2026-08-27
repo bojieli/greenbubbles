@@ -469,7 +469,7 @@ Status: **in progress**
   local path and represent missing/remote-only media explicitly.
 
 The independent `audit-archive` pass now reopens the completed archive, derives
-its row/type/gap/entity/reference counts from the ledgers, verifies schema
+its per-table row/type/gap/entity/reference counts from the ledgers, verifies schema
 profiles, bidirectional relationships, and every relationship-resolution state,
 and descriptor-verifies every
 recorded downloaded or connector-derived file against its identity, timestamps,

@@ -37,8 +37,9 @@ The auditor fails closed unless all of these checks pass:
   identity;
 - source-preserving base64 fields are valid and artifact digests are
   well-formed;
-- the row equation is reproduced from the ledgers, rather than copied from the
-  report;
+- the row equation is reproduced from the ledgers for every individual message
+  table, restored and rejected row identities are disjoint, and the global
+  equation is not accepted as a substitute for per-table accounting;
 - message logical-type, subtype, semantic-gap, direction, ordering,
   relationship, and artifact-reference counts reproduce both `coverage.json`
   and `report.json`;

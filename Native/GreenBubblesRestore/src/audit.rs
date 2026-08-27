@@ -63,6 +63,7 @@ pub struct ArchiveAuditReport {
 struct MessageAudit {
     count: u64,
     source_identities: HashSet<(String, String, i64)>,
+    source_table_counts: HashMap<(String, String), u64>,
     canonical_ids: HashSet<String>,
     canonical_conversations: HashMap<String, String>,
     conversation_ids: HashSet<String>,
@@ -84,6 +85,13 @@ struct MessageAudit {
     semantic_gap_reason_counts: BTreeMap<String, u64>,
     direction_counts: BTreeMap<String, u64>,
     ordering_basis_counts: BTreeMap<String, u64>,
+}
+
+#[derive(Default)]
+struct RejectionAudit {
+    count: u64,
+    source_identities: HashSet<(String, String, Option<i64>)>,
+    source_table_counts: HashMap<(String, String), u64>,
 }
 
 #[derive(Default)]
@@ -145,10 +153,11 @@ pub fn audit_archive(archive_directory: &Path) -> Result<ArchiveAuditReport, Res
     let messages = audit_messages(&archive_root.join("messages.ndjson"), &report)?;
     verify_message_entities(&messages, &conversations, &participants)?;
 
-    let rejection_count = audit_rejections(&archive_root.join("rejections.ndjson"))?;
-    if rejection_count != report.integrity.rejected_row_count {
+    let rejections = audit_rejections(&archive_root.join("rejections.ndjson"))?;
+    if rejections.count != report.integrity.rejected_row_count {
         return Err(integrity("rejection ledger count does not match report"));
     }
+    verify_source_row_accounting(&coverage, &messages, &rejections)?;
 
     let artifacts = audit_artifacts(&archive_root, &archive_root.join("artifacts.ndjson"))?;
     verify_message_artifacts(&messages, &artifacts)?;
@@ -156,7 +165,7 @@ pub fn audit_archive(archive_directory: &Path) -> Result<ArchiveAuditReport, Res
         &report,
         &coverage,
         &messages,
-        rejection_count,
+        &rejections,
         &artifacts,
         &conversations,
         &participants,
@@ -187,7 +196,7 @@ pub fn audit_archive(archive_directory: &Path) -> Result<ArchiveAuditReport, Res
         media_phase: report.media_phase,
         client_build_production_compatible: report.client_build_compatibility.production_compatible,
         message_count: messages.count,
-        rejection_count,
+        rejection_count: rejections.count,
         artifact_count: artifacts.count,
         artifact_reference_count: messages.artifact_reference_count,
         relationship_reference_count: messages.relationship_reference_count,
@@ -377,6 +386,13 @@ fn audit_messages(path: &Path, report: &RestorationReport) -> Result<MessageAudi
         {
             return Err(integrity("message archive contains a duplicate identity"));
         }
+        *result
+            .source_table_counts
+            .entry((
+                message.source_set_id.clone(),
+                message.source_table_id.clone(),
+            ))
+            .or_default() += 1;
         match previous_conversation.as_deref() {
             Some(previous) if previous == message.conversation_id => {
                 expected_ordinal += 1;
@@ -562,23 +578,86 @@ fn audit_messages(path: &Path, report: &RestorationReport) -> Result<MessageAudi
     Ok(result)
 }
 
-fn audit_rejections(path: &Path) -> Result<u64, RestoreError> {
-    let mut count = 0_u64;
-    let mut identities = HashSet::new();
+fn audit_rejections(path: &Path) -> Result<RejectionAudit, RestoreError> {
+    let mut result = RejectionAudit::default();
     read_ndjson(path, |row: RejectedRow| {
         if row.source_set_id.is_empty()
             || row.source_table_id.is_empty()
             || row.reason.is_empty()
-            || !identities.insert((row.source_set_id, row.source_table_id, row.source_row_id))
+            || !result.source_identities.insert((
+                row.source_set_id.clone(),
+                row.source_table_id.clone(),
+                row.source_row_id,
+            ))
         {
             return Err(integrity(
                 "rejection ledger contains an invalid or duplicate row",
             ));
         }
-        count += 1;
+        *result
+            .source_table_counts
+            .entry((row.source_set_id, row.source_table_id))
+            .or_default() += 1;
+        result.count += 1;
         Ok(())
     })?;
-    Ok(count)
+    Ok(result)
+}
+
+fn verify_source_row_accounting(
+    coverage: &RestorationCoverage,
+    messages: &MessageAudit,
+    rejections: &RejectionAudit,
+) -> Result<(), RestoreError> {
+    let expected = coverage
+        .message_tables
+        .iter()
+        .map(|table| {
+            (
+                (table.source_set_id.clone(), table.source_table_id.clone()),
+                table.source_row_count,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    if messages
+        .source_table_counts
+        .keys()
+        .chain(rejections.source_table_counts.keys())
+        .any(|identity| !expected.contains_key(identity))
+    {
+        return Err(integrity(
+            "a restored or rejected row belongs to an uncovered message table",
+        ));
+    }
+    for (identity, expected_count) in expected {
+        let restored = messages
+            .source_table_counts
+            .get(&identity)
+            .copied()
+            .unwrap_or_default();
+        let rejected = rejections
+            .source_table_counts
+            .get(&identity)
+            .copied()
+            .unwrap_or_default();
+        if restored + rejected != expected_count {
+            return Err(integrity(
+                "per-table source row accounting does not match coverage",
+            ));
+        }
+    }
+    if rejections.source_identities.iter().any(|identity| {
+        identity.2.is_some_and(|row_id| {
+            messages
+                .source_identities
+                .contains(&(identity.0.clone(), identity.1.clone(), row_id))
+        })
+    }) {
+        return Err(integrity(
+            "one source row appears in both restored and rejected ledgers",
+        ));
+    }
+    Ok(())
 }
 
 fn audit_artifacts(root: &Path, path: &Path) -> Result<ArtifactAudit, RestoreError> {
@@ -992,7 +1071,7 @@ fn verify_integrity_counts(
     report: &RestorationReport,
     coverage: &RestorationCoverage,
     messages: &MessageAudit,
-    rejection_count: u64,
+    rejections: &RejectionAudit,
     artifacts: &ArtifactAudit,
     conversations: &HashMap<String, CanonicalConversation>,
     participants: &HashMap<String, CanonicalParticipant>,
@@ -1009,8 +1088,8 @@ fn verify_integrity_counts(
         .copied()
         .sum::<u64>();
     if messages.count != integrity_report.restored_row_count
-        || rejection_count != integrity_report.rejected_row_count
-        || messages.count + rejection_count != integrity_report.source_row_count
+        || rejections.count != integrity_report.rejected_row_count
+        || messages.count + rejections.count != integrity_report.source_row_count
         || integrity_report.duplicate_canonical_id_count != 0
         || messages.logical_type_counts != integrity_report.logical_type_counts
         || messages.logical_sub_type_counts != integrity_report.logical_sub_type_counts
