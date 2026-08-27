@@ -55,6 +55,12 @@ has been created can leave an unpublished partial or authoritative output at
 that explicitly new path; inspect or remove that quarantined directory before
 retrying with a new output path.
 
+Successful publication extends the private sealed-generation history used by
+the recoverable retention commands. The history is separate from a failed
+unpublished output: it records only handoffs that became current, and a process
+stop between handoff replacement and history update is reconciled from that
+exact current handoff. See `ARCHIVE_RETENTION.md`.
+
 ## Text-first and privacy boundary
 
 `--defer-media` preserves the existing text-first behavior. It makes all

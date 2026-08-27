@@ -343,6 +343,26 @@ latency, and follower runtime as relative durations rather than absolute
 timestamps. See
 [docs/REPLICA_FOLLOW.md](docs/REPLICA_FOLLOW.md).
 
+Successful publications also maintain a private sealed-generation history.
+Older archives can be moved into a recoverable owner-only quarantine while the
+current and immediately preceding publications remain verified and protected:
+
+```sh
+greenbubbles-restore replica-archive-quarantine \
+  <private-handoff.json> <private-quarantine-directory> \
+  --retain-publications 2
+
+greenbubbles-restore replica-archive-restore \
+  <private-handoff.json> <private-quarantine-directory> \
+  --generation <positive-integer>
+```
+
+Quarantine uses a same-filesystem atomic rename, never deletion, and recovers
+an interrupted move by verifying the complete archive seal. Shared archive
+paths referenced by either protected publication cannot be moved. Reports are
+aggregate-only; generation history, archive paths, and quarantine contents are
+private. See [docs/ARCHIVE_RETENTION.md](docs/ARCHIVE_RETENTION.md).
+
 Avoid placing a real key literally in shell history; pipe it from an
 owner-controlled secret manager. The example value is a placeholder. Bootstrap
 atomically stores canonical records, provenance, coverage, FTS, and its source

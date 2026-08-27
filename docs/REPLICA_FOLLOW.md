@@ -38,6 +38,14 @@ The command returns only the generation and aggregate verdicts. The handoff
 itself is private because it contains the local archive path and source
 fingerprint.
 
+Each publication also extends a mode-`0600` sealed-generation history under the
+same handoff lock. It binds prior publication digests and archive locations so
+retention can protect the current and immediate predecessor even after the
+single current handoff is replaced. A missing history on an older deployment
+is initialized from the exact current handoff; older unknown generations are
+not inferred. A handoff committed immediately before process failure is safely
+reconciled into history on the next locked operation.
+
 ## Run the follower
 
 The replica key remains distinct from the WeChat passphrase and enters only
@@ -101,6 +109,14 @@ Publisher and follower state transitions use stable owner-only lock files, so
 concurrent publishers cannot reuse a generation and concurrent followers
 cannot race a checkpoint/state update. Atomic file replacement plus descriptor
 checks prevent partial control JSON from being accepted.
+
+`replica-archive-quarantine` can atomically move only seal-verified retired
+archives into an owner-only same-filesystem quarantine. It enforces a minimum
+of two protected publications, protects physical paths shared by an older and
+protected generation, records each successful move, and never deletes data.
+`replica-archive-restore` returns a quarantined archive to its exact original
+path and verifies it there. Both operations recover a stop between rename and
+history update and emit aggregate-only reports. See `ARCHIVE_RETENTION.md`.
 
 ## Remaining real-data boundary
 

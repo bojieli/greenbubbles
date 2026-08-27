@@ -167,6 +167,15 @@ and is rechecked before and after application. Production archives pass
 `audit-archive` before publication and again before application. Legacy format
 2 remains readable without timing evidence.
 
+The publisher also keeps an owner-only generation history under the handoff
+lock. Each entry binds the exact handoff digest and sealed canonical archive.
+The recoverable retention operator protects at least the current and prior
+publication, including a physical path shared with either, then atomically
+renames only older verified archives into a same-filesystem quarantine. It
+never deletes them. Interrupted quarantine and restore renames reconcile from
+the exact original/deterministic locations and archive seal. See
+`ARCHIVE_RETENTION.md`.
+
 `restore-publish` is the upstream offline transaction for format-3 snapshots.
 It pins the client build, proves non-bootstrap acquisition continuity against
 both the retained prior snapshot and authoritative archive, audits a restored

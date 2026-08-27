@@ -11,7 +11,10 @@ use greenbubbles_restore::{
     audit::audit_archive,
     benchmark::{run_synthetic_benchmark, SyntheticBenchmarkConfig},
     connector::{audit_connector_log, ConnectorDestination, ConnectorService},
-    follow::{follow_replica_once, publish_replica_handoff, replica_follower_status},
+    follow::{
+        follow_replica_once, publish_replica_handoff, quarantine_retired_replica_archives,
+        replica_follower_status, restore_quarantined_replica_archive,
+    },
     merge::merge_incremental_archive,
     operator::{restore_snapshot_and_publish, OfflineRestorePublishOptions},
     preflight_snapshot, prepare_catalog,
@@ -241,6 +244,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let remaining = arguments.collect::<Vec<_>>();
             let generation = required_u64_option(&remaining, "--generation")?;
             let report = publish_replica_handoff(&archive, &handoff, generation)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "replica-archive-quarantine" => {
+            let handoff = required_path(arguments.next(), "replica handoff path")?;
+            let quarantine = required_path(arguments.next(), "archive quarantine directory")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            let retain_publications =
+                option_usize(&remaining, "--retain-publications")?.unwrap_or(2);
+            let report =
+                quarantine_retired_replica_archives(&handoff, &quarantine, retain_publications)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "replica-archive-restore" => {
+            let handoff = required_path(arguments.next(), "replica handoff path")?;
+            let quarantine = required_path(arguments.next(), "archive quarantine directory")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            let generation = required_u64_option(&remaining, "--generation")?;
+            let report = restore_quarantined_replica_archive(&handoff, &quarantine, generation)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "replica-follow-once" => {
@@ -565,6 +586,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore replica-status <replica-path> --replica-key-stdin\n",
                     "  greenbubbles-restore replica-sync <archive> <replica-path> --replica-key-stdin\n",
                     "  greenbubbles-restore replica-publish <authoritative-archive> <handoff-file> --generation <positive-integer>\n",
+                    "  greenbubbles-restore replica-archive-quarantine <handoff-file> <quarantine-directory> [--retain-publications <n, minimum 2>]\n",
+                    "  greenbubbles-restore replica-archive-restore <handoff-file> <quarantine-directory> --generation <positive-integer>\n",
                     "  greenbubbles-restore replica-follow-once <handoff-file> <follow-state-file> <replica-path> --replica-key-stdin\n",
                     "  greenbubbles-restore replica-follow <handoff-file> <follow-state-file> <replica-path> --replica-key-stdin [--poll-milliseconds <100..60000>] [--maximum-polls <n>]\n",
                     "  greenbubbles-restore replica-follow-status <handoff-file> <follow-state-file> <replica-path> --replica-key-stdin\n",

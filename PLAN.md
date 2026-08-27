@@ -606,6 +606,15 @@ latency without absolute timestamps. This makes the future 60-second
 measurement reproducible; it does not manufacture the required
 disposable-account samples.
 
+Publication now also retains an owner-only sealed generation history. A
+recoverable retention operator verifies and protects at least the current and
+immediately preceding publications (including shared physical archive paths),
+then atomically moves only older archives into an owner-only same-filesystem
+quarantine without deletion. Restore returns an archive to its exact original
+path and re-audits it; interrupted moves reconcile from deterministic locations
+and seals. This bounds active archive clutter without weakening rollback
+recovery or exposing private paths. See `docs/ARCHIVE_RETENTION.md`.
+
 ## Phase 3 — agent-neutral connector service and drafts
 
 Status: **complete for replica-backed reads and non-executing drafts**

@@ -1,5 +1,6 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Read, Write};
+use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -16,7 +17,10 @@ use crate::{ReplicaKey, RestoreError};
 
 const HANDOFF_FORMAT_VERSION: u32 = 3;
 const FOLLOW_STATE_FORMAT_VERSION: u32 = 1;
+const PUBLICATION_HISTORY_FORMAT_VERSION: u32 = 1;
 const MAX_CONTROL_FILE_BYTES: u64 = 64 * 1_024;
+const MAX_PUBLICATION_HISTORY_BYTES: u64 = 4 * 1_024 * 1_024;
+const MAX_PUBLICATION_HISTORY_ENTRIES: usize = 4_096;
 const MAX_ARCHIVE_SEAL_FILE_COUNT: usize = 1_000_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +65,48 @@ pub struct ReplicaHandoffReceipt {
     pub generation: u64,
     pub handoff_written: bool,
     pub authoritative_archive_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ReplicaPublicationHistory {
+    format_version: u32,
+    entries: Vec<ReplicaPublicationHistoryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ReplicaPublicationHistoryEntry {
+    handoff: ReplicaArchiveHandoff,
+    handoff_sha256: String,
+    handoff_value_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    quarantine_directory: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ReplicaArchiveQuarantineReport {
+    pub format_version: u32,
+    pub privacy_safe_summary: bool,
+    pub current_generation: u64,
+    pub protected_publication_count: u64,
+    pub retained_archive_count: u64,
+    pub newly_quarantined_archive_count: u64,
+    pub already_quarantined_archive_count: u64,
+    pub shared_with_protected_generation_count: u64,
+    pub recoverable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ReplicaArchiveRestoreReport {
+    pub format_version: u32,
+    pub privacy_safe_summary: bool,
+    pub requested_generation: u64,
+    pub restored_archive_count: u64,
+    pub restored_publication_count: u64,
+    pub archive_verified: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,7 +185,7 @@ pub(crate) fn capture_publication_predecessor(
         .map(|previous| canonical_publish_archive(previous, handoff_path))
         .transpose()?;
     let _lock = ControlLock::acquire(handoff_path, "handoff")?;
-    match (handoff_path.try_exists()?, canonical_previous) {
+    match (path_entry_exists(handoff_path)?, canonical_previous) {
         (false, None) => Ok(PublicationPredecessor::Absent),
         (true, Some(previous)) => {
             let current = load_handoff(handoff_path)?;
@@ -166,11 +212,11 @@ pub(crate) fn publish_replica_handoff_next_if_current(
     let canonical_archive = canonical_publish_archive(archive_directory, handoff_path)?;
     let _lock = ControlLock::acquire(handoff_path, "handoff")?;
     let generation = match predecessor {
-        PublicationPredecessor::Absent if !handoff_path.try_exists()? => 1,
+        PublicationPredecessor::Absent if !path_entry_exists(handoff_path)? => 1,
         PublicationPredecessor::Current {
             handoff_sha256,
             archive_directory,
-        } if handoff_path.try_exists()? => {
+        } if path_entry_exists(handoff_path)? => {
             let current = load_handoff(handoff_path)?;
             if current.sha256 != *handoff_sha256 {
                 return Err(RestoreError::Integrity(
@@ -237,14 +283,19 @@ fn publish_replica_handoff_locked(
     handoff_path: &Path,
     generation: u64,
 ) -> Result<ReplicaHandoffReceipt, RestoreError> {
-    if handoff_path.try_exists()? {
+    let prior = if path_entry_exists(handoff_path)? {
         let prior = load_handoff(handoff_path)?;
         if generation <= prior.value.generation {
             return Err(RestoreError::Integrity(
                 "replica handoff generation must advance monotonically".to_string(),
             ));
         }
-    }
+        Some(prior)
+    } else {
+        None
+    };
+    let mut publication_history =
+        load_or_reconcile_publication_history(handoff_path, prior.as_ref())?;
     let report = load_report(canonical_archive)?;
     require_authoritative_handoff_report(&report)?;
     if report.format_version >= 3 {
@@ -267,13 +318,248 @@ fn publish_replica_handoff_locked(
         archive_byte_count: seal.byte_count,
         published_at_unix_nanoseconds: Some(unix_nanoseconds()?.to_string()),
     };
+    reject_reused_mutated_archive_path(&publication_history, &handoff)?;
+    if publication_history.entries.len() >= MAX_PUBLICATION_HISTORY_ENTRIES {
+        return Err(RestoreError::Integrity(
+            "replica publication history reached its entry limit".to_string(),
+        ));
+    }
+    let handoff_sha256 = owner_json_sha256(&handoff)?;
     write_atomic_owner_json(handoff_path, &handoff, "handoff")?;
+    publication_history
+        .entries
+        .push(ReplicaPublicationHistoryEntry {
+            handoff_value_sha256: owner_json_sha256(&handoff)?,
+            handoff,
+            handoff_sha256,
+            quarantine_directory: None,
+        });
+    write_publication_history(handoff_path, &publication_history)?;
     Ok(ReplicaHandoffReceipt {
         format_version: 1,
         privacy_safe_summary: true,
         generation,
         handoff_written: true,
         authoritative_archive_required: true,
+    })
+}
+
+pub fn quarantine_retired_replica_archives(
+    handoff_path: &Path,
+    quarantine_directory: &Path,
+    retain_publications: usize,
+) -> Result<ReplicaArchiveQuarantineReport, RestoreError> {
+    if retain_publications < 2 {
+        return Err(RestoreError::Integrity(
+            "archive retention must protect at least the current and previous publications"
+                .to_string(),
+        ));
+    }
+    let _lock = ControlLock::acquire(handoff_path, "handoff")?;
+    let current = load_handoff(handoff_path)?;
+    let mut history = load_or_reconcile_publication_history(handoff_path, Some(&current))?;
+    let quarantine_root = canonical_private_directory(quarantine_directory, "quarantine")?;
+    let protected_start = history.entries.len().saturating_sub(retain_publications);
+    let protected_paths = history.entries[protected_start..]
+        .iter()
+        .map(|entry| entry.handoff.archive_directory.clone())
+        .collect::<BTreeSet<_>>();
+    let groups = publication_path_groups(&history)?;
+
+    for path in &protected_paths {
+        let indices = groups.get(path).ok_or_else(|| {
+            RestoreError::Integrity("protected publication disappeared from history".to_string())
+        })?;
+        require_group_retained_and_verified(&history, indices)?;
+        reject_nested_paths(Path::new(path), &quarantine_root)?;
+    }
+
+    let mut newly_quarantined = 0_u64;
+    let mut already_quarantined = 0_u64;
+    let mut shared_with_protected = 0_u64;
+    let mut eligible = Vec::new();
+    for (archive_path, indices) in &groups {
+        let contains_retired_publication = indices.iter().any(|index| *index < protected_start);
+        if !contains_retired_publication {
+            continue;
+        }
+        if protected_paths.contains(archive_path) {
+            shared_with_protected = shared_with_protected.saturating_add(1);
+            continue;
+        }
+        let quarantine_path = group_quarantine_path(&history, indices, &quarantine_root)?;
+        reject_nested_paths(Path::new(archive_path), &quarantine_root)?;
+        match group_location(&history, indices)? {
+            GroupLocation::Quarantined(recorded) => {
+                if recorded != quarantine_path {
+                    return Err(RestoreError::Integrity(
+                        "publication history names an unexpected quarantine location".to_string(),
+                    ));
+                }
+                verify_quarantined_group(&history, indices, &recorded, Path::new(archive_path))?;
+                already_quarantined = already_quarantined.saturating_add(1);
+            }
+            GroupLocation::Retained => {
+                let original = Path::new(archive_path);
+                match (
+                    path_entry_exists(original)?,
+                    path_entry_exists(&quarantine_path)?,
+                ) {
+                    (true, false) => {
+                        verify_retained_group(&history, indices, original)?;
+                        require_same_filesystem(original, &quarantine_root)?;
+                        eligible.push((archive_path.clone(), indices.clone(), quarantine_path));
+                    }
+                    (false, true) => {
+                        verify_quarantined_group(&history, indices, &quarantine_path, original)?;
+                        mark_group_quarantined(&mut history, indices, &quarantine_path)?;
+                        write_publication_history(handoff_path, &history)?;
+                        newly_quarantined = newly_quarantined.saturating_add(1);
+                    }
+                    (true, true) => {
+                        return Err(RestoreError::Integrity(
+                            "archive exists in both retained and quarantine locations".to_string(),
+                        ));
+                    }
+                    (false, false) => {
+                        return Err(RestoreError::Integrity(
+                            "retired archive is missing from both retained and quarantine locations"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    for (archive_path, indices, quarantine_path) in eligible {
+        let original = Path::new(&archive_path);
+        fs::rename(original, &quarantine_path)?;
+        sync_rename_parents(original, &quarantine_path)?;
+        verify_quarantined_group(&history, &indices, &quarantine_path, original)?;
+        mark_group_quarantined(&mut history, &indices, &quarantine_path)?;
+        write_publication_history(handoff_path, &history)?;
+        newly_quarantined = newly_quarantined.saturating_add(1);
+    }
+
+    let retained_archive_count = publication_path_groups(&history)?
+        .values()
+        .filter(|indices| {
+            matches!(
+                group_location(&history, indices),
+                Ok(GroupLocation::Retained)
+            )
+        })
+        .count() as u64;
+    Ok(ReplicaArchiveQuarantineReport {
+        format_version: 1,
+        privacy_safe_summary: true,
+        current_generation: current.value.generation,
+        protected_publication_count: history.entries.len().min(retain_publications) as u64,
+        retained_archive_count,
+        newly_quarantined_archive_count: newly_quarantined,
+        already_quarantined_archive_count: already_quarantined,
+        shared_with_protected_generation_count: shared_with_protected,
+        recoverable: true,
+    })
+}
+
+pub fn restore_quarantined_replica_archive(
+    handoff_path: &Path,
+    quarantine_directory: &Path,
+    generation: u64,
+) -> Result<ReplicaArchiveRestoreReport, RestoreError> {
+    if generation == 0 {
+        return Err(RestoreError::Integrity(
+            "archive restoration generation must be positive".to_string(),
+        ));
+    }
+    let _lock = ControlLock::acquire(handoff_path, "handoff")?;
+    let current = load_handoff(handoff_path)?;
+    let mut history = load_or_reconcile_publication_history(handoff_path, Some(&current))?;
+    let quarantine_root = canonical_private_directory(quarantine_directory, "quarantine")?;
+    let requested_index = history
+        .entries
+        .iter()
+        .position(|entry| entry.handoff.generation == generation)
+        .ok_or_else(|| {
+            RestoreError::Integrity(
+                "requested generation is not present in publication history".to_string(),
+            )
+        })?;
+    let archive_path = history.entries[requested_index]
+        .handoff
+        .archive_directory
+        .clone();
+    let groups = publication_path_groups(&history)?;
+    let indices = groups.get(&archive_path).ok_or_else(|| {
+        RestoreError::Integrity("requested publication path disappeared from history".to_string())
+    })?;
+    let GroupLocation::Quarantined(recorded_quarantine) = group_location(&history, indices)? else {
+        return Err(RestoreError::Integrity(
+            "requested generation is not quarantined".to_string(),
+        ));
+    };
+    if recorded_quarantine.parent() != Some(quarantine_root.as_path()) {
+        return Err(RestoreError::UnsafePath(
+            "requested generation belongs to a different quarantine directory".to_string(),
+        ));
+    }
+    if recorded_quarantine != group_quarantine_path(&history, indices, &quarantine_root)? {
+        return Err(RestoreError::Integrity(
+            "publication history names an unexpected quarantine location".to_string(),
+        ));
+    }
+    let original = Path::new(&archive_path);
+    reject_nested_paths(original, &quarantine_root)?;
+    let original_parent = original.parent().ok_or_else(|| {
+        RestoreError::UnsafePath("restored archive path has no parent".to_string())
+    })?;
+    ensure_private_directory(original_parent)?;
+
+    let restored_archive_count = match (
+        path_entry_exists(original)?,
+        path_entry_exists(&recorded_quarantine)?,
+    ) {
+        (false, true) => {
+            verify_quarantined_group(&history, indices, &recorded_quarantine, original)?;
+            require_same_filesystem(&recorded_quarantine, original_parent)?;
+            fs::rename(&recorded_quarantine, original)?;
+            sync_rename_parents(&recorded_quarantine, original)?;
+            if let Err(error) = verify_retained_group(&history, indices, original) {
+                if fs::rename(original, &recorded_quarantine).is_ok() {
+                    let _ = sync_rename_parents(original, &recorded_quarantine);
+                }
+                return Err(error);
+            }
+            1
+        }
+        (true, false) => {
+            verify_retained_group(&history, indices, original)?;
+            0
+        }
+        (true, true) => {
+            return Err(RestoreError::Integrity(
+                "archive exists in both retained and quarantine locations".to_string(),
+            ));
+        }
+        (false, false) => {
+            return Err(RestoreError::Integrity(
+                "archive is missing from both retained and quarantine locations".to_string(),
+            ));
+        }
+    };
+    for index in indices {
+        history.entries[*index].quarantine_directory = None;
+    }
+    write_publication_history(handoff_path, &history)?;
+    Ok(ReplicaArchiveRestoreReport {
+        format_version: 1,
+        privacy_safe_summary: true,
+        requested_generation: generation,
+        restored_archive_count,
+        restored_publication_count: indices.len() as u64,
+        archive_verified: true,
     })
 }
 
@@ -327,8 +613,7 @@ pub fn follow_replica_once(
     }
 
     let before = replica_status(replica_path, key)?;
-    let prior_state = state_path
-        .try_exists()?
+    let prior_state = path_entry_exists(state_path)?
         .then(|| load_follow_state(state_path))
         .transpose()?;
     if let Some(state) = prior_state.as_ref() {
@@ -489,8 +774,7 @@ pub fn replica_follower_status(
             "replica handoff changed while follower status was being read; retry".to_string(),
         ));
     }
-    let prior_state = state_path
-        .try_exists()?
+    let prior_state = path_entry_exists(state_path)?
         .then(|| load_follow_state(state_path))
         .transpose()?;
     if let Some(state) = prior_state.as_ref() {
@@ -504,7 +788,7 @@ pub fn replica_follower_status(
         }
     }
 
-    let replica_present = replica_path.try_exists()?;
+    let replica_present = path_entry_exists(replica_path)?;
     let replica = replica_present
         .then(|| replica_status(replica_path, key))
         .transpose()?;
@@ -581,6 +865,374 @@ pub fn replica_follower_status(
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GroupLocation {
+    Retained,
+    Quarantined(PathBuf),
+}
+
+fn publication_history_path(handoff_path: &Path) -> Result<PathBuf, RestoreError> {
+    let file_name = handoff_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            RestoreError::UnsafePath("replica handoff filename is invalid".to_string())
+        })?;
+    Ok(handoff_path.with_file_name(format!("{file_name}.generations.json")))
+}
+
+fn load_or_reconcile_publication_history(
+    handoff_path: &Path,
+    current: Option<&LoadedHandoff>,
+) -> Result<ReplicaPublicationHistory, RestoreError> {
+    let path = publication_history_path(handoff_path)?;
+    let mut changed = false;
+    let mut history = if path_entry_exists(&path)? {
+        let bytes = read_owner_only_file_limited(&path, MAX_PUBLICATION_HISTORY_BYTES)?;
+        serde_json::from_slice::<ReplicaPublicationHistory>(&bytes)?
+    } else {
+        changed = true;
+        ReplicaPublicationHistory {
+            format_version: PUBLICATION_HISTORY_FORMAT_VERSION,
+            entries: Vec::new(),
+        }
+    };
+    validate_publication_history(&history)?;
+    match current {
+        None if !history.entries.is_empty() => {
+            return Err(RestoreError::Integrity(
+                "publication history exists without a current handoff".to_string(),
+            ));
+        }
+        None => {}
+        Some(current) => {
+            let exact_tail = history.entries.last().is_some_and(|entry| {
+                entry.handoff.generation == current.value.generation
+                    && entry.handoff_sha256 == current.sha256
+                    && entry.quarantine_directory.is_none()
+            });
+            if !exact_tail {
+                let equivalent_tail = history.entries.last().is_some_and(|entry| {
+                    entry.handoff.generation == current.value.generation
+                        && entry.quarantine_directory.is_none()
+                        && same_archive_identity(&entry.handoff, &current.value)
+                });
+                if equivalent_tail {
+                    let tail = history.entries.last_mut().ok_or_else(|| {
+                        RestoreError::Integrity(
+                            "publication history unexpectedly became empty".to_string(),
+                        )
+                    })?;
+                    tail.handoff = current.value.clone();
+                    tail.handoff_sha256 = current.sha256.clone();
+                    tail.handoff_value_sha256 = owner_json_sha256(&current.value)?;
+                    changed = true;
+                } else if history
+                    .entries
+                    .last()
+                    .is_some_and(|entry| entry.handoff.generation >= current.value.generation)
+                {
+                    return Err(RestoreError::Integrity(
+                        "publication history does not match the current handoff".to_string(),
+                    ));
+                } else {
+                    if history.entries.len() >= MAX_PUBLICATION_HISTORY_ENTRIES {
+                        return Err(RestoreError::Integrity(
+                            "replica publication history reached its entry limit".to_string(),
+                        ));
+                    }
+                    reject_reused_mutated_archive_path(&history, &current.value)?;
+                    history.entries.push(ReplicaPublicationHistoryEntry {
+                        handoff_value_sha256: owner_json_sha256(&current.value)?,
+                        handoff: current.value.clone(),
+                        handoff_sha256: current.sha256.clone(),
+                        quarantine_directory: None,
+                    });
+                    changed = true;
+                }
+            }
+        }
+    }
+    validate_publication_history(&history)?;
+    if changed {
+        write_publication_history(handoff_path, &history)?;
+    }
+    Ok(history)
+}
+
+fn validate_publication_history(history: &ReplicaPublicationHistory) -> Result<(), RestoreError> {
+    if history.format_version != PUBLICATION_HISTORY_FORMAT_VERSION
+        || history.entries.len() > MAX_PUBLICATION_HISTORY_ENTRIES
+    {
+        return Err(RestoreError::Integrity(
+            "replica publication history is malformed".to_string(),
+        ));
+    }
+    let mut prior_generation = 0_u64;
+    for entry in &history.entries {
+        validate_handoff_value(&entry.handoff)?;
+        if entry.handoff.generation <= prior_generation
+            || !valid_sha256(&entry.handoff_sha256)
+            || !valid_sha256(&entry.handoff_value_sha256)
+            || entry.handoff_value_sha256 != owner_json_sha256(&entry.handoff)?
+            || entry
+                .quarantine_directory
+                .as_deref()
+                .is_some_and(|path| !Path::new(path).is_absolute())
+        {
+            return Err(RestoreError::Integrity(
+                "replica publication history is malformed".to_string(),
+            ));
+        }
+        prior_generation = entry.handoff.generation;
+    }
+    publication_path_groups(history)?;
+    Ok(())
+}
+
+fn write_publication_history(
+    handoff_path: &Path,
+    history: &ReplicaPublicationHistory,
+) -> Result<(), RestoreError> {
+    validate_publication_history(history)?;
+    let bytes = owner_json_bytes(history)?;
+    if bytes.len() as u64 > MAX_PUBLICATION_HISTORY_BYTES {
+        return Err(RestoreError::Integrity(
+            "replica publication history exceeds the size limit".to_string(),
+        ));
+    }
+    write_atomic_owner_bytes(
+        &publication_history_path(handoff_path)?,
+        &bytes,
+        "publication-history",
+    )
+}
+
+fn publication_path_groups(
+    history: &ReplicaPublicationHistory,
+) -> Result<BTreeMap<String, Vec<usize>>, RestoreError> {
+    let mut groups = BTreeMap::<String, Vec<usize>>::new();
+    for (index, entry) in history.entries.iter().enumerate() {
+        let path = Path::new(&entry.handoff.archive_directory);
+        if !path.is_absolute() {
+            return Err(RestoreError::Integrity(
+                "publication history archive path is not absolute".to_string(),
+            ));
+        }
+        groups
+            .entry(entry.handoff.archive_directory.clone())
+            .or_default()
+            .push(index);
+    }
+    for indices in groups.values() {
+        let first = &history.entries[indices[0]].handoff;
+        if indices
+            .iter()
+            .skip(1)
+            .any(|index| !same_archive_identity(first, &history.entries[*index].handoff))
+        {
+            return Err(RestoreError::Integrity(
+                "one publication archive path has conflicting sealed contents".to_string(),
+            ));
+        }
+        let _ = group_location(history, indices)?;
+    }
+    Ok(groups)
+}
+
+fn same_archive_identity(left: &ReplicaArchiveHandoff, right: &ReplicaArchiveHandoff) -> bool {
+    left.archive_directory == right.archive_directory
+        && left.source_fingerprint == right.source_fingerprint
+        && left.report_sha256 == right.report_sha256
+        && left.archive_seal_sha256 == right.archive_seal_sha256
+        && left.archive_file_count == right.archive_file_count
+        && left.archive_byte_count == right.archive_byte_count
+}
+
+fn reject_reused_mutated_archive_path(
+    history: &ReplicaPublicationHistory,
+    handoff: &ReplicaArchiveHandoff,
+) -> Result<(), RestoreError> {
+    if history.entries.iter().any(|entry| {
+        entry.handoff.archive_directory == handoff.archive_directory
+            && !same_archive_identity(&entry.handoff, handoff)
+    }) {
+        return Err(RestoreError::Integrity(
+            "a published archive path cannot be reused for different sealed contents".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn group_location(
+    history: &ReplicaPublicationHistory,
+    indices: &[usize],
+) -> Result<GroupLocation, RestoreError> {
+    let locations = indices
+        .iter()
+        .map(|index| history.entries[*index].quarantine_directory.as_deref())
+        .collect::<BTreeSet<_>>();
+    if locations.len() != 1 {
+        return Err(RestoreError::Integrity(
+            "publications sharing one archive disagree about its location".to_string(),
+        ));
+    }
+    match locations.into_iter().next().flatten() {
+        None => Ok(GroupLocation::Retained),
+        Some(path) => Ok(GroupLocation::Quarantined(PathBuf::from(path))),
+    }
+}
+
+fn group_quarantine_path(
+    history: &ReplicaPublicationHistory,
+    indices: &[usize],
+    quarantine_root: &Path,
+) -> Result<PathBuf, RestoreError> {
+    let latest = history
+        .entries
+        .get(*indices.last().ok_or_else(|| {
+            RestoreError::Integrity("empty publication archive group".to_string())
+        })?)
+        .ok_or_else(|| {
+            RestoreError::Integrity("publication history index is invalid".to_string())
+        })?;
+    Ok(quarantine_root.join(format!(
+        "generation-{:020}-{}",
+        latest.handoff.generation,
+        &latest.handoff_sha256[..16]
+    )))
+}
+
+fn require_group_retained_and_verified(
+    history: &ReplicaPublicationHistory,
+    indices: &[usize],
+) -> Result<(), RestoreError> {
+    if !matches!(group_location(history, indices)?, GroupLocation::Retained) {
+        return Err(RestoreError::Integrity(
+            "a protected publication has already been quarantined".to_string(),
+        ));
+    }
+    verify_retained_group(
+        history,
+        indices,
+        Path::new(&history.entries[indices[0]].handoff.archive_directory),
+    )
+}
+
+fn verify_retained_group(
+    history: &ReplicaPublicationHistory,
+    indices: &[usize],
+    original: &Path,
+) -> Result<(), RestoreError> {
+    let entry = &history.entries[indices[0]];
+    ensure_private_directory(original)?;
+    let canonical = fs::canonicalize(original)?;
+    if canonical != original {
+        return Err(RestoreError::Integrity(
+            "retained publication archive path is not canonical".to_string(),
+        ));
+    }
+    verify_handoff_archive(
+        &LoadedHandoff {
+            value: entry.handoff.clone(),
+            sha256: entry.handoff_sha256.clone(),
+        },
+        &canonical,
+    )
+}
+
+fn verify_quarantined_group(
+    history: &ReplicaPublicationHistory,
+    indices: &[usize],
+    quarantine_path: &Path,
+    original: &Path,
+) -> Result<(), RestoreError> {
+    if path_entry_exists(original)? {
+        return Err(RestoreError::Integrity(
+            "quarantined archive still exists at its retained path".to_string(),
+        ));
+    }
+    ensure_private_directory(quarantine_path)?;
+    let canonical = fs::canonicalize(quarantine_path)?;
+    if canonical != quarantine_path {
+        return Err(RestoreError::Integrity(
+            "quarantined archive path is not canonical".to_string(),
+        ));
+    }
+    let expected = &history.entries[indices[0]].handoff;
+    let seal = archive_seal(&canonical)?;
+    if seal.sha256 != expected.archive_seal_sha256
+        || seal.file_count != expected.archive_file_count
+        || seal.byte_count != expected.archive_byte_count
+    {
+        return Err(RestoreError::Integrity(
+            "quarantined archive no longer matches its publication seal".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn mark_group_quarantined(
+    history: &mut ReplicaPublicationHistory,
+    indices: &[usize],
+    quarantine_path: &Path,
+) -> Result<(), RestoreError> {
+    let path = quarantine_path
+        .to_str()
+        .ok_or_else(|| RestoreError::UnsafePath("quarantine path is not valid UTF-8".to_string()))?
+        .to_string();
+    for index in indices {
+        history.entries[*index].quarantine_directory = Some(path.clone());
+    }
+    Ok(())
+}
+
+fn canonical_private_directory(path: &Path, label: &str) -> Result<PathBuf, RestoreError> {
+    ensure_private_directory(path)?;
+    let canonical = fs::canonicalize(path)?;
+    ensure_private_directory(&canonical)
+        .map_err(|_| RestoreError::Integrity(format!("{label} directory is not owner-only")))?;
+    Ok(canonical)
+}
+
+fn reject_nested_paths(archive: &Path, quarantine_root: &Path) -> Result<(), RestoreError> {
+    if archive == quarantine_root
+        || archive.starts_with(quarantine_root)
+        || quarantine_root.starts_with(archive)
+    {
+        return Err(RestoreError::UnsafePath(
+            "archive and quarantine directories must not contain one another".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_same_filesystem(
+    source: &Path,
+    destination_directory: &Path,
+) -> Result<(), RestoreError> {
+    if fs::metadata(source)?.dev() != fs::metadata(destination_directory)?.dev() {
+        return Err(RestoreError::UnsafePath(
+            "recoverable archive quarantine requires one filesystem".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn sync_rename_parents(source: &Path, destination: &Path) -> Result<(), RestoreError> {
+    let source_parent = source
+        .parent()
+        .ok_or_else(|| RestoreError::UnsafePath("archive path has no parent".to_string()))?;
+    let destination_parent = destination
+        .parent()
+        .ok_or_else(|| RestoreError::UnsafePath("archive destination has no parent".to_string()))?;
+    File::open(source_parent)?.sync_all()?;
+    if destination_parent != source_parent {
+        File::open(destination_parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
 struct LoadedHandoff {
     value: ReplicaArchiveHandoff,
     sha256: String,
@@ -637,6 +1289,14 @@ impl Drop for ControlLock {
 fn load_handoff(path: &Path) -> Result<LoadedHandoff, RestoreError> {
     let bytes = read_owner_only_control_file(path)?;
     let value: ReplicaArchiveHandoff = serde_json::from_slice(&bytes)?;
+    validate_handoff_value(&value)?;
+    Ok(LoadedHandoff {
+        value,
+        sha256: hex::encode(Sha256::digest(bytes)),
+    })
+}
+
+fn validate_handoff_value(value: &ReplicaArchiveHandoff) -> Result<(), RestoreError> {
     if !matches!(value.format_version, 2 | HANDOFF_FORMAT_VERSION)
         || value.generation == 0
         || value.archive_directory.is_empty()
@@ -663,10 +1323,7 @@ fn load_handoff(path: &Path) -> Result<LoadedHandoff, RestoreError> {
             "replica archive handoff is malformed".to_string(),
         ));
     }
-    Ok(LoadedHandoff {
-        value,
-        sha256: hex::encode(Sha256::digest(bytes)),
-    })
+    Ok(())
 }
 
 fn load_follow_state(path: &Path) -> Result<ReplicaFollowState, RestoreError> {
@@ -701,24 +1358,36 @@ fn require_authoritative_handoff_report(
 }
 
 fn read_owner_only_control_file(path: &Path) -> Result<Vec<u8>, RestoreError> {
+    read_owner_only_file_limited(path, MAX_CONTROL_FILE_BYTES)
+}
+
+fn path_entry_exists(path: &Path) -> Result<bool, RestoreError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_owner_only_file_limited(path: &Path, maximum_bytes: u64) -> Result<Vec<u8>, RestoreError> {
     ensure_private_regular_file(path)?;
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
         .open(path)?;
     let before = file.metadata()?;
-    if before.len() > MAX_CONTROL_FILE_BYTES {
+    if before.len() > maximum_bytes {
         return Err(RestoreError::Integrity(
             "replica control file exceeds the size limit".to_string(),
         ));
     }
     let mut bytes = Vec::with_capacity(before.len() as usize);
     (&mut file)
-        .take(MAX_CONTROL_FILE_BYTES + 1)
+        .take(maximum_bytes + 1)
         .read_to_end(&mut bytes)?;
     let after = file.metadata()?;
     if bytes.len() as u64 != before.len()
-        || bytes.len() as u64 > MAX_CONTROL_FILE_BYTES
+        || bytes.len() as u64 > maximum_bytes
         || before.dev() != after.dev()
         || before.ino() != after.ino()
         || before.len() != after.len()
@@ -739,11 +1408,25 @@ fn write_atomic_owner_json(
     value: &impl Serialize,
     label: &str,
 ) -> Result<(), RestoreError> {
+    write_atomic_owner_bytes(path, &owner_json_bytes(value)?, label)
+}
+
+fn owner_json_bytes(value: &impl Serialize) -> Result<Vec<u8>, RestoreError> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn owner_json_sha256(value: &impl Serialize) -> Result<String, RestoreError> {
+    Ok(hex::encode(Sha256::digest(owner_json_bytes(value)?)))
+}
+
+fn write_atomic_owner_bytes(path: &Path, bytes: &[u8], label: &str) -> Result<(), RestoreError> {
     let parent = path.parent().ok_or_else(|| {
         RestoreError::UnsafePath("replica control path has no parent".to_string())
     })?;
     ensure_private_directory(parent)?;
-    if path.try_exists()? {
+    if path_entry_exists(path)? {
         ensure_private_regular_file(path)?;
     }
     let nonce = SystemTime::now()
@@ -761,11 +1444,9 @@ fn write_atomic_owner_json(
             .mode(0o600)
             .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
             .open(&temporary)?;
-        let mut writer = BufWriter::new(file);
-        serde_json::to_writer_pretty(&mut writer, value)?;
-        writer.write_all(b"\n")?;
-        writer.flush()?;
-        writer.get_ref().sync_all()?;
+        let mut file = file;
+        file.write_all(bytes)?;
+        file.sync_all()?;
         fs::rename(&temporary, path)?;
         File::open(parent)?.sync_all()?;
         Ok(())
@@ -966,6 +1647,164 @@ mod tests {
             Path::new(&current.value.archive_directory),
             fs::canonicalize(concurrent).unwrap()
         );
+    }
+
+    #[test]
+    fn quarantines_only_retired_archives_and_restores_them_by_generation() {
+        let fixture = tempfile::tempdir().unwrap();
+        fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let quarantine = fixture.path().join("quarantine");
+        fs::create_dir(&quarantine).unwrap();
+        fs::set_permissions(&quarantine, fs::Permissions::from_mode(0o700)).unwrap();
+        let first = minimal_archive(fixture.path(), "first", "source-first");
+        let second = minimal_archive(fixture.path(), "second", "source-second");
+        let third = minimal_archive(fixture.path(), "third", "source-third");
+        let fourth = minimal_archive(fixture.path(), "fourth", "source-fourth");
+        let handoff = fixture.path().join("handoff.json");
+
+        publish_replica_handoff(&first, &handoff, 1).unwrap();
+        publish_replica_handoff(&second, &handoff, 2).unwrap();
+        publish_replica_handoff(&third, &handoff, 3).unwrap();
+        publish_replica_handoff(&fourth, &handoff, 4).unwrap();
+        let history_path = publication_history_path(&handoff).unwrap();
+        assert_eq!(
+            fs::metadata(&history_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        assert!(quarantine_retired_replica_archives(&handoff, &quarantine, 1).is_err());
+        let report = quarantine_retired_replica_archives(&handoff, &quarantine, 2).unwrap();
+        assert_eq!(report.current_generation, 4);
+        assert_eq!(report.protected_publication_count, 2);
+        assert_eq!(report.newly_quarantined_archive_count, 2);
+        assert!(report.recoverable);
+        assert!(!first.exists());
+        assert!(!second.exists());
+        assert!(third.is_dir());
+        assert!(fourth.is_dir());
+        assert_eq!(
+            Path::new(&load_handoff(&handoff).unwrap().value.archive_directory),
+            fs::canonicalize(&fourth).unwrap()
+        );
+        let serialized = serde_json::to_string(&report).unwrap();
+        for private_path in [&first, &second, &third, &fourth, &quarantine] {
+            assert!(!serialized.contains(private_path.to_str().unwrap()));
+        }
+
+        let repeated = quarantine_retired_replica_archives(&handoff, &quarantine, 2).unwrap();
+        assert_eq!(repeated.newly_quarantined_archive_count, 0);
+        assert_eq!(repeated.already_quarantined_archive_count, 2);
+
+        let restored = restore_quarantined_replica_archive(&handoff, &quarantine, 1).unwrap();
+        assert_eq!(restored.requested_generation, 1);
+        assert_eq!(restored.restored_archive_count, 1);
+        assert_eq!(restored.restored_publication_count, 1);
+        assert!(restored.archive_verified);
+        assert!(first.is_dir());
+        assert!(third.is_dir());
+        assert!(fourth.is_dir());
+        let restore_serialized = serde_json::to_string(&restored).unwrap();
+        assert!(!restore_serialized.contains(first.to_str().unwrap()));
+    }
+
+    #[test]
+    fn refuses_to_reuse_a_published_path_for_mutated_contents() {
+        let fixture = tempfile::tempdir().unwrap();
+        fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let archive = minimal_archive(fixture.path(), "archive", "source-first");
+        let handoff = fixture.path().join("handoff.json");
+        publish_replica_handoff(&archive, &handoff, 1).unwrap();
+
+        let mut report: RestorationReport =
+            serde_json::from_slice(&fs::read(archive.join("report.json")).unwrap()).unwrap();
+        report.source_fingerprint = "source-mutated".to_string();
+        fs::write(
+            archive.join("report.json"),
+            serde_json::to_vec_pretty(&report).unwrap(),
+        )
+        .unwrap();
+        let error = publish_replica_handoff(&archive, &handoff, 2).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("cannot be reused for different sealed contents"));
+        assert_eq!(load_handoff(&handoff).unwrap().value.generation, 1);
+    }
+
+    #[test]
+    fn protects_shared_paths_and_recovers_interrupted_quarantine_moves() {
+        let fixture = tempfile::tempdir().unwrap();
+        fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let quarantine = fixture.path().join("quarantine");
+        fs::create_dir(&quarantine).unwrap();
+        fs::set_permissions(&quarantine, fs::Permissions::from_mode(0o700)).unwrap();
+        let shared = minimal_archive(fixture.path(), "shared", "source-shared");
+        let retired = minimal_archive(fixture.path(), "retired", "source-retired");
+        let current = minimal_archive(fixture.path(), "current", "source-current");
+        let handoff = fixture.path().join("handoff.json");
+
+        publish_replica_handoff(&shared, &handoff, 1).unwrap();
+        publish_replica_handoff(&retired, &handoff, 2).unwrap();
+        publish_replica_handoff(&shared, &handoff, 3).unwrap();
+        publish_replica_handoff(&current, &handoff, 4).unwrap();
+
+        let loaded = load_handoff(&handoff).unwrap();
+        let history = load_or_reconcile_publication_history(&handoff, Some(&loaded)).unwrap();
+        let groups = publication_path_groups(&history).unwrap();
+        let retired_path = fs::canonicalize(&retired).unwrap();
+        let retired_indices = groups.get(retired_path.to_str().unwrap()).unwrap();
+        let quarantine_root = fs::canonicalize(&quarantine).unwrap();
+        let interrupted_destination =
+            group_quarantine_path(&history, retired_indices, &quarantine_root).unwrap();
+        fs::rename(&retired_path, &interrupted_destination).unwrap();
+
+        let recovered = quarantine_retired_replica_archives(&handoff, &quarantine, 2).unwrap();
+        assert_eq!(recovered.newly_quarantined_archive_count, 1);
+        assert_eq!(recovered.shared_with_protected_generation_count, 1);
+        assert!(shared.is_dir());
+        assert!(current.is_dir());
+        assert!(!retired.exists());
+
+        fs::rename(&interrupted_destination, &retired_path).unwrap();
+        let restored = restore_quarantined_replica_archive(&handoff, &quarantine, 2).unwrap();
+        assert_eq!(restored.restored_archive_count, 0);
+        assert_eq!(restored.restored_publication_count, 1);
+        assert!(retired.is_dir());
+        assert!(shared.is_dir());
+        assert!(current.is_dir());
+    }
+
+    #[test]
+    fn quarantine_never_replaces_a_preexisting_filesystem_entry() {
+        let fixture = tempfile::tempdir().unwrap();
+        fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let quarantine = fixture.path().join("quarantine");
+        fs::create_dir(&quarantine).unwrap();
+        fs::set_permissions(&quarantine, fs::Permissions::from_mode(0o700)).unwrap();
+        let first = minimal_archive(fixture.path(), "first", "source-first");
+        let second = minimal_archive(fixture.path(), "second", "source-second");
+        let third = minimal_archive(fixture.path(), "third", "source-third");
+        let handoff = fixture.path().join("handoff.json");
+        publish_replica_handoff(&first, &handoff, 1).unwrap();
+        publish_replica_handoff(&second, &handoff, 2).unwrap();
+        publish_replica_handoff(&third, &handoff, 3).unwrap();
+
+        let loaded = load_handoff(&handoff).unwrap();
+        let history = load_or_reconcile_publication_history(&handoff, Some(&loaded)).unwrap();
+        let first_path = fs::canonicalize(&first).unwrap();
+        let groups = publication_path_groups(&history).unwrap();
+        let indices = groups.get(first_path.to_str().unwrap()).unwrap();
+        let quarantine_root = fs::canonicalize(&quarantine).unwrap();
+        let destination = group_quarantine_path(&history, indices, &quarantine_root).unwrap();
+        std::os::unix::fs::symlink("missing-target", &destination).unwrap();
+
+        assert!(quarantine_retired_replica_archives(&handoff, &quarantine, 2).is_err());
+        assert!(first.is_dir());
+        assert!(second.is_dir());
+        assert!(third.is_dir());
+        assert!(fs::symlink_metadata(destination)
+            .unwrap()
+            .file_type()
+            .is_symlink());
     }
 
     fn minimal_archive(parent: &Path, name: &str, source_fingerprint: &str) -> PathBuf {
