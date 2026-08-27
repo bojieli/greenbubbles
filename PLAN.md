@@ -593,6 +593,7 @@ list_conversations()
 search_messages()
 get_messages()
 get_message()
+get_artifact()
 refresh()
 ```
 
@@ -606,6 +607,14 @@ refresh()
   query/model path.
 - [x] Prevent message content and prompt injection from expanding deterministic
   scopes or enabling unavailable tools.
+
+`get_artifact` resolves a message's opaque artifact reference only when the
+request repeats an enabled conversation, `readRecentMessages` and the
+`attachments` field are allowed, and a referencing message falls inside the
+policy time range. It is local-only regardless of remote message permission and
+descriptor/digest-verifies the source and decoded files immediately before
+returning their exact paths. JSON/Unix, CLI request files, and MCP share this
+same operation and policy boundary.
 
 ### 3B. Draft-only action layer
 

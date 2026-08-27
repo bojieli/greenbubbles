@@ -691,7 +691,7 @@ fn build_archive(
         .insert("1".to_string(), messages.len() as u64);
     let completion = RestorationCompletion::evaluate(&integrity);
     let report = RestorationReport {
-        format_version: 4,
+        format_version: 2,
         account_id: ACCOUNT_ID.to_string(),
         source_fingerprint: fingerprint.to_string(),
         client_build_compatibility: Default::default(),

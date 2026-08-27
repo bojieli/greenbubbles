@@ -1,23 +1,23 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use greenbubbles_restore::replica::{
     bootstrap_replica, get_replica_changes, get_replica_message, list_replica_conversations,
-    replica_coverage, replica_status, search_replica_messages, synchronize_replica,
-    ReplicaMessageFilter,
+    replica_conversation_references_artifact_in_range, replica_coverage, replica_status,
+    search_replica_messages, synchronize_replica, ReplicaMessageFilter,
 };
 use greenbubbles_restore::tools::{
     create_tool_policy, ConversationToolScope, ToolCapability, ToolMessageField,
 };
 use greenbubbles_restore::{
     connector::{
-        ConnectorDestination, ConnectorOperation, ConnectorRequest, ConnectorResult,
-        ConnectorService, CONNECTOR_API_VERSION,
+        ConnectorDestination, ConnectorErrorCode, ConnectorOperation, ConnectorRequest,
+        ConnectorResult, ConnectorService, CONNECTOR_API_VERSION,
     },
     transport::{send_unix_request, serve_unix_once},
 };
@@ -32,11 +32,11 @@ use greenbubbles_restore::{
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 const KEY_BYTES: [u8; 32] = [0x31; 32];
 const WRONG_KEY_BYTES: [u8; 32] = [0x32; 32];
 const PRIVATE_TEXT: &str = "encrypted replica private text";
-const PRIVATE_PATH: &str = "/synthetic/private/image.jpg";
 
 #[test]
 fn serves_scoped_replica_reads_and_complete_non_executing_drafts() {
@@ -51,6 +51,24 @@ fn serves_scoped_replica_reads_and_complete_non_executing_drafts() {
     let replica = private.join("replica.db");
     let key = ReplicaKey::from_bytes(KEY_BYTES);
     bootstrap_replica(&archive, &replica, &key).unwrap();
+    assert!(replica_conversation_references_artifact_in_range(
+        &replica,
+        &key,
+        "conversation-a",
+        "artifact-a",
+        Some(1_700_000_000),
+        Some(1_700_000_000),
+    )
+    .unwrap());
+    assert!(!replica_conversation_references_artifact_in_range(
+        &replica,
+        &key,
+        "conversation-a",
+        "artifact-a",
+        Some(1_700_000_001),
+        None,
+    )
+    .unwrap());
     let policy = private.join("policy.json");
     create_tool_policy(
         &archive,
@@ -101,6 +119,7 @@ fn serves_scoped_replica_reads_and_complete_non_executing_drafts() {
     assert!(!capabilities.file_send.available);
     assert!(!capabilities.cached_moments_read.available);
     assert!(!capabilities.cached_moments_read.enabled);
+    assert!(capabilities.operations["getArtifact"].enabled);
 
     let cached_denied = service.handle(connector_request(
         "cached-denied",
@@ -137,6 +156,65 @@ fn serves_scoped_replica_reads_and_complete_non_executing_drafts() {
         },
     ));
     assert!(!remote_denied.ok);
+
+    let artifact_response = service.handle(connector_request(
+        "artifact",
+        ConnectorDestination::Local,
+        ConnectorOperation::GetArtifact {
+            conversation_id: "conversation-a".to_string(),
+            artifact_id: "artifact-a".to_string(),
+        },
+    ));
+    let ConnectorResult::Artifact(artifact) = artifact_response.result.unwrap() else {
+        panic!("unexpected connector result")
+    };
+    assert_eq!(
+        artifact
+            .source
+            .as_ref()
+            .unwrap()
+            .account_relative_path
+            .as_deref(),
+        Some("msg/image.jpg")
+    );
+    assert_eq!(
+        artifact.decoded.as_ref().unwrap().sha256,
+        hex::encode(Sha256::digest(b"decoded-image"))
+    );
+    let source_path = artifact.source.as_ref().unwrap().absolute_path.clone();
+    let decoded_path = artifact.decoded.as_ref().unwrap().absolute_path.clone();
+    assert!(Path::new(&source_path).is_file());
+    assert!(Path::new(&decoded_path).is_file());
+
+    fs::write(&decoded_path, b"altered-image").unwrap();
+    let stale_artifact_denied = service.handle(connector_request(
+        "stale-artifact-denied",
+        ConnectorDestination::Local,
+        ConnectorOperation::GetArtifact {
+            conversation_id: "conversation-a".to_string(),
+            artifact_id: "artifact-a".to_string(),
+        },
+    ));
+    assert!(!stale_artifact_denied.ok);
+    assert_eq!(
+        stale_artifact_denied.error.unwrap().code,
+        ConnectorErrorCode::IntegrityFailure
+    );
+    fs::write(&decoded_path, b"decoded-image").unwrap();
+
+    let remote_artifact_denied = service.handle(connector_request(
+        "remote-artifact-denied",
+        ConnectorDestination::RemoteModel,
+        ConnectorOperation::GetArtifact {
+            conversation_id: "conversation-a".to_string(),
+            artifact_id: "artifact-a".to_string(),
+        },
+    ));
+    assert!(!remote_artifact_denied.ok);
+    assert_eq!(
+        remote_artifact_denied.error.unwrap().code,
+        ConnectorErrorCode::Unauthorized
+    );
 
     let draft_response = service.handle(connector_request(
         "draft",
@@ -177,7 +255,10 @@ fn serves_scoped_replica_reads_and_complete_non_executing_drafts() {
     );
     assert!(!preview.executable);
     assert!(!preview.expired);
-    assert_eq!(preview.draft.attachments[0].sha256, "b".repeat(64));
+    assert_eq!(
+        preview.draft.attachments[0].sha256,
+        hex::encode(Sha256::digest(b"decoded-image"))
+    );
 
     let audit_bytes = fs::read(&audit).unwrap();
     assert!(!contains_bytes(
@@ -289,7 +370,8 @@ fn serves_scoped_replica_reads_and_complete_non_executing_drafts() {
     let requests = concat!(
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n",
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n",
-        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"greenbubbles_status\",\"arguments\":{}}}\n"
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"greenbubbles_status\",\"arguments\":{}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"greenbubbles_get_artifact\",\"arguments\":{\"conversationId\":\"conversation-a\",\"artifactId\":\"artifact-a\"}}}\n"
     );
     mcp.stdin
         .take()
@@ -307,13 +389,21 @@ fn serves_scoped_replica_reads_and_complete_non_executing_drafts() {
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(mcp_responses.len(), 3);
+    assert_eq!(mcp_responses.len(), 4);
     assert!(mcp_responses[1]["result"]["tools"]
         .as_array()
         .unwrap()
         .iter()
         .any(|tool| tool["name"] == "greenbubbles_get_changes"));
     assert_eq!(mcp_responses[2]["result"]["structuredContent"]["ok"], true);
+    assert_eq!(
+        mcp_responses[3]["result"]["structuredContent"]["result"]["kind"],
+        "artifact"
+    );
+    assert_eq!(
+        mcp_responses[3]["result"]["structuredContent"]["result"]["value"]["artifactId"],
+        "artifact-a"
+    );
     stop_connector_process(&mut connector, &consumer_socket);
 
     let replacement = private.join("replacement-replica.db");
@@ -435,7 +525,11 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
     let bytes = fs::read(&replica).unwrap();
     assert_ne!(&bytes[..16], b"SQLite format 3\0");
     assert!(!contains_bytes(&bytes, PRIVATE_TEXT.as_bytes()));
-    assert!(!contains_bytes(&bytes, PRIVATE_PATH.as_bytes()));
+    let private_path = fs::canonicalize(archive.join("source-account/msg/image.jpg"))
+        .unwrap()
+        .display()
+        .to_string();
+    assert!(!contains_bytes(&bytes, private_path.as_bytes()));
     assert!(Connection::open(&replica)
         .unwrap()
         .query_row("SELECT count(*) FROM message", [], |_| Ok(()))
@@ -652,7 +746,18 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
     let mut artifacts = read_ndjson::<CanonicalArtifact>(&archive_d.join("artifacts.ndjson"));
     artifacts[0].availability = ArtifactAvailability::NotDownloaded;
     artifacts[0].source_local_path = None;
+    artifacts[0].account_relative_path = None;
+    artifacts[0].source_byte_count = None;
+    artifacts[0].source_device_id = None;
+    artifacts[0].source_file_id = None;
+    artifacts[0].source_modified_seconds = None;
+    artifacts[0].source_modified_nanoseconds = None;
+    artifacts[0].source_sha256 = None;
+    artifacts[0].detected_format = None;
     artifacts[0].decoded_local_path = None;
+    artifacts[0].decoded_byte_count = None;
+    artifacts[0].decoded_sha256 = None;
+    artifacts[0].decoded_format = None;
     artifacts[0].decode_state = ArtifactDecodeState::NotRequired;
     overwrite_ndjson(&archive_d.join("artifacts.ndjson"), &artifacts);
     let deletion = synchronize_replica(&archive_d, &replica, &key).unwrap();
@@ -765,6 +870,17 @@ fn build_archive(parent: &Path, name: &str, account: &str, fingerprint: &str) ->
     let archive = parent.join(name);
     fs::create_dir(&archive).unwrap();
     fs::set_permissions(&archive, fs::Permissions::from_mode(0o700)).unwrap();
+    let source_directory = archive.join("source-account/msg");
+    let derived_directory = archive.join("derived");
+    fs::create_dir_all(&source_directory).unwrap();
+    fs::create_dir(&derived_directory).unwrap();
+    let source_path = source_directory.join("image.jpg");
+    let decoded_path = derived_directory.join("image.jpg");
+    write_private(&source_path, b"source-image");
+    write_private(&decoded_path, b"decoded-image");
+    let source_path = fs::canonicalize(source_path).unwrap();
+    let decoded_path = fs::canonicalize(decoded_path).unwrap();
+    let source_metadata = fs::metadata(&source_path).unwrap();
     let integrity = RestorationIntegrity {
         source_row_count: 1,
         restored_row_count: 1,
@@ -784,16 +900,16 @@ fn build_archive(parent: &Path, name: &str, account: &str, fingerprint: &str) ->
         acquisition: None,
         archive_scope: Default::default(),
         media_phase: Default::default(),
-        messages_path: "private".to_string(),
-        rejections_path: "private".to_string(),
-        artifacts_path: "private".to_string(),
-        conversations_path: "private".to_string(),
-        participants_path: "private".to_string(),
+        messages_path: archive.join("messages.ndjson").display().to_string(),
+        rejections_path: archive.join("rejections.ndjson").display().to_string(),
+        artifacts_path: archive.join("artifacts.ndjson").display().to_string(),
+        conversations_path: archive.join("conversations.ndjson").display().to_string(),
+        participants_path: archive.join("participants.ndjson").display().to_string(),
         cached_moments_path: None,
         cached_moment_interactions_path: None,
         cached_surfaces_path: None,
-        coverage_path: "private".to_string(),
-        report_path: "private".to_string(),
+        coverage_path: archive.join("coverage.json").display().to_string(),
+        report_path: archive.join("report.json").display().to_string(),
         integrity,
         completion,
     };
@@ -843,22 +959,22 @@ fn build_archive(parent: &Path, name: &str, account: &str, fingerprint: &str) ->
         role: ArtifactRole::Original,
         availability: ArtifactAvailability::Downloaded,
         source_md5: None,
-        source_local_path: Some(PRIVATE_PATH.to_string()),
+        source_local_path: Some(source_path.display().to_string()),
         account_relative_path: Some("msg/image.jpg".to_string()),
-        source_byte_count: Some(12),
-        source_device_id: Some(1),
-        source_file_id: Some(2),
-        source_modified_seconds: Some(3),
-        source_modified_nanoseconds: Some(4),
-        source_sha256: Some("a".repeat(64)),
+        source_byte_count: Some(source_metadata.len()),
+        source_device_id: Some(source_metadata.dev()),
+        source_file_id: Some(source_metadata.ino()),
+        source_modified_seconds: Some(source_metadata.mtime()),
+        source_modified_nanoseconds: Some(source_metadata.mtime_nsec()),
+        source_sha256: Some(hex::encode(Sha256::digest(b"source-image"))),
         detected_format: Some("jpeg".to_string()),
         materialized_local_path: None,
-        decoded_local_path: Some("/synthetic/private/decoded.jpg".to_string()),
-        decoded_byte_count: Some(12),
-        decoded_sha256: Some("b".repeat(64)),
+        decoded_local_path: Some(decoded_path.display().to_string()),
+        decoded_byte_count: Some(13),
+        decoded_sha256: Some(hex::encode(Sha256::digest(b"decoded-image"))),
         decoded_format: Some("jpeg".to_string()),
         decode_state: ArtifactDecodeState::Decoded,
-        verification_detail: None,
+        verification_detail: Some("synthetic source and derivative were verified".to_string()),
         source_resource_set_id: None,
         source_resource_logical_path: None,
         source_resource_table_id: None,

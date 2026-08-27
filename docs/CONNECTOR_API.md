@@ -68,7 +68,7 @@ capabilities                 status
 coverage                     getChanges
 getCachedMoments
 listConversations            searchMessages
-getMessages                  getMessage
+getMessages                  getMessage                      getArtifact
 resolveContact               resolveConversation
 createMessageDraft           createReplyDraft
 createAttachmentDraft        previewAction
@@ -103,6 +103,19 @@ reading or releasing a record:
 - allowed normalized fields;
 - local versus remote-model destination;
 - configured result and byte limits.
+
+`getArtifact(conversationId, artifactId)` is the only connector operation that
+reveals an artifact path. It requires `readRecentMessages` plus the
+`attachments` field for that exact conversation, proves that at least one
+referencing message falls inside the inclusive policy time range, and is
+unconditionally denied to the `remoteModel` destination even when message text
+is remotely enabled. Immediately before release, the service descriptor-reads
+and digest-verifies every recorded source/materialized/decoded file. The result
+contains the explicit availability and decode states, source and decoded file
+roles, absolute path, optional account-relative path, byte count, SHA-256, and
+format. Missing/remote/deleted artifacts return their explicit state without a
+fabricated file. A stale, replaced, missing, symlinked, or archive-escaping
+file fails with an integrity error and releases no path.
 
 `getCachedMoments` uses its own policy scope with independent allowed fields,
 inclusive time range, local/remote destination permission, result limit, and

@@ -132,6 +132,18 @@ fn merges_selected_source_sets_reorders_globally_and_resolves_cross_shard_relati
     fs::write(&coverage_path, original_coverage).unwrap();
     assert!(audit_archive(&output).is_ok());
 
+    let artifacts_path = output.join("artifacts.ndjson");
+    let original_artifacts = fs::read(&artifacts_path).unwrap();
+    let mut unauditable_artifacts = artifacts.clone();
+    unauditable_artifacts[0].verification_detail = None;
+    let mut unauditable_bytes = serde_json::to_vec(&unauditable_artifacts[0]).unwrap();
+    unauditable_bytes.push(b'\n');
+    fs::write(&artifacts_path, unauditable_bytes).unwrap();
+    let rejected_replica = private.join("unaudited-replica.db");
+    assert!(bootstrap_replica(&output, &rejected_replica, &key).is_err());
+    assert!(!rejected_replica.exists());
+    fs::write(&artifacts_path, original_artifacts).unwrap();
+
     let replica = private.join("merged-replica.db");
     let bootstrapped = bootstrap_replica(&output, &replica, &key).unwrap();
     assert_eq!(bootstrapped.message_count, 2);

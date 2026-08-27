@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::archive::{ensure_private_directory, ensure_private_regular_file, load_report};
+use crate::audit::{audit_archive, validate_canonical_artifact, verify_recorded_artifact_files};
 use crate::schema::{validate_cached_coverage_schema, validate_restoration_coverage_schema};
 use crate::{
     CanonicalArtifact, CanonicalConversation, CanonicalMessage, CanonicalParticipant, ReplicaKey,
@@ -291,6 +292,9 @@ pub fn bootstrap_replica(
     ensure_private_directory(archive_directory)?;
     let report = load_report(archive_directory)?;
     require_authoritative_archive(&report)?;
+    if report.format_version >= 3 {
+        audit_archive(archive_directory)?;
+    }
     let mut opened = open_replica(replica_path, key)?;
     let existing_account: Option<String> = opened
         .connection
@@ -1073,11 +1077,62 @@ pub fn get_replica_artifact(
     get_replica_record(replica_path, key, "artifact", "artifact_id", artifact_id)
 }
 
+pub fn replica_restoration_report(
+    replica_path: &Path,
+    key: &ReplicaKey,
+) -> Result<Option<RestorationReport>, RestoreError> {
+    let opened = open_replica(replica_path, key)?;
+    let account_id: Option<String> = opened
+        .connection
+        .query_row(
+            "SELECT account_id FROM replica_identity WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(account_id) = account_id else {
+        return Ok(None);
+    };
+    let report: Option<Vec<u8>> = opened
+        .connection
+        .query_row(
+            "SELECT report_json FROM coverage_state WHERE account_id = ?1",
+            [&account_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    report
+        .map(|bytes| {
+            let report: RestorationReport = serde_json::from_slice(&bytes)?;
+            require_account(&report.account_id, &account_id)?;
+            Ok(report)
+        })
+        .transpose()
+}
+
 pub fn replica_conversation_references_artifact(
     replica_path: &Path,
     key: &ReplicaKey,
     conversation_id: &str,
     artifact_id: &str,
+) -> Result<bool, RestoreError> {
+    replica_conversation_references_artifact_in_range(
+        replica_path,
+        key,
+        conversation_id,
+        artifact_id,
+        None,
+        None,
+    )
+}
+
+pub fn replica_conversation_references_artifact_in_range(
+    replica_path: &Path,
+    key: &ReplicaKey,
+    conversation_id: &str,
+    artifact_id: &str,
+    not_before_unix: Option<i64>,
+    not_after_unix: Option<i64>,
 ) -> Result<bool, RestoreError> {
     if conversation_id.is_empty() || artifact_id.is_empty() {
         return Err(RestoreError::Integrity(
@@ -1092,8 +1147,16 @@ pub fn replica_conversation_references_artifact(
            JOIN message AS m
              ON m.account_id = a.account_id AND m.canonical_id = a.canonical_id
            WHERE a.account_id = ?1 AND m.conversation_id = ?2 AND a.artifact_id = ?3
+             AND (?4 IS NULL OR m.created_at_unix >= ?4)
+             AND (?5 IS NULL OR m.created_at_unix <= ?5)
          )",
-        params![account_id, conversation_id, artifact_id],
+        params![
+            account_id,
+            conversation_id,
+            artifact_id,
+            not_before_unix,
+            not_after_unix
+        ],
         |row| row.get(0),
     )?;
     Ok(exists)
@@ -2104,6 +2167,12 @@ fn reconcile_archive_transactionally(
                 |row| row.get(0),
             )
             .optional()?;
+        if existing.as_deref() != Some(digest.as_str()) {
+            validate_canonical_artifact(&artifact, &coverage)?;
+            if report.format_version >= 3 {
+                verify_recorded_artifact_files(archive_directory, &artifact)?;
+            }
+        }
         let change_kind = match existing.as_deref() {
             None => {
                 transaction.execute(

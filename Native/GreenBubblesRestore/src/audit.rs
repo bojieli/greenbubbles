@@ -231,6 +231,62 @@ pub fn audit_archive(archive_directory: &Path) -> Result<ArchiveAuditReport, Res
     })
 }
 
+pub fn verify_recorded_artifact_files(
+    archive_directory: &Path,
+    artifact: &CanonicalArtifact,
+) -> Result<(), RestoreError> {
+    ensure_private_directory(archive_directory)?;
+    let root = fs::canonicalize(archive_directory)?;
+    let mut verified_files = HashMap::new();
+    if artifact_has_external_source(artifact) {
+        let source_path = required_artifact_path(
+            artifact.source_local_path.as_deref(),
+            "downloaded artifact lacks its source path",
+        )?;
+        verify_external_source(artifact, &source_path, &mut verified_files)?;
+    }
+    if let Some(materialized) = artifact.materialized_local_path.as_deref() {
+        verify_connector_file(
+            &root,
+            &PathBuf::from(materialized),
+            artifact.source_byte_count,
+            artifact.source_sha256.as_deref(),
+            &mut verified_files,
+        )?;
+    }
+    if let Some(decoded) = artifact.decoded_local_path.as_deref() {
+        verify_connector_file(
+            &root,
+            &PathBuf::from(decoded),
+            artifact.decoded_byte_count,
+            artifact.decoded_sha256.as_deref(),
+            &mut verified_files,
+        )?;
+    }
+    Ok(())
+}
+
+pub fn validate_canonical_artifact(
+    artifact: &CanonicalArtifact,
+    coverage: &RestorationCoverage,
+) -> Result<(), RestoreError> {
+    let covered_tables = coverage
+        .all_tables
+        .iter()
+        .map(|table| {
+            (
+                (
+                    table.source_set_id.as_str(),
+                    table.source_logical_path.as_str(),
+                    table.source_table_id.as_str(),
+                ),
+                table,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    validate_artifact_state(artifact, &covered_tables)
+}
+
 fn verify_report_paths(root: &Path, report: &RestorationReport) -> Result<(), RestoreError> {
     let required = [
         (&report.messages_path, "messages.ndjson"),

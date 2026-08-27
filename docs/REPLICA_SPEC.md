@@ -48,6 +48,24 @@ cannot commit the checkpoint without its records. Repeating the same bootstrap
 is idempotent; presenting a different fingerprint requires the synchronization
 path rather than silently replacing the replica.
 
+Before bootstrap imports a production-format archive, it runs the independent
+archive audit itself. Row accounting, identities, schema provenance,
+relationship states, artifact state coherence, resource-row provenance, and
+every currently recorded source/derivative file must therefore pass again at
+the initial serving boundary. Synchronization remains change-proportional: it
+descriptor/digest-verifies every added or changed artifact rather than rereading
+all unchanged media, while explicit/periodic archive audits retain the full
+integrity-scan role. Legacy synthetic format-2 fixtures remain isolated test
+inputs; they are not accepted as production restoration evidence.
+
+Before either bootstrap or synchronization imports a production-format
+archive, it runs the independent archive audit itself. Row accounting,
+identities, schema provenance, relationship states, artifact state coherence,
+resource-row provenance, and every currently recorded source/derivative file
+must therefore pass again at the serving boundary. Legacy synthetic format-2
+fixtures remain isolated test inputs; they are not accepted as production
+restoration evidence.
+
 Every numbered migration is transactional and recorded with a migration
 identity digest. Before upgrading an existing non-empty schema, GreenBubbles
 uses SQLite's online backup API to create a same-key encrypted, mode-`0600`

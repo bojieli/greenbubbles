@@ -11,12 +11,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::archive::{ensure_private_directory, ensure_private_regular_file};
+use crate::audit::verify_recorded_artifact_files;
 use crate::replica::{
     get_replica_artifact, get_replica_changes, get_replica_conversation, get_replica_message,
-    get_replica_participant, replica_conversation_references_artifact, replica_coverage,
-    replica_status, search_replica_cached_moments, search_replica_messages,
-    ReplicaCachedMomentFilter, ReplicaCachedSurfaceAvailability, ReplicaCoverageView,
-    ReplicaMessageFilter, ReplicaStatus,
+    get_replica_participant, replica_conversation_references_artifact_in_range, replica_coverage,
+    replica_restoration_report, replica_status, search_replica_cached_moments,
+    search_replica_messages, ReplicaCachedMomentFilter, ReplicaCachedSurfaceAvailability,
+    ReplicaCoverageView, ReplicaMessageFilter, ReplicaStatus,
 };
 use crate::tools::{
     load_tool_policy, minimize_cached_moment, minimize_message, released_body_bytes,
@@ -25,8 +26,9 @@ use crate::tools::{
     ToolDataDestination, ToolMessageField, MAX_SEARCH_QUERY_BYTES,
 };
 use crate::{
-    ArtifactKind, ArtifactRole, CanonicalConversation, CanonicalParticipant, ConversationKind,
-    EntityDecodeState, ReplicaKey, RestoreError,
+    ArtifactAvailability, ArtifactDecodeState, ArtifactKind, ArtifactRole, CanonicalArtifact,
+    CanonicalConversation, CanonicalParticipant, ConversationKind, EntityDecodeState, ReplicaKey,
+    RestoreError,
 };
 
 pub const CONNECTOR_API_VERSION: &str = "greenbubbles.connector.v1";
@@ -102,6 +104,10 @@ pub enum ConnectorOperation {
     GetMessage {
         canonical_id: String,
     },
+    GetArtifact {
+        conversation_id: String,
+        artifact_id: String,
+    },
     ResolveContact {
         participant_id: String,
     },
@@ -160,6 +166,7 @@ pub enum ConnectorResult {
     Conversations(ConnectorConversationList),
     Messages(ConnectorMessagePage),
     Message(Option<MinimizedMessage>),
+    Artifact(ConnectorArtifactView),
     Contact(ResolvedContact),
     Conversation(ResolvedConversation),
     Draft(DraftReceipt),
@@ -256,6 +263,39 @@ pub struct ConnectorMessagePage {
     pub source_fingerprint: String,
     pub messages: Vec<MinimizedMessage>,
     pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConnectorArtifactFileOrigin {
+    DownloadedSource,
+    DatabaseMaterializedSource,
+    DecodedDerivative,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorArtifactFile {
+    pub origin: ConnectorArtifactFileOrigin,
+    pub absolute_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_relative_path: Option<String>,
+    pub byte_count: u64,
+    pub sha256: String,
+    pub format: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorArtifactView {
+    pub artifact_id: String,
+    pub kind: ArtifactKind,
+    pub role: ArtifactRole,
+    pub availability: ArtifactAvailability,
+    pub decode_state: ArtifactDecodeState,
+    pub source: Option<ConnectorArtifactFile>,
+    pub decoded: Option<ConnectorArtifactFile>,
+    pub verification_detail: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -569,6 +609,12 @@ impl<'a> ConnectorService<'a> {
             ConnectorOperation::GetMessage { canonical_id } => self
                 .get_message(request, canonical_id)
                 .map(ConnectorResult::Message),
+            ConnectorOperation::GetArtifact {
+                conversation_id,
+                artifact_id,
+            } => self
+                .get_artifact(request, conversation_id, artifact_id)
+                .map(ConnectorResult::Artifact),
             ConnectorOperation::ResolveContact { participant_id } => self
                 .resolve_contact(request, participant_id)
                 .map(ConnectorResult::Contact),
@@ -659,6 +705,15 @@ impl<'a> ConnectorService<'a> {
             .conversation_scopes
             .values()
             .any(|scope| scope.capabilities.contains(&ToolCapability::CreateDraft));
+        let artifact_read_enabled = initialized
+            && self.policy.conversation_scopes.values().any(|scope| {
+                scope
+                    .capabilities
+                    .contains(&ToolCapability::ReadRecentMessages)
+                    && scope
+                        .message_fields
+                        .contains(&ToolMessageField::Attachments)
+            });
         let available = |enabled: bool, code: &str, reason: &str| CapabilityState {
             available: true,
             enabled,
@@ -725,6 +780,26 @@ impl<'a> ConnectorService<'a> {
             }
             .to_string(),
         };
+        let artifact_read = CapabilityState {
+            available: initialized,
+            enabled: artifact_read_enabled,
+            reason_code: if !initialized {
+                "replicaUninitialized"
+            } else if !artifact_read_enabled {
+                "notEnabledByPolicy"
+            } else {
+                "enabled"
+            }
+            .to_string(),
+            reason: if !initialized {
+                "The encrypted replica has not been bootstrapped"
+            } else if !artifact_read_enabled {
+                "No readable conversation scope releases attachment fields"
+            } else {
+                "Verified artifact metadata and paths are available to local requests only"
+            }
+            .to_string(),
+        };
         let mut operations = BTreeMap::new();
         for name in [
             "capabilities",
@@ -740,6 +815,7 @@ impl<'a> ConnectorService<'a> {
         ] {
             operations.insert(name.to_string(), read.clone());
         }
+        operations.insert("getArtifact".to_string(), artifact_read);
         operations.insert("getCachedMoments".to_string(), cached_read.clone());
         for name in [
             "createMessageDraft",
@@ -1186,6 +1262,100 @@ impl<'a> ConnectorService<'a> {
         Ok(Some(result))
     }
 
+    fn get_artifact(
+        &self,
+        request: &ConnectorRequest,
+        conversation_id: &str,
+        artifact_id: &str,
+    ) -> Result<ConnectorArtifactView, ConnectorErrorBody> {
+        if request.destination != ConnectorDestination::Local {
+            let _ = self.audit(
+                request,
+                "getArtifact",
+                Some(conversation_id),
+                ConnectorAuditOutcome::Denied,
+                0,
+                0,
+                0,
+                None,
+                None,
+            );
+            return Err(unauthorized(
+                "artifact paths are restricted to the local destination",
+            ));
+        }
+        let scope = self.authorize(
+            request,
+            conversation_id,
+            ToolCapability::ReadRecentMessages,
+            "getArtifact",
+        )?;
+        if !scope
+            .message_fields
+            .contains(&ToolMessageField::Attachments)
+        {
+            let _ = self.audit(
+                request,
+                "getArtifact",
+                Some(conversation_id),
+                ConnectorAuditOutcome::Denied,
+                0,
+                0,
+                0,
+                None,
+                None,
+            );
+            return Err(unauthorized(
+                "artifact fields are not enabled for this conversation",
+            ));
+        }
+        let referenced = replica_conversation_references_artifact_in_range(
+            &self.replica_path,
+            self.key,
+            conversation_id,
+            artifact_id,
+            scope.not_before_unix,
+            scope.not_after_unix,
+        )
+        .map_err(integrity_error)?;
+        if !referenced {
+            return Err(unauthorized(
+                "artifact is not referenced within the authorized conversation time range",
+            ));
+        }
+        let artifact = get_replica_artifact(&self.replica_path, self.key, artifact_id)
+            .map_err(integrity_error)?
+            .ok_or_else(|| not_found("artifact was not found"))?;
+        let report = replica_restoration_report(&self.replica_path, self.key)
+            .map_err(integrity_error)?
+            .ok_or_else(|| {
+                unavailable(
+                    "replicaUninitialized",
+                    "Replica has no authoritative restoration report",
+                )
+            })?;
+        let archive_root = Path::new(&report.artifacts_path).parent().ok_or_else(|| {
+            integrity_error(RestoreError::UnsafePath(report.artifacts_path.clone()))
+        })?;
+        verify_recorded_artifact_files(archive_root, &artifact).map_err(integrity_error)?;
+        let result = connector_artifact_view(artifact).map_err(integrity_error)?;
+        let released = serde_json::to_vec(&result)
+            .map_err(|error| integrity_error(error.into()))?
+            .len();
+        self.audit(
+            request,
+            "getArtifact",
+            Some(conversation_id),
+            ConnectorAuditOutcome::Completed,
+            1,
+            released,
+            0,
+            None,
+            None,
+        )?;
+        Ok(result)
+    }
+
     fn changes(
         &self,
         request: &ConnectorRequest,
@@ -1451,7 +1621,7 @@ impl<'a> ConnectorService<'a> {
         }
         let attachments = attachment_ids
             .iter()
-            .map(|identifier| self.resolve_attachment(conversation_id, identifier))
+            .map(|identifier| self.resolve_attachment(conversation_id, identifier, scope))
             .collect::<Result<Vec<_>, _>>()?;
         let status = replica_status(&self.replica_path, self.key).map_err(integrity_error)?;
         let source_fingerprint = status.current_source_fingerprint.ok_or_else(|| {
@@ -1566,12 +1736,15 @@ impl<'a> ConnectorService<'a> {
         &self,
         conversation_id: &str,
         artifact_id: &str,
+        scope: &ConversationToolScope,
     ) -> Result<DraftAttachment, ConnectorErrorBody> {
-        if !replica_conversation_references_artifact(
+        if !replica_conversation_references_artifact_in_range(
             &self.replica_path,
             self.key,
             conversation_id,
             artifact_id,
+            scope.not_before_unix,
+            scope.not_after_unix,
         )
         .map_err(integrity_error)?
         {
@@ -2046,6 +2219,90 @@ fn append_owner_only_json_line(path: &Path, value: &impl Serialize) -> Result<()
         return Err(std::io::Error::last_os_error().into());
     }
     Ok(())
+}
+
+fn connector_artifact_view(
+    artifact: CanonicalArtifact,
+) -> Result<ConnectorArtifactView, RestoreError> {
+    let source = if let Some(path) = artifact.source_local_path.as_ref() {
+        Some(connector_artifact_file(
+            ConnectorArtifactFileOrigin::DownloadedSource,
+            path,
+            artifact.account_relative_path.clone(),
+            artifact.source_byte_count,
+            artifact.source_sha256.as_deref(),
+            artifact.detected_format.as_deref(),
+        )?)
+    } else if let Some(path) = artifact.materialized_local_path.as_ref() {
+        Some(connector_artifact_file(
+            ConnectorArtifactFileOrigin::DatabaseMaterializedSource,
+            path,
+            None,
+            artifact.source_byte_count,
+            artifact.source_sha256.as_deref(),
+            artifact.detected_format.as_deref(),
+        )?)
+    } else {
+        None
+    };
+    let decoded = artifact
+        .decoded_local_path
+        .as_ref()
+        .map(|path| {
+            connector_artifact_file(
+                ConnectorArtifactFileOrigin::DecodedDerivative,
+                path,
+                None,
+                artifact.decoded_byte_count,
+                artifact.decoded_sha256.as_deref(),
+                artifact.decoded_format.as_deref(),
+            )
+        })
+        .transpose()?;
+    let verification_detail = artifact
+        .verification_detail
+        .clone()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            RestoreError::Integrity("artifact lacks verification evidence".to_string())
+        })?;
+    Ok(ConnectorArtifactView {
+        artifact_id: artifact.artifact_id,
+        kind: artifact.kind,
+        role: artifact.role,
+        availability: artifact.availability,
+        decode_state: artifact.decode_state,
+        source,
+        decoded,
+        verification_detail,
+    })
+}
+
+fn connector_artifact_file(
+    origin: ConnectorArtifactFileOrigin,
+    path: &str,
+    account_relative_path: Option<String>,
+    byte_count: Option<u64>,
+    sha256: Option<&str>,
+    format: Option<&str>,
+) -> Result<ConnectorArtifactFile, RestoreError> {
+    let byte_count = byte_count.ok_or_else(|| {
+        RestoreError::Integrity("artifact file lacks its verified byte count".to_string())
+    })?;
+    let sha256 = sha256.filter(|value| valid_sha256(value)).ok_or_else(|| {
+        RestoreError::Integrity("artifact file lacks its verified SHA-256".to_string())
+    })?;
+    let format = format.filter(|value| !value.is_empty()).ok_or_else(|| {
+        RestoreError::Integrity("artifact file lacks its detected format".to_string())
+    })?;
+    Ok(ConnectorArtifactFile {
+        origin,
+        absolute_path: path.to_string(),
+        account_relative_path,
+        byte_count,
+        sha256: sha256.to_string(),
+        format: format.to_string(),
+    })
 }
 
 fn valid_sha256(value: &str) -> bool {

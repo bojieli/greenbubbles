@@ -281,6 +281,7 @@ fn mcp_operation_kind(name: &str) -> Option<&'static str> {
         "greenbubbles_search_messages" => "searchMessages",
         "greenbubbles_get_messages" => "getMessages",
         "greenbubbles_get_message" => "getMessage",
+        "greenbubbles_get_artifact" => "getArtifact",
         "greenbubbles_resolve_contact" => "resolveContact",
         "greenbubbles_resolve_conversation" => "resolveConversation",
         "greenbubbles_create_message_draft" => "createMessageDraft",
@@ -353,6 +354,14 @@ fn mcp_tools() -> Vec<Value> {
             "greenbubbles_get_message",
             "Get one canonical message if its conversation and time are authorized",
             object_schema(&[("canonicalId", "string", true)]),
+        ),
+        tool(
+            "greenbubbles_get_artifact",
+            "Resolve one conversation-scoped artifact to currently verified local files; local destination only",
+            object_schema(&[
+                ("conversationId", "string", true),
+                ("artifactId", "string", true),
+            ]),
         ),
         tool(
             "greenbubbles_resolve_contact",
@@ -494,5 +503,18 @@ mod tests {
                 limit: Some(10)
             }
         ));
+
+        let artifact = tools
+            .iter()
+            .find(|tool| tool["name"] == "greenbubbles_get_artifact")
+            .expect("local artifact tool is listed");
+        assert_eq!(
+            artifact["inputSchema"]["required"],
+            json!(["conversationId", "artifactId"])
+        );
+        assert_eq!(
+            mcp_operation_kind("greenbubbles_get_artifact"),
+            Some("getArtifact")
+        );
     }
 }

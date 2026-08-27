@@ -18,7 +18,7 @@ use greenbubbles_restore::{
         ReplicaCachedSurfaceAvailability,
     },
     restore_catalog, CanonicalCachedMoment, ReplicaKey, RestorationOptions, RestorationReport,
-    SnapshotEntry, SnapshotFileRole, SnapshotManifest,
+    SemanticDecodeState, SnapshotEntry, SnapshotFileRole, SnapshotManifest,
 };
 use rusqlite::Connection;
 use serde_json::json;
@@ -247,14 +247,33 @@ fn restores_cached_moments_and_interactions_without_claiming_cache_completeness(
     canonical[0].title_base64 = Some("dXBkYXRlZA==".to_string());
     canonical[0].created_at_unix = Some(1_774_857_291);
     let mut added = canonical[0].clone();
-    added.canonical_id = "synthetic-added-cached-moment".to_string();
     added.source_row_id = 1003;
+    added.canonical_id = hex::encode(Sha256::digest(
+        format!(
+            "{}:{}:{}",
+            added.source_set_id, added.source_table_id, added.source_row_id
+        )
+        .as_bytes(),
+    ));
     added.created_at_unix = Some(1_774_857_292);
     canonical.push(added);
     write_ndjson(&output.join("cached-moments.ndjson"), &canonical);
+    let semantic_gap_count = canonical
+        .iter()
+        .filter(|moment| moment.semantic_decode_state != SemanticDecodeState::Complete)
+        .count() as u64;
+    let mut changed_cached_coverage: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("cached-surfaces.json")).unwrap()).unwrap();
+    changed_cached_coverage["semanticGapCount"] = json!(semantic_gap_count);
+    fs::write(
+        output.join("cached-surfaces.json"),
+        serde_json::to_vec_pretty(&changed_cached_coverage).unwrap(),
+    )
+    .unwrap();
     let mut changed_report: RestorationReport =
         serde_json::from_slice(&fs::read(output.join("report.json")).unwrap()).unwrap();
     changed_report.source_fingerprint = "cached-surface-fixture-2".to_string();
+    changed_report.integrity.cached_surface_semantic_gap_count = semantic_gap_count;
     fs::write(
         output.join("report.json"),
         serde_json::to_vec_pretty(&changed_report).unwrap(),

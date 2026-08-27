@@ -28,9 +28,13 @@ The race-safe bootstrap sequence is:
 1. Drain `getChanges` to a replica-generation-bound high-water cursor.
 2. Call `listConversations`.
 3. Page `getMessages` for every returned conversation.
-4. Resume `getChanges` from the captured high-water cursor and apply catch-up
+4. For locally materialized attachments, call
+   `getArtifact(conversationId, artifactId)` only when the policy exposes the
+   attachment field; preserve the returned missing/decode state as well as any
+   verified source and derivative file evidence.
+5. Resume `getChanges` from the captured high-water cursor and apply catch-up
    events.
-5. Persist canonical IDs, the last change cursor, account ID, and current source
+6. Persist canonical IDs, the last change cursor, account ID, and current source
    fingerprint atomically in owner-only storage.
 
 Message pagination cursors bind the exact account, replica generation, filter,
@@ -66,6 +70,13 @@ omitted from this conversation stream. For released events:
 The stream is an invalidation protocol, not a body feed. Consumers never need
 replica SQL or raw archive access.
 
+Artifact paths are a separate local-only release. An artifact ID is not a
+bearer token: `getArtifact` requires the authorized conversation identity,
+attachment field, and message time range again, then re-verifies recorded files
+before returning them. Remote-model consumers receive artifact references in a
+message only when policy permits, but can never exchange those references for a
+local path.
+
 ## Optional cached surface
 
 `getCachedMoments` has a separate policy, field set, time range, destination,
@@ -86,4 +97,3 @@ stream and does not imply an active `load more` operation.
   can be committed atomically.
 - Preserve the prior state on transport, cursor, authorization, decoding, or
   integrity failure.
-

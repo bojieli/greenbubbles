@@ -24,6 +24,9 @@ The current passive-read slice provides:
   voice payloads to verified local artifact records;
 - records non-downloaded, ambiguous, unsafe, or undecodable artifacts
   explicitly instead of silently omitting them.
+- exposes verified source and decoded artifact locations through a
+  conversation- and time-scoped local-only connector/MCP operation, with a
+  fresh descriptor/digest check before every path release;
 - restores the pinned client's passive local Moments cache and interactions
   with raw provenance, explicit partial-cache semantics, encrypted replica
   storage, and a separately authorized minimized connector/MCP view.
