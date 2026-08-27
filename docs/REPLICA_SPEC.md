@@ -159,6 +159,15 @@ generation. A deterministic seal binds every archive-owned file path, size, and
 content digest and is rechecked before and after application. Production
 archives pass `audit-archive` before publication and again before application.
 
+`restore-publish` is the upstream offline transaction for format-3 snapshots.
+It pins the client build, proves non-bootstrap acquisition continuity against
+both the retained prior snapshot and authoritative archive, audits a restored
+incremental fragment, merges it by source identity, audits the resulting
+authoritative archive, and derives the next generation under the publication
+lock only when the supplied predecessor remains the exact current sealed
+handoff. Concurrent stale branches fail closed. It has no live-store or
+replica-key access. See `OFFLINE_PIPELINE.md`.
+
 The follower watches only the owner-only handoff metadata while idle. It
 serializes state transitions with an owner-only lock, bootstraps or calls the
 same transactional synchronization path, verifies the committed account/source

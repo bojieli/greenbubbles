@@ -17,6 +17,12 @@ greenbubbles-restore replica-publish \
   <authoritative-archive> <private-handoff.json> --generation 1
 ```
 
+For normal offline operation, `restore-publish` performs restoration, chain
+verification, merge, archive audits, and lock-derived next-generation
+publication as one fail-closed sequence. The explicit `replica-publish` command
+remains useful when publishing an independently prepared authoritative archive.
+See `OFFLINE_PIPELINE.md`.
+
 The publisher requires an owner-only canonical archive directory and an
 authoritative restoration report. Production-format archives pass the complete
 independent archive audit before publication. The publisher also

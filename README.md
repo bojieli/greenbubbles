@@ -219,6 +219,24 @@ classification, and selected copied entries agree with both complete source
 inventories. Its output is aggregate-only. See
 [docs/ACQUISITION_CHAIN_AUDIT.md](docs/ACQUISITION_CHAIN_AUDIT.md).
 
+For an already acquired format-3 snapshot, the offline operator can combine
+restoration, acquisition-chain verification, independent archive audits,
+incremental merge, and monotonic publication without exposing the passphrase on
+the command line:
+
+```sh
+greenbubbles-restore restore-publish \
+  <snapshot> <new-authoritative-archive> <private-handoff.json> \
+  --previous-snapshot <previous-snapshot> \
+  --previous-archive <previous-authoritative-archive> \
+  --account-root <authorized-account-root> --passphrase-stdin
+```
+
+Omit both previous inputs only for a bootstrap. The command requires the exact
+pinned build, never touches live WeChat state or the encrypted replica, and
+publishes only after the authoritative archive passes its independent audit.
+See [docs/OFFLINE_PIPELINE.md](docs/OFFLINE_PIPELINE.md).
+
 `audit-connector-log` verifies the body-free connector journal's owner-only
 file boundary, event structure, unique identities, account consistency, event
 digests, and predecessor chain. Its report is aggregate-only and explicitly

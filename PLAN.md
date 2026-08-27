@@ -586,6 +586,16 @@ without exposing account/source identities or rescanning the archive; real
 disposable-account latency evidence remains required. See
 `docs/REPLICA_FOLLOW.md`.
 
+An offline `restore-publish` transaction now removes manual sequencing between
+an already acquired snapshot and that handoff. It requires the exact pinned
+build, independently proves every non-bootstrap snapshot chain against both the
+retained prior snapshot and authoritative archive, restores and audits a bounded
+fragment, merges and audits the new authoritative archive, and allocates the
+next generation only if the supplied predecessor is still the exact current
+sealed handoff, rejecting concurrent stale branches. It has no live-store or
+replica-key access and does not replace real-corpus evidence. See
+`docs/OFFLINE_PIPELINE.md`.
+
 ## Phase 3 — agent-neutral connector service and drafts
 
 Status: **complete for replica-backed reads and non-executing drafts**

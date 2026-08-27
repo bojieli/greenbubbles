@@ -13,6 +13,7 @@ use greenbubbles_restore::{
     connector::{audit_connector_log, ConnectorDestination, ConnectorService},
     follow::{follow_replica_once, publish_replica_handoff, replica_follower_status},
     merge::merge_incremental_archive,
+    operator::{restore_snapshot_and_publish, OfflineRestorePublishOptions},
     preflight_snapshot, prepare_catalog,
     reconcile::reconcile_archives,
     replica::{
@@ -102,6 +103,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     account_root,
                     defer_media,
                 },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "restore-publish" => {
+            let snapshot = required_path(arguments.next(), "snapshot directory")?;
+            let output = required_path(arguments.next(), "authoritative output directory")?;
+            let handoff = required_path(arguments.next(), "replica handoff path")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            let use_passphrase = remaining.iter().any(|value| value == "--passphrase-stdin");
+            let passphrase = if use_passphrase {
+                Some(DatabasePassphrase::read_stdin()?)
+            } else {
+                None
+            };
+            let report = restore_snapshot_and_publish(
+                &snapshot,
+                &OfflineRestorePublishOptions {
+                    output_archive: output,
+                    handoff_path: handoff,
+                    previous_snapshot: option_path(&remaining, "--previous-snapshot")?,
+                    previous_archive: option_path(&remaining, "--previous-archive")?,
+                    account_root: option_path(&remaining, "--account-root")?,
+                    defer_media: remaining.iter().any(|value| value == "--defer-media"),
+                },
+                passphrase.as_ref(),
             )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
@@ -526,6 +552,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore preflight <snapshot>\n",
                     "  greenbubbles-restore probe <snapshot> [--passphrase-stdin]\n",
                     "  greenbubbles-restore restore <snapshot> <output> [--account-root <path>] [--defer-media] [--passphrase-stdin]\n",
+                    "  greenbubbles-restore restore-publish <snapshot> <authoritative-output> <handoff-file> [--previous-snapshot <path> --previous-archive <path>] [--account-root <path>] [--defer-media] [--passphrase-stdin]\n",
                     "  greenbubbles-restore audit-archive <archive>\n",
                     "  greenbubbles-restore audit-acquisition-chain <previous-snapshot> <current-snapshot>\n",
                     "  greenbubbles-restore audit-connector-log <connector-audit-log>\n",

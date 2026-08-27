@@ -13,6 +13,7 @@ pub mod follow;
 pub mod manifest;
 pub mod merge;
 pub mod model;
+pub mod operator;
 pub mod reconcile;
 pub mod replica;
 pub mod restore;

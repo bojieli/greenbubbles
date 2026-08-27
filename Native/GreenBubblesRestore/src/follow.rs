@@ -112,19 +112,141 @@ pub fn publish_replica_handoff(
             "replica handoff generation must be positive".to_string(),
         ));
     }
+    let canonical_archive = canonical_publish_archive(archive_directory, handoff_path)?;
+    let _lock = ControlLock::acquire(handoff_path, "handoff")?;
+    publish_replica_handoff_locked(&canonical_archive, handoff_path, generation)
+}
+
+pub(crate) enum PublicationPredecessor {
+    Absent,
+    Current {
+        handoff_sha256: String,
+        archive_directory: PathBuf,
+    },
+}
+
+pub(crate) fn capture_publication_predecessor(
+    handoff_path: &Path,
+    expected_previous_archive: Option<&Path>,
+) -> Result<PublicationPredecessor, RestoreError> {
+    let canonical_previous = expected_previous_archive
+        .map(|previous| canonical_publish_archive(previous, handoff_path))
+        .transpose()?;
+    let _lock = ControlLock::acquire(handoff_path, "handoff")?;
+    match (handoff_path.try_exists()?, canonical_previous) {
+        (false, None) => Ok(PublicationPredecessor::Absent),
+        (true, Some(previous)) => {
+            let current = load_handoff(handoff_path)?;
+            verify_handoff_archive(&current, &previous)?;
+            Ok(PublicationPredecessor::Current {
+                handoff_sha256: current.sha256,
+                archive_directory: previous,
+            })
+        }
+        (true, None) => Err(RestoreError::Integrity(
+            "bootstrap publication cannot replace an existing handoff".to_string(),
+        )),
+        (false, Some(_)) => Err(RestoreError::Integrity(
+            "continuation publication has no current predecessor handoff".to_string(),
+        )),
+    }
+}
+
+pub(crate) fn publish_replica_handoff_next_if_current(
+    archive_directory: &Path,
+    handoff_path: &Path,
+    predecessor: &PublicationPredecessor,
+) -> Result<ReplicaHandoffReceipt, RestoreError> {
+    let canonical_archive = canonical_publish_archive(archive_directory, handoff_path)?;
+    let _lock = ControlLock::acquire(handoff_path, "handoff")?;
+    let generation = match predecessor {
+        PublicationPredecessor::Absent if !handoff_path.try_exists()? => 1,
+        PublicationPredecessor::Current {
+            handoff_sha256,
+            archive_directory,
+        } if handoff_path.try_exists()? => {
+            let current = load_handoff(handoff_path)?;
+            if current.sha256 != *handoff_sha256 {
+                return Err(RestoreError::Integrity(
+                    "publication predecessor changed while the next archive was prepared"
+                        .to_string(),
+                ));
+            }
+            verify_handoff_archive(&current, archive_directory)?;
+            current.value.generation.checked_add(1).ok_or_else(|| {
+                RestoreError::Integrity("replica handoff generation overflowed".to_string())
+            })?
+        }
+        _ => {
+            return Err(RestoreError::Integrity(
+                "publication predecessor changed while the next archive was prepared".to_string(),
+            ));
+        }
+    };
+    publish_replica_handoff_locked(&canonical_archive, handoff_path, generation)
+}
+
+fn verify_handoff_archive(
+    loaded: &LoadedHandoff,
+    canonical_archive: &Path,
+) -> Result<(), RestoreError> {
+    if Path::new(&loaded.value.archive_directory) != canonical_archive {
+        return Err(RestoreError::Integrity(
+            "publication predecessor is no longer the current handoff archive".to_string(),
+        ));
+    }
+    let report = load_report(canonical_archive)?;
+    require_authoritative_handoff_report(&report)?;
+    if report.format_version >= 3 {
+        audit_archive(canonical_archive)?;
+    }
+    let report_bytes = read_owner_only_control_file(&canonical_archive.join("report.json"))?;
+    let seal = archive_seal(canonical_archive)?;
+    if report.source_fingerprint != loaded.value.source_fingerprint
+        || hex::encode(Sha256::digest(report_bytes)) != loaded.value.report_sha256
+        || seal.sha256 != loaded.value.archive_seal_sha256
+        || seal.file_count != loaded.value.archive_file_count
+        || seal.byte_count != loaded.value.archive_byte_count
+    {
+        return Err(RestoreError::Integrity(
+            "publication predecessor no longer matches its current handoff".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_publish_archive(
+    archive_directory: &Path,
+    handoff_path: &Path,
+) -> Result<PathBuf, RestoreError> {
     ensure_private_directory(archive_directory)?;
     let canonical_archive = fs::canonicalize(archive_directory)?;
     ensure_private_directory(&canonical_archive)?;
     ensure_target_outside_archive(&canonical_archive, handoff_path, "handoff")?;
-    let _lock = ControlLock::acquire(handoff_path, "handoff")?;
-    let report = load_report(&canonical_archive)?;
+    Ok(canonical_archive)
+}
+
+fn publish_replica_handoff_locked(
+    canonical_archive: &Path,
+    handoff_path: &Path,
+    generation: u64,
+) -> Result<ReplicaHandoffReceipt, RestoreError> {
+    if handoff_path.try_exists()? {
+        let prior = load_handoff(handoff_path)?;
+        if generation <= prior.value.generation {
+            return Err(RestoreError::Integrity(
+                "replica handoff generation must advance monotonically".to_string(),
+            ));
+        }
+    }
+    let report = load_report(canonical_archive)?;
     require_authoritative_handoff_report(&report)?;
     if report.format_version >= 3 {
-        audit_archive(&canonical_archive)?;
+        audit_archive(canonical_archive)?;
     }
     let report_path = canonical_archive.join("report.json");
     let report_bytes = read_owner_only_control_file(&report_path)?;
-    let seal = archive_seal(&canonical_archive)?;
+    let seal = archive_seal(canonical_archive)?;
     let handoff = ReplicaArchiveHandoff {
         format_version: HANDOFF_FORMAT_VERSION,
         generation,
@@ -138,14 +260,6 @@ pub fn publish_replica_handoff(
         archive_file_count: seal.file_count,
         archive_byte_count: seal.byte_count,
     };
-    if handoff_path.try_exists()? {
-        let prior = load_handoff(handoff_path)?;
-        if generation <= prior.value.generation {
-            return Err(RestoreError::Integrity(
-                "replica handoff generation must advance monotonically".to_string(),
-            ));
-        }
-    }
     write_atomic_owner_json(handoff_path, &handoff, "handoff")?;
     Ok(ReplicaHandoffReceipt {
         format_version: 1,
@@ -731,4 +845,69 @@ fn digest_stable_file(path: &Path) -> Result<(u64, [u8; 32]), RestoreError> {
         ));
     }
     Ok((observed, digest.finalize().into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        RestorationArchiveScope, RestorationCompletion, RestorationIntegrity,
+        RestorationMediaPhase, RestorationReport,
+    };
+
+    #[test]
+    fn next_publication_rejects_a_predecessor_changed_during_preparation() {
+        let fixture = tempfile::tempdir().unwrap();
+        fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let first = minimal_archive(fixture.path(), "first", "source-first");
+        let concurrent = minimal_archive(fixture.path(), "concurrent", "source-concurrent");
+        let pending = minimal_archive(fixture.path(), "pending", "source-pending");
+        let handoff = fixture.path().join("handoff.json");
+
+        publish_replica_handoff(&first, &handoff, 1).unwrap();
+        let predecessor = capture_publication_predecessor(&handoff, Some(&first)).unwrap();
+        publish_replica_handoff(&concurrent, &handoff, 2).unwrap();
+        let error =
+            publish_replica_handoff_next_if_current(&pending, &handoff, &predecessor).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("changed while the next archive was prepared"));
+        let current = load_handoff(&handoff).unwrap();
+        assert_eq!(current.value.generation, 2);
+        assert_eq!(
+            Path::new(&current.value.archive_directory),
+            fs::canonicalize(concurrent).unwrap()
+        );
+    }
+
+    fn minimal_archive(parent: &Path, name: &str, source_fingerprint: &str) -> PathBuf {
+        let archive = parent.join(name);
+        fs::create_dir(&archive).unwrap();
+        fs::set_permissions(&archive, fs::Permissions::from_mode(0o700)).unwrap();
+        let report = RestorationReport {
+            format_version: 2,
+            account_id: "synthetic-account".to_string(),
+            source_fingerprint: source_fingerprint.to_string(),
+            client_build_compatibility: Default::default(),
+            acquisition: None,
+            archive_scope: RestorationArchiveScope::Authoritative,
+            media_phase: RestorationMediaPhase::Resolved,
+            messages_path: "unused".to_string(),
+            rejections_path: "unused".to_string(),
+            artifacts_path: "unused".to_string(),
+            conversations_path: "unused".to_string(),
+            participants_path: "unused".to_string(),
+            cached_moments_path: None,
+            cached_moment_interactions_path: None,
+            cached_surfaces_path: None,
+            coverage_path: "unused".to_string(),
+            report_path: "unused".to_string(),
+            integrity: RestorationIntegrity::default(),
+            completion: RestorationCompletion::evaluate(&RestorationIntegrity::default()),
+        };
+        let report_path = archive.join("report.json");
+        fs::write(&report_path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        fs::set_permissions(report_path, fs::Permissions::from_mode(0o600)).unwrap();
+        archive
+    }
 }
