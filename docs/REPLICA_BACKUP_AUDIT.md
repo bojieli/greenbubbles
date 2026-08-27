@@ -62,3 +62,7 @@ or decide that restoring an older database is operationally preferable to
 rebootstrapping from the current authoritative archive. Preserve the current
 serving database and authoritative archive until recovery has been chosen and
 validated.
+
+`prepare-replica-recovery` can copy a passing backup into a new path, migrate
+that copy, and deep-audit the current-schema candidate without replacing any
+existing state. See `REPLICA_RECOVERY.md`.

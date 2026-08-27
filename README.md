@@ -342,6 +342,14 @@ printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
   audit-replica-backup \
   /path/to/private-replica-directory/.greenbubbles.db.pre-migration-v1-....db \
   --replica-key-stdin
+
+printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  prepare-replica-recovery \
+  /path/to/private-replica-directory/.greenbubbles.db.pre-migration-v1-....db \
+  /path/to/private-replica-directory/recovered-candidate.db \
+  --replica-key-stdin
 ```
 
 An offline restoration operator can atomically publish successive authoritative
@@ -413,6 +421,11 @@ database without migrating or rewriting it. Backup creation runs this same
 schema-aware audit before the serving replica is upgraded; an invalid candidate
 aborts migration and is removed. See
 [docs/REPLICA_BACKUP_AUDIT.md](docs/REPLICA_BACKUP_AUDIT.md).
+
+`prepare-replica-recovery` creates and migrates only a new candidate path,
+requires the historical and current-schema deep audits to pass, and leaves the
+backup and serving replica untouched. It never performs active cutover. See
+[docs/REPLICA_RECOVERY.md](docs/REPLICA_RECOVERY.md).
 
 Exact retrieval uses an owner-only JSON filter. Any field can be omitted:
 

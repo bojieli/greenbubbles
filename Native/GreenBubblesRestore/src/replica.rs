@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -140,6 +140,25 @@ pub struct ReplicaBackupAuditReport {
     pub full_text_index_verified: bool,
     pub change_stream_verified: bool,
     pub transient_state_empty: bool,
+    pub conversation_count: u64,
+    pub participant_count: u64,
+    pub message_count: u64,
+    pub artifact_count: u64,
+    pub relationship_count: u64,
+    pub message_artifact_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ReplicaRecoveryPreparationReport {
+    pub format_version: u32,
+    pub privacy_safe_summary: bool,
+    pub source_backup_verified: bool,
+    pub source_schema_version: u32,
+    pub current_schema_version: u32,
+    pub candidate_audit_verified: bool,
+    pub initialized: bool,
+    pub encrypted_at_rest: bool,
     pub conversation_count: u64,
     pub participant_count: u64,
     pub message_count: u64,
@@ -829,6 +848,118 @@ pub fn audit_replica_backup(
         relationship_count: record_audit.relationships.len() as u64,
         message_artifact_count: record_audit.message_artifacts.len() as u64,
     })
+}
+
+pub fn prepare_replica_recovery(
+    backup_path: &Path,
+    candidate_path: &Path,
+    key: &ReplicaKey,
+) -> Result<ReplicaRecoveryPreparationReport, RestoreError> {
+    let source_seal = seal_replica_storage(backup_path)?;
+    let source_audit = audit_replica_backup(backup_path, key)?;
+    if seal_replica_storage(backup_path)? != source_seal {
+        return Err(RestoreError::Integrity(
+            "replica backup changed while it was audited".to_string(),
+        ));
+    }
+    let backup = fs::canonicalize(backup_path)?;
+    let candidate_parent = candidate_path
+        .parent()
+        .ok_or_else(|| RestoreError::UnsafePath("recovery candidate has no parent".to_string()))?;
+    ensure_private_directory(candidate_parent)?;
+    let candidate_name = candidate_path.file_name().ok_or_else(|| {
+        RestoreError::UnsafePath("recovery candidate has no filename".to_string())
+    })?;
+    let candidate = fs::canonicalize(candidate_parent)?.join(candidate_name);
+    ensure_distinct_replica_namespaces(&backup, &candidate)?;
+    ensure_replica_namespace_absent(&candidate, "recovery candidate")?;
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&candidate)?;
+    let result = (|| {
+        let (source, _) = open_existing_replica_read_only(&backup, key)?;
+        let mut destination = open_keyed_connection(&candidate, key)?;
+        let backup_copy = Backup::new(&source, &mut destination)?;
+        backup_copy.run_to_completion(128, Duration::from_millis(2), None)?;
+        drop(backup_copy);
+        destination.execute_batch(
+            "PRAGMA wal_checkpoint(TRUNCATE);
+             PRAGMA journal_mode = DELETE;
+             PRAGMA synchronous = FULL;",
+        )?;
+        drop(destination);
+        drop(source);
+        if seal_replica_storage(&backup)? != source_seal {
+            return Err(RestoreError::Integrity(
+                "replica backup changed while it was copied".to_string(),
+            ));
+        }
+        secure_replica_files(&candidate)?;
+
+        let copied_audit = audit_replica_backup(&candidate, key)?;
+        if serde_json::to_vec(&copied_audit)? != serde_json::to_vec(&source_audit)? {
+            return Err(RestoreError::Integrity(
+                "recovery candidate differs from its audited backup".to_string(),
+            ));
+        }
+        let mut recovered = open_keyed_connection(&candidate, key)?;
+        let copied_version = schema_version(&recovered)?;
+        if copied_version != source_audit.schema_version {
+            return Err(RestoreError::Integrity(
+                "recovery candidate schema changed before migration".to_string(),
+            ));
+        }
+        validate_replica_migration_ledger(&recovered, copied_version)?;
+        apply_migrations(&mut recovered, copied_version)?;
+        validate_replica_migration_ledger(&recovered, CURRENT_SCHEMA_VERSION)?;
+        recovered.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = FULL;
+             PRAGMA wal_autocheckpoint = 1000;
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )?;
+        secure_replica_files(&candidate)?;
+        drop(recovered);
+
+        let current_audit = audit_replica(&candidate, key)?;
+        if current_audit.initialized != source_audit.initialized
+            || current_audit.conversation_count != source_audit.conversation_count
+            || current_audit.participant_count != source_audit.participant_count
+            || current_audit.message_count != source_audit.message_count
+            || current_audit.artifact_count != source_audit.artifact_count
+            || current_audit.relationship_count != source_audit.relationship_count
+            || current_audit.message_artifact_count != source_audit.message_artifact_count
+            || current_audit.cached_moment_count != 0
+            || current_audit.cached_moment_interaction_count != 0
+        {
+            return Err(RestoreError::Integrity(
+                "migrated recovery candidate differs from its source backup".to_string(),
+            ));
+        }
+        Ok(ReplicaRecoveryPreparationReport {
+            format_version: 1,
+            privacy_safe_summary: true,
+            source_backup_verified: true,
+            source_schema_version: source_audit.schema_version,
+            current_schema_version: current_audit.schema_version,
+            candidate_audit_verified: true,
+            initialized: current_audit.initialized,
+            encrypted_at_rest: true,
+            conversation_count: current_audit.conversation_count,
+            participant_count: current_audit.participant_count,
+            message_count: current_audit.message_count,
+            artifact_count: current_audit.artifact_count,
+            relationship_count: current_audit.relationship_count,
+            message_artifact_count: current_audit.message_artifact_count,
+        })
+    })();
+    if result.is_err() {
+        remove_failed_replica_files(&candidate);
+    }
+    result
 }
 
 pub fn synchronize_replica(
@@ -1647,6 +1778,17 @@ struct ReplicaRecordAudit {
     message_artifacts: BTreeSet<Vec<u8>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReplicaStorageEntrySeal {
+    present: bool,
+    device: u64,
+    inode: u64,
+    byte_count: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    sha256: Option<[u8; 32]>,
+}
+
 fn verify_private_replica_files(path: &Path) -> Result<(), RestoreError> {
     ensure_private_regular_file(path)?;
     let name = path
@@ -1657,7 +1799,11 @@ fn verify_private_replica_files(path: &Path) -> Result<(), RestoreError> {
         .parent()
         .ok_or_else(|| RestoreError::UnsafePath("replica has no parent".to_string()))?;
     ensure_private_directory(parent)?;
-    for sidecar in [format!("{name}-wal"), format!("{name}-shm")] {
+    for sidecar in [
+        format!("{name}-wal"),
+        format!("{name}-shm"),
+        format!("{name}-journal"),
+    ] {
         let sidecar = parent.join(sidecar);
         match fs::symlink_metadata(&sidecar) {
             Ok(_) => ensure_private_regular_file(&sidecar)?,
@@ -1668,14 +1814,76 @@ fn verify_private_replica_files(path: &Path) -> Result<(), RestoreError> {
     Ok(())
 }
 
+fn seal_replica_storage(path: &Path) -> Result<Vec<ReplicaStorageEntrySeal>, RestoreError> {
+    verify_private_replica_files(path)?;
+    let mut seals = Vec::new();
+    for candidate in sqlite_file_namespace(path) {
+        match fs::symlink_metadata(&candidate) {
+            Ok(_) => {
+                ensure_private_regular_file(&candidate)?;
+                let mut file = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+                    .open(&candidate)?;
+                let before = file.metadata()?;
+                let mut digest = Sha256::new();
+                let mut buffer = [0_u8; 64 * 1024];
+                loop {
+                    let count = file.read(&mut buffer)?;
+                    if count == 0 {
+                        break;
+                    }
+                    digest.update(&buffer[..count]);
+                }
+                let after = file.metadata()?;
+                if before.dev() != after.dev()
+                    || before.ino() != after.ino()
+                    || before.len() != after.len()
+                    || before.mtime() != after.mtime()
+                    || before.mtime_nsec() != after.mtime_nsec()
+                {
+                    return Err(RestoreError::Integrity(
+                        "replica storage changed while it was sealed".to_string(),
+                    ));
+                }
+                seals.push(ReplicaStorageEntrySeal {
+                    present: true,
+                    device: before.dev(),
+                    inode: before.ino(),
+                    byte_count: before.len(),
+                    modified_seconds: before.mtime(),
+                    modified_nanoseconds: before.mtime_nsec(),
+                    sha256: Some(digest.finalize().into()),
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                seals.push(ReplicaStorageEntrySeal {
+                    present: false,
+                    device: 0,
+                    inode: 0,
+                    byte_count: 0,
+                    modified_seconds: 0,
+                    modified_nanoseconds: 0,
+                    sha256: None,
+                });
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(seals)
+}
+
 fn open_existing_replica_read_only(
     path: &Path,
     key: &ReplicaKey,
 ) -> Result<(Connection, String), RestoreError> {
     ensure_private_regular_file(path)?;
+    let canonical = fs::canonicalize(path)?;
     let connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        canonical,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
     configure_keyed_connection(&connection, key, false)?;
     let cipher_version =
@@ -2476,6 +2684,7 @@ fn open_replica(path: &Path, key: &ReplicaKey) -> Result<OpenedReplica, RestoreE
             .parent()
             .ok_or_else(|| RestoreError::UnsafePath("replica has no parent".to_string()))?;
         ensure_private_directory(parent)?;
+        ensure_replica_namespace_absent(path, "replica")?;
         OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -2530,9 +2739,12 @@ fn open_replica(path: &Path, key: &ReplicaKey) -> Result<OpenedReplica, RestoreE
 }
 
 fn open_keyed_connection(path: &Path, key: &ReplicaKey) -> Result<Connection, RestoreError> {
+    let canonical = fs::canonicalize(path)?;
     let connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        canonical,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
     configure_keyed_connection(&connection, key, true)?;
     Ok(connection)
@@ -2837,6 +3049,41 @@ fn migration_2(transaction: &Transaction<'_>) -> Result<(), RestoreError> {
            search_text,
            tokenize = 'unicode61'
          );
+         INSERT INTO message_fts(account_id, canonical_id, conversation_id, search_text)
+           SELECT account_id, canonical_id, conversation_id, search_text FROM message;
+         INSERT INTO source_checkpoint(
+           account_id, source_fingerprint, committed_at_unix_nanoseconds,
+           conversation_count, participant_count, message_count, artifact_count
+         )
+           SELECT account_id, current_source_fingerprint, updated_at_unix_nanoseconds,
+                  (SELECT count(*) FROM conversation),
+                  (SELECT count(*) FROM participant),
+                  (SELECT count(*) FROM message),
+                  (SELECT count(*) FROM artifact)
+           FROM replica_identity
+           WHERE current_source_fingerprint IS NOT NULL;
+         INSERT INTO sync_run(
+           run_id, account_id, mode, source_fingerprint,
+           started_at_unix_nanoseconds, committed_at_unix_nanoseconds,
+           changed_record_count
+         )
+           SELECT lower(hex(randomblob(16))), account_id, 'reconcile',
+                  current_source_fingerprint, updated_at_unix_nanoseconds,
+                  updated_at_unix_nanoseconds,
+                  (SELECT count(*) FROM conversation)
+                    + (SELECT count(*) FROM participant)
+                    + (SELECT count(*) FROM message)
+                    + (SELECT count(*) FROM artifact)
+           FROM replica_identity
+           WHERE current_source_fingerprint IS NOT NULL;
+         INSERT INTO change_log(
+           account_id, source_fingerprint, change_kind, entity_kind, entity_id,
+           conversation_id, record_sha256, observed_at_unix_nanoseconds
+         )
+           SELECT account_id, current_source_fingerprint, 'bootstrap', 'checkpoint',
+                  current_source_fingerprint, NULL, NULL, updated_at_unix_nanoseconds
+           FROM replica_identity
+           WHERE current_source_fingerprint IS NOT NULL;
          UPDATE replica_schema SET schema_version = 2 WHERE singleton = 1;",
     )?;
     record_migration(transaction, 2, MIGRATION_2_IDENTITY)?;
@@ -2941,6 +3188,7 @@ fn create_pre_migration_backup(
         unix_nanoseconds()?
     );
     let path = parent.join(&file_name);
+    ensure_replica_namespace_absent(&path, "pre-migration backup")?;
     OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -4683,7 +4931,7 @@ fn checkpoint_and_secure(connection: &Connection, path: &Path) -> Result<(), Res
 }
 
 fn secure_replica_files(path: &Path) -> Result<(), RestoreError> {
-    for candidate in replica_file_set(path) {
+    for candidate in sqlite_file_namespace(path) {
         if candidate.try_exists()? {
             let metadata = fs::symlink_metadata(&candidate)?;
             if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.nlink() != 1 {
@@ -4698,7 +4946,7 @@ fn secure_replica_files(path: &Path) -> Result<(), RestoreError> {
 }
 
 fn remove_failed_replica_files(path: &Path) {
-    for candidate in replica_file_set(path) {
+    for candidate in sqlite_file_namespace(path) {
         let _ = fs::remove_file(candidate);
     }
 }
@@ -4714,6 +4962,43 @@ fn replica_file_set(path: &Path) -> [PathBuf; 3] {
         PathBuf::from(std::ffi::OsString::from_vec(wal)),
         PathBuf::from(std::ffi::OsString::from_vec(shm)),
     ]
+}
+
+fn ensure_distinct_replica_namespaces(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), RestoreError> {
+    let source = sqlite_file_namespace(source);
+    let destination = sqlite_file_namespace(destination);
+    if source.iter().any(|path| destination.contains(path)) {
+        return Err(RestoreError::Integrity(
+            "recovery source and candidate SQLite namespaces overlap".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_replica_namespace_absent(path: &Path, label: &str) -> Result<(), RestoreError> {
+    for candidate in sqlite_file_namespace(path) {
+        match fs::symlink_metadata(candidate) {
+            Ok(_) => {
+                return Err(RestoreError::Integrity(format!(
+                    "{label} storage already exists"
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn sqlite_file_namespace(path: &Path) -> Vec<PathBuf> {
+    let mut result = replica_file_set(path).to_vec();
+    let mut journal = path.as_os_str().as_encoded_bytes().to_vec();
+    journal.extend_from_slice(b"-journal");
+    result.push(PathBuf::from(std::ffi::OsString::from_vec(journal)));
+    result
 }
 
 trait OptionalRow<T> {

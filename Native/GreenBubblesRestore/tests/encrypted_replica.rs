@@ -12,7 +12,7 @@ use greenbubbles_restore::follow::{
 };
 use greenbubbles_restore::replica::{
     audit_replica, audit_replica_backup, bootstrap_replica, get_replica_changes,
-    get_replica_message, list_replica_conversations,
+    get_replica_message, list_replica_conversations, prepare_replica_recovery,
     replica_conversation_references_artifact_in_range, replica_coverage, replica_status,
     search_replica_messages, synchronize_replica, ReplicaMessageFilter,
 };
@@ -933,6 +933,9 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
     downgrade_to_schema_1(&replica);
     let migrated = replica_status(&replica, &key).unwrap();
     assert_eq!(migrated.schema_version, 4);
+    let migrated_audit = audit_replica(&replica, &key).unwrap();
+    assert_eq!(migrated_audit.message_count, 1);
+    assert_eq!(migrated_audit.change_count, 1);
     let backup = fs::read_dir(&private)
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -1036,6 +1039,7 @@ fn rejects_tampered_migration_identity_before_creating_a_recovery_backup() {
         .unwrap();
     drop(connection);
     assert_eq!(replica_status(&replica, &key).unwrap().schema_version, 4);
+    assert!(audit_replica(&replica, &key).is_ok());
     assert_eq!(migration_backup_count(&private), backup_count + 1);
 }
 
@@ -1223,14 +1227,134 @@ fn audits_every_supported_pre_migration_schema_generation() {
             _ => unreachable!(),
         }
         assert_eq!(replica_status(&replica, &key).unwrap().schema_version, 4);
-        let report = audit_replica_backup(&migration_backup_path(&private, version), &key).unwrap();
+        let backup = migration_backup_path(&private, version);
+        let report = audit_replica_backup(&backup, &key).unwrap();
         assert_eq!(report.schema_version, version);
         assert!(report.checkpoint_state_verified);
         assert!(report.full_text_index_verified);
         assert!(report.change_stream_verified);
         assert!(report.transient_state_empty);
         assert_eq!(report.message_count, 1);
+        let candidate = private.join(format!("recovered-schema-{version}.db"));
+        let recovery = prepare_replica_recovery(&backup, &candidate, &key).unwrap();
+        assert_eq!(recovery.source_schema_version, version);
+        assert_eq!(recovery.current_schema_version, 4);
+        assert!(audit_replica(&candidate, &key).is_ok());
     }
+}
+
+#[test]
+fn prepares_a_verified_recovery_candidate_without_replacing_existing_state() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private-recovery-preparation");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive = build_archive(&private, "archive", "account-a", "source-a");
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+    bootstrap_replica(&archive, &replica, &key).unwrap();
+    downgrade_to_schema_1(&replica);
+    assert_eq!(replica_status(&replica, &key).unwrap().schema_version, 4);
+    let backup = migration_backup_path(&private, 1);
+    let backup_before = fs::read(&backup).unwrap();
+    let replica_before = fs::read(&replica).unwrap();
+
+    let candidate = private.join("recovered-candidate.db");
+    let report = prepare_replica_recovery(&backup, &candidate, &key).unwrap();
+    assert_eq!(report.format_version, 1);
+    assert!(report.privacy_safe_summary);
+    assert!(report.source_backup_verified);
+    assert_eq!(report.source_schema_version, 1);
+    assert_eq!(report.current_schema_version, 4);
+    assert!(report.candidate_audit_verified);
+    assert!(report.initialized);
+    assert!(report.encrypted_at_rest);
+    assert_eq!(report.message_count, 1);
+    assert_eq!(file_mode(&candidate), 0o600);
+    assert_eq!(fs::read(&backup).unwrap(), backup_before);
+    assert_eq!(fs::read(&replica).unwrap(), replica_before);
+    assert_eq!(audit_replica(&candidate, &key).unwrap().message_count, 1);
+    assert!(Connection::open(&candidate)
+        .unwrap()
+        .query_row("SELECT count(*) FROM message", [], |_| Ok(()))
+        .is_err());
+
+    let wrong_key_candidate = private.join("wrong-key-candidate.db");
+    assert!(prepare_replica_recovery(
+        &backup,
+        &wrong_key_candidate,
+        &ReplicaKey::from_bytes(WRONG_KEY_BYTES),
+    )
+    .is_err());
+    assert!(!wrong_key_candidate.exists());
+
+    let occupied = private.join("occupied-candidate.db");
+    write_private(&occupied, b"must not be replaced");
+    assert!(prepare_replica_recovery(&backup, &occupied, &key).is_err());
+    assert_eq!(fs::read(&occupied).unwrap(), b"must not be replaced");
+
+    let sidecar_collision = private.join("sidecar-collision.db");
+    let preexisting_wal = PathBuf::from(format!("{}-wal", sidecar_collision.display()));
+    write_private(&preexisting_wal, b"must also not be replaced");
+    assert!(prepare_replica_recovery(&backup, &sidecar_collision, &key).is_err());
+    assert!(!sidecar_collision.exists());
+    assert_eq!(
+        fs::read(&preexisting_wal).unwrap(),
+        b"must also not be replaced"
+    );
+
+    let new_replica_collision = private.join("new-replica-collision.db");
+    let preexisting_shm = PathBuf::from(format!("{}-shm", new_replica_collision.display()));
+    write_private(&preexisting_shm, b"unrelated reserved namespace");
+    assert!(bootstrap_replica(&archive, &new_replica_collision, &key).is_err());
+    assert!(!new_replica_collision.exists());
+    assert_eq!(
+        fs::read(&preexisting_shm).unwrap(),
+        b"unrelated reserved namespace"
+    );
+
+    let overlapping = PathBuf::from(format!("{}-wal", backup.display()));
+    assert!(prepare_replica_recovery(&backup, &overlapping, &key).is_err());
+    assert!(!overlapping.exists());
+
+    let cli_candidate = private.join("cli-recovered-candidate.db");
+    let mut process = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .arg("prepare-replica-recovery")
+        .arg(&backup)
+        .arg(&cli_candidate)
+        .arg("--replica-key-stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    process
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{}\n", "31".repeat(32)).as_bytes())
+        .unwrap();
+    let output = process.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output_json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output_json["privacySafeSummary"], true);
+    assert_eq!(output_json["sourceSchemaVersion"], 1);
+    assert_eq!(output_json["currentSchemaVersion"], 4);
+    let output_text = String::from_utf8(output.stdout).unwrap();
+    for private_value in [
+        "account-a",
+        "source-a",
+        PRIVATE_TEXT,
+        backup.to_str().unwrap(),
+        cli_candidate.to_str().unwrap(),
+    ] {
+        assert!(!output_text.contains(private_value));
+    }
+    assert!(audit_replica(&cli_candidate, &key).is_ok());
 }
 
 #[test]

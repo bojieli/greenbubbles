@@ -649,6 +649,15 @@ projection corruption, link/coverage inconsistency, and available
 checkpoint/FTS/change-stream damage fail closed without rewriting the backup.
 See `docs/REPLICA_BACKUP_AUDIT.md`.
 
+A non-destructive `prepare-replica-recovery` transaction now turns a passing
+schema-1 through schema-3 backup into a separate current-schema candidate. It
+refuses existing or SQLite-namespace-overlapping output, makes a consistent
+same-key encrypted copy, audits before and after migration, and preserves the
+source backup and serving replica. Schema-1 migration now backfills FTS,
+checkpoint, synchronization, and initial change-stream state so the recovered
+candidate passes the deep serving audit. Automated active cutover remains
+intentionally out of scope. See `docs/REPLICA_RECOVERY.md`.
+
 ## Phase 3 — agent-neutral connector service and drafts
 
 Status: **complete for replica-backed reads and non-executing drafts**

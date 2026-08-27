@@ -23,8 +23,8 @@ use greenbubbles_restore::{
     replica::{
         audit_replica, audit_replica_backup, bootstrap_replica, get_replica_changes,
         get_replica_message, list_replica_conversations, load_replica_message_filter,
-        replica_coverage, replica_status, search_replica_cached_moments, search_replica_messages,
-        synchronize_replica, ReplicaCachedMomentFilter,
+        prepare_replica_recovery, replica_coverage, replica_status, search_replica_cached_moments,
+        search_replica_messages, synchronize_replica, ReplicaCachedMomentFilter,
     },
     restore_catalog,
     tools::{
@@ -246,6 +246,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             let key = ReplicaKey::read_stdin()?;
             let report = audit_replica_backup(&backup, &key)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "prepare-replica-recovery" => {
+            let backup = required_path(arguments.next(), "replica backup path")?;
+            let candidate = required_path(arguments.next(), "new recovery candidate path")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if !remaining.iter().any(|value| value == "--replica-key-stdin") {
+                return Err("replica keys must be supplied with --replica-key-stdin".into());
+            }
+            let key = ReplicaKey::read_stdin()?;
+            let report = prepare_replica_recovery(&backup, &candidate, &key)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "replica-sync" => {
@@ -625,6 +636,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore replica-status <replica-path> --replica-key-stdin\n",
                     "  greenbubbles-restore audit-replica <replica-path> --replica-key-stdin\n",
                     "  greenbubbles-restore audit-replica-backup <pre-migration-backup-path> --replica-key-stdin\n",
+                    "  greenbubbles-restore prepare-replica-recovery <pre-migration-backup-path> <new-candidate-path> --replica-key-stdin\n",
                     "  greenbubbles-restore replica-sync <archive> <replica-path> --replica-key-stdin\n",
                     "  greenbubbles-restore replica-publish <authoritative-archive> <handoff-file> --generation <positive-integer>\n",
                     "  greenbubbles-restore replica-archive-quarantine <handoff-file> <quarantine-directory> [--retain-publications <n, minimum 2>]\n",

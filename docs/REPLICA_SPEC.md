@@ -85,6 +85,12 @@ encrypted backup or explicitly rebootstrap instead of blessing unexplained
 state. This is tamper/corruption detection, not a signature against an attacker
 who can replace the entire encrypted replica and its key.
 
+Upgrading a populated schema-1 replica backfills the schema-2 FTS projection
+from canonical messages and creates a checkpoint, matching reconciliation run,
+and initial checkpoint change event from the committed identity and canonical
+counts. A migrated database must pass the same current-schema deep audit; a
+newer schema number alone is not evidence of a usable serving replica.
+
 Synthetic tests prove that plaintext headers, message text, and stable artifact
 paths do not appear in the database bytes; unkeyed and wrong-key reads fail;
 cross-account bootstrap fails; same-checkpoint bootstrap is idempotent; and a
@@ -106,6 +112,12 @@ canonical records, projections, links, coverage/completion, and every
 checkpoint/FTS/change/staging feature present in that schema without migrating
 or rewriting it. It rejects current-schema serving replicas and emits only
 aggregate verdicts. See `REPLICA_BACKUP_AUDIT.md`.
+
+`prepare-replica-recovery` uses a passing older backup to create a separate,
+same-key encrypted candidate at a path that must not exist. It re-audits the
+historical copy, migrates it, and requires the complete current audit and exact
+canonical/link count preservation. It does not replace the serving replica or
+perform cutover. See `REPLICA_RECOVERY.md`.
 
 ## Transactional reconciliation and changes
 
