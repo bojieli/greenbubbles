@@ -107,13 +107,14 @@ planning took 1,293 ms, acquisition 702 ms, and total runtime 1,996 ms.
 `audit-acquisition-chain` reproduced the exact baseline, signed build,
 inventories, deletion set, and changed-set classification.
 
-The latest metadata-only attachment recount observed 136,751 candidates
-totaling 38,865,082,886 bytes in the larger root and 87 candidates totaling
-1,469,805 bytes in the smaller root. One larger-root metadata item could not be
-fully classified, so this latest enumeration is explicitly incomplete and no
-file-type completeness is inferred. These changing aggregate values are a
-point-in-time observation, not evidence of message linkage or server-history
-coverage.
+The latest metadata-only attachment recount observed 136,786 candidates
+totaling 38,874,071,097 bytes in the larger root and 87 candidates totaling
+1,469,805 bytes in the smaller root. Both enumerations completed without a
+traversal issue, symbolic link, or cap hit. Extension-only classification found
+43 documents, 4 audio candidates, and 1 video candidate in the larger root; the
+remaining 136,738 files were left unclassified. These changing aggregate values
+are a point-in-time observation, not evidence of message linkage, format,
+decryptability, or server-history coverage.
 
 ## Remaining restoration gate
 

@@ -380,11 +380,7 @@ fn normalize_embedded_text(
             "embedded XML exceeds the depth limit of {MAX_EMBEDDED_DEPTH}"
         ));
     }
-    match parse_document(trimmed, embedded_depth + 1) {
-        Ok(document) => Ok(Some(document)),
-        Err(error) if parent_name == Some("recorditem") => Err(error),
-        Err(_) => Ok(None),
-    }
+    parse_document(trimmed, embedded_depth + 1).map(Some)
 }
 
 #[cfg(test)]
@@ -494,6 +490,16 @@ mod tests {
         assert!(gap
             .as_deref()
             .is_some_and(|reason| reason.contains("Finder media graph is absent")));
+
+        let malformed_child = wx_db::MessageContent::MergedMessages {
+            title: None,
+            raw_xml: r#"<msg><appmsg><recorditem><![CDATA[<recordinfo><datalist><dataitem><content>&lt;msg&gt;&lt;appmsg&gt;</content></dataitem></datalist></recordinfo>]]></recorditem></appmsg></msg>"#.to_string(),
+        };
+        let (value, gap) = serialize_message_content(&malformed_child).unwrap();
+        assert!(gap
+            .as_deref()
+            .is_some_and(|reason| reason.contains("could not be normalized")));
+        assert!(value["MergedMessages"].get("normalized_xml").is_none());
     }
 
     #[test]

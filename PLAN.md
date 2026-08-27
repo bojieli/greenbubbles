@@ -350,10 +350,10 @@ ms, but those capture timings omit source persistence, restoration,
 publication, replica application, and disposable-scenario labels. No database
 was decrypted, so this does not satisfy useful-content, semantic/media
 restoration, or real sync latency requirements. A separate content-free latest
-metadata pass observed 136,751 attachment candidates (38,865,082,886 bytes) in
+metadata pass observed 136,786 attachment candidates (38,874,071,097 bytes) in
 the larger attachment root and 87 (1,469,805 bytes) in the smaller root. One
-larger-root metadata issue makes that enumeration explicitly incomplete; it did
-not inspect content or prove message linkage. See
+clean repeat completed without traversal issues, symbolic links, or a cap hit;
+it did not inspect content or prove message linkage. See
 `docs/LOCAL_ACQUISITION_VALIDATION.md`.
 
 A fresh owner-authorized bootstrap/incremental pair independently reproduces
