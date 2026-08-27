@@ -422,6 +422,14 @@ reviewed direct-dependency, revision, license-digest, native-package, or
 publication-state drift. See `docs/DISTRIBUTION_INVENTORY.md`. This evidence
 does not select GreenBubbles' license or complete any legal/publication item.
 
+A private-development operational response draft now defines immediate release
+holds, capability/build fail-closure, evidence quarantine, update revocation,
+private-data exposure, security-report, complaint/takedown, notification, and
+recovery procedures. It deliberately contains no invented contact or approval:
+named owners, secure intake, counsel/security review, jurisdictional decisions,
+and repository-host procedures remain required before the response-plan item can
+be checked. See `docs/OPERATIONAL_RESPONSE_PLAN.md`.
+
 This plan is not legal advice.
 
 Kill criterion: if the only viable public implementation requires distributing

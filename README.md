@@ -53,6 +53,9 @@ remaining external gate and its required resumption evidence is mapped in
 [docs/GATE_READINESS.md](docs/GATE_READINESS.md). Aggregate evidence from the
 owner-authorized, content-free local snapshot validation is in
 [docs/LOCAL_ACQUISITION_VALIDATION.md](docs/LOCAL_ACQUISITION_VALIDATION.md).
+The unapproved private-development incident and complaint response workflow is
+in [docs/OPERATIONAL_RESPONSE_PLAN.md](docs/OPERATIONAL_RESPONSE_PLAN.md); it
+does not substitute for named owners or counsel/security approval.
 The factual source/binary dependency boundary, nested native-code notices, and
 publication categories are in
 [docs/DISTRIBUTION_INVENTORY.md](docs/DISTRIBUTION_INVENTORY.md). This is not a
