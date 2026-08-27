@@ -438,7 +438,7 @@ or exposing raw keys/data outside the local boundary.
 
 ## Phase 2 — encrypted local replica and continuous synchronization
 
-Status: **complete for replica-backed reads and non-executing drafts**
+Status: **in progress; canonical replica and transactional synchronization are implemented**
 
 ### 2A. Canonical replica
 
@@ -478,14 +478,14 @@ Status: **complete for replica-backed reads and non-executing drafts**
 
 - [x] Add exact full-text search and structured filters for conversation,
   participant, direction, message type, time, reply target, and attachment.
-- [ ] Report synchronization health, last authoritative checkpoint, lag,
+- [x] Report synchronization health, last authoritative checkpoint, lag,
   supported version, enabled scope, known coverage gaps, and semantic decoder
   coverage.
 - [ ] Benchmark bootstrap and steady state on small and large authorized test
   archives.
 - [ ] Measure idle, one-message, burst, edit, recall, deletion, missed-hint,
   decoder-upgrade, and crash/restart cases against the service objectives.
-- [ ] Never let embeddings or LLM summaries become required for exact retrieval
+- [x] Never let embeddings or LLM summaries become required for exact retrieval
   or lossless synchronization.
 
 Exit gate: a supported account can remain synchronized without repeated full
@@ -495,7 +495,7 @@ and coverage/freshness limitations are machine-readable.
 
 ## Phase 3 — agent-neutral connector service and drafts
 
-Status: **planned**
+Status: **complete for replica-backed reads and non-executing drafts**
 
 ### 3A. Stable connector surface
 

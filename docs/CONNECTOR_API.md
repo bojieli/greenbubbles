@@ -46,9 +46,11 @@ queries and draft bodies do not appear in process arguments:
 greenbubbles-restore connector-call private/connector.sock private/request.json
 ```
 
-Requests and responses reject an unsupported API version. Replica message and
-change cursors retain their existing checkpoint, query, account, and random
-replica-generation bindings.
+Requests and responses reject an unsupported API version. Replica message
+cursors bind the query, account, random replica generation, source fingerprint,
+and exact checkpoint revision; any committed reconciliation invalidates them.
+Change cursors bind the account and replica generation but remain resumable
+across synchronization checkpoints.
 
 ## Stable operations
 
@@ -75,7 +77,9 @@ serving a replica from implicitly granting source acquisition.
 text send, reply send, and file send independently. Send and active-read
 capabilities remain unavailable until their controlling Phase 0.5 gates pass.
 `status` includes exact client-build compatibility, authoritative checkpoint
-age, replica coverage health, and the enabled conversation/operation scope.
+and revision, acquisition mode, decoder version, latest synchronization and
+integrity-scan timing, replica coverage health, and the enabled
+conversation/operation scope.
 
 ## Deterministic authorization and minimization
 
@@ -129,4 +133,3 @@ request ID, operation, conversation, local/remote destination, outcome, counts,
 draft ID, and policy-decision identity. Preview operations provide the review
 transition available in the draft-only phase; approval, attempt, and
 reconciliation transitions will be introduced only with a gated action layer.
-

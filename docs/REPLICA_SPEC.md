@@ -71,7 +71,17 @@ Coverage, restoration completion, the sync-run record, entity change events,
 current account fingerprint, and source checkpoint commit in that same
 transaction. Invalid or truncated JSON after earlier valid rows therefore rolls
 back all provisional changes and leaves the prior checkpoint authoritative.
-Repeating a committed source fingerprint is an idempotent no-op.
+A committed archive is an idempotent no-op only when both its source
+fingerprint and its restoration revision match the stored state. The revision
+binds client compatibility, integrity/completion evidence, archive scope, and
+the complete decoder coverage document. This permits a decoder upgrade or
+media-enrichment pass to reconcile canonical records even when the underlying
+source snapshot fingerprint is unchanged.
+
+Synchronization runs are classified as `incrementalMerge`, `integrityScan`,
+`fullScan`, or legacy `reconcile`; bootstrap remains a distinct run kind. The
+classification and timings are stored in the encrypted replica rather than
+inferred from wake-up hints.
 
 `replica-changes` returns ordered, body-free entity metadata with a base64url
 cursor bound to the opaque account ID, a random replica-generation ID, and last
@@ -119,15 +129,20 @@ time range, relationship target, and attachment presence. Its filter document
 is an owner-only JSON file so private search terms need not appear in process
 arguments. Results are canonical lossless records, not generated summaries.
 
-Message cursors bind the exact filter digest, account, replica generation, and
-current source fingerprint. Changing the query or committing another source
-checkpoint invalidates pagination rather than producing a mixed-state page.
+Message cursor format 2 binds the exact filter digest, account, replica
+generation, source fingerprint, and a monotonically advancing checkpoint
+revision. Changing the query or committing any reconciliation—including a
+same-source decoder or media upgrade—invalidates pagination rather than
+producing a mixed-state page. Change cursors deliberately remain resumable
+across those commits.
 `replica-message`, `replica-conversations`, and `replica-coverage` provide
 stable JSON access to exact canonical data and machine-readable coverage.
 
 `replica-status` exposes the schema/cipher, opaque account and source
 fingerprints, exact client-build compatibility state and mismatched fields,
-canonical counts, authoritative checkpoint age, completion state,
+checkpoint revision, acquisition mode, decoder identity/version, canonical
+counts, authoritative checkpoint age, latest synchronization kind/start/
+duration, latest integrity-scan time and age, completion state,
 source/restored row counts, semantic/message-candidate gaps, missing and
 undecoded artifacts, entity gaps, and the calculated semantic-decoder coverage
 ratio. The evidence is persisted inside the encrypted coverage state rather

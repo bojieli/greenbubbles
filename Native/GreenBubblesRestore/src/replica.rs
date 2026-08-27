@@ -49,7 +49,11 @@ pub struct ReplicaStatus {
     pub replica_id: String,
     pub account_id: Option<String>,
     pub current_source_fingerprint: Option<String>,
+    pub checkpoint_revision: Option<String>,
     pub client_build_compatibility: Option<crate::ClientBuildCompatibilityEvidence>,
+    pub acquisition_mode: Option<crate::SnapshotAcquisitionMode>,
+    pub decoder_name: Option<String>,
+    pub decoder_version: Option<String>,
     pub cipher_version: String,
     pub encrypted_at_rest: bool,
     pub conversation_count: u64,
@@ -58,6 +62,11 @@ pub struct ReplicaStatus {
     pub artifact_count: u64,
     pub last_checkpoint_unix_nanoseconds: Option<u128>,
     pub checkpoint_age_seconds: Option<u64>,
+    pub last_sync_kind: Option<String>,
+    pub last_sync_started_unix_nanoseconds: Option<u128>,
+    pub last_sync_duration_milliseconds: Option<u64>,
+    pub last_integrity_scan_unix_nanoseconds: Option<u128>,
+    pub integrity_scan_age_seconds: Option<u64>,
     pub restoration_complete: Option<bool>,
     pub health: ReplicaHealthState,
     pub source_row_count: Option<u64>,
@@ -148,6 +157,7 @@ pub struct ReplicaMessageCursor {
     pub account_id: String,
     pub replica_id: String,
     pub source_fingerprint: String,
+    pub checkpoint_revision: String,
     pub filter_sha256: String,
     pub after_sort_time: i64,
     pub after_conversation_id: String,
@@ -160,6 +170,7 @@ pub struct ReplicaMessageCursor {
 pub struct ReplicaMessagePage {
     pub account_id: String,
     pub source_fingerprint: String,
+    pub checkpoint_revision: String,
     pub items: Vec<CanonicalMessage>,
     pub next_cursor: Option<String>,
 }
@@ -202,6 +213,14 @@ struct SyncCounts {
     added: u64,
     changed: u64,
     removed: u64,
+}
+
+#[derive(Default)]
+struct SyncHealth {
+    last_kind: Option<String>,
+    last_started: Option<u128>,
+    last_duration_milliseconds: Option<u64>,
+    last_integrity_scan: Option<u128>,
 }
 
 pub fn bootstrap_replica(
@@ -276,7 +295,8 @@ pub fn replica_status(
     let identity = opened
         .connection
         .query_row(
-            "SELECT account_id, current_source_fingerprint, restoration_complete
+            "SELECT account_id, current_source_fingerprint, restoration_complete,
+                    updated_at_unix_nanoseconds
              FROM replica_identity WHERE singleton = 1",
             [],
             |row| {
@@ -284,11 +304,12 @@ pub fn replica_status(
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<bool>>(2)?,
+                    row.get::<_, String>(3)?,
                 ))
             },
         )
         .optional()?;
-    let checkpoint = if let Some((account, _, _)) = identity.as_ref() {
+    let checkpoint = if let Some((account, _, _, _)) = identity.as_ref() {
         let encoded = opened
             .connection
             .query_row(
@@ -308,22 +329,12 @@ pub fn replica_status(
     } else {
         None
     };
-    let stored_report: Option<RestorationReport> = if let Some((account, _, _)) = identity.as_ref()
-    {
-        let bytes: Option<Vec<u8>> = opened
-            .connection
-            .query_row(
-                "SELECT report_json FROM coverage_state WHERE account_id = ?1",
-                [account],
-                |row| row.get(0),
-            )
-            .optional()?;
-        bytes
-            .map(|bytes| serde_json::from_slice(&bytes).map_err(RestoreError::from))
-            .transpose()?
-    } else {
-        None
+    let stored_state = match identity.as_ref() {
+        Some((account, _, _, _)) => load_coverage_state(&opened.connection, account)?,
+        None => None,
     };
+    let stored_report = stored_state.as_ref().map(|value| &value.0);
+    let stored_coverage = stored_state.as_ref().map(|value| &value.1);
     let checkpoint_age_seconds = checkpoint
         .map(|timestamp| {
             unix_nanoseconds()
@@ -337,7 +348,7 @@ pub fn replica_status(
                 })
         })
         .transpose()?;
-    let semantic_decode_coverage_ratio = stored_report.as_ref().and_then(|report| {
+    let semantic_decode_coverage_ratio = stored_report.and_then(|report| {
         (report.integrity.restored_row_count > 0).then(|| {
             let covered = report
                 .integrity
@@ -346,22 +357,32 @@ pub fn replica_status(
             covered as f64 / report.integrity.restored_row_count as f64
         })
     });
-    let health = match stored_report.as_ref() {
+    let health = match stored_report {
         None => ReplicaHealthState::Uninitialized,
         Some(report) if report.completion.full_restoration_achieved => {
             ReplicaHealthState::CurrentComplete
         }
         Some(_) => ReplicaHealthState::CurrentWithCoverageGaps,
     };
+    let sync_health =
+        load_sync_health(&opened.connection, identity.as_ref().map(|value| &value.0))?;
+    let integrity_scan_age_seconds = sync_health
+        .last_integrity_scan
+        .map(age_seconds)
+        .transpose()?;
     Ok(ReplicaStatus {
         format_version: REPLICA_FORMAT_VERSION,
         schema_version: CURRENT_SCHEMA_VERSION,
         replica_id: replica_id(&opened.connection)?,
         account_id: identity.as_ref().map(|value| value.0.clone()),
         current_source_fingerprint: identity.as_ref().and_then(|value| value.1.clone()),
+        checkpoint_revision: identity.as_ref().map(|value| value.3.clone()),
         client_build_compatibility: stored_report
-            .as_ref()
             .map(|report| report.client_build_compatibility.clone()),
+        acquisition_mode: stored_report
+            .and_then(|report| report.acquisition.as_ref().map(|value| value.mode)),
+        decoder_name: stored_coverage.map(|coverage| coverage.decoder_name.clone()),
+        decoder_version: stored_coverage.map(|coverage| coverage.decoder_version.clone()),
         cipher_version: opened.cipher_version,
         encrypted_at_rest: true,
         conversation_count: table_count(&opened.connection, "conversation")?,
@@ -370,28 +391,23 @@ pub fn replica_status(
         artifact_count: table_count(&opened.connection, "artifact")?,
         last_checkpoint_unix_nanoseconds: checkpoint,
         checkpoint_age_seconds,
+        last_sync_kind: sync_health.last_kind,
+        last_sync_started_unix_nanoseconds: sync_health.last_started,
+        last_sync_duration_milliseconds: sync_health.last_duration_milliseconds,
+        last_integrity_scan_unix_nanoseconds: sync_health.last_integrity_scan,
+        integrity_scan_age_seconds,
         restoration_complete: identity.and_then(|value| value.2),
         health,
-        source_row_count: stored_report
-            .as_ref()
-            .map(|report| report.integrity.source_row_count),
-        restored_row_count: stored_report
-            .as_ref()
-            .map(|report| report.integrity.restored_row_count),
-        semantic_gap_count: stored_report
-            .as_ref()
-            .map(|report| report.integrity.semantic_gap_count),
+        source_row_count: stored_report.map(|report| report.integrity.source_row_count),
+        restored_row_count: stored_report.map(|report| report.integrity.restored_row_count),
+        semantic_gap_count: stored_report.map(|report| report.integrity.semantic_gap_count),
         message_candidate_gap_count: stored_report
-            .as_ref()
             .map(|report| report.integrity.message_candidate_gap_count),
         unavailable_artifact_count: stored_report
-            .as_ref()
             .map(|report| report.integrity.missing_artifact_count),
         artifact_decode_gap_count: stored_report
-            .as_ref()
             .map(|report| report.integrity.artifact_decode_gap_count),
         entity_decode_gap_count: stored_report
-            .as_ref()
             .map(|report| report.integrity.entity_decode_gap_count),
         semantic_decode_coverage_ratio,
     })
@@ -424,7 +440,16 @@ pub fn synchronize_replica(
     let previous_fingerprint = previous_fingerprint.ok_or_else(|| {
         RestoreError::Integrity("replica has no authoritative source checkpoint".to_string())
     })?;
-    if previous_fingerprint == report.source_fingerprint {
+    let incoming_coverage = load_archive_coverage(archive_directory)?;
+    let stored_state = load_coverage_state(&opened.connection, &account_id)?;
+    let unchanged_revision =
+        stored_state
+            .as_ref()
+            .is_some_and(|(stored_report, stored_coverage)| {
+                archive_revision_digest(stored_report, stored_coverage)
+                    == archive_revision_digest(&report, &incoming_coverage)
+            });
+    if previous_fingerprint == report.source_fingerprint && unchanged_revision {
         return sync_report(
             &opened.connection,
             &account_id,
@@ -561,15 +586,17 @@ pub fn search_replica_messages(
 ) -> Result<ReplicaMessagePage, RestoreError> {
     validate_message_filter(filter)?;
     let opened = open_replica(replica_path, key)?;
-    let (account_id, source_fingerprint) = current_replica_identity(&opened.connection)?;
+    let (account_id, source_fingerprint, checkpoint_revision) =
+        current_replica_checkpoint(&opened.connection)?;
     let generation = replica_id(&opened.connection)?;
     let filter_sha256 = sha256(&serde_json::to_vec(filter)?);
     let decoded = cursor.map(decode_message_cursor).transpose()?;
     if decoded.as_ref().is_some_and(|cursor| {
-        cursor.format_version != 1
+        cursor.format_version != 2
             || cursor.account_id != account_id
             || cursor.replica_id != generation
             || cursor.source_fingerprint != source_fingerprint
+            || cursor.checkpoint_revision != checkpoint_revision
             || cursor.filter_sha256 != filter_sha256
     }) {
         return Err(RestoreError::Integrity(
@@ -690,10 +717,11 @@ pub fn search_replica_messages(
     let next_cursor = if has_more {
         items.last().map(|message| {
             encode_message_cursor(&ReplicaMessageCursor {
-                format_version: 1,
+                format_version: 2,
                 account_id: account_id.clone(),
                 replica_id: generation,
                 source_fingerprint: source_fingerprint.clone(),
+                checkpoint_revision: checkpoint_revision.clone(),
                 filter_sha256,
                 after_sort_time: message.created_at_unix.unwrap_or(i64::MIN),
                 after_conversation_id: message.conversation_id.clone(),
@@ -707,6 +735,7 @@ pub fn search_replica_messages(
     Ok(ReplicaMessagePage {
         account_id,
         source_fingerprint,
+        checkpoint_revision,
         items,
         next_cursor,
     })
@@ -1329,7 +1358,7 @@ fn import_archive_transactionally(
     ] {
         ensure_private_regular_file(path)?;
     }
-    let coverage: RestorationCoverage = serde_json::from_slice(&fs::read(&coverage_path)?)?;
+    let coverage = load_archive_coverage(archive_directory)?;
     let started = unix_nanoseconds()?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute(
@@ -1574,7 +1603,7 @@ fn reconcile_archive_transactionally(
     ] {
         ensure_private_regular_file(path)?;
     }
-    let coverage: RestorationCoverage = serde_json::from_slice(&fs::read(&coverage_path)?)?;
+    let coverage = load_archive_coverage(archive_directory)?;
     let started = unix_nanoseconds()?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute("DELETE FROM sync_seen", [])?;
@@ -1866,7 +1895,7 @@ fn reconcile_archive_transactionally(
         "participant_id",
     )?;
 
-    let committed = unix_nanoseconds()?;
+    let committed = next_checkpoint_revision(&transaction, &report.account_id)?;
     transaction.execute(
         "INSERT INTO coverage_state VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(account_id) DO UPDATE SET
@@ -1912,11 +1941,13 @@ fn reconcile_archive_transactionally(
         )
         .as_bytes(),
     );
+    let sync_kind = synchronization_kind(report);
     transaction.execute(
-        "INSERT INTO sync_run VALUES (?1, ?2, 'reconcile', ?3, ?4, ?5, ?6)",
+        "INSERT INTO sync_run VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             run_id,
             report.account_id,
+            sync_kind,
             report.source_fingerprint,
             started.to_string(),
             committed.to_string(),
@@ -2327,6 +2358,36 @@ fn current_replica_identity(connection: &Connection) -> Result<(String, String),
         })
 }
 
+fn current_replica_checkpoint(
+    connection: &Connection,
+) -> Result<(String, String, String), RestoreError> {
+    connection
+        .query_row(
+            "SELECT account_id, current_source_fingerprint, updated_at_unix_nanoseconds
+             FROM replica_identity WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(RestoreError::from)
+        .and_then(|(account, fingerprint, revision)| {
+            let fingerprint = fingerprint.ok_or_else(|| {
+                RestoreError::Integrity(
+                    "replica has no authoritative source checkpoint".to_string(),
+                )
+            })?;
+            revision.parse::<u128>().map_err(|_| {
+                RestoreError::Integrity("replica checkpoint revision is invalid".to_string())
+            })?;
+            Ok((account, fingerprint, revision))
+        })
+}
+
 fn encode_message_cursor(cursor: &ReplicaMessageCursor) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(serde_json::to_vec(cursor).expect("message cursor serialization cannot fail"))
@@ -2474,6 +2535,135 @@ fn unix_nanoseconds() -> Result<u128, RestoreError> {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .map_err(|_| RestoreError::Integrity("system clock predates Unix epoch".to_string()))
+}
+
+fn age_seconds(timestamp: u128) -> Result<u64, RestoreError> {
+    let age = unix_nanoseconds()?.saturating_sub(timestamp) / 1_000_000_000;
+    u64::try_from(age)
+        .map_err(|_| RestoreError::Integrity("replica checkpoint age exceeds range".to_string()))
+}
+
+fn next_checkpoint_revision(
+    transaction: &Transaction<'_>,
+    account_id: &str,
+) -> Result<u128, RestoreError> {
+    let previous: String = transaction.query_row(
+        "SELECT updated_at_unix_nanoseconds FROM replica_identity WHERE account_id = ?1",
+        [account_id],
+        |row| row.get(0),
+    )?;
+    let previous = previous.parse::<u128>().map_err(|_| {
+        RestoreError::Integrity("replica checkpoint revision is invalid".to_string())
+    })?;
+    Ok(unix_nanoseconds()?.max(previous.saturating_add(1)))
+}
+
+fn load_archive_coverage(archive_directory: &Path) -> Result<RestorationCoverage, RestoreError> {
+    let path = archive_directory.join("coverage.json");
+    ensure_private_regular_file(&path)?;
+    Ok(serde_json::from_slice(&fs::read(path)?)?)
+}
+
+fn load_coverage_state(
+    connection: &Connection,
+    account_id: &str,
+) -> Result<Option<(RestorationReport, RestorationCoverage)>, RestoreError> {
+    let state: Option<(Vec<u8>, Vec<u8>)> = connection
+        .query_row(
+            "SELECT report_json, coverage_json FROM coverage_state WHERE account_id = ?1",
+            [account_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    state
+        .map(|(report, coverage)| {
+            Ok((
+                serde_json::from_slice(&report)?,
+                serde_json::from_slice(&coverage)?,
+            ))
+        })
+        .transpose()
+}
+
+fn archive_revision_digest(report: &RestorationReport, coverage: &RestorationCoverage) -> String {
+    sha256(
+        &serde_json::to_vec(&(
+            &report.source_fingerprint,
+            &report.client_build_compatibility,
+            &report.integrity,
+            &report.completion,
+            report.archive_scope,
+            coverage,
+        ))
+        .expect("restoration revision serialization cannot fail"),
+    )
+}
+
+fn synchronization_kind(report: &RestorationReport) -> &'static str {
+    match report.acquisition.as_ref().map(|evidence| evidence.mode) {
+        Some(crate::SnapshotAcquisitionMode::Incremental) => "incrementalMerge",
+        Some(crate::SnapshotAcquisitionMode::IntegrityScan) => "integrityScan",
+        Some(crate::SnapshotAcquisitionMode::Bootstrap) => "fullScan",
+        None => "reconcile",
+    }
+}
+
+fn load_sync_health(
+    connection: &Connection,
+    account_id: Option<&String>,
+) -> Result<SyncHealth, RestoreError> {
+    let Some(account_id) = account_id else {
+        return Ok(SyncHealth::default());
+    };
+    let latest: Option<(String, String, String)> = connection
+        .query_row(
+            "SELECT mode, started_at_unix_nanoseconds, committed_at_unix_nanoseconds
+             FROM sync_run WHERE account_id = ?1
+             ORDER BY length(committed_at_unix_nanoseconds) DESC,
+                      committed_at_unix_nanoseconds DESC LIMIT 1",
+            [account_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let last_integrity_scan: Option<String> = connection
+        .query_row(
+            "SELECT committed_at_unix_nanoseconds FROM sync_run
+             WHERE account_id = ?1 AND mode = 'integrityScan'
+             ORDER BY length(committed_at_unix_nanoseconds) DESC,
+                      committed_at_unix_nanoseconds DESC LIMIT 1",
+            [account_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let (last_kind, last_started, last_duration_milliseconds) = match latest {
+        Some((kind, started, committed)) => {
+            let started = started.parse::<u128>().map_err(|_| {
+                RestoreError::Integrity("sync start timestamp is invalid".to_string())
+            })?;
+            let committed = committed.parse::<u128>().map_err(|_| {
+                RestoreError::Integrity("sync commit timestamp is invalid".to_string())
+            })?;
+            let duration = committed.saturating_sub(started) / 1_000_000;
+            let duration = u64::try_from(duration).map_err(|_| {
+                RestoreError::Integrity("sync duration exceeds supported range".to_string())
+            })?;
+            (Some(kind), Some(started), Some(duration))
+        }
+        None => (None, None, None),
+    };
+    let last_integrity_scan = last_integrity_scan
+        .map(|timestamp| {
+            timestamp.parse::<u128>().map_err(|_| {
+                RestoreError::Integrity("integrity scan timestamp is invalid".to_string())
+            })
+        })
+        .transpose()?;
+    Ok(SyncHealth {
+        last_kind,
+        last_started,
+        last_duration_milliseconds,
+        last_integrity_scan,
+    })
 }
 
 fn checkpoint_and_secure(connection: &Connection, path: &Path) -> Result<(), RestoreError> {

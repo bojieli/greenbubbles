@@ -25,7 +25,7 @@ use greenbubbles_restore::{
     ConversationKind, DirectionEvidence, EntityDecodeState, LocalProfileState,
     MessageArtifactReference, MessageDirection, MessageOrderingBasis, ReplicaKey,
     RestorationCompletion, RestorationCoverage, RestorationIntegrity, RestorationReport,
-    SemanticDecodeState, TypedPayload,
+    SemanticDecodeState, SnapshotAcquisitionEvidence, SnapshotAcquisitionMode, TypedPayload,
 };
 use rusqlite::Connection;
 use serde::Serialize;
@@ -268,6 +268,12 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
     );
     assert_eq!(status.message_count, 1);
     assert!(status.last_checkpoint_unix_nanoseconds.is_some());
+    assert!(status.checkpoint_revision.is_some());
+    assert_eq!(status.decoder_name.as_deref(), Some("synthetic"));
+    assert_eq!(status.decoder_version.as_deref(), Some("1"));
+    assert_eq!(status.last_sync_kind.as_deref(), Some("bootstrap"));
+    assert!(status.last_sync_started_unix_nanoseconds.is_some());
+    assert!(status.last_sync_duration_milliseconds.is_some());
     assert_eq!(
         status.client_build_compatibility.unwrap().state,
         ClientBuildCompatibilityState::LegacySyntheticFixture
@@ -364,6 +370,57 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
     .is_err());
     let pre_sync_message_cursor = message_first.next_cursor.clone();
 
+    let pre_upgrade_revision = replica_status(&replica, &key)
+        .unwrap()
+        .checkpoint_revision
+        .unwrap();
+    let archive_b_upgrade = clone_archive(
+        &archive_b,
+        &private,
+        "archive-sync-b-upgrade",
+        "source-sync-b",
+    );
+    let mut upgraded_coverage: RestorationCoverage =
+        serde_json::from_slice(&fs::read(archive_b_upgrade.join("coverage.json")).unwrap())
+            .unwrap();
+    upgraded_coverage.decoder_version = "2".to_string();
+    fs::write(
+        archive_b_upgrade.join("coverage.json"),
+        serde_json::to_vec_pretty(&upgraded_coverage).unwrap(),
+    )
+    .unwrap();
+    let mut upgraded_artifacts =
+        read_ndjson::<CanonicalArtifact>(&archive_b_upgrade.join("artifacts.ndjson"));
+    upgraded_artifacts[0].decoded_sha256 = Some("c".repeat(64));
+    overwrite_ndjson(
+        &archive_b_upgrade.join("artifacts.ndjson"),
+        &upgraded_artifacts,
+    );
+    let decoder_upgrade = synchronize_replica(&archive_b_upgrade, &replica, &key).unwrap();
+    assert!(!decoder_upgrade.idempotent);
+    assert_eq!(decoder_upgrade.previous_source_fingerprint, "source-sync-b");
+    assert_eq!(decoder_upgrade.current_source_fingerprint, "source-sync-b");
+    assert_eq!(decoder_upgrade.changed_count, 1);
+    let upgraded_status = replica_status(&replica, &key).unwrap();
+    assert_eq!(upgraded_status.decoder_version.as_deref(), Some("2"));
+    assert_ne!(
+        upgraded_status.checkpoint_revision.as_deref(),
+        Some(pre_upgrade_revision.as_str())
+    );
+    assert!(search_replica_messages(
+        &replica,
+        &key,
+        &ReplicaMessageFilter::default(),
+        pre_sync_message_cursor.as_deref(),
+        10,
+    )
+    .is_err());
+    assert!(
+        synchronize_replica(&archive_b_upgrade, &replica, &key)
+            .unwrap()
+            .idempotent
+    );
+
     let first_changes = get_replica_changes(&replica, &key, None, 1).unwrap();
     assert_eq!(first_changes.items.len(), 1);
     assert!(first_changes.next_cursor.is_some());
@@ -426,6 +483,44 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
     assert_eq!(idempotent_sync.added_count, 0);
     assert_eq!(idempotent_sync.changed_count, 0);
     assert_eq!(idempotent_sync.removed_count, 0);
+
+    let integrity_archive = clone_archive(
+        &archive_d,
+        &private,
+        "archive-integrity-scan",
+        "source-integrity-scan",
+    );
+    let mut integrity_report: RestorationReport =
+        serde_json::from_slice(&fs::read(integrity_archive.join("report.json")).unwrap()).unwrap();
+    integrity_report.acquisition = Some(SnapshotAcquisitionEvidence {
+        format_version: 1,
+        mode: SnapshotAcquisitionMode::IntegrityScan,
+        previous_source_fingerprint: Some("source-sync-d".to_string()),
+        reconciliation_window_seconds: 0,
+        changed_source_set_ids: Vec::new(),
+        reconciliation_source_set_ids: Vec::new(),
+        deleted_source_set_ids: Vec::new(),
+        source_sets: Vec::new(),
+    });
+    fs::write(
+        integrity_archive.join("report.json"),
+        serde_json::to_vec_pretty(&integrity_report).unwrap(),
+    )
+    .unwrap();
+    synchronize_replica(&integrity_archive, &replica, &key).unwrap();
+    let integrity_status = replica_status(&replica, &key).unwrap();
+    assert_eq!(
+        integrity_status.last_sync_kind.as_deref(),
+        Some("integrityScan")
+    );
+    assert_eq!(
+        integrity_status.acquisition_mode,
+        Some(SnapshotAcquisitionMode::IntegrityScan)
+    );
+    assert!(integrity_status
+        .last_integrity_scan_unix_nanoseconds
+        .is_some());
+    assert!(integrity_status.integrity_scan_age_seconds.is_some());
 
     let connection = keyed_connection(&replica);
     let retained_fts: i64 = connection
