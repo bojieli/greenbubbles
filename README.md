@@ -89,6 +89,31 @@ satisfy `source rows = restored rows + rejected rows`, with zero rejections,
 zero duplicate canonical identities, no unknown observed message types, and no
 unexplained media state. See [docs/RESTORATION_SPEC.md](docs/RESTORATION_SPEC.md).
 
+## Encrypted canonical replica
+
+The restored archive can be bootstrapped into a one-account SQLCipher replica.
+Use a new high-entropy 32-byte key that is distinct from the WeChat database
+passphrase. The key is accepted only through standard input:
+
+```sh
+mkdir -m 700 /path/to/private-replica-directory
+printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  replica-bootstrap <private-output-directory> \
+  /path/to/private-replica-directory/greenbubbles.db --replica-key-stdin
+
+printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  replica-status /path/to/private-replica-directory/greenbubbles.db \
+  --replica-key-stdin
+```
+
+Avoid placing a real key literally in shell history; pipe it from an
+owner-controlled secret manager. The example value is a placeholder. Bootstrap
+atomically stores canonical records, provenance, coverage, FTS, and its source
+checkpoint. Each replica rejects another account, and migrations retain an
+encrypted pre-migration backup. See [docs/REPLICA_SPEC.md](docs/REPLICA_SPEC.md).
+
 Conversation reads require a separate owner-only policy. Creating one is an
 explicit local authorization step; cursors are bound to both the archive
 fingerprint and the selected conversation:

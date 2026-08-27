@@ -442,17 +442,17 @@ Status: **planned**
 
 ### 2A. Canonical replica
 
-- [ ] Store canonical accounts, conversations, participants, messages,
+- [x] Store canonical accounts, conversations, participants, messages,
   attachments, replies/quotes, edits/recalls, and unknown payload references in
   an owner-only encrypted local replica.
-- [ ] Keep source identities and provenance sufficient to reproduce every
+- [x] Keep source identities and provenance sufficient to reproduce every
   normalized record and diagnose decoder or schema changes.
-- [ ] Isolate accounts cryptographically and logically; never let a policy,
+- [x] Isolate accounts cryptographically and logically; never let a policy,
   cursor, contact identity, or action from one account resolve in another.
-- [ ] Retain freshness, coverage, rejection, and schema/version state alongside
+- [x] Retain freshness, coverage, rejection, and schema/version state alongside
   content so an agent can distinguish “not present” from “not synchronized” or
   “not understood.”
-- [ ] Make migrations transactional and retain a recoverable pre-migration
+- [x] Make migrations transactional and retain a recoverable pre-migration
   state.
 
 ### 2B. Change-proportional synchronization

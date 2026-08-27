@@ -7,12 +7,13 @@ use greenbubbles_restore::{
     archive::{create_conversation_policy, read_conversation_page},
     prepare_catalog,
     reconcile::reconcile_archives,
+    replica::{bootstrap_replica, replica_status},
     restore_catalog,
     tools::{
         create_tool_policy, ConversationToolScope, LocalToolService, ToolCapability,
         ToolDataDestination, ToolMessageField,
     },
-    DatabasePassphrase, RestorationOptions,
+    DatabasePassphrase, ReplicaKey, RestorationOptions,
 };
 use zeroize::Zeroizing;
 
@@ -98,6 +99,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let policy = required_path(arguments.next(), "policy path")?;
             let events = required_path(arguments.next(), "events output path")?;
             let report = reconcile_archives(&previous, &current, &policy, &events)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "replica-bootstrap" => {
+            let archive = required_path(arguments.next(), "archive directory")?;
+            let replica = required_path(arguments.next(), "replica path")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if !remaining.iter().any(|value| value == "--replica-key-stdin") {
+                return Err("replica keys must be supplied with --replica-key-stdin".into());
+            }
+            let key = ReplicaKey::read_stdin()?;
+            let report = bootstrap_replica(&archive, &replica, &key)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "replica-status" => {
+            let replica = required_path(arguments.next(), "replica path")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if !remaining.iter().any(|value| value == "--replica-key-stdin") {
+                return Err("replica keys must be supplied with --replica-key-stdin".into());
+            }
+            let key = ReplicaKey::read_stdin()?;
+            let report = replica_status(&replica, &key)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "tool-policy" => {
@@ -213,7 +235,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             eprintln!(
-                "Usage:\n  greenbubbles-restore probe <snapshot> [--passphrase-stdin]\n  greenbubbles-restore restore <snapshot> <output> [--account-root <path>] [--passphrase-stdin]\n  greenbubbles-restore policy <archive> <policy-file> <conversation-id>... [--max-page-size <n>]\n  greenbubbles-restore read <archive> <policy-file> <conversation-id> [--cursor <cursor>] [--limit <n>]\n  greenbubbles-restore reconcile <previous-archive> <current-archive> <policy-file> <events-output>\n  greenbubbles-restore tool-policy <archive> <policy-file> <conversation-id>... --capabilities list,read,search,draft [--fields sender,created-at,direction,type,content,attachments,relationships] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--max-results <n>] [--max-summary-bytes <n>] [--max-draft-bytes <n>]\n  greenbubbles-restore tool-list <archive> <policy-file> <audit-log> --requester <id> [--destination local|remote]\n  greenbubbles-restore tool-recent <archive> <policy-file> <audit-log> <conversation-id> --requester <id> [--limit <n>] [--destination local|remote]\n  greenbubbles-restore tool-search <archive> <policy-file> <audit-log> --requester <id> --query-stdin [--conversation <id>] [--limit <n>] [--destination local|remote]\n  greenbubbles-restore tool-draft <archive> <policy-file> <audit-log> <draft-directory> <conversation-id> --requester <id> --body-stdin"
+                "Usage:\n  greenbubbles-restore probe <snapshot> [--passphrase-stdin]\n  greenbubbles-restore restore <snapshot> <output> [--account-root <path>] [--passphrase-stdin]\n  greenbubbles-restore policy <archive> <policy-file> <conversation-id>... [--max-page-size <n>]\n  greenbubbles-restore read <archive> <policy-file> <conversation-id> [--cursor <cursor>] [--limit <n>]\n  greenbubbles-restore reconcile <previous-archive> <current-archive> <policy-file> <events-output>\n  greenbubbles-restore replica-bootstrap <archive> <replica-path> --replica-key-stdin\n  greenbubbles-restore replica-status <replica-path> --replica-key-stdin\n  greenbubbles-restore tool-policy <archive> <policy-file> <conversation-id>... --capabilities list,read,search,draft [--fields sender,created-at,direction,type,content,attachments,relationships] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--max-results <n>] [--max-summary-bytes <n>] [--max-draft-bytes <n>]\n  greenbubbles-restore tool-list <archive> <policy-file> <audit-log> --requester <id> [--destination local|remote]\n  greenbubbles-restore tool-recent <archive> <policy-file> <audit-log> <conversation-id> --requester <id> [--limit <n>] [--destination local|remote]\n  greenbubbles-restore tool-search <archive> <policy-file> <audit-log> --requester <id> --query-stdin [--conversation <id>] [--limit <n>] [--destination local|remote]\n  greenbubbles-restore tool-draft <archive> <policy-file> <audit-log> <draft-directory> <conversation-id> --requester <id> --body-stdin"
             );
         }
     }
