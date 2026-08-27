@@ -62,6 +62,12 @@ aggregate-only `audit-connector-log` command reports chain integrity and any
 unlinked format-1 prefix. This is tamper-evident hashing, not an independently
 signed attestation; see `CONNECTOR_AUDIT.md`.
 
+The key-gated `audit-connector-state` command further verifies all immutable
+draft files against the encrypted replica, current policy, and completed
+request/review events. It reports stale and expired counts without releasing
+draft or recipient data, and fails if a gated action stage appears. It is a
+local maintenance command, not an MCP/Unix tool available to an AI caller.
+
 Connector drafts bind the body to account/conversation and human-readable
 recipient evidence, optional reply target, attachment digests, connector/API
 version, expiry, requester, policy decision, and authoritative checkpoint.

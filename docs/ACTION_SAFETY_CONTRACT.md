@@ -70,3 +70,9 @@ independently verifiable request/draft/review substrate described in
 `CONNECTOR_AUDIT.md`. It deliberately does not create the future stages, and
 its unkeyed hashes are not a substitute for any independently protected action
 attestation required by the eventual threat model.
+
+`audit-connector-state` independently proves that the immutable draft inputs to
+this future contract still match their files, current policy/checkpoint, and
+chained request/review history. It treats any already-present gated lifecycle
+stage as an integrity failure; therefore it cannot be used to introduce an
+approval or attempt indirectly.

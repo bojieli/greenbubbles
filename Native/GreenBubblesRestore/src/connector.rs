@@ -39,6 +39,8 @@ const MAX_REQUESTER_ID_BYTES: usize = 256;
 const MAX_CACHED_MOMENT_REQUESTS_PER_MINUTE: usize = 60;
 const MAX_CONNECTOR_AUDIT_BYTES: u64 = 1_073_741_824;
 const MAX_CONNECTOR_AUDIT_RECORD_BYTES: usize = 64 * 1_024;
+const MAX_CONNECTOR_DRAFT_BYTES: u64 = 1_048_576;
+const MAX_CONNECTOR_DRAFT_COUNT: usize = 100_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -331,7 +333,7 @@ pub struct ResolvedContact {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RecipientParticipantEvidence {
     pub participant_id: String,
     pub display_name: String,
@@ -339,7 +341,7 @@ pub struct RecipientParticipantEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ResolvedConversation {
     pub conversation_id: String,
     pub kind: ConversationKind,
@@ -351,7 +353,7 @@ pub struct ResolvedConversation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct DraftReplyTarget {
     pub canonical_id: String,
     pub canonical_record_sha256: String,
@@ -360,7 +362,7 @@ pub struct DraftReplyTarget {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct DraftAttachment {
     pub artifact_id: String,
     pub kind: ArtifactKind,
@@ -372,7 +374,7 @@ pub struct DraftAttachment {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ActionDraft {
     pub format_version: u32,
     pub draft_id: String,
@@ -486,6 +488,25 @@ pub struct ConnectorAuditReport {
     pub reconciliation_event_count: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ConnectorStateAuditReport {
+    pub format_version: u32,
+    pub privacy_safe_summary: bool,
+    pub audit_log: ConnectorAuditReport,
+    pub draft_file_count: u64,
+    pub structurally_valid_draft_count: u64,
+    pub currently_previewable_draft_count: u64,
+    pub stale_draft_count: u64,
+    pub expired_draft_count: u64,
+    pub reviewed_draft_count: u64,
+    pub completed_draft_request_event_count: u64,
+    pub completed_draft_review_event_count: u64,
+    pub all_drafts_linked_to_request_events: bool,
+    pub all_completed_review_events_linked_to_drafts: bool,
+    pub gated_action_stage_event_count: u64,
+}
+
 pub struct ConnectorService<'a> {
     replica_path: PathBuf,
     key: &'a ReplicaKey,
@@ -539,6 +560,136 @@ impl<'a> ConnectorService<'a> {
             audit_path: audit_path.to_path_buf(),
             draft_directory: draft_directory.to_path_buf(),
             cached_moment_request_times: Mutex::new(VecDeque::new()),
+        })
+    }
+
+    pub fn audit_state(&self) -> Result<ConnectorStateAuditReport, RestoreError> {
+        let (audit_log, events) =
+            verified_connector_log_for_account(&self.audit_path, Some(&self.policy.account_id))?;
+        let gated_action_stage_event_count = audit_log
+            .approval_event_count
+            .saturating_add(audit_log.attempt_event_count)
+            .saturating_add(audit_log.reconciliation_event_count);
+        if gated_action_stage_event_count != 0 {
+            return Err(RestoreError::Integrity(
+                "connector journal contains a gated action stage".to_string(),
+            ));
+        }
+        let status = replica_status(&self.replica_path, self.key)?;
+        let current_source_fingerprint = status.current_source_fingerprint.ok_or_else(|| {
+            RestoreError::Integrity("connector replica has no current checkpoint".to_string())
+        })?;
+        let now = unix_nanoseconds()?;
+        let mut drafts = BTreeMap::new();
+        let mut draft_snapshot = BTreeMap::new();
+        let mut current_count = 0_u64;
+        let mut stale_count = 0_u64;
+        let mut expired_count = 0_u64;
+        for entry in fs::read_dir(&self.draft_directory)? {
+            let entry = entry?;
+            if drafts.len() >= MAX_CONNECTOR_DRAFT_COUNT {
+                return Err(RestoreError::Integrity(
+                    "connector draft store exceeds the verification limit".to_string(),
+                ));
+            }
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                return Err(RestoreError::Integrity(
+                    "connector draft store contains an unsupported entry".to_string(),
+                ));
+            }
+            let file_id = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .filter(|value| valid_sha256(value))
+                .ok_or_else(|| {
+                    RestoreError::Integrity(
+                        "connector draft filename is not an immutable draft identity".to_string(),
+                    )
+                })?;
+            let bytes = read_connector_draft_file(&path)?;
+            let draft: ActionDraft = serde_json::from_slice(&bytes)?;
+            validate_draft_structure(&draft)?;
+            if draft.draft_id != file_id {
+                return Err(RestoreError::Integrity(
+                    "connector draft filename does not match its contents".to_string(),
+                ));
+            }
+            if self.draft_current_binding_matches(&draft, &current_source_fingerprint) {
+                if now < draft.expires_at_unix_nanoseconds {
+                    current_count += 1;
+                }
+            } else {
+                stale_count += 1;
+            }
+            if now >= draft.expires_at_unix_nanoseconds {
+                expired_count += 1;
+            }
+            if drafts.insert(draft.draft_id.clone(), draft).is_some() {
+                return Err(RestoreError::Integrity(
+                    "connector draft store repeats an immutable identity".to_string(),
+                ));
+            }
+            draft_snapshot.insert(file_id.to_string(), hex::encode(Sha256::digest(&bytes)));
+        }
+
+        let mut completed_requests = BTreeMap::<String, u64>::new();
+        let mut reviewed_drafts = BTreeSet::new();
+        let mut completed_review_count = 0_u64;
+        for event in &events {
+            validate_current_connector_stage_evidence(event)?;
+            match (event.stage, event.outcome) {
+                (ConnectorAuditStage::DraftRequested, ConnectorAuditOutcome::Completed) => {
+                    let draft = linked_audit_draft(event, &drafts, "createDraft")?;
+                    if event.requester_id != draft.requester_id {
+                        return Err(RestoreError::Integrity(
+                            "draft request audit requester does not match the draft".to_string(),
+                        ));
+                    }
+                    *completed_requests
+                        .entry(draft.draft_id.clone())
+                        .or_default() += 1;
+                }
+                (ConnectorAuditStage::DraftReviewed, ConnectorAuditOutcome::Completed) => {
+                    let draft = linked_audit_draft(event, &drafts, "previewAction")?;
+                    reviewed_drafts.insert(draft.draft_id.clone());
+                    completed_review_count += 1;
+                }
+                _ => {}
+            }
+        }
+        if completed_requests.len() != drafts.len()
+            || completed_requests.values().any(|count| *count != 1)
+        {
+            return Err(RestoreError::Integrity(
+                "connector drafts and completed request events are not one-to-one".to_string(),
+            ));
+        }
+        let (_, final_events) =
+            verified_connector_log_for_account(&self.audit_path, Some(&self.policy.account_id))?;
+        if audit_event_snapshot(&events)? != audit_event_snapshot(&final_events)?
+            || draft_snapshot != connector_draft_store_snapshot(&self.draft_directory)?
+        {
+            return Err(RestoreError::Integrity(
+                "connector audit or draft state changed during verification".to_string(),
+            ));
+        }
+
+        Ok(ConnectorStateAuditReport {
+            format_version: 1,
+            privacy_safe_summary: true,
+            audit_log,
+            draft_file_count: drafts.len() as u64,
+            structurally_valid_draft_count: drafts.len() as u64,
+            currently_previewable_draft_count: current_count,
+            stale_draft_count: stale_count,
+            expired_draft_count: expired_count,
+            reviewed_draft_count: reviewed_drafts.len() as u64,
+            completed_draft_request_event_count: completed_requests.len() as u64,
+            completed_draft_review_event_count: completed_review_count,
+            all_drafts_linked_to_request_events: true,
+            all_completed_review_events_linked_to_drafts: true,
+            gated_action_stage_event_count,
         })
     }
 
@@ -1678,6 +1829,8 @@ impl<'a> ConnectorService<'a> {
             &source_fingerprint,
             &policy_decision_id,
             &request.requester_id,
+            CONNECTOR_VERSION,
+            CONNECTOR_API_VERSION,
             created,
             expires,
         );
@@ -1798,6 +1951,12 @@ impl<'a> ConnectorService<'a> {
                 "Attachment digest is malformed and cannot be bound to an immutable draft",
             ));
         }
+        let byte_count = byte_count.ok_or_else(|| {
+            unavailable(
+                "attachmentSizeUnavailable",
+                "Attachment cannot be bound to a draft without a verified byte count",
+            )
+        })?;
         let display_file_name = artifact
             .account_relative_path
             .as_deref()
@@ -1812,7 +1971,7 @@ impl<'a> ConnectorService<'a> {
             role: artifact.role,
             digest_kind: digest_kind.to_string(),
             sha256,
-            byte_count,
+            byte_count: Some(byte_count),
             display_file_name,
         })
     }
@@ -1866,40 +2025,47 @@ impl<'a> ConnectorService<'a> {
     }
 
     fn validate_draft(&self, draft: &ActionDraft) -> Result<(), ConnectorErrorBody> {
-        if draft.format_version != 1
-            || draft.state != DraftState::DraftOnly
-            || draft.account_id != self.policy.account_id
+        validate_draft_structure(draft)
+            .map_err(|_| conflict("draft binding evidence is invalid or stale"))?;
+        if draft.account_id != self.policy.account_id
             || draft.api_version != CONNECTOR_API_VERSION
             || draft.connector_version != CONNECTOR_VERSION
-            || draft.rendered_text_sha256
-                != hex::encode(Sha256::digest(draft.rendered_text.as_bytes()))
+            || draft.rendered_text.len() > self.policy.maximum_draft_bytes
         {
             return Err(conflict("draft binding evidence is invalid or stale"));
         }
-        let expected = draft_identity(
-            &draft.account_id,
-            &draft.conversation_id,
-            &draft.recipient,
-            draft.reply_target.as_ref(),
-            &draft.rendered_text_sha256,
-            &draft.attachments,
-            &draft.source_fingerprint,
-            &draft.policy_decision_id,
-            &draft.requester_id,
-            draft.created_at_unix_nanoseconds,
-            draft.expires_at_unix_nanoseconds,
-        );
-        if expected != draft.draft_id {
+        let status = replica_status(&self.replica_path, self.key).map_err(integrity_error)?;
+        if !status
+            .current_source_fingerprint
+            .as_deref()
+            .is_some_and(|source| self.draft_current_binding_matches(draft, source))
+        {
             return Err(conflict(
-                "draft immutable identity does not match its contents",
+                "draft policy or replica checkpoint is stale; create a new draft",
             ));
+        }
+        Ok(())
+    }
+
+    fn draft_current_binding_matches(
+        &self,
+        draft: &ActionDraft,
+        current_source_fingerprint: &str,
+    ) -> bool {
+        if draft.account_id != self.policy.account_id
+            || draft.api_version != CONNECTOR_API_VERSION
+            || draft.connector_version != CONNECTOR_VERSION
+            || draft.rendered_text.len() > self.policy.maximum_draft_bytes
+            || draft.source_fingerprint != current_source_fingerprint
+        {
+            return false;
         }
         let attachment_ids = draft
             .attachments
             .iter()
             .map(|attachment| attachment.artifact_id.clone())
             .collect::<Vec<_>>();
-        let expected_policy = self.policy_decision_identity(
+        self.policy_decision_identity(
             &draft.requester_id,
             &draft.conversation_id,
             draft
@@ -1908,17 +2074,7 @@ impl<'a> ConnectorService<'a> {
                 .map(|target| target.canonical_id.as_str()),
             &attachment_ids,
             &draft.source_fingerprint,
-        );
-        let status = replica_status(&self.replica_path, self.key).map_err(integrity_error)?;
-        if expected_policy != draft.policy_decision_id
-            || status.current_source_fingerprint.as_deref()
-                != Some(draft.source_fingerprint.as_str())
-        {
-            return Err(conflict(
-                "draft policy or replica checkpoint is stale; create a new draft",
-            ));
-        }
-        Ok(())
+        ) == draft.policy_decision_id
     }
 
     fn authorize(
@@ -2125,6 +2281,243 @@ impl<'a> ConnectorService<'a> {
     }
 }
 
+fn linked_audit_draft<'a>(
+    event: &ConnectorAuditEvent,
+    drafts: &'a BTreeMap<String, ActionDraft>,
+    expected_operation: &str,
+) -> Result<&'a ActionDraft, RestoreError> {
+    let draft_id = event.draft_id.as_ref().ok_or_else(|| {
+        RestoreError::Integrity("completed draft audit event lacks a draft identity".to_string())
+    })?;
+    let draft = drafts.get(draft_id).ok_or_else(|| {
+        RestoreError::Integrity("completed draft audit event has no draft file".to_string())
+    })?;
+    if event.operation != expected_operation
+        || event.account_id != draft.account_id
+        || event.conversation_id.as_deref() != Some(draft.conversation_id.as_str())
+        || event.policy_decision_id.as_deref() != Some(draft.policy_decision_id.as_str())
+    {
+        return Err(RestoreError::Integrity(
+            "connector draft audit linkage is inconsistent".to_string(),
+        ));
+    }
+    Ok(draft)
+}
+
+fn validate_current_connector_stage_evidence(
+    event: &ConnectorAuditEvent,
+) -> Result<(), RestoreError> {
+    let valid = match (event.stage, event.outcome) {
+        (ConnectorAuditStage::Request, _) => {
+            event.draft_id.is_none() && event.policy_decision_id.is_none()
+        }
+        (ConnectorAuditStage::DraftRequested, ConnectorAuditOutcome::Completed) => {
+            event.operation == "createDraft"
+                && event.draft_id.is_some()
+                && event.policy_decision_id.is_some()
+        }
+        (ConnectorAuditStage::DraftRequested, ConnectorAuditOutcome::Denied) => {
+            event.operation == "createDraft"
+                && event.draft_id.is_none()
+                && event.policy_decision_id.is_none()
+        }
+        (ConnectorAuditStage::DraftReviewed, ConnectorAuditOutcome::Completed) => {
+            event.operation == "previewAction"
+                && event.draft_id.is_some()
+                && event.policy_decision_id.is_some()
+        }
+        (ConnectorAuditStage::DraftReviewed, ConnectorAuditOutcome::Denied) => {
+            event.operation == "previewAction"
+                && event.draft_id.is_none()
+                && event.policy_decision_id.is_none()
+        }
+        (
+            ConnectorAuditStage::ApprovalRecorded
+            | ConnectorAuditStage::AttemptRecorded
+            | ConnectorAuditStage::ReconciliationRecorded,
+            _,
+        ) => false,
+    };
+    if !valid {
+        return Err(RestoreError::Integrity(
+            "connector journal stage evidence is invalid for the current product phase".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn read_connector_draft_file(path: &Path) -> Result<Vec<u8>, RestoreError> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)?;
+    let before = file.metadata()?;
+    if !before.is_file()
+        || before.permissions().mode() & 0o077 != 0
+        || before.nlink() != 1
+        || before.len() > MAX_CONNECTOR_DRAFT_BYTES
+    {
+        return Err(RestoreError::Integrity(
+            "connector draft must be a bounded owner-only single-link regular file".to_string(),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(before.len() as usize);
+    (&mut file)
+        .take(MAX_CONNECTOR_DRAFT_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    let after = file.metadata()?;
+    if bytes.len() as u64 != before.len()
+        || bytes.len() as u64 > MAX_CONNECTOR_DRAFT_BYTES
+        || before.dev() != after.dev()
+        || before.ino() != after.ino()
+        || before.len() != after.len()
+        || before.mtime() != after.mtime()
+        || before.mtime_nsec() != after.mtime_nsec()
+        || before.ctime() != after.ctime()
+        || before.ctime_nsec() != after.ctime_nsec()
+    {
+        return Err(RestoreError::Integrity(
+            "connector draft changed while it was being verified".to_string(),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn connector_draft_store_snapshot(
+    directory: &Path,
+) -> Result<BTreeMap<String, String>, RestoreError> {
+    let mut snapshot = BTreeMap::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        if snapshot.len() >= MAX_CONNECTOR_DRAFT_COUNT {
+            return Err(RestoreError::Integrity(
+                "connector draft store exceeds the verification limit".to_string(),
+            ));
+        }
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            return Err(RestoreError::Integrity(
+                "connector draft store contains an unsupported entry".to_string(),
+            ));
+        }
+        let file_id = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .filter(|value| valid_sha256(value))
+            .ok_or_else(|| {
+                RestoreError::Integrity(
+                    "connector draft filename is not an immutable draft identity".to_string(),
+                )
+            })?;
+        let bytes = read_connector_draft_file(&path)?;
+        if snapshot
+            .insert(file_id.to_string(), hex::encode(Sha256::digest(bytes)))
+            .is_some()
+        {
+            return Err(RestoreError::Integrity(
+                "connector draft store repeats an immutable identity".to_string(),
+            ));
+        }
+    }
+    Ok(snapshot)
+}
+
+fn audit_event_snapshot(events: &[ConnectorAuditEvent]) -> Result<String, RestoreError> {
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(events)?)))
+}
+
+fn validate_draft_structure(draft: &ActionDraft) -> Result<(), RestoreError> {
+    let maximum_expiry_nanoseconds =
+        u128::from(MAX_DRAFT_EXPIRY_SECONDS).saturating_mul(1_000_000_000);
+    let participant_ids = draft
+        .recipient
+        .participants
+        .iter()
+        .map(|participant| participant.participant_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let attachment_ids = draft
+        .attachments
+        .iter()
+        .map(|attachment| attachment.artifact_id.as_str())
+        .collect::<BTreeSet<_>>();
+    let participants_valid = participant_ids.len() == draft.recipient.participants.len()
+        && draft.recipient.participants.iter().all(|participant| {
+            !participant.participant_id.is_empty()
+                && !participant.display_name.is_empty()
+                && !participant.role.is_empty()
+        });
+    let attachments_valid = attachment_ids.len() == draft.attachments.len()
+        && draft.attachments.len() <= 20
+        && draft.attachments.iter().all(|attachment| {
+            !attachment.artifact_id.is_empty()
+                && matches!(
+                    attachment.digest_kind.as_str(),
+                    "decodedSha256" | "sourceSha256"
+                )
+                && valid_sha256(&attachment.sha256)
+                && attachment.byte_count.is_some()
+                && !attachment.display_file_name.is_empty()
+                && !attachment.display_file_name.contains('/')
+                && !attachment.display_file_name.contains('\0')
+                && !matches!(attachment.display_file_name.as_str(), "." | "..")
+        });
+    let reply_valid = draft.reply_target.as_ref().is_none_or(|target| {
+        !target.canonical_id.is_empty()
+            && valid_sha256(&target.canonical_record_sha256)
+            && target
+                .sender_id
+                .as_ref()
+                .is_none_or(|sender| !sender.is_empty())
+    });
+    let expected = draft_identity(
+        &draft.account_id,
+        &draft.conversation_id,
+        &draft.recipient,
+        draft.reply_target.as_ref(),
+        &draft.rendered_text_sha256,
+        &draft.attachments,
+        &draft.source_fingerprint,
+        &draft.policy_decision_id,
+        &draft.requester_id,
+        &draft.connector_version,
+        &draft.api_version,
+        draft.created_at_unix_nanoseconds,
+        draft.expires_at_unix_nanoseconds,
+    );
+    if draft.format_version != 1
+        || draft.state != DraftState::DraftOnly
+        || !valid_sha256(&draft.draft_id)
+        || draft.account_id.is_empty()
+        || draft.conversation_id.is_empty()
+        || draft.requester_id.is_empty()
+        || draft.requester_id.len() > MAX_REQUESTER_ID_BYTES
+        || draft.connector_version.is_empty()
+        || draft.connector_version.len() > 256
+        || draft.api_version.is_empty()
+        || draft.api_version.len() > 256
+        || draft.source_fingerprint.is_empty()
+        || !valid_sha256(&draft.policy_decision_id)
+        || draft.rendered_text.len() as u64 > MAX_CONNECTOR_DRAFT_BYTES
+        || (draft.rendered_text.is_empty() && draft.attachments.is_empty())
+        || draft.rendered_text_sha256 != hex::encode(Sha256::digest(draft.rendered_text.as_bytes()))
+        || draft.created_at_unix_nanoseconds >= draft.expires_at_unix_nanoseconds
+        || draft.expires_at_unix_nanoseconds - draft.created_at_unix_nanoseconds
+            > maximum_expiry_nanoseconds
+        || draft.recipient.conversation_id != draft.conversation_id
+        || draft.recipient.human_label.is_empty()
+        || draft.recipient.participant_count != draft.recipient.participants.len()
+        || !participants_valid
+        || !attachments_valid
+        || !reply_valid
+        || expected != draft.draft_id
+    {
+        return Err(RestoreError::Integrity(
+            "connector draft immutable structure is invalid".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draft_identity(
     account_id: &str,
@@ -2136,6 +2529,8 @@ fn draft_identity(
     source_fingerprint: &str,
     policy_decision_id: &str,
     requester_id: &str,
+    connector_version: &str,
+    api_version: &str,
     created: u128,
     expires: u128,
 ) -> String {
@@ -2147,8 +2542,8 @@ fn draft_identity(
         source_fingerprint,
         policy_decision_id,
         requester_id,
-        CONNECTOR_VERSION,
-        CONNECTOR_API_VERSION,
+        connector_version,
+        api_version,
     ] {
         hasher.update(value.as_bytes());
         hasher.update([0]);
@@ -2269,6 +2664,13 @@ fn audit_connector_log_for_account(
     path: &Path,
     expected_account_id: Option<&str>,
 ) -> Result<ConnectorAuditReport, RestoreError> {
+    verified_connector_log_for_account(path, expected_account_id).map(|(report, _)| report)
+}
+
+fn verified_connector_log_for_account(
+    path: &Path,
+    expected_account_id: Option<&str>,
+) -> Result<(ConnectorAuditReport, Vec<ConnectorAuditEvent>), RestoreError> {
     ensure_private_regular_file(path)?;
     let file = File::open(path)?;
     let descriptor = std::os::fd::AsRawFd::as_raw_fd(&file);
@@ -2287,7 +2689,7 @@ fn audit_connector_log_for_account(
 fn audit_connector_log_file(
     file: &File,
     expected_account_id: Option<&str>,
-) -> Result<ConnectorAuditReport, RestoreError> {
+) -> Result<(ConnectorAuditReport, Vec<ConnectorAuditEvent>), RestoreError> {
     if file.metadata()?.len() > MAX_CONNECTOR_AUDIT_BYTES {
         return Err(RestoreError::Integrity(
             "connector audit log exceeds the verification limit".to_string(),
@@ -2299,6 +2701,7 @@ fn audit_connector_log_file(
     let mut seen_chained = false;
     let mut account_id: Option<String> = None;
     let mut event_ids = BTreeSet::new();
+    let mut events = Vec::new();
     let mut report = ConnectorAuditReport {
         format_version: 1,
         privacy_safe_summary: true,
@@ -2404,8 +2807,9 @@ fn audit_connector_log_file(
             }
             ConnectorAuditStage::Request => {}
         }
+        events.push(event);
     }
-    Ok(report)
+    Ok((report, events))
 }
 
 fn validate_connector_audit_event(event: &ConnectorAuditEvent) -> Result<(), RestoreError> {

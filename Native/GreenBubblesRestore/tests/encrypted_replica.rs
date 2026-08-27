@@ -274,11 +274,75 @@ fn serves_scoped_replica_reads_and_complete_non_executing_drafts() {
     assert_eq!(audit_report.approval_event_count, 0);
     assert_eq!(audit_report.attempt_event_count, 0);
     assert_eq!(audit_report.reconciliation_event_count, 0);
+    let state_audit = service.audit_state().unwrap();
+    assert!(state_audit.privacy_safe_summary);
+    assert_eq!(state_audit.draft_file_count, 1);
+    assert_eq!(state_audit.structurally_valid_draft_count, 1);
+    assert_eq!(state_audit.currently_previewable_draft_count, 1);
+    assert_eq!(state_audit.stale_draft_count, 0);
+    assert_eq!(state_audit.expired_draft_count, 0);
+    assert_eq!(state_audit.reviewed_draft_count, 1);
+    assert_eq!(state_audit.completed_draft_request_event_count, 1);
+    assert_eq!(state_audit.completed_draft_review_event_count, 1);
+    assert_eq!(state_audit.gated_action_stage_event_count, 0);
+    let mut state_audit_process = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .arg("audit-connector-state")
+        .args([&replica, &policy, &audit, &drafts])
+        .arg("--replica-key-stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    state_audit_process
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{}\n", "31".repeat(32)).as_bytes())
+        .unwrap();
+    let state_audit_output = state_audit_process.wait_with_output().unwrap();
+    assert!(
+        state_audit_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&state_audit_output.stderr)
+    );
+    let state_audit_json: serde_json::Value =
+        serde_json::from_slice(&state_audit_output.stdout).unwrap();
+    assert_eq!(state_audit_json["privacySafeSummary"], true);
+    assert_eq!(state_audit_json["draftFileCount"], 1);
+    assert!(state_audit_json.get("accountId").is_none());
+    let state_audit_text = String::from_utf8(state_audit_output.stdout).unwrap();
+    for private_value in [
+        "account-a",
+        "conversation-a",
+        "immutable synthetic draft body",
+        receipt.draft_id.as_str(),
+        receipt.policy_decision_id.as_str(),
+    ] {
+        assert!(!state_audit_text.contains(private_value));
+    }
+
+    let stale_policy_path = private.join("stale-policy.json");
+    let mut stale_policy: serde_json::Value =
+        serde_json::from_slice(&fs::read(&policy).unwrap()).unwrap();
+    stale_policy["maximumDraftBytes"] = json!(16_383);
+    fs::write(
+        &stale_policy_path,
+        serde_json::to_vec_pretty(&stale_policy).unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&stale_policy_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let stale_service =
+        ConnectorService::open(&replica, &key, &stale_policy_path, &audit, &drafts).unwrap();
+    let stale_state = stale_service.audit_state().unwrap();
+    assert_eq!(stale_state.currently_previewable_draft_count, 0);
+    assert_eq!(stale_state.stale_draft_count, 1);
 
     let mut tampered: serde_json::Value =
         serde_json::from_slice(&fs::read(&draft_path).unwrap()).unwrap();
     tampered["renderedText"] = json!("tampered");
     fs::write(&draft_path, serde_json::to_vec_pretty(&tampered).unwrap()).unwrap();
+    assert!(service.audit_state().is_err());
     let rejected = service.handle(connector_request(
         "tampered-preview",
         ConnectorDestination::Local,

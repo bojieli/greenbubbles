@@ -185,3 +185,10 @@ Any format-1 prefix is retained but explicitly reported as unchained. Preview
 operations provide the review transition available in the draft-only phase;
 approval, attempt, and reconciliation transitions will be introduced only with
 a gated action layer. See `CONNECTOR_AUDIT.md`.
+
+The separate local `audit-connector-state` command requires the replica key
+through stdin and verifies every draft filename, immutable content binding,
+current/stale/expired state, and one-to-one completed request linkage against
+the chained journal. It also resolves every completed review back to a draft
+and rejects gated lifecycle stages. Its output is aggregate-only and it is not
+an agent-facing connector operation.

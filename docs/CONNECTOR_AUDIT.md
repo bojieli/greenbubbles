@@ -46,3 +46,37 @@ The current serving process can produce only request, draft-requested, and
 draft-reviewed stages. The schema names future approval, attempt, and
 reconciliation stages so the verifier can count them, but no operation can
 produce those stages while Phase 4 is gated.
+
+## Full connector-state audit
+
+The key-gated state audit additionally opens the encrypted replica and current
+policy and verifies the dedicated connector draft directory:
+
+```sh
+cargo run --locked \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  audit-connector-state <replica> <policy> <audit-log> <draft-directory> \
+  --replica-key-stdin
+```
+
+Every directory entry must be a single-link, mode-`0600`, bounded JSON draft
+whose filename equals its recomputed immutable identity. Unknown JSON fields,
+duplicate attachments/participants, missing attachment sizes or digests,
+invalid reply evidence, inconsistent recipient evidence, excessive expiry,
+and any body or binding mutation fail closed.
+
+Drafts are opened with no-follow descriptors and checked before and after each
+bounded read. The verifier fingerprints both the journal and the complete draft
+directory again before returning, so a concurrent creation, replacement, or
+audit append cannot produce a mixed-state success report; the operator retries
+after the connector becomes quiescent.
+
+The audit then distinguishes structurally valid drafts from drafts that are
+expired or stale under the current policy, connector/API version, or replica
+checkpoint. Every draft must have exactly one matching completed
+`draftRequested` journal event, and every completed `draftReviewed` event must
+resolve back to the same draft, conversation, and policy decision. The command
+rejects any approval, attempt, or reconciliation stage while Phase 4 remains
+closed. Its output contains counts and booleans only; it emits no draft text,
+recipient, account, conversation, requester, path, or stable identity.

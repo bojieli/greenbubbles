@@ -118,6 +118,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let report = audit_connector_log(&audit_log)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        "audit-connector-state" => {
+            let replica = required_path(arguments.next(), "replica path")?;
+            let policy = required_path(arguments.next(), "tool policy path")?;
+            let audit = required_path(arguments.next(), "connector audit log")?;
+            let drafts = required_path(arguments.next(), "connector draft directory")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if !remaining.iter().any(|value| value == "--replica-key-stdin") {
+                return Err("replica keys must be supplied with --replica-key-stdin".into());
+            }
+            let key = ReplicaKey::read_stdin()?;
+            let service = ConnectorService::open(&replica, &key, &policy, &audit, &drafts)?;
+            let report = service.audit_state()?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         "policy" => {
             let archive = required_path(arguments.next(), "archive directory")?;
             let policy_path = required_path(arguments.next(), "policy path")?;
@@ -444,6 +458,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore audit-archive <archive>\n",
                     "  greenbubbles-restore audit-acquisition-chain <previous-snapshot> <current-snapshot>\n",
                     "  greenbubbles-restore audit-connector-log <connector-audit-log>\n",
+                    "  greenbubbles-restore audit-connector-state <replica-path> <policy-file> <connector-audit-log> <draft-directory> --replica-key-stdin\n",
                     "  greenbubbles-restore policy <archive> <policy-file> <conversation-id>... [--max-page-size <n>]\n",
                     "  greenbubbles-restore read <archive> <policy-file> <conversation-id> [--cursor <cursor>] [--limit <n>]\n",
                     "  greenbubbles-restore reconcile <previous-archive> <current-archive> <policy-file> <events-output>\n",

@@ -648,6 +648,12 @@ for current request/draft/review evidence; it is not a signature and does not
 make the gated approval/attempt/reconciliation stages producible. See
 `docs/CONNECTOR_AUDIT.md`.
 
+A key-gated connector-state audit also recomputes every stored draft identity,
+checks bounded owner-only files, separates current from stale/expired drafts,
+requires one completed request event per draft, resolves completed reviews, and
+rejects any gated lifecycle stage. Its report is aggregate-only and the command
+is deliberately absent from agent-facing connector/MCP operations.
+
 Exit gate: GreenBubbles is independently useful to people, scripts, OpenClaw,
 Codex, Claude, and downstream memory engines, and hostile source content cannot
 access another conversation or turn a draft into an action.

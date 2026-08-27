@@ -182,6 +182,12 @@ cargo run --locked \
   --manifest-path Native/GreenBubblesRestore/Cargo.toml \
   --bin greenbubbles-restore -- \
   audit-connector-log <owner-only-connector-audit.ndjson>
+
+cargo run --locked \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  audit-connector-state <replica> <policy> <audit-log> <draft-directory> \
+  --replica-key-stdin
 ```
 
 `preflight` verifies every copied database/WAL/SHM digest and reports the
@@ -218,6 +224,12 @@ file boundary, event structure, unique identities, account consistency, event
 digests, and predecessor chain. Its report is aggregate-only and explicitly
 counts any unchained legacy prefix. See
 [docs/CONNECTOR_AUDIT.md](docs/CONNECTOR_AUDIT.md).
+
+`audit-connector-state` additionally opens the encrypted replica and current
+policy, recomputes every immutable draft identity, classifies expired/stale
+drafts, cross-links draft/request/review records, and rejects gated action
+stages. The replica key is accepted only through standard input, and the report
+contains no identities or bodies.
 
 Production completeness is deliberately strict. The restoration report must
 satisfy `source rows = restored rows + rejected rows`, with zero rejections,
