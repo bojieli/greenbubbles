@@ -314,13 +314,13 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
             .collect(),
     };
     let conversation = CanonicalConversation {
-        conversation_id: "conversation-a".to_string(),
+        conversation_id: scoped_id(ACCOUNT, b"conversation"),
         account_id: ACCOUNT.to_string(),
         source_identifier_base64: "Y29udmVyc2F0aW9u".to_string(),
         kind: ConversationKind::Direct,
-        participant_ids: vec!["participant-a".to_string()],
+        participant_ids: vec![scoped_id(ACCOUNT, b"participant")],
         memberships: vec![ConversationMembership {
-            participant_id: "participant-a".to_string(),
+            participant_id: scoped_id(ACCOUNT, b"participant"),
             role: ConversationMembershipRole::DirectPeer,
             display_name_base64: None,
         }],
@@ -329,7 +329,7 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
         source_records: Vec::new(),
     };
     let participant = CanonicalParticipant {
-        participant_id: "participant-a".to_string(),
+        participant_id: scoped_id(ACCOUNT, b"participant"),
         account_id: ACCOUNT.to_string(),
         source_identifier_base64: "cGFydGljaXBhbnQ=".to_string(),
         alias_base64: None,
@@ -337,7 +337,7 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
         nickname_base64: None,
         display_name_base64: None,
         local_profile_state: LocalProfileState::Hydrated,
-        conversation_ids: vec!["conversation-a".to_string()],
+        conversation_ids: vec![scoped_id(ACCOUNT, b"conversation")],
         source_records: Vec::new(),
     };
     let connector_media = archive.join("connector-media.bin");
@@ -424,10 +424,10 @@ fn message(
         source_table_id: format!("table-{source_set_id}"),
         source_table_name: format!("Msg_{source_set_id}"),
         source_row_id,
-        conversation_id: "conversation-a".to_string(),
+        conversation_id: scoped_id(ACCOUNT, b"conversation"),
         conversation_source_identifier_base64: "Y29udmVyc2F0aW9u".to_string(),
-        sender_id: Some("participant-a".to_string()),
-        sender_source_identifier_base64: None,
+        sender_id: Some(scoped_id(ACCOUNT, b"participant")),
+        sender_source_identifier_base64: Some("cGFydGljaXBhbnQ=".to_string()),
         local_id: Some(source_row_id),
         server_id: Some(if source_set_id == "set-b" { 200 } else { 100 }),
         sort_sequence: Some(sort_sequence),

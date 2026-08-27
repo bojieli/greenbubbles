@@ -155,6 +155,13 @@ per-table accounting and schema-ledger check. Their canonical row identities
 and source-participant identities are re-derived from preserved source evidence,
 and interaction kinds are checked against their raw types.
 
+Conversation, participant, cached-author, cached-interaction-participant, and
+message sender IDs are account-scoped derivations of the corresponding
+source-preserving identifiers. The audit re-derives each mapping, requires
+message identities to agree with the canonical entity ledgers, and verifies
+that every entity source record has a unique row identity and an exact covered
+table name/raw-column set.
+
 Relationship completion also requires that no relationship remain in the
 transient `pending` state. Every unresolved relationship must be independently
 accounted for as target-not-present-locally, missing-identifier, or ambiguous;

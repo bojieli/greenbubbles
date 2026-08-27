@@ -50,7 +50,9 @@ The auditor fails closed unless all of these checks pass:
 - conversations are deterministically grouped, per-conversation ordinals are
   contiguous, and one conversation does not silently change ordering basis;
 - every message conversation and sender resolves to the account-scoped entity
-  ledgers, participant/membership links are bidirectional, every resolved
+  ledgers and has a canonical ID independently re-derived from its preserved
+  source identifier; participant/membership links are bidirectional, entity
+  source rows match the complete schema ledger without duplication, every resolved
   relationship target exists in the same conversation, every resolved,
   absent-target, missing-identifier, ambiguous, and pending relationship state
   reproduces its integrity counter, and every message artifact ID and role

@@ -67,7 +67,9 @@ struct MessageAudit {
     canonical_ids: HashSet<String>,
     canonical_conversations: HashMap<String, String>,
     conversation_ids: HashSet<String>,
+    conversation_sources: HashMap<String, String>,
     participant_ids: HashSet<String>,
+    participant_sources: HashMap<String, String>,
     participant_memberships: Vec<(String, String)>,
     artifact_ids: HashSet<String>,
     artifact_references: Vec<(String, crate::ArtifactRole)>,
@@ -148,7 +150,7 @@ pub fn audit_archive(archive_directory: &Path) -> Result<ArchiveAuditReport, Res
         |value| value.participant_id.clone(),
         "participant",
     )?;
-    verify_entities(&conversations, &participants, &report)?;
+    verify_entities(&conversations, &participants, &report, &coverage)?;
 
     let messages = audit_messages(&archive_root.join("messages.ndjson"), &report, &coverage)?;
     verify_message_entities(&messages, &conversations, &participants)?;
@@ -426,7 +428,18 @@ fn audit_messages(
             return Err(integrity("message identity or account binding is invalid"));
         }
         validate_base64(&message.conversation_source_identifier_base64)?;
-        validate_optional_base64(message.sender_source_identifier_base64.as_deref())?;
+        validate_scoped_identifier(
+            &report.account_id,
+            Some(&message.conversation_source_identifier_base64),
+            Some(&message.conversation_id),
+            "message conversation",
+        )?;
+        validate_scoped_identifier(
+            &report.account_id,
+            message.sender_source_identifier_base64.as_deref(),
+            message.sender_id.as_deref(),
+            "message sender",
+        )?;
         validate_optional_base64(message.content_base64.as_deref())?;
         validate_optional_base64(message.packed_info_base64.as_deref())?;
         validate_raw_columns(&message.raw_columns)?;
@@ -507,8 +520,34 @@ fn audit_messages(
         result
             .conversation_ids
             .insert(message.conversation_id.clone());
+        if result
+            .conversation_sources
+            .insert(
+                message.conversation_id.clone(),
+                message.conversation_source_identifier_base64.clone(),
+            )
+            .is_some_and(|value| value != message.conversation_source_identifier_base64)
+        {
+            return Err(integrity(
+                "one conversation has inconsistent source identifiers",
+            ));
+        }
         if let Some(sender) = &message.sender_id {
             result.participant_ids.insert(sender.clone());
+            if result
+                .participant_sources
+                .insert(
+                    sender.clone(),
+                    message.sender_source_identifier_base64.clone().unwrap(),
+                )
+                .is_some_and(|value| {
+                    Some(value.as_str()) != message.sender_source_identifier_base64.as_deref()
+                })
+            {
+                return Err(integrity(
+                    "one message sender has inconsistent source identifiers",
+                ));
+            }
             result
                 .participant_memberships
                 .push((message.conversation_id.clone(), sender.clone()));
@@ -990,7 +1029,23 @@ fn verify_entities(
     conversations: &HashMap<String, CanonicalConversation>,
     participants: &HashMap<String, CanonicalParticipant>,
     report: &RestorationReport,
+    coverage: &RestorationCoverage,
 ) -> Result<(), RestoreError> {
+    let covered_tables = coverage
+        .all_tables
+        .iter()
+        .map(|table| {
+            (
+                (
+                    table.source_set_id.as_str(),
+                    table.source_logical_path.as_str(),
+                    table.source_table_id.as_str(),
+                ),
+                table,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut entity_source_rows = HashSet::new();
     for (identifier, conversation) in conversations {
         if identifier.is_empty()
             || conversation.account_id != report.account_id
@@ -1006,8 +1061,14 @@ fn verify_entities(
             ));
         }
         validate_base64(&conversation.source_identifier_base64)?;
+        validate_scoped_identifier(
+            &report.account_id,
+            Some(&conversation.source_identifier_base64),
+            Some(identifier),
+            "conversation",
+        )?;
         for source in &conversation.source_records {
-            validate_raw_columns(&source.raw_columns)?;
+            validate_entity_source_record(source, &covered_tables, &mut entity_source_rows)?;
         }
         for participant in &conversation.participant_ids {
             if !participants.contains_key(participant) {
@@ -1036,7 +1097,19 @@ fn verify_entities(
             .iter()
             .map(|membership| membership.participant_id.clone())
             .collect::<HashSet<_>>();
-        if participant_ids != membership_ids {
+        let unique_memberships = conversation
+            .memberships
+            .iter()
+            .map(|membership| {
+                (
+                    membership.participant_id.as_str(),
+                    format!("{:?}", membership.role),
+                )
+            })
+            .collect::<HashSet<_>>();
+        if participant_ids != membership_ids
+            || unique_memberships.len() != conversation.memberships.len()
+        {
             return Err(integrity(
                 "conversation participant and membership lists disagree",
             ));
@@ -1049,6 +1122,14 @@ fn verify_entities(
             return Err(integrity(
                 "conversation owner is absent from its participant list",
             ));
+        }
+        if let Some(owner) = &conversation.owner_participant_id {
+            if !conversation.memberships.iter().any(|membership| {
+                &membership.participant_id == owner
+                    && membership.role == ConversationMembershipRole::Owner
+            }) {
+                return Err(integrity("conversation owner lacks an owner membership"));
+            }
         }
     }
     for (identifier, participant) in participants {
@@ -1066,12 +1147,18 @@ fn verify_entities(
             ));
         }
         validate_base64(&participant.source_identifier_base64)?;
+        validate_scoped_identifier(
+            &report.account_id,
+            Some(&participant.source_identifier_base64),
+            Some(identifier),
+            "participant",
+        )?;
         validate_optional_base64(participant.alias_base64.as_deref())?;
         validate_optional_base64(participant.remark_base64.as_deref())?;
         validate_optional_base64(participant.nickname_base64.as_deref())?;
         validate_optional_base64(participant.display_name_base64.as_deref())?;
         for source in &participant.source_records {
-            validate_raw_columns(&source.raw_columns)?;
+            validate_entity_source_record(source, &covered_tables, &mut entity_source_rows)?;
         }
         for conversation in &participant.conversation_ids {
             let conversation = conversations
@@ -1112,6 +1199,72 @@ fn verify_message_entities(
                 "message sender is absent from the conversation membership",
             ));
         }
+    }
+    for (identifier, source) in &messages.conversation_sources {
+        if conversations
+            .get(identifier)
+            .is_none_or(|conversation| &conversation.source_identifier_base64 != source)
+        {
+            return Err(integrity(
+                "message conversation source disagrees with its canonical entity",
+            ));
+        }
+    }
+    for (identifier, source) in &messages.participant_sources {
+        if participants
+            .get(identifier)
+            .is_none_or(|participant| &participant.source_identifier_base64 != source)
+        {
+            return Err(integrity(
+                "message sender source disagrees with its canonical participant",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_entity_source_record<'a>(
+    source: &crate::EntitySourceRecord,
+    covered_tables: &HashMap<(&'a str, &'a str, &'a str), &'a crate::TableSchemaCoverage>,
+    source_rows: &mut HashSet<(String, String, String, i64)>,
+) -> Result<(), RestoreError> {
+    if source.source_set_id.is_empty()
+        || source.source_logical_path.is_empty()
+        || source.source_table_id.is_empty()
+        || source.source_table_name.is_empty()
+        || !source_rows.insert((
+            source.source_set_id.clone(),
+            source.source_logical_path.clone(),
+            source.source_table_id.clone(),
+            source.source_row_id,
+        ))
+    {
+        return Err(integrity(
+            "entity source record has missing or duplicate provenance",
+        ));
+    }
+    validate_raw_columns(&source.raw_columns)?;
+    let table = covered_tables
+        .get(&(
+            source.source_set_id.as_str(),
+            source.source_logical_path.as_str(),
+            source.source_table_id.as_str(),
+        ))
+        .ok_or_else(|| integrity("entity source record is absent from table coverage"))?;
+    let raw_columns = source
+        .raw_columns
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let table_columns = table
+        .columns
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if source.source_table_name != table.source_table_name || raw_columns != table_columns {
+        return Err(integrity(
+            "entity source record disagrees with its covered table",
+        ));
     }
     Ok(())
 }
