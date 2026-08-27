@@ -297,7 +297,7 @@ public struct WeChatIntegrationSurfaceInspector: Sendable {
     )
   }
 
-  static let pinnedWeChat4112 = WeChatClientBuildFingerprint(
+  public static let pinnedWeChat4112 = WeChatClientBuildFingerprint(
     bundleIdentifier: "com.tencent.xinWeChat",
     marketingVersion: "4.1.12",
     buildVersion: "269365",

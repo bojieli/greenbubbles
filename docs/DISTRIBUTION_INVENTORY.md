@@ -44,11 +44,19 @@ review.
 
 ## Swift dependency boundary
 
-`Package.swift` contains no external Swift package dependency. Both libraries,
-both executables, and their tests use only this repository's Swift targets and
-Apple platform frameworks exposed by the SDK. This means there is currently no
-third-party Swift package notice set, but Apple SDK terms and the project's own
-license decision still apply to distribution.
+`Package.swift` contains no external Swift package dependency. All three
+libraries, all three executables, and their tests use only this repository's
+Swift targets and Apple platform frameworks exposed by the SDK. This means
+there is currently no third-party Swift package notice set, but Apple SDK
+terms and the project's own license decision still apply to distribution.
+
+The `greenbubbles-acquire` executable and its `GreenBubblesAcquire` library
+implement the WeChat passphrase capture, PBKDF2 derivation, and SQLCipher4
+HMAC verification ported from wcdb-key-tool
+(https://github.com/TANGandXUE/wcdb-key-tool), which is MIT licensed. Each
+derived source file carries a one-line attribution header; the port does not
+copy upstream files into this repository, and distribution review must treat
+it as MIT-licensed derived material.
 
 ## Rust dependency boundary
 

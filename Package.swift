@@ -10,15 +10,24 @@ let package = Package(
   products: [
     .library(name: "GreenBubblesCore", targets: ["GreenBubblesCore"]),
     .library(name: "GreenBubblesWeb", targets: ["GreenBubblesWeb"]),
+    .library(name: "GreenBubblesAcquire", targets: ["GreenBubblesAcquire"]),
     .executable(name: "greenbubbles", targets: ["GreenBubblesCLI"]),
     .executable(
       name: "greenbubbles-public-article",
       targets: ["GreenBubblesArticleCLI"]
     ),
+    .executable(
+      name: "greenbubbles-acquire",
+      targets: ["GreenBubblesAcquireCLI"]
+    ),
   ],
   targets: [
     .target(name: "GreenBubblesCore"),
     .target(name: "GreenBubblesWeb"),
+    .target(
+      name: "GreenBubblesAcquire",
+      dependencies: ["GreenBubblesCore"]
+    ),
     .executableTarget(
       name: "GreenBubblesCLI",
       dependencies: ["GreenBubblesCore"]
@@ -27,6 +36,10 @@ let package = Package(
       name: "GreenBubblesArticleCLI",
       dependencies: ["GreenBubblesWeb"]
     ),
+    .executableTarget(
+      name: "GreenBubblesAcquireCLI",
+      dependencies: ["GreenBubblesAcquire"]
+    ),
     .testTarget(
       name: "GreenBubblesCoreTests",
       dependencies: ["GreenBubblesCore"]
@@ -34,6 +47,10 @@ let package = Package(
     .testTarget(
       name: "GreenBubblesWebTests",
       dependencies: ["GreenBubblesWeb"]
+    ),
+    .testTarget(
+      name: "GreenBubblesAcquireTests",
+      dependencies: ["GreenBubblesAcquire"]
     ),
   ]
 )
