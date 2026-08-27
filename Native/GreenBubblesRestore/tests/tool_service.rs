@@ -41,6 +41,7 @@ fn enforces_scopes_minimizes_context_and_creates_drafts_only() {
             client_build_compatibility: Default::default(),
             acquisition: None,
             archive_scope: Default::default(),
+            media_phase: Default::default(),
             messages_path: "private".to_string(),
             rejections_path: "private".to_string(),
             artifacts_path: "private".to_string(),

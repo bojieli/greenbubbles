@@ -9,7 +9,9 @@ use greenbubbles_restore::manifest::{
     PathReference, SnapshotEntry, SnapshotFileRole, SnapshotManifest, SourceFileFingerprint,
 };
 use greenbubbles_restore::reconcile::reconcile_archives;
-use greenbubbles_restore::{prepare_catalog, restore_catalog, RestorationOptions};
+use greenbubbles_restore::{
+    prepare_catalog, restore_catalog, RestorationMediaPhase, RestorationOptions,
+};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
@@ -339,15 +341,50 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
     .unwrap();
 
     let catalog = prepare_catalog(&snapshot, None).unwrap();
+    let text_first_output = fixture.path().join("text-first");
+    let text_first_report = restore_catalog(
+        &catalog,
+        &RestorationOptions {
+            output_directory: text_first_output.clone(),
+            account_root: Some(account.clone()),
+            defer_media: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        text_first_report.media_phase,
+        RestorationMediaPhase::Deferred
+    );
+    assert!(!text_first_report.completion.full_restoration_achieved);
+    assert_eq!(text_first_report.integrity.restored_row_count, 9);
+    assert!(ndjson(text_first_output.join("artifacts.ndjson"))
+        .iter()
+        .all(|artifact| artifact["verificationDetail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("explicitly deferred"))));
+    assert_eq!(
+        fs::read_dir(text_first_output.join("derived"))
+            .unwrap()
+            .count(),
+        0
+    );
+
     let output = fixture.path().join("restored");
     let report = restore_catalog(
         &catalog,
         &RestorationOptions {
             output_directory: output.clone(),
             account_root: Some(account.clone()),
+            defer_media: false,
         },
     )
     .unwrap();
+
+    assert_eq!(report.media_phase, RestorationMediaPhase::Resolved);
+    assert_eq!(
+        text_first_report.source_fingerprint,
+        report.source_fingerprint
+    );
 
     assert!(report.integrity.row_equation_holds());
     assert_eq!(report.integrity.source_row_count, 9);
@@ -546,6 +583,7 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
         &RestorationOptions {
             output_directory: fixture.path().join("wrong-account-output"),
             account_root: Some(wrong_account),
+            defer_media: false,
         },
     )
     .unwrap_err();

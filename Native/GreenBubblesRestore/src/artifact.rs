@@ -54,6 +54,7 @@ pub struct ArtifactResolver {
     v2_image_key: Option<[u8; 16]>,
     artifacts: BTreeMap<String, CanonicalArtifact>,
     verified_file_cache: HashMap<String, String>,
+    deferred: bool,
 }
 
 impl ArtifactResolver {
@@ -61,6 +62,7 @@ impl ArtifactResolver {
         catalog: &PreparedCatalog,
         account_root: Option<&Path>,
         output_directory: &Path,
+        defer_media: bool,
     ) -> Result<Self, RestoreError> {
         let account_root = match account_root {
             Some(path) => {
@@ -80,16 +82,32 @@ impl ArtifactResolver {
             None => None,
         };
 
-        let (resource_by_local, resource_by_server) = load_resource_index(catalog)?;
-        let (voice_by_local, voice_by_server) = load_voice_index(catalog)?;
-        let file_index = account_root
-            .as_deref()
-            .map(build_file_index)
-            .transpose()?
-            .unwrap_or_default();
-        let v2_image_key = account_root
-            .as_deref()
-            .and_then(|root| wx_media::derive_v2_key_from_dir(root).ok());
+        let (resource_by_local, resource_by_server) = if defer_media {
+            (HashMap::new(), HashMap::new())
+        } else {
+            load_resource_index(catalog)?
+        };
+        let (voice_by_local, voice_by_server) = if defer_media {
+            (HashMap::new(), HashMap::new())
+        } else {
+            load_voice_index(catalog)?
+        };
+        let file_index = if defer_media {
+            MediaFileIndex::default()
+        } else {
+            account_root
+                .as_deref()
+                .map(build_file_index)
+                .transpose()?
+                .unwrap_or_default()
+        };
+        let v2_image_key = if defer_media {
+            None
+        } else {
+            account_root
+                .as_deref()
+                .and_then(|root| wx_media::derive_v2_key_from_dir(root).ok())
+        };
 
         let derived = output_directory.join("derived");
         create_owner_only_directory(&derived)?;
@@ -105,6 +123,7 @@ impl ArtifactResolver {
             v2_image_key,
             artifacts: BTreeMap::new(),
             verified_file_cache: HashMap::new(),
+            deferred: defer_media,
         })
     }
 
@@ -115,6 +134,49 @@ impl ArtifactResolver {
         let Some((kind, default_role)) = media_descriptor(message) else {
             return Ok(Vec::new());
         };
+
+        if self.deferred {
+            let identity = format!(
+                "deferred:{}:{kind:?}:{default_role:?}",
+                message.canonical_id
+            );
+            let artifact_id = opaque_id(identity.as_bytes());
+            self.artifacts
+                .entry(artifact_id.clone())
+                .or_insert_with(|| CanonicalArtifact {
+                    artifact_id: artifact_id.clone(),
+                    kind,
+                    role: default_role,
+                    availability: ArtifactAvailability::MetadataMissing,
+                    source_md5: None,
+                    source_local_path: None,
+                    account_relative_path: None,
+                    source_byte_count: None,
+                    source_device_id: None,
+                    source_file_id: None,
+                    source_modified_seconds: None,
+                    source_modified_nanoseconds: None,
+                    source_sha256: None,
+                    detected_format: None,
+                    materialized_local_path: None,
+                    decoded_local_path: None,
+                    decoded_byte_count: None,
+                    decoded_sha256: None,
+                    decoded_format: None,
+                    decode_state: ArtifactDecodeState::NotRequired,
+                    verification_detail: Some(
+                        "media resolution was explicitly deferred from the text restoration pass"
+                            .to_string(),
+                    ),
+                    source_resource_set_id: None,
+                    source_resource_row_id: None,
+                });
+            return Ok(vec![MessageArtifactReference {
+                artifact_id,
+                role: default_role,
+                preferred: true,
+            }]);
+        }
 
         if kind == ArtifactKind::Voice {
             return self.resolve_voice(message);

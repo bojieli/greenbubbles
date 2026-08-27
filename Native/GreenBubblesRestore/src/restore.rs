@@ -21,6 +21,7 @@ use crate::{
 pub struct RestorationOptions {
     pub output_directory: PathBuf,
     pub account_root: Option<PathBuf>,
+    pub defer_media: bool,
 }
 
 pub fn restore_catalog(
@@ -68,6 +69,7 @@ pub fn restore_catalog(
         catalog,
         options.account_root.as_deref(),
         &options.output_directory,
+        options.defer_media,
     )?;
     let account_id = options
         .account_root
@@ -434,6 +436,9 @@ pub fn restore_catalog(
 
     let client_build_compatibility = catalog.manifest.client_build_compatibility();
     let mut completion = RestorationCompletion::evaluate(&integrity);
+    if options.defer_media {
+        completion.full_restoration_achieved = false;
+    }
     if catalog.manifest.manifest_format_version >= 2
         && !client_build_compatibility.production_compatible
     {
@@ -457,6 +462,11 @@ pub fn restore_catalog(
         client_build_compatibility,
         acquisition: catalog.manifest.acquisition.clone(),
         archive_scope,
+        media_phase: if options.defer_media {
+            crate::RestorationMediaPhase::Deferred
+        } else {
+            crate::RestorationMediaPhase::Resolved
+        },
         messages_path: messages_path.display().to_string(),
         rejections_path: rejections_path.display().to_string(),
         artifacts_path: artifacts_path.display().to_string(),

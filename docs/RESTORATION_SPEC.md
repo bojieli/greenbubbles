@@ -33,6 +33,14 @@ A restoration is complete only when all of the following are true:
    account secrets, plaintext histories, or stable identifiers in Git or normal
    logs.
 
+`restore --defer-media` is the explicit text-first mode. It still emits a
+reference for every media-bearing message, but that reference is labeled as
+deferred and carries no guessed path or digest. The report sets
+`mediaPhase: deferred` and cannot claim full restoration. Re-running from the
+identical immutable snapshot without the flag produces a `resolved` archive
+with the same source fingerprint and verified artifact paths/digests; the
+encrypted replica treats that as a new restoration revision.
+
 ## Canonical message envelope
 
 Every message includes these source-preserving fields even if its typed decoder

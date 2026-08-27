@@ -271,6 +271,10 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
     assert!(status.checkpoint_revision.is_some());
     assert_eq!(status.decoder_name.as_deref(), Some("synthetic"));
     assert_eq!(status.decoder_version.as_deref(), Some("1"));
+    assert_eq!(
+        status.media_phase,
+        Some(greenbubbles_restore::RestorationMediaPhase::Resolved)
+    );
     assert_eq!(status.last_sync_kind.as_deref(), Some("bootstrap"));
     assert!(status.last_sync_started_unix_nanoseconds.is_some());
     assert!(status.last_sync_duration_milliseconds.is_some());
@@ -592,6 +596,7 @@ fn build_archive(parent: &Path, name: &str, account: &str, fingerprint: &str) ->
         client_build_compatibility: Default::default(),
         acquisition: None,
         archive_scope: Default::default(),
+        media_phase: Default::default(),
         messages_path: "private".to_string(),
         rejections_path: "private".to_string(),
         artifacts_path: "private".to_string(),

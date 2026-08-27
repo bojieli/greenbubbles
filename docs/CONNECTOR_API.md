@@ -78,7 +78,7 @@ text send, reply send, and file send independently. Send and active-read
 capabilities remain unavailable until their controlling Phase 0.5 gates pass.
 `status` includes exact client-build compatibility, authoritative checkpoint
 and revision, acquisition mode, decoder version, latest synchronization and
-integrity-scan timing, replica coverage health, and the enabled
+integrity-scan timing, media phase, replica coverage health, and the enabled
 conversation/operation scope.
 
 ## Deterministic authorization and minimization

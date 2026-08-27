@@ -84,6 +84,7 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
         &RestorationOptions {
             output_directory: output.clone(),
             account_root: None,
+            defer_media: false,
         },
     )
     .unwrap();

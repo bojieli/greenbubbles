@@ -377,6 +377,8 @@ pub struct RestorationReport {
     pub acquisition: Option<crate::SnapshotAcquisitionEvidence>,
     #[serde(default)]
     pub archive_scope: RestorationArchiveScope,
+    #[serde(default)]
+    pub media_phase: RestorationMediaPhase,
     pub messages_path: String,
     pub rejections_path: String,
     pub artifacts_path: String,
@@ -386,6 +388,14 @@ pub struct RestorationReport {
     pub report_path: String,
     pub integrity: RestorationIntegrity,
     pub completion: RestorationCompletion,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RestorationMediaPhase {
+    #[default]
+    Resolved,
+    Deferred,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

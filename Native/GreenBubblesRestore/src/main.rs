@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use greenbubbles_restore::{
     archive::{create_conversation_policy, read_conversation_page},
+    benchmark::{run_synthetic_benchmark, SyntheticBenchmarkConfig},
     connector::{ConnectorDestination, ConnectorService},
     merge::merge_incremental_archive,
     prepare_catalog,
@@ -35,6 +36,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = env::args().skip(1);
     let command = arguments.next().unwrap_or_else(|| "help".to_string());
     match command.as_str() {
+        "synthetic-benchmark" => {
+            let work_directory = required_path(arguments.next(), "private work directory")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            let defaults = SyntheticBenchmarkConfig::default();
+            let config = SyntheticBenchmarkConfig {
+                samples: option_usize(&remaining, "--samples")?.unwrap_or(defaults.samples),
+                small_message_count: option_usize(&remaining, "--small-messages")?
+                    .unwrap_or(defaults.small_message_count),
+                large_message_count: option_usize(&remaining, "--large-messages")?
+                    .unwrap_or(defaults.large_message_count),
+                burst_message_count: option_usize(&remaining, "--burst-messages")?
+                    .unwrap_or(defaults.burst_message_count),
+            };
+            let report = run_synthetic_benchmark(&work_directory, &config)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         "probe" => {
             let snapshot = required_path(arguments.next(), "snapshot directory")?;
             let use_passphrase = arguments.any(|value| value == "--passphrase-stdin");
@@ -59,6 +76,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let remaining = arguments.collect::<Vec<_>>();
             let use_passphrase = remaining.iter().any(|value| value == "--passphrase-stdin");
             let account_root = option_path(&remaining, "--account-root")?;
+            let defer_media = remaining.iter().any(|value| value == "--defer-media");
             let passphrase = if use_passphrase {
                 Some(DatabasePassphrase::read_stdin()?)
             } else {
@@ -70,6 +88,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 &RestorationOptions {
                     output_directory: output,
                     account_root,
+                    defer_media,
                 },
             )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -353,8 +372,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!(
                 concat!(
                     "Usage:\n",
+                    "  greenbubbles-restore synthetic-benchmark <private-work-directory> [--samples <n>] [--small-messages <n>] [--large-messages <n>] [--burst-messages <n>]\n",
                     "  greenbubbles-restore probe <snapshot> [--passphrase-stdin]\n",
-                    "  greenbubbles-restore restore <snapshot> <output> [--account-root <path>] [--passphrase-stdin]\n",
+                    "  greenbubbles-restore restore <snapshot> <output> [--account-root <path>] [--defer-media] [--passphrase-stdin]\n",
                     "  greenbubbles-restore policy <archive> <policy-file> <conversation-id>... [--max-page-size <n>]\n",
                     "  greenbubbles-restore read <archive> <policy-file> <conversation-id> [--cursor <cursor>] [--limit <n>]\n",
                     "  greenbubbles-restore reconcile <previous-archive> <current-archive> <policy-file> <events-output>\n",

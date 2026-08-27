@@ -86,6 +86,7 @@ fn decrypts_sqlcipher4_and_applies_committed_wal_frames() {
         &RestorationOptions {
             output_directory: output,
             account_root: None,
+            defer_media: false,
         },
     )
     .unwrap();

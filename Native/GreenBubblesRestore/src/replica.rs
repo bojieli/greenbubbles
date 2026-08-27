@@ -52,6 +52,7 @@ pub struct ReplicaStatus {
     pub checkpoint_revision: Option<String>,
     pub client_build_compatibility: Option<crate::ClientBuildCompatibilityEvidence>,
     pub acquisition_mode: Option<crate::SnapshotAcquisitionMode>,
+    pub media_phase: Option<crate::RestorationMediaPhase>,
     pub decoder_name: Option<String>,
     pub decoder_version: Option<String>,
     pub cipher_version: String,
@@ -381,6 +382,7 @@ pub fn replica_status(
             .map(|report| report.client_build_compatibility.clone()),
         acquisition_mode: stored_report
             .and_then(|report| report.acquisition.as_ref().map(|value| value.mode)),
+        media_phase: stored_report.map(|report| report.media_phase),
         decoder_name: stored_coverage.map(|coverage| coverage.decoder_name.clone()),
         decoder_version: stored_coverage.map(|coverage| coverage.decoder_version.clone()),
         cipher_version: opened.cipher_version,
@@ -2593,6 +2595,7 @@ fn archive_revision_digest(report: &RestorationReport, coverage: &RestorationCov
             &report.integrity,
             &report.completion,
             report.archive_scope,
+            report.media_phase,
             coverage,
         ))
         .expect("restoration revision serialization cannot fail"),

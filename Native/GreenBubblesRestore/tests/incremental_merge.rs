@@ -155,6 +155,7 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
         } else {
             RestorationArchiveScope::Authoritative
         },
+        media_phase: Default::default(),
         messages_path: "private".to_string(),
         rejections_path: "private".to_string(),
         artifacts_path: "private".to_string(),

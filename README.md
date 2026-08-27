@@ -89,6 +89,24 @@ satisfy `source rows = restored rows + rejected rows`, with zero rejections,
 zero duplicate canonical identities, no unknown observed message types, and no
 unexplained media state. See [docs/RESTORATION_SPEC.md](docs/RESTORATION_SPEC.md).
 
+For low-latency text publication, media traversal and decoding can be deferred:
+
+```sh
+cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  restore <snapshot> <private-text-archive> --defer-media --passphrase-stdin
+```
+
+This produces every canonical message immediately, gives media messages an
+explicit deferred artifact record, sets `mediaPhase` to `deferred`, and cannot
+claim complete restoration. Run restoration again from the same immutable
+snapshot without `--defer-media` (and with the authorized account root) to
+produce a fully resolved media archive. It retains the source fingerprint;
+`replica-sync` recognizes the changed restoration revision and commits the
+artifact/message enrichment without mixing pagination checkpoints.
+
+The release-mode synthetic benchmark and fault harness is documented in
+[docs/SYNTHETIC_BENCHMARK.md](docs/SYNTHETIC_BENCHMARK.md).
+
 ## Encrypted canonical replica
 
 The restored archive can be bootstrapped into a one-account SQLCipher replica.

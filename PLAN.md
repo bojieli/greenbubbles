@@ -457,7 +457,7 @@ Status: **in progress; canonical replica and transactional synchronization are i
 
 ### 2B. Change-proportional synchronization
 
-- [ ] Bootstrap once from a consistent snapshot, then process only plausible
+- [x] Bootstrap once from a consistent snapshot, then process only plausible
   changed shards/ranges plus a bounded reconciliation window.
 - [x] Treat filesystem and optional notification events only as wake-up hints;
   make source comparison and restoration authoritative.
@@ -469,7 +469,7 @@ Status: **in progress; canonical replica and transactional synchronization are i
   relationships, coverage, and verified connector-owned media paths.
 - [ ] Run occasional bounded integrity scans to recover from missed hints,
   timestamp anomalies, decoder upgrades, and checkpoint damage.
-- [ ] Keep attachment extraction, media decoding, thumbnails, and indexing off
+- [x] Keep attachment extraction, media decoding, thumbnails, and indexing off
   the path that makes new text searchable.
 - [x] Publish an ordered, resumable `get_changes(cursor)` stream for downstream
   consumers.
@@ -481,9 +481,9 @@ Status: **in progress; canonical replica and transactional synchronization are i
 - [x] Report synchronization health, last authoritative checkpoint, lag,
   supported version, enabled scope, known coverage gaps, and semantic decoder
   coverage.
-- [ ] Benchmark bootstrap and steady state on small and large authorized test
+- [x] Benchmark bootstrap and steady state on small and large authorized test
   archives.
-- [ ] Measure idle, one-message, burst, edit, recall, deletion, missed-hint,
+- [x] Measure idle, one-message, burst, edit, recall, deletion, missed-hint,
   decoder-upgrade, and crash/restart cases against the service objectives.
 - [x] Never let embeddings or LLM summaries become required for exact retrieval
   or lossless synchronization.

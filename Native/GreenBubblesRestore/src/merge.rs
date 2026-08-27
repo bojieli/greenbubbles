@@ -15,8 +15,8 @@ use crate::{
     ConversationMembershipRole, EntityDecodeState, EntitySourceRecord, LocalProfileState,
     MessageDirection, MessageOrderingBasis, RejectedRow, RelationshipResolutionState,
     RestorationArchiveScope, RestorationCompletion, RestorationCoverage, RestorationIntegrity,
-    RestorationReport, RestoreError, SemanticDecodeState, SnapshotAcquisitionMode,
-    TableCoverageRole, TypedPayload,
+    RestorationMediaPhase, RestorationReport, RestoreError, SemanticDecodeState,
+    SnapshotAcquisitionMode, TableCoverageRole, TypedPayload,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -123,6 +123,14 @@ pub fn merge_incremental_archive(
     {
         completion.full_restoration_achieved = false;
     }
+    let media_phase = if previous_report.media_phase == RestorationMediaPhase::Deferred
+        || fragment_report.media_phase == RestorationMediaPhase::Deferred
+    {
+        completion.full_restoration_achieved = false;
+        RestorationMediaPhase::Deferred
+    } else {
+        RestorationMediaPhase::Resolved
+    };
 
     write_ndjson(&temporary.path().join("messages.ndjson"), &messages)?;
     write_ndjson(
@@ -141,6 +149,7 @@ pub fn merge_incremental_archive(
         client_build_compatibility: fragment_report.client_build_compatibility.clone(),
         acquisition: fragment_report.acquisition.clone(),
         archive_scope: RestorationArchiveScope::Authoritative,
+        media_phase,
         messages_path: output_archive.join("messages.ndjson").display().to_string(),
         rejections_path: output_archive
             .join("rejections.ndjson")

@@ -140,7 +140,7 @@ stable JSON access to exact canonical data and machine-readable coverage.
 
 `replica-status` exposes the schema/cipher, opaque account and source
 fingerprints, exact client-build compatibility state and mismatched fields,
-checkpoint revision, acquisition mode, decoder identity/version, canonical
+checkpoint revision, acquisition mode, media phase, decoder identity/version, canonical
 counts, authoritative checkpoint age, latest synchronization kind/start/
 duration, latest integrity-scan time and age, completion state,
 source/restored row counts, semantic/message-candidate gaps, missing and
