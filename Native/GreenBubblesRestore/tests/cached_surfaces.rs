@@ -6,6 +6,7 @@ use greenbubbles_restore::tools::{
     create_tool_policy_with_cached_moments, CachedMomentField, CachedMomentsToolScope,
 };
 use greenbubbles_restore::{
+    audit::audit_archive,
     connector::{
         ConnectorDestination, ConnectorOperation, ConnectorRequest, ConnectorResult,
         ConnectorService, CONNECTOR_API_VERSION,
@@ -174,6 +175,11 @@ fn restores_cached_moments_and_interactions_without_claiming_cache_completeness(
             0o600
         );
     }
+
+    let archive_audit = audit_archive(&output).unwrap();
+    assert_eq!(archive_audit.cached_moment_count, 2);
+    assert_eq!(archive_audit.cached_moment_interaction_count, 2);
+    assert!(archive_audit.report_matches_archive);
 
     let replica_directory = fixture.path().join("replica-private");
     fs::create_dir(&replica_directory).unwrap();

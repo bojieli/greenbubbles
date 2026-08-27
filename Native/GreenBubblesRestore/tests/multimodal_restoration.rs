@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine;
 use greenbubbles_restore::archive::{create_conversation_policy, read_conversation_page};
+use greenbubbles_restore::audit::audit_archive;
 use greenbubbles_restore::manifest::{
     PathReference, SnapshotEntry, SnapshotFileRole, SnapshotManifest, SourceFileFingerprint,
 };
@@ -493,6 +494,15 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
         artifact["availability"] == "unsafePath" && artifact["sourceLocalPath"].is_null()
     }));
 
+    let audit = audit_archive(&output).unwrap();
+    assert!(audit.report_matches_archive);
+    assert!(audit.all_recorded_artifact_files_match);
+    assert_eq!(audit.message_count, 9);
+    assert_eq!(audit.artifact_reference_count, 7);
+    assert_eq!(audit.verified_external_source_file_count, 4);
+    assert!(audit.verified_connector_owned_file_count >= 2);
+    assert!(!audit.full_restoration_verified);
+
     let direct_conversation_id = direct_messages[0]["conversationId"]
         .as_str()
         .unwrap()
@@ -590,6 +600,12 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
     assert!(error
         .to_string()
         .contains("does not match the snapshot source scope"));
+
+    fs::write(&video_path, b"substituted-after-restoration").unwrap();
+    assert!(audit_archive(&output)
+        .unwrap_err()
+        .to_string()
+        .contains("no longer matches recorded evidence"));
 }
 
 fn entry(

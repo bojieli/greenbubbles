@@ -1,9 +1,10 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 
 use greenbubbles_restore::{
-    prepare_catalog, restore_catalog, RestorationOptions, SnapshotEntry, SnapshotFileRole,
-    SnapshotManifest,
+    audit::audit_archive, prepare_catalog, restore_catalog, RestorationOptions, SnapshotEntry,
+    SnapshotFileRole, SnapshotManifest,
 };
 use rusqlite::Connection;
 use serde_json::json;
@@ -141,4 +142,29 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
     assert!(all_tables
         .iter()
         .any(|table| { table["sourceTableName"] == "Preference" && table["role"] == "other" }));
+
+    let audit = audit_archive(&output).unwrap();
+    assert!(audit.report_matches_archive);
+    assert!(audit.all_artifact_references_resolve);
+    assert!(audit.all_resolved_relationships_resolve);
+    assert!(audit.all_recorded_artifact_files_match);
+    assert_eq!(audit.message_count, 2);
+    assert!(!audit.full_restoration_verified);
+    assert!(Path::new(&report.messages_path).is_absolute());
+    assert!(Path::new(&report.report_path).is_absolute());
+
+    let message_path = output.join("messages.ndjson");
+    let mut tampered = lines;
+    tampered[0]["contentBase64"] = json!("not-base64!");
+    let bytes = tampered
+        .iter()
+        .map(|message| serde_json::to_string(message).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    fs::write(message_path, bytes).unwrap();
+    assert!(audit_archive(&output)
+        .unwrap_err()
+        .to_string()
+        .contains("malformed source-preserving base64"));
 }

@@ -126,6 +126,23 @@ For a production-complete decoder, rejected rows must be zero. Unknown typed
 payloads may be retained losslessly during development but prevent a claim of
 full semantic restoration until each observed type is understood.
 
+## Independent post-restoration audit
+
+`audit-archive` does not accept the writer's completion report on trust. It
+streams every canonical ledger again, reproduces row/type/gap/reference/entity
+and cached-surface counts, validates the table and schema-profile ledgers,
+checks ordering and bidirectional relationships, and verifies every recorded
+source or derivative file from a read-only no-follow descriptor. External media
+must still match device, inode, size, modification time, and SHA-256; connector
+derivatives must remain owner-only beneath the archive and match size and
+SHA-256. The successful result exposes aggregate evidence only.
+
+This audit is required before a real archive can serve as Phase 1 completion
+evidence or enter a replica. Its `fullRestorationVerified` field remains false
+unless the archive is authoritative, media-resolved, pinned-build compatible,
+and already satisfies every strict completion component. See
+`docs/ARCHIVE_AUDIT.md`.
+
 ## Media path semantics
 
 GreenBubbles records the verified location of the existing downloaded artifact;

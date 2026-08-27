@@ -31,15 +31,16 @@ pub fn restore_catalog(
     options: &RestorationOptions,
 ) -> Result<RestorationReport, RestoreError> {
     create_owner_only_directory(&options.output_directory)?;
-    let messages_path = options.output_directory.join("messages.ndjson");
-    let rejections_path = options.output_directory.join("rejections.ndjson");
-    let artifacts_path = options.output_directory.join("artifacts.ndjson");
-    let coverage_path = options.output_directory.join("coverage.json");
-    let report_path = options.output_directory.join("report.json");
+    let output_directory = fs::canonicalize(&options.output_directory)?;
+    let messages_path = output_directory.join("messages.ndjson");
+    let rejections_path = output_directory.join("rejections.ndjson");
+    let artifacts_path = output_directory.join("artifacts.ndjson");
+    let coverage_path = output_directory.join("coverage.json");
+    let report_path = output_directory.join("report.json");
     let mut rejections = owner_only_writer(&rejections_path)?;
     let staging_directory = tempfile::Builder::new()
         .prefix(".staging-")
-        .tempdir_in(&options.output_directory)?;
+        .tempdir_in(&output_directory)?;
     create_owner_only_directory(staging_directory.path())?;
     let staging_path = staging_directory.path().join("messages.sqlite");
     let staging = Connection::open(&staging_path)?;
@@ -70,7 +71,7 @@ pub fn restore_catalog(
     let mut artifact_resolver = ArtifactResolver::new(
         catalog,
         options.account_root.as_deref(),
-        &options.output_directory,
+        &output_directory,
         options.defer_media,
     )?;
     let account_id = options
@@ -381,12 +382,7 @@ pub fn restore_catalog(
     }
     artifacts.flush()?;
 
-    let entity_result = restore_entities(
-        catalog,
-        &account_id,
-        entity_seeds,
-        &options.output_directory,
-    )?;
+    let entity_result = restore_entities(catalog, &account_id, entity_seeds, &output_directory)?;
     integrity.conversation_count = entity_result.conversation_count;
     integrity.participant_count = entity_result.participant_count;
     integrity.group_member_count = entity_result.group_member_count;
@@ -394,7 +390,7 @@ pub fn restore_catalog(
     integrity.entity_decode_gap_count = entity_result.decode_gap_count;
     integrity.missing_local_profile_count = entity_result.missing_local_profile_count;
     integrity.unresolved_conversation_count = entity_result.unresolved_conversation_count;
-    let cached_surfaces = restore_cached_surfaces(catalog, &account_id, &options.output_directory)?;
+    let cached_surfaces = restore_cached_surfaces(catalog, &account_id, &output_directory)?;
     integrity.cached_moment_count = cached_surfaces.coverage.moment_count;
     integrity.cached_moment_interaction_count = cached_surfaces.coverage.interaction_count;
     integrity.cached_surface_semantic_gap_count = cached_surfaces.coverage.semantic_gap_count;

@@ -1,0 +1,1302 @@
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufRead, BufReader, Read};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Component, Path, PathBuf};
+
+use base64::Engine;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::archive::{ensure_private_directory, ensure_private_regular_file};
+use crate::schema::schema_profile_fingerprint;
+use crate::{
+    ArtifactAvailability, ArtifactDecodeState, CachedSurfaceCoverage, CachedSurfaceTableRole,
+    CanonicalArtifact, CanonicalCachedMoment, CanonicalCachedMomentInteraction,
+    CanonicalConversation, CanonicalMessage, CanonicalParticipant, ConversationKind,
+    ConversationMembershipRole, EntityDecodeState, LocalProfileState, RawSQLiteValue, RejectedRow,
+    RelationshipResolutionState, RestorationArchiveScope, RestorationCompletion,
+    RestorationCoverage, RestorationMediaPhase, RestorationReport, RestoreError,
+    SemanticDecodeState, TableCoverageRole, TypedPayload,
+};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveAuditReport {
+    pub format_version: u32,
+    pub privacy_safe_summary: bool,
+    pub archive_format_version: u32,
+    pub coverage_format_version: u32,
+    pub archive_scope: RestorationArchiveScope,
+    pub media_phase: RestorationMediaPhase,
+    pub client_build_production_compatible: bool,
+    pub message_count: u64,
+    pub rejection_count: u64,
+    pub artifact_count: u64,
+    pub artifact_reference_count: u64,
+    pub relationship_reference_count: u64,
+    pub conversation_count: u64,
+    pub participant_count: u64,
+    pub cached_moment_count: u64,
+    pub cached_moment_interaction_count: u64,
+    pub verified_external_source_file_count: u64,
+    pub verified_connector_owned_file_count: u64,
+    pub row_equation_holds: bool,
+    pub report_matches_archive: bool,
+    pub all_artifact_references_resolve: bool,
+    pub all_resolved_relationships_resolve: bool,
+    pub all_recorded_artifact_files_match: bool,
+    pub full_restoration_claimed: bool,
+    pub full_restoration_verified: bool,
+    pub semantic_gap_count: u64,
+    pub message_candidate_gap_count: u64,
+    pub missing_artifact_count: u64,
+    pub ambiguous_artifact_count: u64,
+    pub corrupt_artifact_count: u64,
+    pub unsafe_artifact_count: u64,
+    pub artifact_decode_gap_count: u64,
+    pub entity_decode_gap_count: u64,
+    pub unresolved_relationship_count: u64,
+}
+
+#[derive(Default)]
+struct MessageAudit {
+    count: u64,
+    source_identities: HashSet<(String, String, i64)>,
+    canonical_ids: HashSet<String>,
+    canonical_conversations: HashMap<String, String>,
+    conversation_ids: HashSet<String>,
+    participant_ids: HashSet<String>,
+    participant_memberships: Vec<(String, String)>,
+    artifact_ids: HashSet<String>,
+    artifact_references: Vec<(String, crate::ArtifactRole)>,
+    artifact_reference_count: u64,
+    relationship_reference_count: u64,
+    resolved_relationships: Vec<(String, String)>,
+    logical_type_counts: BTreeMap<String, u64>,
+    logical_sub_type_counts: BTreeMap<String, u64>,
+    unknown_payload_reason_counts: BTreeMap<String, u64>,
+    semantic_gap_reason_counts: BTreeMap<String, u64>,
+    direction_counts: BTreeMap<String, u64>,
+    ordering_basis_counts: BTreeMap<String, u64>,
+}
+
+#[derive(Default)]
+struct ArtifactAudit {
+    count: u64,
+    identifiers: HashSet<String>,
+    roles: HashMap<String, crate::ArtifactRole>,
+    external_paths: BTreeSet<PathBuf>,
+    connector_paths: BTreeSet<PathBuf>,
+    downloaded: u64,
+    materialized: u64,
+    missing: u64,
+    ambiguous: u64,
+    corrupt: u64,
+    unsafe_count: u64,
+    decoded: u64,
+    decode_gaps: u64,
+    account_root_unavailable: u64,
+}
+
+#[derive(Clone)]
+struct VerifiedFile {
+    byte_count: u64,
+    sha256: String,
+    device_id: u64,
+    file_id: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+}
+
+pub fn audit_archive(archive_directory: &Path) -> Result<ArchiveAuditReport, RestoreError> {
+    ensure_private_directory(archive_directory)?;
+    let archive_root = fs::canonicalize(archive_directory)?;
+    let report_path = archive_root.join("report.json");
+    let coverage_path = archive_root.join("coverage.json");
+    let report: RestorationReport = read_json(&report_path)?;
+    let coverage: RestorationCoverage = read_json(&coverage_path)?;
+
+    if !matches!(report.format_version, 3 | 4) || !matches!(coverage.format_version, 2 | 3) {
+        return Err(integrity(
+            "archive or coverage format is not supported by this auditor",
+        ));
+    }
+    verify_report_paths(&archive_root, &report)?;
+    verify_coverage(&coverage, &report)?;
+
+    let conversations = read_unique_ndjson::<CanonicalConversation, _, _>(
+        &archive_root.join("conversations.ndjson"),
+        |value| value.conversation_id.clone(),
+        "conversation",
+    )?;
+    let participants = read_unique_ndjson::<CanonicalParticipant, _, _>(
+        &archive_root.join("participants.ndjson"),
+        |value| value.participant_id.clone(),
+        "participant",
+    )?;
+    verify_entities(&conversations, &participants, &report)?;
+
+    let messages = audit_messages(&archive_root.join("messages.ndjson"), &report)?;
+    verify_message_entities(&messages, &conversations, &participants)?;
+
+    let rejection_count = audit_rejections(&archive_root.join("rejections.ndjson"))?;
+    if rejection_count != report.integrity.rejected_row_count {
+        return Err(integrity("rejection ledger count does not match report"));
+    }
+
+    let artifacts = audit_artifacts(&archive_root, &archive_root.join("artifacts.ndjson"))?;
+    verify_message_artifacts(&messages, &artifacts)?;
+    verify_integrity_counts(
+        &report,
+        &coverage,
+        &messages,
+        rejection_count,
+        &artifacts,
+        &conversations,
+        &participants,
+    )?;
+
+    let (cached_moment_count, cached_interaction_count) =
+        audit_cached_surfaces(&archive_root, &report)?;
+    if cached_moment_count != report.integrity.cached_moment_count
+        || cached_interaction_count != report.integrity.cached_moment_interaction_count
+    {
+        return Err(integrity(
+            "cached-surface record counts do not match report",
+        ));
+    }
+
+    verify_completion(&report)?;
+    let full_restoration_verified = report.completion.full_restoration_achieved
+        && report.archive_scope == RestorationArchiveScope::Authoritative
+        && report.media_phase == RestorationMediaPhase::Resolved
+        && report.client_build_compatibility.production_compatible;
+
+    Ok(ArchiveAuditReport {
+        format_version: 1,
+        privacy_safe_summary: true,
+        archive_format_version: report.format_version,
+        coverage_format_version: coverage.format_version,
+        archive_scope: report.archive_scope,
+        media_phase: report.media_phase,
+        client_build_production_compatible: report.client_build_compatibility.production_compatible,
+        message_count: messages.count,
+        rejection_count,
+        artifact_count: artifacts.count,
+        artifact_reference_count: messages.artifact_reference_count,
+        relationship_reference_count: messages.relationship_reference_count,
+        conversation_count: conversations.len() as u64,
+        participant_count: participants.len() as u64,
+        cached_moment_count,
+        cached_moment_interaction_count: cached_interaction_count,
+        verified_external_source_file_count: artifacts.external_paths.len() as u64,
+        verified_connector_owned_file_count: artifacts.connector_paths.len() as u64,
+        row_equation_holds: true,
+        report_matches_archive: true,
+        all_artifact_references_resolve: true,
+        all_resolved_relationships_resolve: true,
+        all_recorded_artifact_files_match: true,
+        full_restoration_claimed: report.completion.full_restoration_achieved,
+        full_restoration_verified,
+        semantic_gap_count: report.integrity.semantic_gap_count,
+        message_candidate_gap_count: report.integrity.message_candidate_gap_count,
+        missing_artifact_count: report.integrity.missing_artifact_count,
+        ambiguous_artifact_count: report.integrity.ambiguous_artifact_count,
+        corrupt_artifact_count: report.integrity.corrupt_artifact_count,
+        unsafe_artifact_count: report.integrity.unsafe_artifact_count,
+        artifact_decode_gap_count: report.integrity.artifact_decode_gap_count,
+        entity_decode_gap_count: report.integrity.entity_decode_gap_count,
+        unresolved_relationship_count: report.integrity.unresolved_relationship_count,
+    })
+}
+
+fn verify_report_paths(root: &Path, report: &RestorationReport) -> Result<(), RestoreError> {
+    let required = [
+        (&report.messages_path, "messages.ndjson"),
+        (&report.rejections_path, "rejections.ndjson"),
+        (&report.artifacts_path, "artifacts.ndjson"),
+        (&report.conversations_path, "conversations.ndjson"),
+        (&report.participants_path, "participants.ndjson"),
+        (&report.coverage_path, "coverage.json"),
+        (&report.report_path, "report.json"),
+    ];
+    for (recorded, name) in required {
+        verify_recorded_archive_path(root, recorded, name)?;
+    }
+    let cached = [
+        (
+            report.cached_moments_path.as_deref(),
+            "cached-moments.ndjson",
+        ),
+        (
+            report.cached_moment_interactions_path.as_deref(),
+            "cached-moment-interactions.ndjson",
+        ),
+        (
+            report.cached_surfaces_path.as_deref(),
+            "cached-surfaces.json",
+        ),
+    ];
+    for (recorded, name) in cached {
+        let recorded = recorded
+            .ok_or_else(|| integrity("cached-surface path triplet is incomplete in report"))?;
+        verify_recorded_archive_path(root, recorded, name)?;
+    }
+    Ok(())
+}
+
+fn verify_recorded_archive_path(
+    root: &Path,
+    recorded: &str,
+    expected_name: &str,
+) -> Result<(), RestoreError> {
+    let expected = root.join(expected_name);
+    ensure_private_regular_file(&expected)?;
+    let actual = fs::canonicalize(recorded)?;
+    if actual != expected {
+        return Err(integrity(
+            "a report path does not identify its archive-owned file",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_coverage(
+    coverage: &RestorationCoverage,
+    report: &RestorationReport,
+) -> Result<(), RestoreError> {
+    let mut all_table_ids = HashSet::new();
+    let mut message_table_ids = HashSet::new();
+    let mut schema_counts = BTreeMap::new();
+    let mut candidate_gaps = 0_u64;
+    for table in &coverage.all_tables {
+        let identity = (
+            table.source_set_id.clone(),
+            table.source_logical_path.clone(),
+            table.source_table_id.clone(),
+        );
+        if !all_table_ids.insert(identity.clone()) {
+            return Err(integrity("coverage contains a duplicate table identity"));
+        }
+        if table
+            .schema_fingerprint
+            .as_deref()
+            .is_none_or(|value| value.len() != 64)
+        {
+            return Err(integrity(
+                "coverage table lacks a complete schema fingerprint",
+            ));
+        }
+        match table.role {
+            TableCoverageRole::Message => {
+                message_table_ids.insert(identity);
+                *schema_counts
+                    .entry(table.schema_fingerprint.clone().unwrap())
+                    .or_default() += 1;
+            }
+            TableCoverageRole::UnhandledMessageCandidate => candidate_gaps += 1,
+            TableCoverageRole::KnownAuxiliary | TableCoverageRole::Other => {}
+        }
+    }
+    let covered_message_ids = coverage
+        .message_tables
+        .iter()
+        .map(|table| {
+            (
+                table.source_set_id.clone(),
+                table.source_logical_path.clone(),
+                table.source_table_id.clone(),
+            )
+        })
+        .collect::<HashSet<_>>();
+    if covered_message_ids.len() != coverage.message_tables.len()
+        || covered_message_ids != message_table_ids
+    {
+        return Err(integrity(
+            "message-table coverage does not match the complete table ledger",
+        ));
+    }
+    let source_rows = coverage
+        .message_tables
+        .iter()
+        .map(|table| table.source_row_count)
+        .sum::<u64>();
+    if source_rows != report.integrity.source_row_count
+        || coverage.message_tables.len() as u64 != report.integrity.message_table_count
+        || candidate_gaps != report.integrity.message_candidate_gap_count
+        || schema_counts != report.integrity.message_schema_counts
+    {
+        return Err(integrity(
+            "coverage counts do not match restoration integrity",
+        ));
+    }
+    let profile = schema_profile_fingerprint(coverage.all_tables.iter().map(|table| {
+        (
+            table.source_logical_path.as_str(),
+            table.source_table_name.as_str(),
+            table.schema_fingerprint.as_deref(),
+        )
+    }));
+    if coverage.schema_profile_fingerprint != profile {
+        return Err(integrity(
+            "coverage schema-profile fingerprint is inconsistent",
+        ));
+    }
+    Ok(())
+}
+
+fn audit_messages(path: &Path, report: &RestorationReport) -> Result<MessageAudit, RestoreError> {
+    let mut result = MessageAudit::default();
+    let mut previous_conversation: Option<String> = None;
+    let mut expected_ordinal = 0_u64;
+    let mut conversation_basis = None;
+    read_ndjson(path, |message: CanonicalMessage| {
+        if message.canonical_id.is_empty()
+            || message.account_id != report.account_id
+            || message.conversation_id.is_empty()
+        {
+            return Err(integrity("message identity or account binding is invalid"));
+        }
+        validate_base64(&message.conversation_source_identifier_base64)?;
+        validate_optional_base64(message.sender_source_identifier_base64.as_deref())?;
+        validate_optional_base64(message.content_base64.as_deref())?;
+        validate_optional_base64(message.packed_info_base64.as_deref())?;
+        validate_raw_columns(&message.raw_columns)?;
+        if !result.canonical_ids.insert(message.canonical_id.clone())
+            || !result.source_identities.insert((
+                message.source_set_id.clone(),
+                message.source_table_id.clone(),
+                message.source_row_id,
+            ))
+        {
+            return Err(integrity("message archive contains a duplicate identity"));
+        }
+        match previous_conversation.as_deref() {
+            Some(previous) if previous == message.conversation_id => {
+                expected_ordinal += 1;
+                if conversation_basis != Some(message.ordering_basis) {
+                    return Err(integrity(
+                        "one conversation uses inconsistent ordering bases",
+                    ));
+                }
+            }
+            Some(previous) if previous < message.conversation_id.as_str() => {
+                expected_ordinal = 0;
+                conversation_basis = Some(message.ordering_basis);
+            }
+            None => {
+                expected_ordinal = 0;
+                conversation_basis = Some(message.ordering_basis);
+            }
+            _ => {
+                return Err(integrity(
+                    "message conversations are not in deterministic order",
+                ))
+            }
+        }
+        if message.conversation_ordinal != expected_ordinal {
+            return Err(integrity(
+                "message conversation ordinals are not contiguous",
+            ));
+        }
+        previous_conversation = Some(message.conversation_id.clone());
+
+        result.canonical_conversations.insert(
+            message.canonical_id.clone(),
+            message.conversation_id.clone(),
+        );
+        result
+            .conversation_ids
+            .insert(message.conversation_id.clone());
+        if let Some(sender) = &message.sender_id {
+            result.participant_ids.insert(sender.clone());
+            result
+                .participant_memberships
+                .push((message.conversation_id.clone(), sender.clone()));
+        }
+        let mut message_artifacts = HashSet::new();
+        for reference in &message.artifact_references {
+            if !message_artifacts.insert(reference.artifact_id.clone()) {
+                return Err(integrity(
+                    "one message contains a duplicate artifact reference",
+                ));
+            }
+            result.artifact_ids.insert(reference.artifact_id.clone());
+            result
+                .artifact_references
+                .push((reference.artifact_id.clone(), reference.role));
+        }
+        if !message.artifact_references.is_empty()
+            && !message
+                .artifact_references
+                .iter()
+                .any(|value| value.preferred)
+        {
+            return Err(integrity("media-bearing message has no preferred artifact"));
+        }
+        result.artifact_reference_count += message.artifact_references.len() as u64;
+
+        for relationship in &message.relationships {
+            validate_optional_base64(relationship.raw_reference_base64.as_deref())?;
+            let state_resolved =
+                relationship.resolution_state == RelationshipResolutionState::Resolved;
+            if relationship.resolved != state_resolved {
+                return Err(integrity(
+                    "relationship resolved flag disagrees with its state",
+                ));
+            }
+            if state_resolved {
+                let target = relationship
+                    .target_canonical_id
+                    .clone()
+                    .ok_or_else(|| integrity("resolved relationship lacks a canonical target"))?;
+                result
+                    .resolved_relationships
+                    .push((message.conversation_id.clone(), target));
+            }
+        }
+        result.relationship_reference_count += message.relationships.len() as u64;
+
+        let logical = message
+            .logical_type
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "missing".to_string());
+        *result.logical_type_counts.entry(logical).or_default() += 1;
+        let subtype = match (message.logical_type, message.sub_type) {
+            (Some(logical), Some(subtype)) => format!("{logical}:{subtype}"),
+            _ => "missing".to_string(),
+        };
+        *result.logical_sub_type_counts.entry(subtype).or_default() += 1;
+        if let TypedPayload::Unknown { reason } = &message.typed_payload {
+            *result
+                .unknown_payload_reason_counts
+                .entry(reason.clone())
+                .or_default() += 1;
+        }
+        if message.semantic_decode_state != SemanticDecodeState::Complete {
+            let reason = message
+                .semantic_gap_reason
+                .clone()
+                .unwrap_or_else(|| "unspecified semantic coverage gap".to_string());
+            *result.semantic_gap_reason_counts.entry(reason).or_default() += 1;
+        }
+        *result
+            .direction_counts
+            .entry(format!("{:?}", message.direction).to_ascii_lowercase())
+            .or_default() += 1;
+        let basis = match message.ordering_basis {
+            crate::MessageOrderingBasis::SortSequence => "sortSequence",
+            crate::MessageOrderingBasis::ServerId => "serverId",
+            crate::MessageOrderingBasis::CreatedAt => "createdAt",
+            crate::MessageOrderingBasis::LocalId => "localId",
+            crate::MessageOrderingBasis::HybridSourceFallback => "hybridSourceFallback",
+        };
+        *result
+            .ordering_basis_counts
+            .entry(basis.to_string())
+            .or_default() += 1;
+        result.count += 1;
+        Ok(())
+    })?;
+
+    for (conversation, target) in &result.resolved_relationships {
+        let target_conversation = result
+            .canonical_conversations
+            .get(target)
+            .ok_or_else(|| integrity("resolved relationship target is absent"))?;
+        if target_conversation != conversation {
+            return Err(integrity(
+                "resolved relationship crosses conversation scope",
+            ));
+        }
+    }
+    Ok(result)
+}
+
+fn audit_rejections(path: &Path) -> Result<u64, RestoreError> {
+    let mut count = 0_u64;
+    let mut identities = HashSet::new();
+    read_ndjson(path, |row: RejectedRow| {
+        if row.source_set_id.is_empty()
+            || row.source_table_id.is_empty()
+            || row.reason.is_empty()
+            || !identities.insert((row.source_set_id, row.source_table_id, row.source_row_id))
+        {
+            return Err(integrity(
+                "rejection ledger contains an invalid or duplicate row",
+            ));
+        }
+        count += 1;
+        Ok(())
+    })?;
+    Ok(count)
+}
+
+fn audit_artifacts(root: &Path, path: &Path) -> Result<ArtifactAudit, RestoreError> {
+    let mut result = ArtifactAudit::default();
+    let mut verified_files = HashMap::<PathBuf, VerifiedFile>::new();
+    read_ndjson(path, |artifact: CanonicalArtifact| {
+        if artifact.artifact_id.is_empty()
+            || !result.identifiers.insert(artifact.artifact_id.clone())
+        {
+            return Err(integrity(
+                "artifact ledger contains a duplicate or empty identity",
+            ));
+        }
+        result
+            .roles
+            .insert(artifact.artifact_id.clone(), artifact.role);
+        result.count += 1;
+        if artifact
+            .source_md5
+            .as_deref()
+            .is_some_and(|value| !is_lower_hex(value, 32))
+            || artifact
+                .source_sha256
+                .as_deref()
+                .is_some_and(|value| !is_lower_hex(value, 64))
+            || artifact
+                .decoded_sha256
+                .as_deref()
+                .is_some_and(|value| !is_lower_hex(value, 64))
+        {
+            return Err(integrity("artifact ledger contains a malformed digest"));
+        }
+        match artifact.availability {
+            ArtifactAvailability::Downloaded => result.downloaded += 1,
+            ArtifactAvailability::MaterializedFromDatabase => result.materialized += 1,
+            ArtifactAvailability::NotDownloaded
+            | ArtifactAvailability::RemoteOnly
+            | ArtifactAvailability::Expired
+            | ArtifactAvailability::Deleted
+            | ArtifactAvailability::MetadataMissing => result.missing += 1,
+            ArtifactAvailability::AccountRootUnavailable => {
+                result.missing += 1;
+                result.account_root_unavailable += 1;
+            }
+            ArtifactAvailability::Ambiguous => result.ambiguous += 1,
+            ArtifactAvailability::Corrupt => result.corrupt += 1,
+            ArtifactAvailability::UnsafePath => result.unsafe_count += 1,
+        }
+
+        if matches!(
+            artifact.availability,
+            ArtifactAvailability::Downloaded | ArtifactAvailability::Ambiguous
+        ) {
+            let source_path = required_artifact_path(
+                artifact.source_local_path.as_deref(),
+                "downloaded artifact lacks its source path",
+            )?;
+            verify_external_source(&artifact, &source_path, &mut verified_files)?;
+            result.external_paths.insert(source_path);
+        }
+        if artifact.availability == ArtifactAvailability::MaterializedFromDatabase {
+            let materialized = required_artifact_path(
+                artifact.materialized_local_path.as_deref(),
+                "database artifact lacks its materialized path",
+            )?;
+            verify_connector_file(
+                root,
+                &materialized,
+                artifact.source_byte_count,
+                artifact.source_sha256.as_deref(),
+                &mut verified_files,
+            )?;
+            result.connector_paths.insert(materialized);
+        }
+        if artifact.decode_state == ArtifactDecodeState::Decoded {
+            let decoded = required_artifact_path(
+                artifact.decoded_local_path.as_deref(),
+                "decoded artifact lacks its derivative path",
+            )?;
+            verify_connector_file(
+                root,
+                &decoded,
+                artifact.decoded_byte_count,
+                artifact.decoded_sha256.as_deref(),
+                &mut verified_files,
+            )?;
+            if artifact.decoded_format.as_deref().is_none_or(str::is_empty) {
+                return Err(integrity("decoded artifact lacks a detected output format"));
+            }
+            result.connector_paths.insert(decoded);
+            result.decoded += 1;
+        } else if artifact.decoded_local_path.is_some()
+            || artifact.decoded_byte_count.is_some()
+            || artifact.decoded_sha256.is_some()
+            || artifact.decoded_format.is_some()
+        {
+            return Err(integrity(
+                "non-decoded artifact unexpectedly records a derivative",
+            ));
+        }
+        if matches!(
+            artifact.availability,
+            ArtifactAvailability::Downloaded
+                | ArtifactAvailability::MaterializedFromDatabase
+                | ArtifactAvailability::Ambiguous
+        ) && matches!(
+            artifact.decode_state,
+            ArtifactDecodeState::KeyUnavailable
+                | ArtifactDecodeState::Unsupported
+                | ArtifactDecodeState::Failed
+        ) {
+            result.decode_gaps += 1;
+        }
+        Ok(())
+    })?;
+    Ok(result)
+}
+
+fn verify_external_source(
+    artifact: &CanonicalArtifact,
+    path: &Path,
+    cache: &mut HashMap<PathBuf, VerifiedFile>,
+) -> Result<(), RestoreError> {
+    if !path.is_absolute() || fs::canonicalize(path)? != path {
+        return Err(integrity(
+            "artifact source path is not an absolute canonical path",
+        ));
+    }
+    let relative = required_artifact_path(
+        artifact.account_relative_path.as_deref(),
+        "downloaded artifact lacks its account-relative path",
+    )?;
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+        || !path.ends_with(&relative)
+    {
+        return Err(integrity(
+            "artifact account-relative path is unsafe or mismatched",
+        ));
+    }
+    let verified = verified_file(path, false, cache)?;
+    if Some(verified.byte_count) != artifact.source_byte_count
+        || Some(verified.device_id) != artifact.source_device_id
+        || Some(verified.file_id) != artifact.source_file_id
+        || Some(verified.modified_seconds) != artifact.source_modified_seconds
+        || Some(verified.modified_nanoseconds) != artifact.source_modified_nanoseconds
+        || Some(verified.sha256.as_str()) != artifact.source_sha256.as_deref()
+    {
+        return Err(integrity(
+            "artifact source file no longer matches recorded evidence",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_connector_file(
+    root: &Path,
+    path: &Path,
+    expected_bytes: Option<u64>,
+    expected_sha256: Option<&str>,
+    cache: &mut HashMap<PathBuf, VerifiedFile>,
+) -> Result<(), RestoreError> {
+    if !path.is_absolute() {
+        return Err(integrity(
+            "connector-owned artifact path escapes the archive",
+        ));
+    }
+    let canonical = fs::canonicalize(path)?;
+    if !canonical.starts_with(root) {
+        return Err(integrity(
+            "connector-owned artifact path escapes the archive",
+        ));
+    }
+    ensure_no_symlink_components(root, &canonical)?;
+    let verified = verified_file(&canonical, true, cache)?;
+    if Some(verified.byte_count) != expected_bytes
+        || Some(verified.sha256.as_str()) != expected_sha256
+    {
+        return Err(integrity(
+            "connector-owned artifact file fails digest or size verification",
+        ));
+    }
+    Ok(())
+}
+
+fn verified_file(
+    path: &Path,
+    owner_only: bool,
+    cache: &mut HashMap<PathBuf, VerifiedFile>,
+) -> Result<VerifiedFile, RestoreError> {
+    if let Some(value) = cache.get(path) {
+        return Ok(value.clone());
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)?;
+    let before = file.metadata()?;
+    if !before.is_file()
+        || (owner_only && (before.permissions().mode() & 0o077 != 0 || before.nlink() != 1))
+    {
+        return Err(integrity(
+            "recorded artifact is not an acceptable regular file",
+        ));
+    }
+    let mut hasher = Sha256::new();
+    let mut byte_count = 0_u64;
+    let mut buffer = vec![0_u8; 128 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+        byte_count += count as u64;
+    }
+    let after = file.metadata()?;
+    if !same_file_version(&before, &after) || byte_count != before.len() {
+        return Err(integrity("recorded artifact changed while it was audited"));
+    }
+    let value = VerifiedFile {
+        byte_count,
+        sha256: hex::encode(hasher.finalize()),
+        device_id: before.dev(),
+        file_id: before.ino(),
+        modified_seconds: before.mtime(),
+        modified_nanoseconds: before.mtime_nsec(),
+    };
+    cache.insert(path.to_path_buf(), value.clone());
+    Ok(value)
+}
+
+fn ensure_no_symlink_components(root: &Path, path: &Path) -> Result<(), RestoreError> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| integrity("connector-owned path escapes its archive root"))?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        if !matches!(component, Component::Normal(_)) {
+            return Err(integrity("connector-owned path has a non-normal component"));
+        }
+        current.push(component.as_os_str());
+        if fs::symlink_metadata(&current)?.file_type().is_symlink() {
+            return Err(integrity("connector-owned path traverses a symlink"));
+        }
+    }
+    Ok(())
+}
+
+fn verify_entities(
+    conversations: &HashMap<String, CanonicalConversation>,
+    participants: &HashMap<String, CanonicalParticipant>,
+    report: &RestorationReport,
+) -> Result<(), RestoreError> {
+    for (identifier, conversation) in conversations {
+        if identifier.is_empty()
+            || conversation.account_id != report.account_id
+            || conversation
+                .participant_ids
+                .iter()
+                .collect::<HashSet<_>>()
+                .len()
+                != conversation.participant_ids.len()
+        {
+            return Err(integrity(
+                "conversation entity is invalid or contains duplicate members",
+            ));
+        }
+        validate_base64(&conversation.source_identifier_base64)?;
+        for source in &conversation.source_records {
+            validate_raw_columns(&source.raw_columns)?;
+        }
+        for participant in &conversation.participant_ids {
+            if !participants.contains_key(participant) {
+                return Err(integrity("conversation references an absent participant"));
+            }
+        }
+        for membership in &conversation.memberships {
+            validate_optional_base64(membership.display_name_base64.as_deref())?;
+            if !participants.contains_key(&membership.participant_id)
+                || !conversation
+                    .participant_ids
+                    .contains(&membership.participant_id)
+            {
+                return Err(integrity(
+                    "conversation membership is not bidirectionally valid",
+                ));
+            }
+        }
+        let participant_ids = conversation
+            .participant_ids
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let membership_ids = conversation
+            .memberships
+            .iter()
+            .map(|membership| membership.participant_id.clone())
+            .collect::<HashSet<_>>();
+        if participant_ids != membership_ids {
+            return Err(integrity(
+                "conversation participant and membership lists disagree",
+            ));
+        }
+        if conversation
+            .owner_participant_id
+            .as_ref()
+            .is_some_and(|owner| !conversation.participant_ids.contains(owner))
+        {
+            return Err(integrity(
+                "conversation owner is absent from its participant list",
+            ));
+        }
+    }
+    for (identifier, participant) in participants {
+        if identifier.is_empty()
+            || participant.account_id != report.account_id
+            || participant
+                .conversation_ids
+                .iter()
+                .collect::<HashSet<_>>()
+                .len()
+                != participant.conversation_ids.len()
+        {
+            return Err(integrity(
+                "participant entity is invalid or has duplicate conversations",
+            ));
+        }
+        validate_base64(&participant.source_identifier_base64)?;
+        validate_optional_base64(participant.alias_base64.as_deref())?;
+        validate_optional_base64(participant.remark_base64.as_deref())?;
+        validate_optional_base64(participant.nickname_base64.as_deref())?;
+        validate_optional_base64(participant.display_name_base64.as_deref())?;
+        for source in &participant.source_records {
+            validate_raw_columns(&source.raw_columns)?;
+        }
+        for conversation in &participant.conversation_ids {
+            let conversation = conversations
+                .get(conversation)
+                .ok_or_else(|| integrity("participant references an absent conversation"))?;
+            if !conversation.participant_ids.contains(identifier) {
+                return Err(integrity("participant relationship is not bidirectional"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_message_entities(
+    messages: &MessageAudit,
+    conversations: &HashMap<String, CanonicalConversation>,
+    participants: &HashMap<String, CanonicalParticipant>,
+) -> Result<(), RestoreError> {
+    if messages
+        .conversation_ids
+        .iter()
+        .any(|identifier| !conversations.contains_key(identifier))
+        || messages
+            .participant_ids
+            .iter()
+            .any(|identifier| !participants.contains_key(identifier))
+    {
+        return Err(integrity(
+            "message references an absent conversation or sender",
+        ));
+    }
+    for (conversation_id, participant_id) in &messages.participant_memberships {
+        let conversation = conversations
+            .get(conversation_id)
+            .ok_or_else(|| integrity("message conversation is absent"))?;
+        if !conversation.participant_ids.contains(participant_id) {
+            return Err(integrity(
+                "message sender is absent from the conversation membership",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_message_artifacts(
+    messages: &MessageAudit,
+    artifacts: &ArtifactAudit,
+) -> Result<(), RestoreError> {
+    if messages
+        .artifact_ids
+        .iter()
+        .any(|identifier| !artifacts.identifiers.contains(identifier))
+        || artifacts
+            .identifiers
+            .iter()
+            .any(|identifier| !messages.artifact_ids.contains(identifier))
+    {
+        return Err(integrity(
+            "message and artifact ledgers are not fully linked",
+        ));
+    }
+    for (identifier, role) in &messages.artifact_references {
+        if artifacts.roles.get(identifier) != Some(role) {
+            return Err(integrity(
+                "message artifact role disagrees with the artifact ledger",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_integrity_counts(
+    report: &RestorationReport,
+    coverage: &RestorationCoverage,
+    messages: &MessageAudit,
+    rejection_count: u64,
+    artifacts: &ArtifactAudit,
+    conversations: &HashMap<String, CanonicalConversation>,
+    participants: &HashMap<String, CanonicalParticipant>,
+) -> Result<(), RestoreError> {
+    let integrity_report = &report.integrity;
+    let unknown_payload_count = messages
+        .unknown_payload_reason_counts
+        .values()
+        .copied()
+        .sum::<u64>();
+    let semantic_gap_count = messages
+        .semantic_gap_reason_counts
+        .values()
+        .copied()
+        .sum::<u64>();
+    if messages.count != integrity_report.restored_row_count
+        || rejection_count != integrity_report.rejected_row_count
+        || messages.count + rejection_count != integrity_report.source_row_count
+        || messages.logical_type_counts != integrity_report.logical_type_counts
+        || messages.logical_sub_type_counts != integrity_report.logical_sub_type_counts
+        || messages.unknown_payload_reason_counts != integrity_report.unknown_payload_reason_counts
+        || messages.semantic_gap_reason_counts != integrity_report.semantic_gap_reason_counts
+        || unknown_payload_count != integrity_report.unknown_payload_count
+        || semantic_gap_count != integrity_report.semantic_gap_count
+        || messages.direction_counts != integrity_report.direction_counts
+        || messages.ordering_basis_counts != integrity_report.ordering_basis_counts
+        || messages.artifact_reference_count != integrity_report.artifact_reference_count
+        || messages.relationship_reference_count != integrity_report.relationship_reference_count
+        || artifacts.count != integrity_report.unique_artifact_count
+        || artifacts.downloaded != integrity_report.downloaded_artifact_count
+        || artifacts.materialized != integrity_report.materialized_artifact_count
+        || artifacts.missing != integrity_report.missing_artifact_count
+        || artifacts.ambiguous != integrity_report.ambiguous_artifact_count
+        || artifacts.corrupt != integrity_report.corrupt_artifact_count
+        || artifacts.unsafe_count != integrity_report.unsafe_artifact_count
+        || artifacts.decoded != integrity_report.decoded_artifact_count
+        || artifacts.decode_gaps != integrity_report.artifact_decode_gap_count
+        || artifacts.account_root_unavailable
+            != integrity_report.account_root_unavailable_artifact_count
+        || conversations.len() as u64 != integrity_report.conversation_count
+        || participants.len() as u64 != integrity_report.participant_count
+        || coverage.logical_type_counts != messages.logical_type_counts
+        || coverage.logical_sub_type_counts != messages.logical_sub_type_counts
+        || coverage.unknown_payload_reason_counts != messages.unknown_payload_reason_counts
+        || coverage.semantic_gap_reason_counts != messages.semantic_gap_reason_counts
+    {
+        return Err(integrity(
+            "archive records do not reproduce reported integrity counts",
+        ));
+    }
+
+    let unresolved = integrity_report
+        .relationship_reference_count
+        .saturating_sub(integrity_report.resolved_relationship_count);
+    if unresolved != integrity_report.unresolved_relationship_count
+        || messages.resolved_relationships.len() as u64
+            != integrity_report.resolved_relationship_count
+    {
+        return Err(integrity(
+            "relationship counts do not reproduce reported integrity",
+        ));
+    }
+    let missing_profiles = participants
+        .values()
+        .filter(|value| value.local_profile_state == LocalProfileState::MissingLocalRecord)
+        .count() as u64;
+    let unresolved_conversations = conversations
+        .values()
+        .filter(|value| value.kind == ConversationKind::Unresolved)
+        .count() as u64;
+    let entity_gaps = conversations
+        .values()
+        .filter(|value| value.entity_decode_state != EntityDecodeState::Complete)
+        .count() as u64;
+    let entity_source_rows = conversations
+        .values()
+        .map(|value| value.source_records.len() as u64)
+        .sum::<u64>()
+        + participants
+            .values()
+            .map(|value| value.source_records.len() as u64)
+            .sum::<u64>();
+    let unique_group_members = conversations
+        .values()
+        .flat_map(|value| &value.memberships)
+        .filter(|membership| membership.role == ConversationMembershipRole::Member)
+        .count() as u64;
+    if missing_profiles != integrity_report.missing_local_profile_count
+        || unresolved_conversations != integrity_report.unresolved_conversation_count
+        || entity_source_rows != integrity_report.entity_source_row_count
+        || unique_group_members > integrity_report.group_member_count
+        || (entity_gaps == 0) != (integrity_report.entity_decode_gap_count == 0)
+        || entity_gaps > integrity_report.entity_decode_gap_count
+    {
+        return Err(integrity(
+            "entity records do not reproduce reported coverage gaps",
+        ));
+    }
+    Ok(())
+}
+
+fn audit_cached_surfaces(
+    root: &Path,
+    report: &RestorationReport,
+) -> Result<(u64, u64), RestoreError> {
+    let coverage: CachedSurfaceCoverage = read_json(&root.join("cached-surfaces.json"))?;
+    if !matches!(coverage.format_version, 1 | 2) {
+        return Err(integrity("cached-surface coverage format is unsupported"));
+    }
+    let moments = read_unique_ndjson::<CanonicalCachedMoment, _, _>(
+        &root.join("cached-moments.ndjson"),
+        |value| value.canonical_id.clone(),
+        "cached Moment",
+    )?;
+    let interactions = read_unique_ndjson::<CanonicalCachedMomentInteraction, _, _>(
+        &root.join("cached-moment-interactions.ndjson"),
+        |value| value.canonical_id.clone(),
+        "cached Moment interaction",
+    )?;
+    if moments
+        .values()
+        .any(|value| value.account_id != report.account_id)
+        || interactions
+            .values()
+            .any(|value| value.account_id != report.account_id)
+    {
+        return Err(integrity(
+            "cached-surface record belongs to another account",
+        ));
+    }
+    for moment in moments.values() {
+        validate_optional_base64(moment.author_source_identifier_base64.as_deref())?;
+        validate_optional_base64(moment.content_description_base64.as_deref())?;
+        validate_optional_base64(moment.title_base64.as_deref())?;
+        validate_optional_base64(moment.description_base64.as_deref())?;
+        validate_optional_base64(moment.content_url_base64.as_deref())?;
+        validate_optional_base64(moment.raw_content_base64.as_deref())?;
+        validate_optional_base64(moment.raw_pack_info_base64.as_deref())?;
+        validate_raw_columns(&moment.raw_columns)?;
+    }
+    for interaction in interactions.values() {
+        validate_optional_base64(interaction.from_source_identifier_base64.as_deref())?;
+        validate_optional_base64(interaction.from_nickname_base64.as_deref())?;
+        validate_optional_base64(interaction.to_source_identifier_base64.as_deref())?;
+        validate_optional_base64(interaction.to_nickname_base64.as_deref())?;
+        validate_optional_base64(interaction.content_base64.as_deref())?;
+        validate_raw_columns(&interaction.raw_columns)?;
+    }
+    let mut table_ids = HashSet::new();
+    let mut moment_rows = 0_u64;
+    let mut interaction_rows = 0_u64;
+    for table in &coverage.tables {
+        if !table_ids.insert((
+            table.source_set_id.clone(),
+            table.source_logical_path.clone(),
+            table.source_table_id.clone(),
+        )) || table
+            .schema_fingerprint
+            .as_deref()
+            .is_none_or(|value| value.len() != 64)
+        {
+            return Err(integrity(
+                "cached coverage has duplicate or incomplete table evidence",
+            ));
+        }
+        match table.role {
+            CachedSurfaceTableRole::MomentTimeline => {
+                moment_rows += table.restored_row_count;
+                if table.source_row_count != table.restored_row_count {
+                    return Err(integrity("cached Moment table row equation failed"));
+                }
+            }
+            CachedSurfaceTableRole::MomentInteraction => {
+                interaction_rows += table.restored_row_count;
+                if table.source_row_count != table.restored_row_count {
+                    return Err(integrity("cached interaction table row equation failed"));
+                }
+            }
+            CachedSurfaceTableRole::UnsupportedCandidate | CachedSurfaceTableRole::Other => {}
+        }
+    }
+    let profile = schema_profile_fingerprint(coverage.tables.iter().map(|table| {
+        (
+            table.source_logical_path.as_str(),
+            table.source_table_name.as_str(),
+            table.schema_fingerprint.as_deref(),
+        )
+    }));
+    if coverage.schema_profile_fingerprint != profile
+        || moment_rows != moments.len() as u64
+        || interaction_rows != interactions.len() as u64
+        || coverage.moment_count != moments.len() as u64
+        || coverage.interaction_count != interactions.len() as u64
+        || coverage.semantic_gap_count != report.integrity.cached_surface_semantic_gap_count
+    {
+        return Err(integrity(
+            "cached-surface coverage does not match its record ledgers",
+        ));
+    }
+    Ok((moments.len() as u64, interactions.len() as u64))
+}
+
+fn verify_completion(report: &RestorationReport) -> Result<(), RestoreError> {
+    let mut expected = RestorationCompletion::evaluate(&report.integrity);
+    if report.media_phase == RestorationMediaPhase::Deferred
+        || report.archive_scope != RestorationArchiveScope::Authoritative
+        || !report.client_build_compatibility.production_compatible
+    {
+        expected.full_restoration_achieved = false;
+    }
+    let component_fields_match = expected.row_equation_holds
+        == report.completion.row_equation_holds
+        && expected.zero_rejected_rows == report.completion.zero_rejected_rows
+        && expected.canonical_identities_unique == report.completion.canonical_identities_unique
+        && expected.semantic_message_coverage_complete
+            == report.completion.semantic_message_coverage_complete
+        && expected.directions_complete == report.completion.directions_complete
+        && expected.entity_coverage_complete == report.completion.entity_coverage_complete
+        && expected.relationship_coverage_complete
+            == report.completion.relationship_coverage_complete
+        && expected.artifact_verification_complete
+            == report.completion.artifact_verification_complete
+        && expected.artifact_decoding_complete == report.completion.artifact_decoding_complete;
+    if !component_fields_match
+        || (report.completion.full_restoration_achieved && !expected.full_restoration_achieved)
+    {
+        return Err(integrity(
+            "completion verdict is inconsistent with audited evidence",
+        ));
+    }
+    Ok(())
+}
+
+fn required_artifact_path(value: Option<&str>, message: &str) -> Result<PathBuf, RestoreError> {
+    value
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| integrity(message))
+}
+
+fn read_unique_ndjson<T, K, F>(
+    path: &Path,
+    key: F,
+    kind: &str,
+) -> Result<HashMap<K, T>, RestoreError>
+where
+    T: DeserializeOwned,
+    K: Eq + std::hash::Hash,
+    F: Fn(&T) -> K,
+{
+    let mut values = HashMap::new();
+    read_ndjson(path, |value: T| {
+        if values.insert(key(&value), value).is_some() {
+            return Err(integrity(format!(
+                "{kind} ledger contains a duplicate identity"
+            )));
+        }
+        Ok(())
+    })?;
+    Ok(values)
+}
+
+fn read_ndjson<T, F>(path: &Path, mut consume: F) -> Result<(), RestoreError>
+where
+    T: DeserializeOwned,
+    F: FnMut(T) -> Result<(), RestoreError>,
+{
+    let file = open_private_readonly(path)?;
+    let before = file.metadata()?;
+    let mut reader = BufReader::new(file);
+    for line in (&mut reader).lines() {
+        let line = line?;
+        if line.is_empty() {
+            return Err(integrity("NDJSON ledger contains an empty record"));
+        }
+        consume(serde_json::from_str(&line)?)?;
+    }
+    let after = reader.get_ref().metadata()?;
+    if !same_file_version(&before, &after) {
+        return Err(integrity("archive ledger changed while it was audited"));
+    }
+    Ok(())
+}
+
+fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, RestoreError> {
+    let mut file = open_private_readonly(path)?;
+    let before = file.metadata()?;
+    let mut data = Vec::new();
+    file.read_to_end(&mut data)?;
+    let after = file.metadata()?;
+    if !same_file_version(&before, &after) || data.len() as u64 != before.len() {
+        return Err(integrity("archive JSON changed while it was audited"));
+    }
+    Ok(serde_json::from_slice(&data)?)
+}
+
+fn open_private_readonly(path: &Path) -> Result<File, RestoreError> {
+    ensure_private_regular_file(path)?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o077 != 0 || metadata.nlink() != 1 {
+        return Err(integrity(
+            "private archive file changed identity or permissions before audit",
+        ));
+    }
+    Ok(file)
+}
+
+fn validate_raw_columns(values: &BTreeMap<String, RawSQLiteValue>) -> Result<(), RestoreError> {
+    for value in values.values() {
+        match value {
+            RawSQLiteValue::TextBase64(value) | RawSQLiteValue::BlobBase64(value) => {
+                validate_base64(value)?
+            }
+            RawSQLiteValue::Null | RawSQLiteValue::Integer(_) | RawSQLiteValue::Real(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_optional_base64(value: Option<&str>) -> Result<(), RestoreError> {
+    if let Some(value) = value {
+        validate_base64(value)?;
+    }
+    Ok(())
+}
+
+fn validate_base64(value: &str) -> Result<(), RestoreError> {
+    base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map(|_| ())
+        .map_err(|_| integrity("archive contains a malformed source-preserving base64 field"))
+}
+
+fn is_lower_hex(value: &str, expected_length: usize) -> bool {
+    value.len() == expected_length
+        && value
+            .bytes()
+            .all(|value| value.is_ascii_digit() || matches!(value, b'a'..=b'f'))
+}
+
+fn same_file_version(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    before.dev() == after.dev()
+        && before.ino() == after.ino()
+        && before.len() == after.len()
+        && before.mtime() == after.mtime()
+        && before.mtime_nsec() == after.mtime_nsec()
+}
+
+fn integrity(message: impl Into<String>) -> RestoreError {
+    RestoreError::Integrity(message.into())
+}

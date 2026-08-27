@@ -159,6 +159,11 @@ cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml \
   --bin greenbubbles-restore -- \
   restore <snapshot-directory> <private-output-directory> \
   --account-root <authorized-account-directory> --passphrase-stdin
+
+cargo run --locked \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  audit-archive <private-output-directory>
 ```
 
 `preflight` verifies every copied database/WAL/SHM digest and reports the
@@ -176,6 +181,13 @@ records, and an integrity/completion report. It also contains losslessly decoded
 image derivatives, raw SILK voice payloads, and playable voice derivatives when
 decoding succeeds. These files are plaintext private data: keep them out of
 Git, issue attachments, shell transcripts, and model prompts.
+
+`audit-archive` independently reopens all ledgers, reproduces their counts and
+relationships, validates source-preserving encodings and schema profiles, and
+descriptor-verifies every recorded downloaded/materialized/decoded file against
+its stored identity, size, timestamps, and SHA-256. Its output contains only
+aggregate counts and verdicts. A moved, evicted, substituted, or changed media
+file fails closed. See [docs/ARCHIVE_AUDIT.md](docs/ARCHIVE_AUDIT.md).
 
 Production completeness is deliberately strict. The restoration report must
 satisfy `source rows = restored rows + rejected rows`, with zero rejections,

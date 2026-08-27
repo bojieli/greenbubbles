@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use greenbubbles_restore::{
     archive::{create_conversation_policy, read_conversation_page},
+    audit::audit_archive,
     benchmark::{run_synthetic_benchmark, SyntheticBenchmarkConfig},
     connector::{ConnectorDestination, ConnectorService},
     merge::merge_incremental_archive,
@@ -98,6 +99,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     defer_media,
                 },
             )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "audit-archive" => {
+            let archive = required_path(arguments.next(), "archive directory")?;
+            let report = audit_archive(&archive)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "policy" => {
@@ -423,6 +429,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore preflight <snapshot>\n",
                     "  greenbubbles-restore probe <snapshot> [--passphrase-stdin]\n",
                     "  greenbubbles-restore restore <snapshot> <output> [--account-root <path>] [--defer-media] [--passphrase-stdin]\n",
+                    "  greenbubbles-restore audit-archive <archive>\n",
                     "  greenbubbles-restore policy <archive> <policy-file> <conversation-id>... [--max-page-size <n>]\n",
                     "  greenbubbles-restore read <archive> <policy-file> <conversation-id> [--cursor <cursor>] [--limit <n>]\n",
                     "  greenbubbles-restore reconcile <previous-archive> <current-archive> <policy-file> <events-output>\n",

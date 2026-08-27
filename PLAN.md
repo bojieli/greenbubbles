@@ -468,6 +468,14 @@ Status: **in progress**
 - [ ] Resolve every locally downloaded multimodal/file artifact to a verified
   local path and represent missing/remote-only media explicitly.
 
+The independent `audit-archive` pass now reopens the completed archive, derives
+its row/type/gap/entity/reference counts from the ledgers, verifies schema
+profiles and bidirectional relationships, and descriptor-verifies every
+recorded downloaded or connector-derived file against its identity, timestamps,
+size, and SHA-256. Its content-free summary can make the eventual real-corpus
+evidence reproducible; it does not replace the still-required observation of
+all real tables, types, and media states. See `docs/ARCHIVE_AUDIT.md`.
+
 ### 1E. Incoming event reconciler
 
 - [x] Observe filesystem changes as a wake-up hint.

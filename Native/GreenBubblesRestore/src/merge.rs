@@ -66,18 +66,28 @@ pub fn merge_incremental_archive(
         .collect::<BTreeSet<_>>();
     let affected = selected.union(&deleted).cloned().collect::<BTreeSet<_>>();
 
-    let output_parent = output_archive
+    let requested_output_parent = output_archive
         .parent()
         .ok_or_else(|| RestoreError::UnsafePath(output_archive.display().to_string()))?;
-    ensure_private_directory(output_parent)?;
+    let requested_output_parent = if requested_output_parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        requested_output_parent
+    };
+    ensure_private_directory(requested_output_parent)?;
     if fs::symlink_metadata(output_archive).is_ok() {
         return Err(RestoreError::Integrity(
             "merged archive output already exists".to_string(),
         ));
     }
+    let output_name = output_archive
+        .file_name()
+        .ok_or_else(|| RestoreError::UnsafePath(output_archive.display().to_string()))?;
+    let output_parent = fs::canonicalize(requested_output_parent)?;
+    let output_archive = output_parent.join(output_name);
     let temporary = tempfile::Builder::new()
         .prefix(".greenbubbles-merge-")
-        .tempdir_in(output_parent)?;
+        .tempdir_in(&output_parent)?;
     fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700))?;
 
     let mut messages = merge_messages(previous_archive, fragment_archive, &selected, &affected)?;
@@ -103,7 +113,7 @@ pub fn merge_incremental_archive(
         previous_archive,
         fragment_archive,
         temporary.path(),
-        output_archive,
+        &output_archive,
     )?;
     let rejections = merge_rejections(previous_archive, fragment_archive, &selected, &affected)?;
     let coverage = merge_coverage(previous_archive, fragment_archive, &affected, &messages)?;
@@ -214,8 +224,8 @@ pub fn merge_incremental_archive(
     write_json(&temporary.path().join("report.json"), &final_report)?;
     sync_directory(temporary.path())?;
     let persisted = temporary.keep();
-    fs::rename(&persisted, output_archive)?;
-    sync_directory(output_parent)?;
+    fs::rename(&persisted, &output_archive)?;
+    sync_directory(&output_parent)?;
 
     Ok(ArchiveMergeReport {
         format_version: 1,

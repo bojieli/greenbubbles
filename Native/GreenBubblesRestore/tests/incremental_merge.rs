@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use greenbubbles_restore::merge::merge_incremental_archive;
 use greenbubbles_restore::replica::bootstrap_replica;
 use greenbubbles_restore::{
-    ArtifactAvailability, ArtifactDecodeState, ArtifactKind, ArtifactRole,
+    audit::audit_archive, ArtifactAvailability, ArtifactDecodeState, ArtifactKind, ArtifactRole,
     CachedSurfaceCompleteness, CachedSurfaceCoverage, CachedSurfaceTableCoverage,
     CachedSurfaceTableRole, CanonicalArtifact, CanonicalCachedMoment, CanonicalConversation,
     CanonicalMessage, CanonicalParticipant, ConversationKind, ConversationMembership,
@@ -106,8 +106,16 @@ fn merges_selected_source_sets_reorders_globally_and_resolves_cross_shard_relati
         .any(|table| table.source_set_id == "set-b" && table.source_row_count == 1));
     let artifacts = read_ndjson::<CanonicalArtifact>(&output.join("artifacts.ndjson"));
     let relocated = PathBuf::from(artifacts[0].materialized_local_path.as_ref().unwrap());
-    assert!(relocated.starts_with(&output));
+    assert!(relocated.starts_with(fs::canonicalize(&output).unwrap()));
     assert_eq!(fs::read(relocated).unwrap(), b"synthetic-media");
+
+    let audit = audit_archive(&output).unwrap();
+    assert_eq!(audit.archive_format_version, 4);
+    assert_eq!(audit.message_count, 2);
+    assert_eq!(audit.cached_moment_count, 2);
+    assert!(audit.all_recorded_artifact_files_match);
+    assert!(Path::new(&merged_report.messages_path).is_absolute());
+    assert!(Path::new(&merged_report.report_path).is_absolute());
 
     let replica = private.join("merged-replica.db");
     let bootstrapped = bootstrap_replica(&output, &replica, &key).unwrap();

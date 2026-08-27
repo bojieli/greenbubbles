@@ -1,0 +1,95 @@
+# Independent restoration-archive audit
+
+`greenbubbles-restore audit-archive` independently reopens a completed local
+archive and verifies that its ledgers, coverage verdict, relationships, and
+recorded artifact files still agree. It does not trust `report.json` merely
+because the restoration process wrote it successfully.
+
+This command is the final offline check before replica bootstrap or
+synchronization:
+
+```sh
+cargo run --locked \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  audit-archive <owner-only-restoration-archive>
+```
+
+It needs no database passphrase or replica key. It reads only the already
+restored owner-private archive and the exact downloaded media paths recorded by
+that archive. It does not open a WeChat database, contact WeChat, invoke the
+official client, or alter any source file.
+
+Restoration and merge writers record canonical absolute archive paths, so the
+archive can be audited from any working directory. Older or externally created
+reports whose recorded paths do not resolve to their own archive files fail
+closed.
+
+## What is independently verified
+
+The auditor fails closed unless all of these checks pass:
+
+- every required archive file is an owner-only, single-link, non-symlink
+  regular file and every path in `report.json` resolves to the corresponding
+  file;
+- message, rejection, artifact, conversation, participant, cached-Moment, and
+  cached-interaction NDJSON ledgers parse completely with no empty or duplicate
+  identity;
+- source-preserving base64 fields are valid and artifact digests are
+  well-formed;
+- the row equation is reproduced from the ledgers, rather than copied from the
+  report;
+- message logical-type, subtype, semantic-gap, direction, ordering,
+  relationship, and artifact-reference counts reproduce both `coverage.json`
+  and `report.json`;
+- the complete table ledger, supported message-table subset, source-row
+  counts, message-candidate gaps, per-table schema fingerprints, and aggregate
+  schema-profile fingerprint agree;
+- conversations are deterministically grouped, per-conversation ordinals are
+  contiguous, and one conversation does not silently change ordering basis;
+- every message conversation and sender resolves to the account-scoped entity
+  ledgers, participant/membership links are bidirectional, every resolved
+  relationship target exists in the same conversation, and every message
+  artifact ID and role agrees with the artifact ledger;
+- every downloaded source path is still an absolute canonical regular file,
+  ends with its safe account-relative path, and matches the recorded device,
+  inode, size, modification time, and SHA-256 before and after a descriptor-based
+  read;
+- every database-materialized or decoded derivative stays beneath the archive,
+  traverses no symlink, remains owner-only and single-link, and matches its
+  recorded size and SHA-256;
+- cached-surface row equations, schema profile, record counts, account binding,
+  and partial-cache evidence agree; and
+- the component and top-level completion verdicts are no stronger than the
+  independently reproduced evidence permits.
+
+A source file that is deleted, replaced, edited, or evicted after restoration
+therefore makes the audit fail. This is intentional: a stale pathname is not a
+faithfully restorable downloaded artifact. Run the audit promptly after the
+full media pass and again before a long-lived replica consumes a newly restored
+revision.
+
+## Privacy-safe output
+
+On success, the command emits only aggregate counts, format/scope states,
+coverage-gap counts, and booleans. It emits no message body, identifier,
+filesystem path, source fingerprint, file digest, table name, or failure-row
+identity. Errors name the failed invariant but not the sensitive record.
+
+`fullRestorationVerified` is true only when all archive checks pass and the
+archive itself claims full restoration from an authoritative, media-resolved,
+production-compatible pinned build. A structurally valid archive with an
+unknown message type, missing media, unsupported relationship, schema gap,
+unrecognized client, deferred media phase, or incremental-fragment scope is
+audited successfully but still reports `fullRestorationVerified: false`.
+
+## Boundary of the evidence
+
+This audit proves internal archive consistency and the current identity of
+every recorded local file. It does not prove that an undiscovered WeChat table
+was absent, that a private field's semantics were interpreted correctly, or
+that remote-only history exists locally. Those claims still require one real
+pinned-version corpus with zero unhandled message tables, zero observed
+logical-type gaps, and an explicit state for every media reference. Likewise,
+the audit does not authorize public distribution, authenticated active reads,
+or actions.
