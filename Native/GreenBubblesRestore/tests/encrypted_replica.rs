@@ -4,7 +4,9 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use greenbubbles_restore::replica::{bootstrap_replica, replica_status};
+use greenbubbles_restore::replica::{
+    bootstrap_replica, get_replica_changes, replica_status, synchronize_replica,
+};
 use greenbubbles_restore::{
     ArtifactAvailability, ArtifactDecodeState, ArtifactKind, ArtifactRole, CanonicalArtifact,
     CanonicalConversation, CanonicalMessage, CanonicalParticipant, ConversationKind,
@@ -34,7 +36,7 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
     let first = bootstrap_replica(&archive, &replica, &key).unwrap();
     assert!(first.encrypted_at_rest);
     assert!(!first.idempotent);
-    assert_eq!(first.schema_version, 2);
+    assert_eq!(first.schema_version, 3);
     assert_eq!(first.conversation_count, 1);
     assert_eq!(first.participant_count, 1);
     assert_eq!(first.message_count, 1);
@@ -65,12 +67,109 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
     assert!(repeated.idempotent);
     assert_eq!(repeated.message_count, 1);
 
+    let archive_b = clone_archive(&archive, &private, "archive-sync-b", "source-sync-b");
+    let mut messages = read_ndjson::<CanonicalMessage>(&archive_b.join("messages.ndjson"));
+    messages[0].typed_payload = TypedPayload::Decoded(json!({"Text": "edited searchable text"}));
+    messages[0].content_base64 = Some("ZWRpdGVkIHNlYXJjaGFibGUgdGV4dA==".to_string());
+    let mut added = messages[0].clone();
+    added.canonical_id = "message-b".to_string();
+    added.local_id = Some(2);
+    added.server_id = Some(3);
+    added.sort_sequence = Some(4);
+    added.conversation_ordinal = 1;
+    added.created_at_unix = Some(1_700_000_001);
+    added.typed_payload = TypedPayload::Decoded(json!({"Text": "second retained message"}));
+    added.content_base64 = Some("c2Vjb25kIHJldGFpbmVkIG1lc3NhZ2U=".to_string());
+    messages.push(added);
+    overwrite_ndjson(&archive_b.join("messages.ndjson"), &messages);
+    let synchronized = synchronize_replica(&archive_b, &replica, &key).unwrap();
+    assert_eq!(synchronized.previous_source_fingerprint, "source-a");
+    assert_eq!(synchronized.current_source_fingerprint, "source-sync-b");
+    assert_eq!(synchronized.added_count, 1);
+    assert_eq!(synchronized.changed_count, 1);
+    assert_eq!(synchronized.removed_count, 0);
+    assert_eq!(synchronized.message_count, 2);
+
+    let first_changes = get_replica_changes(&replica, &key, None, 1).unwrap();
+    assert_eq!(first_changes.items.len(), 1);
+    assert!(first_changes.next_cursor.is_some());
+    let resumed_changes =
+        get_replica_changes(&replica, &key, first_changes.next_cursor.as_deref(), 100).unwrap();
+    assert!(resumed_changes.items.len() >= 2);
+    assert!(resumed_changes
+        .items
+        .windows(2)
+        .all(|pair| pair[0].sequence < pair[1].sequence));
+    let second_replica = private.join("second-replica.db");
+    bootstrap_replica(&archive, &second_replica, &key).unwrap();
+    assert!(get_replica_changes(
+        &second_replica,
+        &key,
+        first_changes.next_cursor.as_deref(),
+        100,
+    )
+    .is_err());
+
+    let archive_c = clone_archive(&archive_b, &private, "archive-sync-c", "source-sync-c");
+    let mut malformed = fs::read(archive_c.join("messages.ndjson")).unwrap();
+    malformed.extend_from_slice(b"{not-valid-json}\n");
+    fs::write(archive_c.join("messages.ndjson"), malformed).unwrap();
+    assert!(synchronize_replica(&archive_c, &replica, &key).is_err());
+    let after_failed_sync = replica_status(&replica, &key).unwrap();
+    assert_eq!(
+        after_failed_sync.current_source_fingerprint.as_deref(),
+        Some("source-sync-b")
+    );
+    assert_eq!(after_failed_sync.message_count, 2);
+
+    let archive_d = clone_archive(&archive_b, &private, "archive-sync-d", "source-sync-d");
+    let retained = read_ndjson::<CanonicalMessage>(&archive_d.join("messages.ndjson"))
+        .into_iter()
+        .filter(|message| message.canonical_id == "message-b")
+        .collect::<Vec<_>>();
+    overwrite_ndjson(&archive_d.join("messages.ndjson"), &retained);
+    let mut artifacts = read_ndjson::<CanonicalArtifact>(&archive_d.join("artifacts.ndjson"));
+    artifacts[0].availability = ArtifactAvailability::NotDownloaded;
+    artifacts[0].source_local_path = None;
+    artifacts[0].decoded_local_path = None;
+    artifacts[0].decode_state = ArtifactDecodeState::NotRequired;
+    overwrite_ndjson(&archive_d.join("artifacts.ndjson"), &artifacts);
+    let deletion = synchronize_replica(&archive_d, &replica, &key).unwrap();
+    assert_eq!(deletion.added_count, 0);
+    assert_eq!(deletion.changed_count, 1);
+    assert_eq!(deletion.removed_count, 1);
+    assert_eq!(deletion.message_count, 1);
+    let idempotent_sync = synchronize_replica(&archive_d, &replica, &key).unwrap();
+    assert!(idempotent_sync.idempotent);
+    assert_eq!(idempotent_sync.added_count, 0);
+    assert_eq!(idempotent_sync.changed_count, 0);
+    assert_eq!(idempotent_sync.removed_count, 0);
+
+    let connection = keyed_connection(&replica);
+    let retained_fts: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM message_fts WHERE message_fts MATCH 'retained'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let deleted_fts: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM message_fts WHERE message_fts MATCH 'edited'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained_fts, 1);
+    assert_eq!(deleted_fts, 0);
+    drop(connection);
+
     let other_archive = build_archive(&private, "archive-b", "account-b", "source-b");
     assert!(bootstrap_replica(&other_archive, &replica, &key).is_err());
 
     downgrade_to_schema_1(&replica);
     let migrated = replica_status(&replica, &key).unwrap();
-    assert_eq!(migrated.schema_version, 2);
+    assert_eq!(migrated.schema_version, 3);
     let backup = fs::read_dir(&private)
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -242,15 +341,61 @@ fn downgrade_to_schema_1(path: &Path) {
              DROP INDEX message_by_type;
              DROP INDEX relationship_by_target;
              DROP INDEX change_by_account_sequence;
+             DROP TABLE sync_seen;
+             DROP TABLE replica_generation;
              DROP TABLE source_checkpoint;
              DROP TABLE sync_run;
              DROP TABLE change_log;
              DROP TABLE message_fts;
-             DELETE FROM migration_history WHERE schema_version = 2;
+             DELETE FROM migration_history WHERE schema_version >= 2;
              UPDATE replica_schema SET schema_version = 1 WHERE singleton = 1;
              PRAGMA wal_checkpoint(TRUNCATE);",
         )
         .unwrap();
+}
+
+fn clone_archive(source: &Path, parent: &Path, name: &str, fingerprint: &str) -> PathBuf {
+    let destination = parent.join(name);
+    fs::create_dir(&destination).unwrap();
+    fs::set_permissions(&destination, fs::Permissions::from_mode(0o700)).unwrap();
+    for name in [
+        "report.json",
+        "coverage.json",
+        "conversations.ndjson",
+        "participants.ndjson",
+        "messages.ndjson",
+        "artifacts.ndjson",
+    ] {
+        let path = destination.join(name);
+        fs::copy(source.join(name), &path).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let mut report: RestorationReport =
+        serde_json::from_slice(&fs::read(destination.join("report.json")).unwrap()).unwrap();
+    report.source_fingerprint = fingerprint.to_string();
+    fs::write(
+        destination.join("report.json"),
+        serde_json::to_vec_pretty(&report).unwrap(),
+    )
+    .unwrap();
+    destination
+}
+
+fn read_ndjson<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
+    fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn overwrite_ndjson<T: Serialize>(path: &Path, values: &[T]) {
+    let mut bytes = Vec::new();
+    for value in values {
+        serde_json::to_writer(&mut bytes, value).unwrap();
+        bytes.push(b'\n');
+    }
+    fs::write(path, bytes).unwrap();
 }
 
 fn keyed_connection(path: &Path) -> Connection {

@@ -106,13 +106,25 @@ printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
   --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
   replica-status /path/to/private-replica-directory/greenbubbles.db \
   --replica-key-stdin
+
+printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  replica-sync <new-private-output-directory> \
+  /path/to/private-replica-directory/greenbubbles.db --replica-key-stdin
+
+printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  replica-changes /path/to/private-replica-directory/greenbubbles.db \
+  --replica-key-stdin --limit 100
 ```
 
 Avoid placing a real key literally in shell history; pipe it from an
 owner-controlled secret manager. The example value is a placeholder. Bootstrap
 atomically stores canonical records, provenance, coverage, FTS, and its source
 checkpoint. Each replica rejects another account, and migrations retain an
-encrypted pre-migration backup. See [docs/REPLICA_SPEC.md](docs/REPLICA_SPEC.md).
+encrypted pre-migration backup. Synchronization mutates only changed canonical
+records and commits them with the checkpoint; the body-free change stream is
+ordered and resumable. See [docs/REPLICA_SPEC.md](docs/REPLICA_SPEC.md).
 
 Conversation reads require a separate owner-only policy. Creating one is an
 explicit local authorization step; cursors are bound to both the archive

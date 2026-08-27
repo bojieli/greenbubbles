@@ -459,16 +459,16 @@ Status: **planned**
 
 - [ ] Bootstrap once from a consistent snapshot, then process only plausible
   changed shards/ranges plus a bounded reconciliation window.
-- [ ] Treat filesystem and optional notification events only as wake-up hints;
+- [x] Treat filesystem and optional notification events only as wake-up hints;
   make source comparison and restoration authoritative.
-- [ ] Advance source checkpoints and replica mutations in one transaction.
-- [ ] Reconcile additions, edits, recalls, deletions, attachment availability,
+- [x] Advance source checkpoints and replica mutations in one transaction.
+- [x] Reconcile additions, edits, recalls, deletions, attachment availability,
   and late-arriving rows without emitting duplicate logical events.
 - [ ] Run occasional bounded integrity scans to recover from missed hints,
   timestamp anomalies, decoder upgrades, and checkpoint damage.
 - [ ] Keep attachment extraction, media decoding, thumbnails, and indexing off
   the path that makes new text searchable.
-- [ ] Publish an ordered, resumable `get_changes(cursor)` stream for downstream
+- [x] Publish an ordered, resumable `get_changes(cursor)` stream for downstream
   consumers.
 
 ### 2C. Retrieval and operational evidence

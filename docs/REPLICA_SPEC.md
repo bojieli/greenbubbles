@@ -24,7 +24,7 @@ accept it as a command argument, or silently fall back to plaintext.
 
 ## Schema and provenance
 
-Replica schema version 2 stores:
+Replica schema version 3 stores:
 
 - the account and current source fingerprint;
 - canonical conversations, participants, memberships, messages, artifacts,
@@ -56,4 +56,26 @@ absolute location—is the only backup reference exposed in normal reports.
 Synthetic tests prove that plaintext headers, message text, and stable artifact
 paths do not appear in the database bytes; unkeyed and wrong-key reads fail;
 cross-account bootstrap fails; same-checkpoint bootstrap is idempotent; and a
-schema-1 database is backed up in encrypted form before migration to schema 2.
+schema-1 database is backed up in encrypted form before migration to schema 3.
+
+## Transactional reconciliation and changes
+
+`replica-sync` compares canonical SHA-256 record identities inside an immediate
+encrypted transaction. It mutates only added, changed, or removed conversations,
+participants, messages, and artifacts. Message FTS rows, quote/reply/recall
+relationships, and artifact links are replaced only when their message changes.
+An encrypted `sync_seen` table makes deletions explicit without writing IDs to
+plaintext temporary files.
+
+Coverage, restoration completion, the sync-run record, entity change events,
+current account fingerprint, and source checkpoint commit in that same
+transaction. Invalid or truncated JSON after earlier valid rows therefore rolls
+back all provisional changes and leaves the prior checkpoint authoritative.
+Repeating a committed source fingerprint is an idempotent no-op.
+
+`replica-changes` returns ordered, body-free entity metadata with a base64url
+cursor bound to the opaque account ID, a random replica-generation ID, and last
+sequence. Cursors remain valid across later synchronizations of that replica;
+cross-account use and reuse against a replacement replica fail closed.
+Downstream consumers bootstrap canonical data through scoped APIs, then use
+this stream to know which stable entities require refresh.

@@ -7,7 +7,7 @@ use greenbubbles_restore::{
     archive::{create_conversation_policy, read_conversation_page},
     prepare_catalog,
     reconcile::reconcile_archives,
-    replica::{bootstrap_replica, replica_status},
+    replica::{bootstrap_replica, get_replica_changes, replica_status, synchronize_replica},
     restore_catalog,
     tools::{
         create_tool_policy, ConversationToolScope, LocalToolService, ToolCapability,
@@ -120,6 +120,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             let key = ReplicaKey::read_stdin()?;
             let report = replica_status(&replica, &key)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "replica-sync" => {
+            let archive = required_path(arguments.next(), "archive directory")?;
+            let replica = required_path(arguments.next(), "replica path")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if !remaining.iter().any(|value| value == "--replica-key-stdin") {
+                return Err("replica keys must be supplied with --replica-key-stdin".into());
+            }
+            let key = ReplicaKey::read_stdin()?;
+            let report = synchronize_replica(&archive, &replica, &key)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "replica-changes" => {
+            let replica = required_path(arguments.next(), "replica path")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if !remaining.iter().any(|value| value == "--replica-key-stdin") {
+                return Err("replica keys must be supplied with --replica-key-stdin".into());
+            }
+            let cursor = option_string(&remaining, "--cursor")?;
+            let limit = option_usize(&remaining, "--limit")?.unwrap_or(100);
+            let key = ReplicaKey::read_stdin()?;
+            let report = get_replica_changes(&replica, &key, cursor.as_deref(), limit)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "tool-policy" => {
@@ -235,7 +258,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => {
             eprintln!(
-                "Usage:\n  greenbubbles-restore probe <snapshot> [--passphrase-stdin]\n  greenbubbles-restore restore <snapshot> <output> [--account-root <path>] [--passphrase-stdin]\n  greenbubbles-restore policy <archive> <policy-file> <conversation-id>... [--max-page-size <n>]\n  greenbubbles-restore read <archive> <policy-file> <conversation-id> [--cursor <cursor>] [--limit <n>]\n  greenbubbles-restore reconcile <previous-archive> <current-archive> <policy-file> <events-output>\n  greenbubbles-restore replica-bootstrap <archive> <replica-path> --replica-key-stdin\n  greenbubbles-restore replica-status <replica-path> --replica-key-stdin\n  greenbubbles-restore tool-policy <archive> <policy-file> <conversation-id>... --capabilities list,read,search,draft [--fields sender,created-at,direction,type,content,attachments,relationships] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--max-results <n>] [--max-summary-bytes <n>] [--max-draft-bytes <n>]\n  greenbubbles-restore tool-list <archive> <policy-file> <audit-log> --requester <id> [--destination local|remote]\n  greenbubbles-restore tool-recent <archive> <policy-file> <audit-log> <conversation-id> --requester <id> [--limit <n>] [--destination local|remote]\n  greenbubbles-restore tool-search <archive> <policy-file> <audit-log> --requester <id> --query-stdin [--conversation <id>] [--limit <n>] [--destination local|remote]\n  greenbubbles-restore tool-draft <archive> <policy-file> <audit-log> <draft-directory> <conversation-id> --requester <id> --body-stdin"
+                "Usage:\n  greenbubbles-restore probe <snapshot> [--passphrase-stdin]\n  greenbubbles-restore restore <snapshot> <output> [--account-root <path>] [--passphrase-stdin]\n  greenbubbles-restore policy <archive> <policy-file> <conversation-id>... [--max-page-size <n>]\n  greenbubbles-restore read <archive> <policy-file> <conversation-id> [--cursor <cursor>] [--limit <n>]\n  greenbubbles-restore reconcile <previous-archive> <current-archive> <policy-file> <events-output>\n  greenbubbles-restore replica-bootstrap <archive> <replica-path> --replica-key-stdin\n  greenbubbles-restore replica-status <replica-path> --replica-key-stdin\n  greenbubbles-restore replica-sync <archive> <replica-path> --replica-key-stdin\n  greenbubbles-restore replica-changes <replica-path> --replica-key-stdin [--cursor <cursor>] [--limit <n>]\n  greenbubbles-restore tool-policy <archive> <policy-file> <conversation-id>... --capabilities list,read,search,draft [--fields sender,created-at,direction,type,content,attachments,relationships] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--max-results <n>] [--max-summary-bytes <n>] [--max-draft-bytes <n>]\n  greenbubbles-restore tool-list <archive> <policy-file> <audit-log> --requester <id> [--destination local|remote]\n  greenbubbles-restore tool-recent <archive> <policy-file> <audit-log> <conversation-id> --requester <id> [--limit <n>] [--destination local|remote]\n  greenbubbles-restore tool-search <archive> <policy-file> <audit-log> --requester <id> --query-stdin [--conversation <id>] [--limit <n>] [--destination local|remote]\n  greenbubbles-restore tool-draft <archive> <policy-file> <audit-log> <draft-directory> <conversation-id> --requester <id> --body-stdin"
             );
         }
     }

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader};
 use std::os::unix::ffi::OsStringExt;
@@ -18,7 +19,7 @@ use crate::{
     RestorationCoverage, RestorationReport, RestoreError, TypedPayload,
 };
 
-const CURRENT_SCHEMA_VERSION: u32 = 2;
+const CURRENT_SCHEMA_VERSION: u32 = 3;
 const REPLICA_FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +46,7 @@ pub struct ReplicaBootstrapReport {
 pub struct ReplicaStatus {
     pub format_version: u32,
     pub schema_version: u32,
+    pub replica_id: String,
     pub account_id: Option<String>,
     pub current_source_fingerprint: Option<String>,
     pub cipher_version: String,
@@ -55,6 +57,54 @@ pub struct ReplicaStatus {
     pub artifact_count: u64,
     pub last_checkpoint_unix_nanoseconds: Option<u128>,
     pub restoration_complete: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicaSyncReport {
+    pub format_version: u32,
+    pub account_id: String,
+    pub previous_source_fingerprint: String,
+    pub current_source_fingerprint: String,
+    pub idempotent: bool,
+    pub added_count: u64,
+    pub changed_count: u64,
+    pub removed_count: u64,
+    pub conversation_count: u64,
+    pub participant_count: u64,
+    pub message_count: u64,
+    pub artifact_count: u64,
+    pub committed_at_unix_nanoseconds: Option<u128>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicaChangeCursor {
+    pub format_version: u32,
+    pub account_id: String,
+    pub replica_id: String,
+    pub after_sequence: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicaChange {
+    pub sequence: u64,
+    pub source_fingerprint: String,
+    pub change_kind: String,
+    pub entity_kind: String,
+    pub entity_id: String,
+    pub conversation_id: Option<String>,
+    pub record_sha256: Option<String>,
+    pub observed_at_unix_nanoseconds: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplicaChangePage {
+    pub account_id: String,
+    pub items: Vec<ReplicaChange>,
+    pub next_cursor: Option<String>,
 }
 
 struct OpenedReplica {
@@ -71,6 +121,13 @@ struct ImportCounts {
     artifacts: u64,
     relationships: u64,
     message_artifacts: u64,
+}
+
+#[derive(Default)]
+struct SyncCounts {
+    added: u64,
+    changed: u64,
+    removed: u64,
 }
 
 pub fn bootstrap_replica(
@@ -179,6 +236,7 @@ pub fn replica_status(
     Ok(ReplicaStatus {
         format_version: REPLICA_FORMAT_VERSION,
         schema_version: CURRENT_SCHEMA_VERSION,
+        replica_id: replica_id(&opened.connection)?,
         account_id: identity.as_ref().map(|value| value.0.clone()),
         current_source_fingerprint: identity.as_ref().and_then(|value| value.1.clone()),
         cipher_version: opened.cipher_version,
@@ -189,6 +247,160 @@ pub fn replica_status(
         artifact_count: table_count(&opened.connection, "artifact")?,
         last_checkpoint_unix_nanoseconds: checkpoint,
         restoration_complete: identity.and_then(|value| value.2),
+    })
+}
+
+pub fn synchronize_replica(
+    archive_directory: &Path,
+    replica_path: &Path,
+    key: &ReplicaKey,
+) -> Result<ReplicaSyncReport, RestoreError> {
+    ensure_private_directory(archive_directory)?;
+    let report = load_report(archive_directory)?;
+    let mut opened = open_replica(replica_path, key)?;
+    let identity: Option<(String, Option<String>)> = opened
+        .connection
+        .query_row(
+            "SELECT account_id, current_source_fingerprint
+             FROM replica_identity WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((account_id, previous_fingerprint)) = identity else {
+        return Err(RestoreError::Integrity(
+            "replica must be bootstrapped before synchronization".to_string(),
+        ));
+    };
+    require_account(&report.account_id, &account_id)?;
+    let previous_fingerprint = previous_fingerprint.ok_or_else(|| {
+        RestoreError::Integrity("replica has no authoritative source checkpoint".to_string())
+    })?;
+    if previous_fingerprint == report.source_fingerprint {
+        return sync_report(
+            &opened.connection,
+            &account_id,
+            &previous_fingerprint,
+            &report.source_fingerprint,
+            true,
+            SyncCounts::default(),
+            None,
+        );
+    }
+    let (counts, committed) = reconcile_archive_transactionally(
+        &mut opened.connection,
+        archive_directory,
+        &report,
+        &previous_fingerprint,
+    )?;
+    checkpoint_and_secure(&opened.connection, replica_path)?;
+    sync_report(
+        &opened.connection,
+        &account_id,
+        &previous_fingerprint,
+        &report.source_fingerprint,
+        false,
+        counts,
+        Some(committed),
+    )
+}
+
+pub fn get_replica_changes(
+    replica_path: &Path,
+    key: &ReplicaKey,
+    cursor: Option<&str>,
+    requested_limit: usize,
+) -> Result<ReplicaChangePage, RestoreError> {
+    let opened = open_replica(replica_path, key)?;
+    let account_id: String = opened
+        .connection
+        .query_row(
+            "SELECT account_id FROM replica_identity WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| match error {
+            rusqlite::Error::QueryReturnedNoRows => RestoreError::Integrity(
+                "replica must be bootstrapped before reading changes".to_string(),
+            ),
+            other => other.into(),
+        })?;
+    let replica_id = replica_id(&opened.connection)?;
+    let decoded = cursor.map(decode_change_cursor).transpose()?;
+    if decoded.as_ref().is_some_and(|cursor| {
+        cursor.format_version != 1
+            || cursor.account_id != account_id
+            || cursor.replica_id != replica_id
+    }) {
+        return Err(RestoreError::Integrity(
+            "change cursor belongs to another account or format".to_string(),
+        ));
+    }
+    let after = decoded.map(|cursor| cursor.after_sequence).unwrap_or(0);
+    let limit = requested_limit.clamp(1, 1_000);
+    let query_limit = checked_usize_i64(limit.saturating_add(1))?;
+    let mut statement = opened.connection.prepare(
+        "SELECT sequence, source_fingerprint, change_kind, entity_kind, entity_id,
+                conversation_id, record_sha256, observed_at_unix_nanoseconds
+         FROM change_log
+         WHERE account_id = ?1 AND sequence > ?2
+         ORDER BY sequence LIMIT ?3",
+    )?;
+    let values = statement
+        .query_map(
+            params![account_id, checked_i64(after)?, query_limit],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(7)?,
+                ))
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    let has_more = values.len() > limit;
+    let mut items = Vec::with_capacity(values.len().min(limit));
+    for (sequence, source, kind, entity_kind, entity_id, conversation, digest, timestamp) in
+        values.into_iter().take(limit)
+    {
+        items.push(ReplicaChange {
+            sequence: u64::try_from(sequence).map_err(|_| {
+                RestoreError::Integrity(
+                    "change sequence is outside the supported range".to_string(),
+                )
+            })?,
+            source_fingerprint: source,
+            change_kind: kind,
+            entity_kind,
+            entity_id,
+            conversation_id: conversation,
+            record_sha256: digest,
+            observed_at_unix_nanoseconds: timestamp
+                .parse()
+                .map_err(|_| RestoreError::Integrity("change timestamp is invalid".to_string()))?,
+        });
+    }
+    let next_cursor = if has_more {
+        items.last().map(|change| {
+            encode_change_cursor(&ReplicaChangeCursor {
+                format_version: 1,
+                account_id: account_id.clone(),
+                replica_id,
+                after_sequence: change.sequence,
+            })
+        })
+    } else {
+        None
+    };
+    Ok(ReplicaChangePage {
+        account_id,
+        items,
+        next_cursor,
     })
 }
 
@@ -303,6 +515,7 @@ fn apply_migrations(connection: &mut Connection, from: u32) -> Result<(), Restor
         match version {
             1 => migration_1(&transaction)?,
             2 => migration_2(&transaction)?,
+            3 => migration_3(&transaction)?,
             _ => unreachable!("all replica migrations are enumerated"),
         }
         transaction.commit()?;
@@ -487,6 +700,28 @@ fn migration_2(transaction: &Transaction<'_>) -> Result<(), RestoreError> {
          UPDATE replica_schema SET schema_version = 2 WHERE singleton = 1;",
     )?;
     record_migration(transaction, 2, "checkpoints change stream and exact FTS")?;
+    Ok(())
+}
+
+fn migration_3(transaction: &Transaction<'_>) -> Result<(), RestoreError> {
+    transaction.execute_batch(
+        "CREATE TABLE replica_generation(
+           singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+           replica_id TEXT NOT NULL UNIQUE
+         );
+         INSERT INTO replica_generation VALUES (1, lower(hex(randomblob(16))));
+         CREATE TABLE sync_seen(
+           entity_kind TEXT NOT NULL,
+           entity_id TEXT NOT NULL,
+           PRIMARY KEY(entity_kind, entity_id)
+         ) WITHOUT ROWID;
+         UPDATE replica_schema SET schema_version = 3 WHERE singleton = 1;",
+    )?;
+    record_migration(
+        transaction,
+        3,
+        "encrypted reconciliation staging and resumable change stream",
+    )?;
     Ok(())
 }
 
@@ -780,6 +1015,726 @@ fn import_archive_transactionally(
     Ok(counts)
 }
 
+fn reconcile_archive_transactionally(
+    connection: &mut Connection,
+    archive_directory: &Path,
+    report: &RestorationReport,
+    previous_fingerprint: &str,
+) -> Result<(SyncCounts, u128), RestoreError> {
+    let conversations_path = archive_directory.join("conversations.ndjson");
+    let participants_path = archive_directory.join("participants.ndjson");
+    let messages_path = archive_directory.join("messages.ndjson");
+    let artifacts_path = archive_directory.join("artifacts.ndjson");
+    let coverage_path = archive_directory.join("coverage.json");
+    for path in [
+        &conversations_path,
+        &participants_path,
+        &messages_path,
+        &artifacts_path,
+        &coverage_path,
+    ] {
+        ensure_private_regular_file(path)?;
+    }
+    let coverage: RestorationCoverage = serde_json::from_slice(&fs::read(&coverage_path)?)?;
+    let started = unix_nanoseconds()?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute("DELETE FROM sync_seen", [])?;
+    let mut counts = SyncCounts::default();
+    let mut changed_conversations = HashSet::new();
+
+    for_each_ndjson::<CanonicalConversation>(&conversations_path, |conversation, bytes| {
+        require_account(&conversation.account_id, &report.account_id)?;
+        mark_seen(&transaction, "conversation", &conversation.conversation_id)?;
+        let digest = sha256(&bytes);
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT record_sha256 FROM conversation
+                 WHERE account_id = ?1 AND conversation_id = ?2",
+                params![report.account_id, conversation.conversation_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let change_kind = match existing.as_deref() {
+            None => {
+                transaction.execute(
+                    "INSERT INTO conversation VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        report.account_id,
+                        conversation.conversation_id,
+                        json_enum(&conversation.kind)?,
+                        json_enum(&conversation.entity_decode_state)?,
+                        checked_usize_i64(conversation.participant_ids.len())?,
+                        digest,
+                        bytes,
+                    ],
+                )?;
+                Some("added")
+            }
+            Some(value) if value != digest => {
+                transaction.execute(
+                    "UPDATE conversation SET
+                       kind = ?3, entity_decode_state = ?4, participant_count = ?5,
+                       record_sha256 = ?6, record_json = ?7
+                     WHERE account_id = ?1 AND conversation_id = ?2",
+                    params![
+                        report.account_id,
+                        conversation.conversation_id,
+                        json_enum(&conversation.kind)?,
+                        json_enum(&conversation.entity_decode_state)?,
+                        checked_usize_i64(conversation.participant_ids.len())?,
+                        digest,
+                        bytes,
+                    ],
+                )?;
+                Some("changed")
+            }
+            Some(_) => None,
+        };
+        if let Some(kind) = change_kind {
+            changed_conversations.insert(conversation.conversation_id.clone());
+            record_change(
+                &transaction,
+                &mut counts,
+                &report.account_id,
+                &report.source_fingerprint,
+                kind,
+                "conversation",
+                &conversation.conversation_id,
+                Some(&conversation.conversation_id),
+                Some(&digest),
+                started,
+            )?;
+        }
+        Ok(())
+    })?;
+
+    for_each_ndjson::<CanonicalParticipant>(&participants_path, |participant, bytes| {
+        require_account(&participant.account_id, &report.account_id)?;
+        mark_seen(&transaction, "participant", &participant.participant_id)?;
+        let digest = sha256(&bytes);
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT record_sha256 FROM participant
+                 WHERE account_id = ?1 AND participant_id = ?2",
+                params![report.account_id, participant.participant_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let change_kind = match existing.as_deref() {
+            None => {
+                transaction.execute(
+                    "INSERT INTO participant VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        report.account_id,
+                        participant.participant_id,
+                        json_enum(&participant.local_profile_state)?,
+                        digest,
+                        bytes,
+                    ],
+                )?;
+                Some("added")
+            }
+            Some(value) if value != digest => {
+                transaction.execute(
+                    "UPDATE participant SET local_profile_state = ?3,
+                       record_sha256 = ?4, record_json = ?5
+                     WHERE account_id = ?1 AND participant_id = ?2",
+                    params![
+                        report.account_id,
+                        participant.participant_id,
+                        json_enum(&participant.local_profile_state)?,
+                        digest,
+                        bytes,
+                    ],
+                )?;
+                Some("changed")
+            }
+            Some(_) => None,
+        };
+        if let Some(kind) = change_kind {
+            record_change(
+                &transaction,
+                &mut counts,
+                &report.account_id,
+                &report.source_fingerprint,
+                kind,
+                "participant",
+                &participant.participant_id,
+                None,
+                Some(&digest),
+                started,
+            )?;
+        }
+        Ok(())
+    })?;
+
+    for_each_ndjson::<CanonicalConversation>(&conversations_path, |conversation, _| {
+        if !changed_conversations.contains(&conversation.conversation_id) {
+            return Ok(());
+        }
+        transaction.execute(
+            "DELETE FROM conversation_participant
+             WHERE account_id = ?1 AND conversation_id = ?2",
+            params![report.account_id, conversation.conversation_id],
+        )?;
+        for membership in conversation.memberships {
+            transaction.execute(
+                "INSERT INTO conversation_participant VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    report.account_id,
+                    conversation.conversation_id,
+                    membership.participant_id,
+                    json_enum(&membership.role)?,
+                    membership.display_name_base64,
+                ],
+            )?;
+        }
+        Ok(())
+    })?;
+
+    for_each_ndjson::<CanonicalArtifact>(&artifacts_path, |artifact, bytes| {
+        mark_seen(&transaction, "artifact", &artifact.artifact_id)?;
+        let digest = sha256(&bytes);
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT record_sha256 FROM artifact
+                 WHERE account_id = ?1 AND artifact_id = ?2",
+                params![report.account_id, artifact.artifact_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let change_kind = match existing.as_deref() {
+            None => {
+                transaction.execute(
+                    "INSERT INTO artifact VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        report.account_id,
+                        artifact.artifact_id,
+                        json_enum(&artifact.kind)?,
+                        json_enum(&artifact.role)?,
+                        json_enum(&artifact.availability)?,
+                        artifact.source_sha256,
+                        artifact.decoded_sha256,
+                        digest,
+                        bytes,
+                    ],
+                )?;
+                Some("added")
+            }
+            Some(value) if value != digest => {
+                transaction.execute(
+                    "UPDATE artifact SET kind = ?3, role = ?4, availability = ?5,
+                       source_sha256 = ?6, decoded_sha256 = ?7,
+                       record_sha256 = ?8, record_json = ?9
+                     WHERE account_id = ?1 AND artifact_id = ?2",
+                    params![
+                        report.account_id,
+                        artifact.artifact_id,
+                        json_enum(&artifact.kind)?,
+                        json_enum(&artifact.role)?,
+                        json_enum(&artifact.availability)?,
+                        artifact.source_sha256,
+                        artifact.decoded_sha256,
+                        digest,
+                        bytes,
+                    ],
+                )?;
+                Some("changed")
+            }
+            Some(_) => None,
+        };
+        if let Some(kind) = change_kind {
+            record_change(
+                &transaction,
+                &mut counts,
+                &report.account_id,
+                &report.source_fingerprint,
+                kind,
+                "artifact",
+                &artifact.artifact_id,
+                None,
+                Some(&digest),
+                started,
+            )?;
+        }
+        Ok(())
+    })?;
+
+    for_each_ndjson::<CanonicalMessage>(&messages_path, |message, bytes| {
+        require_account(&message.account_id, &report.account_id)?;
+        mark_seen(&transaction, "message", &message.canonical_id)?;
+        let digest = sha256(&bytes);
+        let existing: Option<String> = transaction
+            .query_row(
+                "SELECT record_sha256 FROM message
+                 WHERE account_id = ?1 AND canonical_id = ?2",
+                params![report.account_id, message.canonical_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let change_kind = match existing.as_deref() {
+            None => {
+                insert_message(&transaction, report, &message, &bytes, &digest)?;
+                Some("added")
+            }
+            Some(value) if value != digest => {
+                update_message(&transaction, report, &message, &bytes, &digest)?;
+                Some("changed")
+            }
+            Some(_) => None,
+        };
+        if let Some(kind) = change_kind {
+            replace_message_links(&transaction, report, &message)?;
+            record_change(
+                &transaction,
+                &mut counts,
+                &report.account_id,
+                &report.source_fingerprint,
+                kind,
+                "message",
+                &message.canonical_id,
+                Some(&message.conversation_id),
+                Some(&digest),
+                started,
+            )?;
+        }
+        Ok(())
+    })?;
+
+    remove_missing_messages(&transaction, report, &mut counts, started)?;
+    remove_missing_entities(
+        &transaction,
+        report,
+        &mut counts,
+        started,
+        "artifact",
+        "artifact_id",
+    )?;
+    remove_missing_entities(
+        &transaction,
+        report,
+        &mut counts,
+        started,
+        "conversation",
+        "conversation_id",
+    )?;
+    remove_missing_entities(
+        &transaction,
+        report,
+        &mut counts,
+        started,
+        "participant",
+        "participant_id",
+    )?;
+
+    let committed = unix_nanoseconds()?;
+    transaction.execute(
+        "INSERT INTO coverage_state VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(account_id) DO UPDATE SET
+           source_fingerprint = excluded.source_fingerprint,
+           coverage_json = excluded.coverage_json,
+           report_json = excluded.report_json,
+           full_restoration_achieved = excluded.full_restoration_achieved",
+        params![
+            report.account_id,
+            report.source_fingerprint,
+            serde_json::to_vec(&coverage)?,
+            serde_json::to_vec(report)?,
+            report.completion.full_restoration_achieved,
+        ],
+    )?;
+    let conversation_count = table_account_count(&transaction, "conversation", &report.account_id)?;
+    let participant_count = table_account_count(&transaction, "participant", &report.account_id)?;
+    let message_count = table_account_count(&transaction, "message", &report.account_id)?;
+    let artifact_count = table_account_count(&transaction, "artifact", &report.account_id)?;
+    transaction.execute(
+        "INSERT INTO source_checkpoint VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(account_id) DO UPDATE SET
+           source_fingerprint = excluded.source_fingerprint,
+           committed_at_unix_nanoseconds = excluded.committed_at_unix_nanoseconds,
+           conversation_count = excluded.conversation_count,
+           participant_count = excluded.participant_count,
+           message_count = excluded.message_count,
+           artifact_count = excluded.artifact_count",
+        params![
+            report.account_id,
+            report.source_fingerprint,
+            committed.to_string(),
+            checked_i64(conversation_count)?,
+            checked_i64(participant_count)?,
+            checked_i64(message_count)?,
+            checked_i64(artifact_count)?,
+        ],
+    )?;
+    let run_id = sha256(
+        format!(
+            "{}:{}:{}:{started}",
+            report.account_id, previous_fingerprint, report.source_fingerprint
+        )
+        .as_bytes(),
+    );
+    transaction.execute(
+        "INSERT INTO sync_run VALUES (?1, ?2, 'reconcile', ?3, ?4, ?5, ?6)",
+        params![
+            run_id,
+            report.account_id,
+            report.source_fingerprint,
+            started.to_string(),
+            committed.to_string(),
+            checked_i64(counts.added + counts.changed + counts.removed)?,
+        ],
+    )?;
+    transaction.execute(
+        "UPDATE replica_identity SET
+           current_source_fingerprint = ?2,
+           restoration_complete = ?3,
+           updated_at_unix_nanoseconds = ?4
+         WHERE account_id = ?1",
+        params![
+            report.account_id,
+            report.source_fingerprint,
+            report.completion.full_restoration_achieved,
+            committed.to_string(),
+        ],
+    )?;
+    transaction.execute("DELETE FROM sync_seen", [])?;
+    transaction.commit()?;
+    Ok((counts, committed))
+}
+
+fn insert_message(
+    transaction: &Transaction<'_>,
+    report: &RestorationReport,
+    message: &CanonicalMessage,
+    bytes: &[u8],
+    digest: &str,
+) -> Result<(), RestoreError> {
+    let search_text = message_search_text(message);
+    transaction.execute(
+        "INSERT INTO message VALUES (
+           ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+         )",
+        params![
+            report.account_id,
+            message.canonical_id,
+            message.conversation_id,
+            message.sender_id,
+            checked_i64(message.conversation_ordinal)?,
+            message.created_at_unix,
+            json_enum(&message.direction)?,
+            message.logical_type,
+            message.sub_type,
+            json_enum(&message.semantic_decode_state)?,
+            search_text,
+            digest,
+            bytes,
+        ],
+    )?;
+    transaction.execute(
+        "INSERT INTO message_fts(account_id, canonical_id, conversation_id, search_text)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            report.account_id,
+            message.canonical_id,
+            message.conversation_id,
+            search_text,
+        ],
+    )?;
+    Ok(())
+}
+
+fn update_message(
+    transaction: &Transaction<'_>,
+    report: &RestorationReport,
+    message: &CanonicalMessage,
+    bytes: &[u8],
+    digest: &str,
+) -> Result<(), RestoreError> {
+    let search_text = message_search_text(message);
+    transaction.execute(
+        "UPDATE message SET
+           conversation_id = ?3, sender_id = ?4, conversation_ordinal = ?5,
+           created_at_unix = ?6, direction = ?7, logical_type = ?8, sub_type = ?9,
+           semantic_decode_state = ?10, search_text = ?11,
+           record_sha256 = ?12, record_json = ?13
+         WHERE account_id = ?1 AND canonical_id = ?2",
+        params![
+            report.account_id,
+            message.canonical_id,
+            message.conversation_id,
+            message.sender_id,
+            checked_i64(message.conversation_ordinal)?,
+            message.created_at_unix,
+            json_enum(&message.direction)?,
+            message.logical_type,
+            message.sub_type,
+            json_enum(&message.semantic_decode_state)?,
+            search_text,
+            digest,
+            bytes,
+        ],
+    )?;
+    transaction.execute(
+        "DELETE FROM message_fts WHERE account_id = ?1 AND canonical_id = ?2",
+        params![report.account_id, message.canonical_id],
+    )?;
+    transaction.execute(
+        "INSERT INTO message_fts(account_id, canonical_id, conversation_id, search_text)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            report.account_id,
+            message.canonical_id,
+            message.conversation_id,
+            search_text,
+        ],
+    )?;
+    Ok(())
+}
+
+fn replace_message_links(
+    transaction: &Transaction<'_>,
+    report: &RestorationReport,
+    message: &CanonicalMessage,
+) -> Result<(), RestoreError> {
+    transaction.execute(
+        "DELETE FROM message_relationship WHERE account_id = ?1 AND source_canonical_id = ?2",
+        params![report.account_id, message.canonical_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM message_artifact WHERE account_id = ?1 AND canonical_id = ?2",
+        params![report.account_id, message.canonical_id],
+    )?;
+    for (ordinal, relationship) in message.relationships.iter().enumerate() {
+        transaction.execute(
+            "INSERT INTO message_relationship VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                report.account_id,
+                message.canonical_id,
+                checked_usize_i64(ordinal)?,
+                json_enum(&relationship.kind)?,
+                relationship.target_canonical_id,
+                relationship.resolved,
+                serde_json::to_vec(relationship)?,
+            ],
+        )?;
+    }
+    for (ordinal, reference) in message.artifact_references.iter().enumerate() {
+        transaction.execute(
+            "INSERT INTO message_artifact VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                report.account_id,
+                message.canonical_id,
+                checked_usize_i64(ordinal)?,
+                reference.artifact_id,
+                json_enum(&reference.role)?,
+                reference.preferred,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn mark_seen(
+    transaction: &Transaction<'_>,
+    entity_kind: &str,
+    entity_id: &str,
+) -> Result<(), RestoreError> {
+    transaction.execute(
+        "INSERT INTO sync_seen VALUES (?1, ?2)",
+        params![entity_kind, entity_id],
+    )?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_change(
+    transaction: &Transaction<'_>,
+    counts: &mut SyncCounts,
+    account_id: &str,
+    source_fingerprint: &str,
+    change_kind: &str,
+    entity_kind: &str,
+    entity_id: &str,
+    conversation_id: Option<&str>,
+    record_sha256: Option<&str>,
+    observed_at: u128,
+) -> Result<(), RestoreError> {
+    match change_kind {
+        "added" => counts.added += 1,
+        "changed" => counts.changed += 1,
+        "removed" => counts.removed += 1,
+        _ => {
+            return Err(RestoreError::Integrity(
+                "unsupported replica change kind".to_string(),
+            ))
+        }
+    }
+    transaction.execute(
+        "INSERT INTO change_log(
+           account_id, source_fingerprint, change_kind, entity_kind, entity_id,
+           conversation_id, record_sha256, observed_at_unix_nanoseconds
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            account_id,
+            source_fingerprint,
+            change_kind,
+            entity_kind,
+            entity_id,
+            conversation_id,
+            record_sha256,
+            observed_at.to_string(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn remove_missing_messages(
+    transaction: &Transaction<'_>,
+    report: &RestorationReport,
+    counts: &mut SyncCounts,
+    observed_at: u128,
+) -> Result<(), RestoreError> {
+    let values = {
+        let mut statement = transaction.prepare(
+            "SELECT canonical_id, conversation_id, record_sha256 FROM message
+             WHERE account_id = ?1 AND NOT EXISTS(
+               SELECT 1 FROM sync_seen
+               WHERE entity_kind = 'message' AND entity_id = canonical_id
+             ) ORDER BY canonical_id",
+        )?;
+        let rows = statement.query_map([&report.account_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for (identifier, conversation, digest) in values {
+        record_change(
+            transaction,
+            counts,
+            &report.account_id,
+            &report.source_fingerprint,
+            "removed",
+            "message",
+            &identifier,
+            Some(&conversation),
+            Some(&digest),
+            observed_at,
+        )?;
+        transaction.execute(
+            "DELETE FROM message_fts WHERE account_id = ?1 AND canonical_id = ?2",
+            params![report.account_id, identifier],
+        )?;
+        transaction.execute(
+            "DELETE FROM message WHERE account_id = ?1 AND canonical_id = ?2",
+            params![report.account_id, identifier],
+        )?;
+    }
+    Ok(())
+}
+
+fn remove_missing_entities(
+    transaction: &Transaction<'_>,
+    report: &RestorationReport,
+    counts: &mut SyncCounts,
+    observed_at: u128,
+    table: &str,
+    id_column: &str,
+) -> Result<(), RestoreError> {
+    debug_assert!(matches!(table, "artifact" | "conversation" | "participant"));
+    debug_assert!(matches!(
+        id_column,
+        "artifact_id" | "conversation_id" | "participant_id"
+    ));
+    let query = format!(
+        "SELECT {id_column}, record_sha256 FROM {table}
+         WHERE account_id = ?1 AND NOT EXISTS(
+           SELECT 1 FROM sync_seen
+           WHERE entity_kind = ?2 AND entity_id = {id_column}
+         ) ORDER BY {id_column}"
+    );
+    let values = {
+        let mut statement = transaction.prepare(&query)?;
+        let rows = statement.query_map(params![report.account_id, table], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for (identifier, digest) in values {
+        let conversation = (table == "conversation").then_some(identifier.as_str());
+        record_change(
+            transaction,
+            counts,
+            &report.account_id,
+            &report.source_fingerprint,
+            "removed",
+            table,
+            &identifier,
+            conversation,
+            Some(&digest),
+            observed_at,
+        )?;
+        let delete = format!("DELETE FROM {table} WHERE account_id = ?1 AND {id_column} = ?2");
+        transaction.execute(&delete, params![report.account_id, identifier])?;
+    }
+    Ok(())
+}
+
+fn table_account_count(
+    transaction: &Transaction<'_>,
+    table: &str,
+    account_id: &str,
+) -> Result<u64, RestoreError> {
+    debug_assert!(matches!(
+        table,
+        "conversation" | "participant" | "message" | "artifact"
+    ));
+    let sql = format!("SELECT count(*) FROM {table} WHERE account_id = ?1");
+    let count: i64 = transaction.query_row(&sql, [account_id], |row| row.get(0))?;
+    Ok(count.max(0) as u64)
+}
+
+fn sync_report(
+    connection: &Connection,
+    account_id: &str,
+    previous_source_fingerprint: &str,
+    current_source_fingerprint: &str,
+    idempotent: bool,
+    counts: SyncCounts,
+    committed_at_unix_nanoseconds: Option<u128>,
+) -> Result<ReplicaSyncReport, RestoreError> {
+    Ok(ReplicaSyncReport {
+        format_version: REPLICA_FORMAT_VERSION,
+        account_id: account_id.to_string(),
+        previous_source_fingerprint: previous_source_fingerprint.to_string(),
+        current_source_fingerprint: current_source_fingerprint.to_string(),
+        idempotent,
+        added_count: counts.added,
+        changed_count: counts.changed,
+        removed_count: counts.removed,
+        conversation_count: table_count(connection, "conversation")?,
+        participant_count: table_count(connection, "participant")?,
+        message_count: table_count(connection, "message")?,
+        artifact_count: table_count(connection, "artifact")?,
+        committed_at_unix_nanoseconds,
+    })
+}
+
+fn encode_change_cursor(cursor: &ReplicaChangeCursor) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(cursor).expect("change cursor serialization cannot fail"))
+}
+
+fn decode_change_cursor(value: &str) -> Result<ReplicaChangeCursor, RestoreError> {
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| RestoreError::Integrity("change cursor is not valid base64url".to_string()))?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
 fn bootstrap_report(
     opened: &OpenedReplica,
     report: &RestorationReport,
@@ -878,6 +1833,20 @@ fn table_count(connection: &Connection, table: &str) -> Result<u64, RestoreError
     let sql = format!("SELECT count(*) FROM {table}");
     let count: i64 = connection.query_row(&sql, [], |row| row.get(0))?;
     Ok(count.max(0) as u64)
+}
+
+fn replica_id(connection: &Connection) -> Result<String, RestoreError> {
+    let value: String = connection.query_row(
+        "SELECT replica_id FROM replica_generation WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    if value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(RestoreError::Integrity(
+            "replica generation identity is invalid".to_string(),
+        ));
+    }
+    Ok(value)
 }
 
 fn sha256(value: &[u8]) -> String {
