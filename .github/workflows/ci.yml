@@ -30,6 +30,9 @@ jobs:
       - name: Check distribution dependency baseline
         run: swift scripts/check-distribution-inventory.swift
 
+      - name: Check secret hygiene
+        run: swift scripts/check-secret-hygiene.swift
+
       - name: Check cross-language pinned build profile
         run: swift scripts/check-pinned-build-profile.swift
 

@@ -17,3 +17,13 @@ DerivedData/
 *.pem
 *.p12
 *.mobileprovision
+
+# Local tool test area; may contain extracted key material (e.g. all_keys.json).
+/.tmp
+
+# Extracted key/passphrase artifacts and decrypted database output must never
+# enter the repository. Enforced by scripts/check-secret-hygiene.swift.
+all_keys.json
+wechat-passphrase.json
+*-passphrase.json
+decrypted/

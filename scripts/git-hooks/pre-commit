@@ -1,0 +1,6 @@
+#!/bin/sh
+# Blocks commits that would introduce extracted key material or decrypted
+# database output. One-time setup: git config core.hooksPath scripts/git-hooks
+set -e
+cd "$(git rev-parse --show-toplevel)"
+exec swift scripts/check-secret-hygiene.swift --staged
