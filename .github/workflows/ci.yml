@@ -27,6 +27,9 @@ jobs:
       - name: Build release executable
         run: swift build -c release
 
+      - name: Check distribution dependency baseline
+        run: swift scripts/check-distribution-inventory.swift
+
       - name: Show Rust version
         run: rustc --version && cargo --version
 

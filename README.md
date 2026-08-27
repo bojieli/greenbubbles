@@ -47,6 +47,11 @@ remaining external gate and its required resumption evidence is mapped in
 [docs/GATE_READINESS.md](docs/GATE_READINESS.md). Aggregate evidence from the
 owner-authorized, content-free local snapshot validation is in
 [docs/LOCAL_ACQUISITION_VALIDATION.md](docs/LOCAL_ACQUISITION_VALIDATION.md).
+The factual source/binary dependency boundary, nested native-code notices, and
+publication categories are in
+[docs/DISTRIBUTION_INVENTORY.md](docs/DISTRIBUTION_INVENTORY.md). This is not a
+public-release approval; the repository remains unlicensed for public use and
+private by design.
 
 ## Build and test
 
@@ -61,6 +66,7 @@ swift run greenbubbles integration-surfaces
 swift run greenbubbles inventory
 swift run greenbubbles snapshot
 swift run greenbubbles-public-article /private/owner-only-request.json
+swift scripts/check-distribution-inventory.swift
 cd Native/GreenBubblesRestore
 cargo test --locked --all-targets
 ```

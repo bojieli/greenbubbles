@@ -398,6 +398,18 @@ Before a public release, obtain qualified legal review and:
 - [ ] document which components may be published and which experiments, if any,
   must remain private.
 
+The current factual dependency audit separates source, binary, schema/format
+documentation, sanitized-fixture, real-data, hosted-repository, and research
+publication categories. The Swift package has no external package dependency.
+The Rust build pins `wx-cli` commit
+`2abe708f55bfe135539a385df856fdc58f97fc74`; its repository carries an MIT
+license while five selected package records omit inherited license metadata.
+The native build also bundles SQLCipher and SILK C sources with their own
+source/binary notice conditions. A deterministic CI check fails closed on
+reviewed direct-dependency, revision, license-digest, native-package, or
+publication-state drift. See `docs/DISTRIBUTION_INVENTORY.md`. This evidence
+does not select GreenBubbles' license or complete any legal/publication item.
+
 This plan is not legal advice.
 
 Kill criterion: if the only viable public implementation requires distributing
