@@ -35,6 +35,11 @@ column signatures, allowing ordinary, business, and chatbot schema variants to
 be included. Field aliases are resolved dynamically. Every column is retained
 using its original SQLite storage class and bytes.
 
+Every table in every prepared database is also recorded in the schema coverage
+ledger. Message-like tables that do not meet the supported adapter signature
+remain explicit completion-blocking candidates until their role is proved and
+an adapter or auxiliary classification is added.
+
 Known auxiliary chains include:
 
 ```text

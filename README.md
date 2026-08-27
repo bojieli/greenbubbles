@@ -104,8 +104,21 @@ cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
 ```
 
 The `read` command emits message bodies and is therefore intended only for
-explicit local use. A policy for one archive or conversation cannot be reused
-for another.
+explicit local use. A policy remains valid for later archives from the same
+account, but not for another account; cursors remain bound to one archive and
+conversation.
+
+Periodic archive reconciliation is authoritative for incoming/change events:
+
+```sh
+cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  reconcile <previous-archive> <current-archive> <policy-file> <events-output>
+```
+
+It emits deterministic, body-free `added`, `changed`, and `removed` event
+metadata only for enabled conversations. Filesystem and optional notification
+hints merely decide when to run this reconciliation. See
+[docs/NOTIFICATION_HINTS.md](docs/NOTIFICATION_HINTS.md).
 
 ## Scope and authorization
 

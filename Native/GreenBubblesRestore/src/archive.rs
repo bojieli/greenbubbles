@@ -15,7 +15,8 @@ const MAX_POLICY_PAGE_SIZE: usize = 1_000;
 #[serde(rename_all = "camelCase")]
 pub struct ConversationReadPolicy {
     pub format_version: u32,
-    pub source_fingerprint: String,
+    pub account_id: String,
+    pub created_from_source_fingerprint: String,
     pub enabled_conversation_ids: BTreeSet<String>,
     pub maximum_page_size: usize,
 }
@@ -60,8 +61,9 @@ pub fn create_conversation_policy(
         )));
     }
     let policy = ConversationReadPolicy {
-        format_version: 1,
-        source_fingerprint: report.source_fingerprint,
+        format_version: 2,
+        account_id: report.account_id,
+        created_from_source_fingerprint: report.source_fingerprint,
         enabled_conversation_ids,
         maximum_page_size: maximum_page_size.clamp(1, MAX_POLICY_PAGE_SIZE),
     };
@@ -76,22 +78,16 @@ pub fn read_conversation_page(
     cursor: Option<&str>,
     requested_limit: usize,
 ) -> Result<ConversationPage, RestoreError> {
-    ensure_private_regular_file(policy_path)?;
-    let policy: ConversationReadPolicy = serde_json::from_slice(&fs::read(policy_path)?)?;
-    if policy.format_version != 1 {
-        return Err(RestoreError::Integrity(
-            "unsupported conversation policy version".to_string(),
-        ));
-    }
+    let policy = load_policy(policy_path)?;
     if !policy.enabled_conversation_ids.contains(conversation_id) {
         return Err(RestoreError::Integrity(
             "conversation is not enabled by the local read policy".to_string(),
         ));
     }
     let report = load_report(archive_directory)?;
-    if report.source_fingerprint != policy.source_fingerprint {
+    if report.account_id != policy.account_id {
         return Err(RestoreError::Integrity(
-            "conversation policy belongs to a different restoration archive".to_string(),
+            "conversation policy belongs to a different account".to_string(),
         ));
     }
     let cursor = cursor.map(decode_cursor).transpose()?;
@@ -152,11 +148,22 @@ pub fn read_conversation_page(
     })
 }
 
-fn load_report(archive_directory: &Path) -> Result<RestorationReport, RestoreError> {
+pub(crate) fn load_report(archive_directory: &Path) -> Result<RestorationReport, RestoreError> {
     ensure_private_directory(archive_directory)?;
     let path = archive_directory.join("report.json");
     ensure_private_regular_file(&path)?;
     Ok(serde_json::from_slice(&fs::read(path)?)?)
+}
+
+pub(crate) fn load_policy(policy_path: &Path) -> Result<ConversationReadPolicy, RestoreError> {
+    ensure_private_regular_file(policy_path)?;
+    let policy: ConversationReadPolicy = serde_json::from_slice(&fs::read(policy_path)?)?;
+    if policy.format_version != 2 {
+        return Err(RestoreError::Integrity(
+            "unsupported conversation policy version".to_string(),
+        ));
+    }
+    Ok(policy)
 }
 
 fn load_conversation_ids(archive_directory: &Path) -> Result<BTreeSet<String>, RestoreError> {
@@ -191,7 +198,7 @@ fn decode_cursor(value: &str) -> Result<ConversationCursor, RestoreError> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 
-fn ensure_private_directory(path: &Path) -> Result<(), RestoreError> {
+pub(crate) fn ensure_private_directory(path: &Path) -> Result<(), RestoreError> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink()
         || !metadata.is_dir()
@@ -204,7 +211,7 @@ fn ensure_private_directory(path: &Path) -> Result<(), RestoreError> {
     Ok(())
 }
 
-fn ensure_private_regular_file(path: &Path) -> Result<(), RestoreError> {
+pub(crate) fn ensure_private_regular_file(path: &Path) -> Result<(), RestoreError> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink()
         || !metadata.is_file()

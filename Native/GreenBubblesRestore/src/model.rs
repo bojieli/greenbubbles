@@ -319,6 +319,7 @@ pub struct RejectedRow {
 pub struct RestorationIntegrity {
     pub database_count: u64,
     pub message_table_count: u64,
+    pub message_candidate_gap_count: u64,
     pub source_row_count: u64,
     pub restored_row_count: u64,
     pub rejected_row_count: u64,
@@ -368,6 +369,7 @@ impl RestorationIntegrity {
 #[serde(rename_all = "camelCase")]
 pub struct RestorationReport {
     pub format_version: u32,
+    pub account_id: String,
     pub source_fingerprint: String,
     pub messages_path: String,
     pub rejections_path: String,
@@ -400,7 +402,8 @@ impl RestorationCompletion {
         let row_equation_holds = integrity.row_equation_holds();
         let zero_rejected_rows = integrity.rejected_row_count == 0;
         let canonical_identities_unique = integrity.duplicate_canonical_id_count == 0;
-        let semantic_message_coverage_complete = integrity.semantic_gap_count == 0;
+        let semantic_message_coverage_complete =
+            integrity.semantic_gap_count == 0 && integrity.message_candidate_gap_count == 0;
         let directions_complete = integrity
             .direction_counts
             .get("unknown")
@@ -448,10 +451,32 @@ pub struct RestorationCoverage {
     pub decoder_version: String,
     pub snapshot_manifest_format_version: u32,
     pub message_tables: Vec<MessageTableCoverage>,
+    pub all_tables: Vec<TableSchemaCoverage>,
     pub logical_type_counts: BTreeMap<String, u64>,
     pub logical_sub_type_counts: BTreeMap<String, u64>,
     pub unknown_payload_reason_counts: BTreeMap<String, u64>,
     pub semantic_gap_reason_counts: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TableCoverageRole {
+    Message,
+    KnownAuxiliary,
+    Other,
+    UnhandledMessageCandidate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableSchemaCoverage {
+    pub source_set_id: String,
+    pub source_logical_path: String,
+    pub source_table_id: String,
+    pub source_table_name: String,
+    pub columns: Vec<String>,
+    pub role: TableCoverageRole,
+    pub classification_reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

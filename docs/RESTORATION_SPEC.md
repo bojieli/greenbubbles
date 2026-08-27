@@ -55,6 +55,8 @@ only policy-approved normalized fields, never the lossless archive by default.
 
 Each run produces counts that can be checked without printing message content:
 
+- every discovered table and column set, classified as a supported message
+  table, known auxiliary table, other table, or unhandled message candidate;
 - source tables and rows discovered;
 - rows restored, rejected, duplicated, and unknown by logical message type;
 - relationship references resolved and unresolved;
@@ -68,6 +70,13 @@ canonical identity uniqueness, semantic decoding, directions, entities,
 relationships, artifact verification, and artifact decoding all pass. Retaining
 raw bytes is necessary for losslessness but does not by itself satisfy semantic
 or playable-media completeness.
+
+`coverage.json` format 2 contains the complete schema ledger in `allTables`.
+Any message-like name or column signature that does not match a supported safe
+adapter is labeled `unhandledMessageCandidate`, increments
+`messageCandidateGapCount`, and keeps semantic completion false. This makes a
+new or version-drifted message shard fail closed instead of disappearing from
+row accounting.
 
 The completion invariant is:
 
@@ -111,7 +120,14 @@ unparseable group-member payload is an entity coverage gap.
 
 The lossless archive is not an implicit read grant. A separate mode-`0600`
 policy lists the opaque conversation IDs that may be queried and caps page size.
+The policy is bound to the account so it can survive periodic resnapshots.
 Every cursor includes the source fingerprint, conversation ID, and last emitted
 conversation ordinal. Cross-archive and cross-conversation cursor reuse fails
 closed. Duplicate canonical identities encountered during paging abort the
 read.
+
+Archive reconciliation compares canonical identities and canonicalized record
+digests under that same policy. It emits deterministic body-free events for
+additions, changes, and removals; repeating the same comparison produces the
+same event IDs. This is the recovery path for missed or duplicated wake-up
+hints.

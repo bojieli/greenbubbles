@@ -4,7 +4,9 @@ use std::path::PathBuf;
 
 use greenbubbles_restore::{
     archive::{create_conversation_policy, read_conversation_page},
-    prepare_catalog, restore_catalog, DatabasePassphrase, RestorationOptions,
+    prepare_catalog,
+    reconcile::reconcile_archives,
+    restore_catalog, DatabasePassphrase, RestorationOptions,
 };
 
 fn main() {
@@ -83,9 +85,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 read_conversation_page(&archive, &policy, &conversation, cursor.as_deref(), limit)?;
             println!("{}", serde_json::to_string_pretty(&page)?);
         }
+        "reconcile" => {
+            let previous = required_path(arguments.next(), "previous archive directory")?;
+            let current = required_path(arguments.next(), "current archive directory")?;
+            let policy = required_path(arguments.next(), "policy path")?;
+            let events = required_path(arguments.next(), "events output path")?;
+            let report = reconcile_archives(&previous, &current, &policy, &events)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         _ => {
             eprintln!(
-                "Usage:\n  greenbubbles-restore probe <snapshot> [--passphrase-stdin]\n  greenbubbles-restore restore <snapshot> <output> [--account-root <path>] [--passphrase-stdin]\n  greenbubbles-restore policy <archive> <policy-file> <conversation-id>... [--max-page-size <n>]\n  greenbubbles-restore read <archive> <policy-file> <conversation-id> [--cursor <cursor>] [--limit <n>]"
+                "Usage:\n  greenbubbles-restore probe <snapshot> [--passphrase-stdin]\n  greenbubbles-restore restore <snapshot> <output> [--account-root <path>] [--passphrase-stdin]\n  greenbubbles-restore policy <archive> <policy-file> <conversation-id>... [--max-page-size <n>]\n  greenbubbles-restore read <archive> <policy-file> <conversation-id> [--cursor <cursor>] [--limit <n>]\n  greenbubbles-restore reconcile <previous-archive> <current-archive> <policy-file> <events-output>"
             );
         }
     }

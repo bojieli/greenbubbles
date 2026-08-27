@@ -102,10 +102,10 @@ Status: **in progress**
 
 ### 1E. Incoming event reconciler
 
-- [ ] Observe filesystem changes as a wake-up hint.
-- [ ] Evaluate macOS notification accessibility only as an optional low-latency
+- [x] Observe filesystem changes as a wake-up hint.
+- [x] Evaluate macOS notification accessibility only as an optional low-latency
   hint; do not depend on it for completeness.
-- [ ] Reconcile against normalized message identifiers and periodically recover
+- [x] Reconcile against normalized message identifiers and periodically recover
   missed/duplicate events.
 
 Exit gate: on supported, pinned versions, the bridge can reproduce selected

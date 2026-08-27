@@ -13,7 +13,8 @@ use crate::{
     DirectionEvidence, MessageDirection, MessageOrderingBasis, MessageRelationship,
     MessageRelationshipKind, MessageTableCoverage, PreparedCatalog, RawSQLiteValue, RejectedRow,
     RelationshipResolutionState, RestorationCompletion, RestorationCoverage, RestorationIntegrity,
-    RestorationReport, RestoreError, SemanticDecodeState, TypedPayload,
+    RestorationReport, RestoreError, SemanticDecodeState, TableCoverageRole, TableSchemaCoverage,
+    TypedPayload,
 };
 
 #[derive(Debug, Clone)]
@@ -85,6 +86,7 @@ pub fn restore_catalog(
         ..Default::default()
     };
     let mut table_coverage = Vec::new();
+    let mut all_table_coverage = Vec::new();
     let mut entity_seeds = EntitySeeds::default();
 
     for database in &catalog.databases {
@@ -95,13 +97,25 @@ pub fn restore_catalog(
 
         for table in &database.tables {
             let columns = table_columns(&connection, table)?;
-            if !is_message_table(table, &columns) {
+            let table_id = opaque_id(table.as_bytes());
+            let (role, classification_reason) = classify_table(table, &columns);
+            if role == TableCoverageRole::UnhandledMessageCandidate {
+                integrity.message_candidate_gap_count += 1;
+            }
+            all_table_coverage.push(TableSchemaCoverage {
+                source_set_id: database.source_set_id.clone(),
+                source_logical_path: database.logical_path.clone(),
+                source_table_id: table_id.clone(),
+                source_table_name: table.clone(),
+                columns: columns.clone(),
+                role,
+                classification_reason: classification_reason.to_string(),
+            });
+            if role != TableCoverageRole::Message {
                 continue;
             }
             integrity.message_table_count += 1;
-            let table_id = opaque_id(table.as_bytes());
             let conversation = infer_conversation(table, &database.logical_path, names.values());
-            let conversation_id = scoped_opaque_id(&account_id, conversation.as_bytes());
             let schema_identity = columns
                 .iter()
                 .map(|value| value.to_ascii_lowercase())
@@ -135,7 +149,6 @@ pub fn restore_catalog(
                     table_id: &table_id,
                     table_name: table,
                     account_id: &account_id,
-                    conversation_id: &conversation_id,
                     conversation: &conversation,
                     names: &names,
                     self_username: self_username.as_deref(),
@@ -393,12 +406,25 @@ pub fn restore_catalog(
                 &right.source_set_id,
             ))
     });
+    all_table_coverage.sort_by(|left, right| {
+        (
+            &left.source_logical_path,
+            &left.source_table_name,
+            &left.source_set_id,
+        )
+            .cmp(&(
+                &right.source_logical_path,
+                &right.source_table_name,
+                &right.source_set_id,
+            ))
+    });
     let coverage = RestorationCoverage {
-        format_version: 1,
+        format_version: 2,
         decoder_name: "greenbubbles-restore".to_string(),
         decoder_version: env!("CARGO_PKG_VERSION").to_string(),
         snapshot_manifest_format_version: catalog.manifest.manifest_format_version,
         message_tables: table_coverage,
+        all_tables: all_table_coverage,
         logical_type_counts: integrity.logical_type_counts.clone(),
         logical_sub_type_counts: integrity.logical_sub_type_counts.clone(),
         unknown_payload_reason_counts: integrity.unknown_payload_reason_counts.clone(),
@@ -409,6 +435,7 @@ pub fn restore_catalog(
     let completion = RestorationCompletion::evaluate(&integrity);
     let report = RestorationReport {
         format_version: 2,
+        account_id,
         source_fingerprint: catalog.manifest.source_fingerprint.clone(),
         messages_path: messages_path.display().to_string(),
         rejections_path: rejections_path.display().to_string(),
@@ -430,10 +457,47 @@ struct RowRestorationContext<'a> {
     table_id: &'a str,
     table_name: &'a str,
     account_id: &'a str,
-    conversation_id: &'a str,
     conversation: &'a str,
     names: &'a HashMap<i64, String>,
     self_username: Option<&'a str>,
+}
+
+fn resolve_row_conversation(
+    row: &Row<'_>,
+    columns: &[String],
+    context: &RowRestorationContext<'_>,
+) -> Option<String> {
+    let index = column_index(
+        columns,
+        &[
+            "talker",
+            "talker_name",
+            "chat_name",
+            "chat_username",
+            "conversation_id",
+            "session_id",
+            "biz_username",
+            "username",
+            "user_name",
+            "chat_id",
+            "chat_name_id",
+        ],
+    )?;
+    match row.get_ref(index).ok()? {
+        ValueRef::Integer(value) => context.names.get(&value).cloned(),
+        ValueRef::Real(value) => context.names.get(&(value as i64)).cloned(),
+        ValueRef::Text(value) | ValueRef::Blob(value) => {
+            let decoded = String::from_utf8(value.to_vec()).ok()?;
+            if decoded.is_empty() {
+                None
+            } else if let Ok(identifier) = decoded.parse::<i64>() {
+                context.names.get(&identifier).cloned().or(Some(decoded))
+            } else {
+                Some(decoded)
+            }
+        }
+        ValueRef::Null => None,
+    }
 }
 
 fn restore_row(
@@ -443,23 +507,48 @@ fn restore_row(
 ) -> Result<CanonicalMessage, RejectedRow> {
     let source_row_id = get_i64(row, 0).unwrap_or(0);
     let field = |names: &[&str]| column_index(columns, names);
-    let local_id = field(&["local_id", "message_local_id", "meslocalid"])
+    let local_id = field(&["local_id", "message_local_id", "msg_local_id", "meslocalid"])
         .and_then(|index| get_i64(row, index));
-    let server_id = field(&["server_id", "svr_id", "message_svr_id", "messvrid"])
-        .and_then(|index| get_i64(row, index));
+    let server_id = field(&[
+        "server_id",
+        "svr_id",
+        "message_svr_id",
+        "msg_svr_id",
+        "msg_server_id",
+        "messvrid",
+    ])
+    .and_then(|index| get_i64(row, index));
     let sort_sequence =
         field(&["sort_seq", "sort_sequence", "sequence"]).and_then(|index| get_i64(row, index));
-    let raw_type =
-        field(&["local_type", "message_local_type", "type"]).and_then(|index| get_i64(row, index));
-    let sender_row_id =
-        field(&["real_sender_id", "sender_id", "from_id"]).and_then(|index| get_i64(row, index));
-    let created_at = field(&["create_time", "message_create_time", "timestamp"])
+    let raw_type = field(&[
+        "local_type",
+        "message_local_type",
+        "msg_type",
+        "message_type",
+        "type",
+    ])
+    .and_then(|index| get_i64(row, index));
+    let sender_row_id = field(&["real_sender_id", "sender_id", "from_id", "from_user_id"])
         .and_then(|index| get_i64(row, index));
+    let created_at = field(&[
+        "create_time",
+        "message_create_time",
+        "msg_create_time",
+        "create_timestamp",
+        "timestamp",
+    ])
+    .and_then(|index| get_i64(row, index));
     let status = field(&["status", "message_status"]).and_then(|index| get_i64(row, index));
     let explicit_sender_flag =
         field(&["is_sender", "is_send", "is_sent_by_self"]).and_then(|index| get_i64(row, index));
-    let content = field(&["message_content", "content", "message_data"])
-        .and_then(|index| get_bytes(row, index));
+    let content = field(&[
+        "message_content",
+        "msg_content",
+        "content",
+        "message_data",
+        "msg_data",
+    ])
+    .and_then(|index| get_bytes(row, index));
     let packed = field(&["packed_info_data", "packed_info", "message_packed_info"])
         .and_then(|index| get_bytes(row, index));
     let compression_type = field(&[
@@ -483,9 +572,18 @@ fn restore_row(
         .map(wx_db::split_local_type)
         .map(|(message_type, subtype)| (Some(message_type), Some(subtype)))
         .unwrap_or((None, None));
+    let row_conversation = resolve_row_conversation(row, columns, context)
+        .unwrap_or_else(|| context.conversation.to_string());
+    let row_conversation_id = scoped_opaque_id(context.account_id, row_conversation.as_bytes());
     let fallback_sender = sender_row_id
         .and_then(|value| context.names.get(&value))
-        .cloned();
+        .cloned()
+        .or_else(|| {
+            field(&["sender", "sender_name", "from_user", "from_username"])
+                .and_then(|index| get_bytes(row, index))
+                .filter(|value| !value.is_empty())
+                .and_then(|value| String::from_utf8(value).ok())
+        });
     let mut decoded_sender = fallback_sender.clone();
     let (typed_payload, semantic_decode_state, semantic_gap_reason) = match raw_type {
         Some(local_type) => match wx_db::decode_message_for_test(
@@ -493,14 +591,14 @@ fn restore_row(
             server_id.unwrap_or_default(),
             local_type,
             fallback_sender.as_deref().unwrap_or(""),
-            context.conversation,
+            &row_conversation,
             created_at.unwrap_or_default(),
             content.as_deref().unwrap_or_default(),
             packed.as_deref(),
             status.unwrap_or_default() as i32,
             compression_type.map(|value| value as i32),
             compressed.as_deref(),
-            context.conversation.ends_with("@chatroom"),
+            row_conversation.ends_with("@chatroom"),
         ) {
             Ok(decoded) => {
                 if !decoded.sender.is_empty() {
@@ -588,7 +686,7 @@ fn restore_row(
     let (direction, direction_evidence) = infer_direction(
         explicit_sender_flag,
         decoded_sender.as_deref(),
-        context.conversation,
+        &row_conversation,
         context.self_username,
     );
     Ok(CanonicalMessage {
@@ -599,9 +697,9 @@ fn restore_row(
         source_table_id: context.table_id.to_string(),
         source_table_name: context.table_name.to_string(),
         source_row_id,
-        conversation_id: context.conversation_id.to_string(),
+        conversation_id: row_conversation_id,
         conversation_source_identifier_base64: base64::engine::general_purpose::STANDARD
-            .encode(context.conversation.as_bytes()),
+            .encode(row_conversation.as_bytes()),
         sender_id: decoded_sender
             .as_ref()
             .map(|value| scoped_opaque_id(context.account_id, value.as_bytes())),
@@ -873,13 +971,25 @@ fn infer_conversation<'a>(
 
 fn is_message_table(name: &str, columns: &[String]) -> bool {
     let lower = name.to_ascii_lowercase();
-    let has_type = column_index(columns, &["local_type", "message_local_type", "type"]).is_some();
+    let has_type = column_index(
+        columns,
+        &[
+            "local_type",
+            "message_local_type",
+            "msg_type",
+            "message_type",
+            "type",
+        ],
+    )
+    .is_some();
     let has_content = column_index(
         columns,
         &[
             "message_content",
+            "msg_content",
             "content",
             "message_data",
+            "msg_data",
             "compress_content",
         ],
     )
@@ -889,11 +999,15 @@ fn is_message_table(name: &str, columns: &[String]) -> bool {
         &[
             "local_id",
             "message_local_id",
+            "msg_local_id",
             "server_id",
             "svr_id",
             "message_svr_id",
+            "msg_svr_id",
+            "msg_server_id",
             "sort_seq",
             "create_time",
+            "msg_create_time",
         ],
     )
     .is_some();
@@ -907,6 +1021,112 @@ fn is_message_table(name: &str, columns: &[String]) -> bool {
         return true;
     }
     has_type && has_content && has_identity
+}
+
+fn classify_table(name: &str, columns: &[String]) -> (TableCoverageRole, &'static str) {
+    if is_message_table(name, columns) {
+        return (
+            TableCoverageRole::Message,
+            "matched the supported message-table name or column signature",
+        );
+    }
+    if is_known_auxiliary_table(name) {
+        return (
+            TableCoverageRole::KnownAuxiliary,
+            "matched a known entity, resource, index, or metadata table family",
+        );
+    }
+    if is_unhandled_message_candidate(name, columns) {
+        return (
+            TableCoverageRole::UnhandledMessageCandidate,
+            "message-like name or columns did not satisfy the safe message adapter signature",
+        );
+    }
+    (
+        TableCoverageRole::Other,
+        "no supported message signature or known auxiliary-table identity matched",
+    )
+}
+
+fn is_known_auxiliary_table(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "name2id" | "sessiontable" | "contact" | "chat_room" | "messageresourceinfo" | "voiceinfo"
+    ) || [
+        "index",
+        "metadata",
+        "_meta",
+        "resource",
+        "media",
+        "emoticon",
+        "sticker",
+        "attachment",
+        "download",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn is_unhandled_message_candidate(name: &str, columns: &[String]) -> bool {
+    let lower = name.to_ascii_lowercase();
+    let message_like_name = [
+        "message",
+        "msg",
+        "chat",
+        "conversation",
+        "history",
+        "inbox",
+        "outbox",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    let has_type = column_index(
+        columns,
+        &[
+            "local_type",
+            "message_local_type",
+            "msg_type",
+            "message_type",
+            "type",
+        ],
+    )
+    .is_some();
+    let has_content = column_index(
+        columns,
+        &[
+            "message_content",
+            "msg_content",
+            "content",
+            "message_data",
+            "msg_data",
+            "compress_content",
+            "compressed_content",
+        ],
+    )
+    .is_some();
+    let has_identity = column_index(
+        columns,
+        &[
+            "local_id",
+            "message_local_id",
+            "msg_local_id",
+            "server_id",
+            "svr_id",
+            "message_svr_id",
+            "msg_svr_id",
+            "msg_server_id",
+            "sort_seq",
+            "sort_sequence",
+            "create_time",
+            "msg_create_time",
+            "timestamp",
+        ],
+    )
+    .is_some();
+    let signature_count =
+        usize::from(has_type) + usize::from(has_content) + usize::from(has_identity);
+    message_like_name && (has_type || has_content || has_identity) || signature_count >= 2
 }
 
 fn get_i64(row: &Row<'_>, index: usize) -> Option<i64> {

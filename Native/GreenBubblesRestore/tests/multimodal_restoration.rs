@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -7,6 +8,7 @@ use greenbubbles_restore::archive::{create_conversation_policy, read_conversatio
 use greenbubbles_restore::manifest::{
     PathReference, SnapshotEntry, SnapshotFileRole, SnapshotManifest, SourceFileFingerprint,
 };
+use greenbubbles_restore::reconcile::reconcile_archives;
 use greenbubbles_restore::{prepare_catalog, restore_catalog, RestorationOptions};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -216,6 +218,19 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
             ],
         )
         .unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE BizMessage(
+               msg_local_id INTEGER, msg_svr_id INTEGER, msg_type INTEGER,
+               msg_create_time INTEGER, msg_content BLOB,
+               username TEXT, from_user TEXT
+             );
+             INSERT INTO BizMessage VALUES (
+               30, 300, 1, 1700000008, x'7075626c696320757064617465',
+               'gh_public', 'gh_public'
+             );",
+        )
+        .unwrap();
     drop(connection);
 
     let connection = Connection::open(&resource_db).unwrap();
@@ -333,8 +348,8 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
     .unwrap();
 
     assert!(report.integrity.row_equation_holds());
-    assert_eq!(report.integrity.source_row_count, 8);
-    assert_eq!(report.integrity.restored_row_count, 8);
+    assert_eq!(report.integrity.source_row_count, 9);
+    assert_eq!(report.integrity.restored_row_count, 9);
     assert_eq!(report.integrity.rejected_row_count, 0);
     assert_eq!(report.integrity.artifact_reference_count, 7);
     assert_eq!(report.integrity.unique_artifact_count, 7);
@@ -344,8 +359,8 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
     assert_eq!(report.integrity.unsafe_artifact_count, 1);
     assert_eq!(report.integrity.relationship_reference_count, 1);
     assert_eq!(report.integrity.resolved_relationship_count, 1);
-    assert_eq!(report.integrity.conversation_count, 2);
-    assert_eq!(report.integrity.participant_count, 3);
+    assert_eq!(report.integrity.conversation_count, 3);
+    assert_eq!(report.integrity.participant_count, 4);
     assert_eq!(report.integrity.group_member_count, 2);
     assert_eq!(report.integrity.entity_source_row_count, 6);
     assert_eq!(report.integrity.entity_decode_gap_count, 0);
@@ -397,6 +412,9 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
         .find(|conversation| conversation["kind"] == "group")
         .unwrap();
     assert_eq!(group["participantIds"].as_array().unwrap().len(), 2);
+    assert!(conversations
+        .iter()
+        .any(|conversation| conversation["kind"] == "business"));
     let display_name = base64::engine::general_purpose::STANDARD.encode(b"Bob in group");
     assert!(group["memberships"]
         .as_array()
@@ -406,7 +424,7 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
             membership["role"] == "member" && membership["displayNameBase64"] == display_name
         }));
     let participants = ndjson(output.join("participants.ndjson"));
-    assert_eq!(participants.len(), 3);
+    assert_eq!(participants.len(), 4);
     assert!(participants
         .iter()
         .any(|participant| participant["remarkBase64"] == "QWxpY2UgUmVtYXJr"));
@@ -474,6 +492,50 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
             .contains("not enabled")
     );
 
+    let current_archive = fixture.path().join("current-archive");
+    fs::create_dir(&current_archive).unwrap();
+    fs::set_permissions(&current_archive, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut current_report: serde_json::Value =
+        serde_json::from_slice(&fs::read(output.join("report.json")).unwrap()).unwrap();
+    current_report["sourceFingerprint"] = serde_json::json!("next-fixture-fingerprint");
+    write_private(
+        current_archive.join("report.json"),
+        &serde_json::to_vec_pretty(&current_report).unwrap(),
+    );
+    let mut current_messages = messages.clone();
+    current_messages
+        .iter_mut()
+        .find(|message| message["conversationId"] == direct_conversation_id)
+        .unwrap()["status"] = serde_json::json!(99);
+    let removed_id = direct_messages[1]["canonicalId"].as_str().unwrap();
+    current_messages.retain(|message| message["canonicalId"] != removed_id);
+    let mut added = direct_messages[2].clone();
+    added["canonicalId"] = serde_json::json!("synthetic-added-message");
+    added["conversationOrdinal"] = serde_json::json!(999);
+    added["serverId"] = serde_json::json!(999);
+    current_messages.push(added);
+    let message_bytes = current_messages
+        .iter()
+        .map(|message| serde_json::to_string(message).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    write_private(
+        current_archive.join("messages.ndjson"),
+        message_bytes.as_bytes(),
+    );
+    let event_directory = fixture.path().join("event-output");
+    fs::create_dir(&event_directory).unwrap();
+    fs::set_permissions(&event_directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let events_path = event_directory.join("events.ndjson");
+    let delta = reconcile_archives(&output, &current_archive, &policy_path, &events_path).unwrap();
+    assert_eq!(delta.previous_message_count, 7);
+    assert_eq!(delta.current_message_count, 7);
+    assert_eq!(delta.added_count, 1);
+    assert_eq!(delta.changed_count, 1);
+    assert_eq!(delta.removed_count, 1);
+    assert_eq!(ndjson(events_path).len(), 3);
+
     let wrong_account = fixture.path().join("wxid_wrong_ab12");
     fs::create_dir_all(wrong_account.join("db_storage")).unwrap();
     fs::create_dir_all(wrong_account.join("msg")).unwrap();
@@ -529,6 +591,11 @@ fn ndjson(path: PathBuf) -> Vec<serde_json::Value> {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
+}
+
+fn write_private(path: PathBuf, bytes: &[u8]) {
+    fs::write(&path, bytes).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
 fn contains_exact_path(artifacts: &[serde_json::Value], expected: &Path) -> bool {

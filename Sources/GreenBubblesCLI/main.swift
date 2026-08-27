@@ -23,6 +23,7 @@ struct Arguments {
     case accounts
     case discover
     case inventory
+    case notificationHints = "notification-hints"
     case snapshot
     case help
   }
@@ -89,6 +90,7 @@ private let usage = """
     accounts             Find account-scoped database and attachment roots
     discover             Find known WeChat installations and data roots (default)
     inventory            Classify candidate artifacts without opening their contents
+    notification-hints   Assess optional notification wake-up feasibility without prompting
     snapshot             Verify a consistent, temporary read-only database snapshot
     help                 Show this help
 
@@ -141,6 +143,8 @@ do {
         includePaths: arguments.includePaths
       ))
     try printJSON(inventory.inventory(roots: roots))
+  case .notificationHints:
+    try printJSON(NotificationHintAssessor().assess())
   case .snapshot:
     let roots: [URL]
     if arguments.roots.isEmpty {
