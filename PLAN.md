@@ -687,6 +687,16 @@ Tencent's official bot channel may be offered as a separate sanctioned adapter
 for workflows addressed to that bot. It must be labeled with its actual
 coverage and must not be presented as access to ordinary personal chats.
 
+An adapter-independent offline safety contract now models the exact gate,
+build, adapter, account, conversation, capability, immutable approval,
+idempotency, kill-switch, rate-window, and lifecycle evidence a future action
+boundary must check. It cannot mint or consume approvals, reserve an attempt,
+invoke a client/network adapter, or expose an action through CLI, Unix API, or
+MCP. Its synthetic fail-closed tests therefore strengthen the design without
+completing any Phase 4 checkbox or substituting for adapter-bound concurrency,
+restart, disposable-account, live-result, and legal/supportability evidence.
+See `docs/ACTION_SAFETY_CONTRACT.md`.
+
 Exit gate: retries, prompt injection, ambiguous contacts, client upgrades,
 partial failures, crashes, and model misbehavior cannot produce a duplicate or
 unauthorized external action, and every attempted action has a reconciled or

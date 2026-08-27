@@ -60,3 +60,9 @@ recipient evidence, optional reply target, attachment digests, connector/API
 version, expiry, requester, policy decision, and authoritative checkpoint.
 They are immutable (`create_new`) and have a separate preview operation, but no
 approval or execution operation exists before the Phase 4 gate.
+
+The Rust library also contains the pure validation types documented in
+`ACTION_SAFETY_CONTRACT.md`. They let tests exercise future gate, adapter,
+approval-binding, idempotency, rate, kill-switch, and lifecycle invariants, but
+they are not registered as connector, CLI, Unix, or MCP operations. They have no
+approval issuer or action adapter and do not change this tool boundary.

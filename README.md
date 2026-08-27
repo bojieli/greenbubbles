@@ -36,6 +36,9 @@ The current passive-read slice provides:
 - inventories static evidence of official backup, migration, device-transfer,
   and file-export workflows without invoking WeChat or claiming that their
   formats or conversation/media coverage are compatible.
+- defines and tests a pure offline action-safety contract for future gate,
+  build, adapter, approval, idempotency, rate, kill-switch, and lifecycle
+  checks without exposing approval, attempt, or send operations.
 
 See [PLAN.md](PLAN.md) for the phased roadmap and safety gates.
 The implemented downstream protocol and validation evidence are in
@@ -54,7 +57,9 @@ The factual source/binary dependency boundary, nested native-code notices, and
 publication categories are in
 [docs/DISTRIBUTION_INVENTORY.md](docs/DISTRIBUTION_INVENTORY.md). This is not a
 public-release approval; the repository remains unlicensed for public use and
-private by design.
+private by design. The deliberately non-operational Phase 4 safety foundation
+and its remaining adapter/live-evidence requirements are in
+[docs/ACTION_SAFETY_CONTRACT.md](docs/ACTION_SAFETY_CONTRACT.md).
 
 ## Build and test
 
