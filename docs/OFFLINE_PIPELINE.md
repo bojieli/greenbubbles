@@ -80,6 +80,11 @@ without disclosing absolute activity times. Snapshot command report format 2
 supplies the preceding planning/acquisition durations; because that report also
 contains its manifest and preserved path, it remains owner-private.
 
+`compose-latency-evidence` can locally bind that private snapshot report to the
+same format-3 handoff generation and this command's aggregate report, then join
+the actual follower application timing. Its result remains limited stage
+evidence and explicitly refuses an end-to-end claim. See `LATENCY_EVIDENCE.md`.
+
 This workflow supplies deterministic sequencing and synthetic fault coverage;
 it does not satisfy the plan's real disposable-account corpus, semantic/media
 coverage, or 60-second p95 evidence gates.

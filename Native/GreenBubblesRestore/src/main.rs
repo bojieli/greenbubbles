@@ -15,6 +15,7 @@ use greenbubbles_restore::{
         follow_replica_once, publish_replica_handoff, quarantine_retired_replica_archives,
         replica_follower_status, restore_quarantined_replica_archive,
     },
+    latency::{compose_latency_evidence_sample, summarize_latency_evidence_samples},
     merge::merge_incremental_archive,
     operator::{restore_snapshot_and_publish, OfflineRestorePublishOptions},
     preflight_snapshot, prepare_catalog,
@@ -262,6 +263,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let remaining = arguments.collect::<Vec<_>>();
             let generation = required_u64_option(&remaining, "--generation")?;
             let report = restore_quarantined_replica_archive(&handoff, &quarantine, generation)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "compose-latency-evidence" => {
+            let snapshot_report = required_path(arguments.next(), "private snapshot report")?;
+            let offline_report = required_path(arguments.next(), "private offline report")?;
+            let follower_report = required_path(arguments.next(), "private follower report")?;
+            let handoff = required_path(arguments.next(), "private replica handoff")?;
+            let report = compose_latency_evidence_sample(
+                &snapshot_report,
+                &offline_report,
+                &follower_report,
+                &handoff,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "summarize-latency-evidence" => {
+            let samples = required_path(arguments.next(), "private latency sample array")?;
+            let report = summarize_latency_evidence_samples(&samples)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "replica-follow-once" => {
@@ -588,6 +607,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore replica-publish <authoritative-archive> <handoff-file> --generation <positive-integer>\n",
                     "  greenbubbles-restore replica-archive-quarantine <handoff-file> <quarantine-directory> [--retain-publications <n, minimum 2>]\n",
                     "  greenbubbles-restore replica-archive-restore <handoff-file> <quarantine-directory> --generation <positive-integer>\n",
+                    "  greenbubbles-restore compose-latency-evidence <private-snapshot-report> <private-offline-report> <private-follower-report> <private-handoff-file>\n",
+                    "  greenbubbles-restore summarize-latency-evidence <private-sample-array-json>\n",
                     "  greenbubbles-restore replica-follow-once <handoff-file> <follow-state-file> <replica-path> --replica-key-stdin\n",
                     "  greenbubbles-restore replica-follow <handoff-file> <follow-state-file> <replica-path> --replica-key-stdin [--poll-milliseconds <100..60000>] [--maximum-polls <n>]\n",
                     "  greenbubbles-restore replica-follow-status <handoff-file> <follow-state-file> <replica-path> --replica-key-stdin\n",

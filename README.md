@@ -162,6 +162,21 @@ The snapshot report still contains a manifest and, for a preserved snapshot, a
 private local path; keep the complete report owner-private and publish only a
 reviewed aggregate.
 
+After the same published generation is applied, compose a bound aggregate-only
+stage sample from owner-only report files and the private current handoff:
+
+```sh
+greenbubbles-restore compose-latency-evidence \
+  <private-snapshot-report.json> <private-offline-report.json> \
+  <private-follower-report.json> <private-current-handoff.json>
+```
+
+Reviewed samples can be summarized from an owner-only JSON array with
+`summarize-latency-evidence`. The output reports p50/p95 stage values but always
+states that source-persistence time, inter-command delay, and disposable-case
+attribution are missing, so it cannot falsely satisfy the 60-second end-to-end
+gate. See [docs/LATENCY_EVIDENCE.md](docs/LATENCY_EVIDENCE.md).
+
 The native restoration engine works only from such a snapshot. A database
 passphrase must never be placed on the command line:
 

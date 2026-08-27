@@ -606,6 +606,15 @@ latency without absolute timestamps. This makes the future 60-second
 measurement reproducible; it does not manufacture the required
 disposable-account samples.
 
+A privacy-safe latency composer now binds the private snapshot report to the
+current handoff source and publication generation, verifies the exact offline
+transition and actual follower application, checks row/completion/timing
+consistency, and emits only stage durations and aggregate coverage. Its sample
+and nearest-rank p50/p95 summary schemas always preserve explicit missing
+source-persistence, inter-command-delay, and disposable-scenario limitations;
+they cannot claim the end-to-end objective from partial timing evidence. See
+`docs/LATENCY_EVIDENCE.md`.
+
 Publication now also retains an owner-only sealed generation history. A
 recoverable retention operator verifies and protects at least the current and
 immediately preceding publications (including shared physical archive paths),

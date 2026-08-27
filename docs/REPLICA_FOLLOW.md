@@ -83,6 +83,12 @@ publication-to-checkpoint latency. Each follower application report also
 includes its monotonic local runtime. No absolute timestamp is emitted by these
 aggregate reports.
 
+The private handoff can also bind a snapshot/offline/follower report set for
+`compose-latency-evidence`. The composer verifies one source and generation but
+labels publication-to-checkpoint as only a partial timing because source
+persistence and inter-command delay are not measured. See
+`LATENCY_EVIDENCE.md`.
+
 The follower requires:
 
 - a canonical absolute archive path;
