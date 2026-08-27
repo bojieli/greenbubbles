@@ -312,7 +312,7 @@ is technically and legally supportable.
 - [ ] Determine whether restoration can work without modifying or re-signing
   WeChat, attaching to its process, scanning process memory, or exporting
   reusable session credentials.
-- [ ] Evaluate user-created official backups, exports, and owner-supplied
+- [x] Evaluate user-created official backups, exports, and owner-supplied
   plaintext/passphrase workflows before any more invasive alternative.
 - [ ] Prove bootstrap and incremental synchronization on disposable test data;
   measure idle, one-message, burst, edit, recall, deletion, and crash-recovery
@@ -328,6 +328,16 @@ unhandled message candidates and unknown logical types remain raw-retained,
 machine-readable completion gaps; incremental merges recompute the schema
 profile. This satisfies the fingerprint/fail-closed item but not the remaining
 real-corpus and disposable-account requirements in this gate.
+
+The bounded acquisition assessment statically confirms that the pinned client
+contains user-mediated backup/restore, chat-history migration, device-transfer,
+and file-export workflows. It does not prove a portable plaintext export,
+official-backup compatibility, or complete conversation/media coverage.
+GreenBubbles accepts only owner-supplied plaintext snapshots or a passphrase
+through standard input and has no automated key acquisition. The preferred
+order is official portable export/backup, then owner-supplied plaintext or
+passphrase, then stop; there is no invasive fallback. See
+`docs/ACQUISITION_FEASIBILITY.md`.
 
 ### Ordinary-contact action feasibility gate
 

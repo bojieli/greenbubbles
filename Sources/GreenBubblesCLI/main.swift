@@ -22,6 +22,7 @@ enum CLIError: Error, CustomStringConvertible {
 struct Arguments {
   enum Command: String {
     case accounts
+    case acquisitionSurfaces = "acquisition-surfaces"
     case discover
     case integrationSurfaces = "integration-surfaces"
     case inventory
@@ -112,6 +113,8 @@ private let usage = """
 
   Commands:
     accounts             Find account-scoped database and attachment roots
+    acquisition-surfaces
+                         Inspect static, signed backup/export workflow evidence
     discover             Find known WeChat installations and data roots (default)
     integration-surfaces
                          Inspect static, signed integration metadata for a pinned build
@@ -159,6 +162,16 @@ do {
     print(usage)
   case .accounts:
     try printJSON(WeChatAccountDiscovery(includePaths: arguments.includePaths).discover())
+  case .acquisitionSurfaces:
+    let surfaceInspector = WeChatAcquisitionSurfaceInspector()
+    if let application = arguments.application {
+      let build = try WeChatClientBuildInspector().inspect(application: application)
+      try printJSON(surfaceInspector.inspect(application: application, clientBuild: build))
+    } else if let report = try surfaceInspector.inspectDefaultInstallation() {
+      try printJSON(report)
+    } else {
+      throw CLIError.invalidOption("no WeChat installation was found")
+    }
   case .discover:
     let discovery = WeChatDiscovery(includePaths: arguments.includePaths)
     try printJSON(discovery.discover())

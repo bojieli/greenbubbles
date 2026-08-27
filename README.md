@@ -30,6 +30,9 @@ The current passive-read slice provides:
 - inventories the pinned signed app bundle's URL, extension, XPC, app-group,
   and internal-service metadata without live-process interaction, while keeping
   authenticated reads explicitly unavailable.
+- inventories static evidence of official backup, migration, device-transfer,
+  and file-export workflows without invoking WeChat or claiming that their
+  formats or conversation/media coverage are compatible.
 
 See [PLAN.md](PLAN.md) for the phased roadmap and safety gates.
 The implemented downstream protocol and validation evidence are in
@@ -37,7 +40,9 @@ The implemented downstream protocol and validation evidence are in
 [docs/DOWNSTREAM_CONSUMER.md](docs/DOWNSTREAM_CONSUMER.md), and
 [docs/ECOSYSTEM_VALIDATION.md](docs/ECOSYSTEM_VALIDATION.md). The bounded static
 active-read assessment is in
-[docs/ACTIVE_READ_FEASIBILITY.md](docs/ACTIVE_READ_FEASIBILITY.md).
+[docs/ACTIVE_READ_FEASIBILITY.md](docs/ACTIVE_READ_FEASIBILITY.md). The passive
+acquisition assessment and non-invasive stop rule are in
+[docs/ACQUISITION_FEASIBILITY.md](docs/ACQUISITION_FEASIBILITY.md).
 
 ## Build and test
 
@@ -45,6 +50,7 @@ active-read assessment is in
 swift build
 swift test
 swift run greenbubbles accounts
+swift run greenbubbles acquisition-surfaces
 swift run greenbubbles discover
 swift run greenbubbles integration-surfaces
 swift run greenbubbles inventory
@@ -63,6 +69,14 @@ are stable hashes intended for correlation, not a substitute for access control.
 build and emits no application path. It reports inbound and internal boundaries;
 it does not invoke them and does not claim an authenticated message or Moments
 read API. An unknown build fails closed.
+
+`acquisition-surfaces` performs a bounded read-only scan of one regular,
+single-link resource in that same exact pinned bundle. It reports static clues
+for official user-mediated backup/restore, history migration, device transfer,
+and file export. It neither invokes those workflows nor proves a portable
+plaintext export, backup compatibility, or complete conversation/attachment
+coverage. See
+[docs/ACQUISITION_FEASIBILITY.md](docs/ACQUISITION_FEASIBILITY.md).
 
 `greenbubbles-public-article` is a separately compiled, cookie-free,
 fail-closed helper for one ordinary public `https://mp.weixin.qq.com/s...`
