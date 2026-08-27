@@ -30,6 +30,9 @@ jobs:
       - name: Check distribution dependency baseline
         run: swift scripts/check-distribution-inventory.swift
 
+      - name: Check cross-language pinned build profile
+        run: swift scripts/check-pinned-build-profile.swift
+
       - name: Show Rust version
         run: rustc --version && cargo --version
 

@@ -77,6 +77,7 @@ swift run greenbubbles integration-surfaces
 swift run greenbubbles inventory
 swift run greenbubbles snapshot
 swift run greenbubbles-public-article /private/owner-only-request.json
+swift scripts/check-pinned-build-profile.swift
 swift scripts/check-distribution-inventory.swift
 cd Native/GreenBubblesRestore
 cargo test --locked --all-targets

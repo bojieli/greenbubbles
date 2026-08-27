@@ -329,6 +329,13 @@ machine-readable completion gaps; incremental merges recompute the schema
 profile. This satisfies the fingerprint/fail-closed item but not the remaining
 real-corpus and disposable-account requirements in this gate.
 
+CI also extracts and compares every supported-build field from the Swift
+acquisition/static-inspection boundary and Rust restoration boundary. A
+one-sided version, identifier, architecture, signing, executable-hash,
+CodeDirectory-hash, Hardened Runtime, signature-validity, or profile-ID change
+now fails before merge, making revocation and future build updates atomic across
+the two implementations.
+
 The bounded acquisition assessment statically confirms that the pinned client
 contains user-mediated backup/restore, chat-history migration, device-transfer,
 and file-export workflows. It does not prove a portable plaintext export,

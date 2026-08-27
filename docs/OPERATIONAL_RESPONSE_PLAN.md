@@ -104,7 +104,8 @@ not reduce a real private-data or account-safety event by itself.
 4. If the currently pinned build must be revoked, land a reviewed change that
    removes its production-compatible profile from both Swift acquisition/static
    inspection and Rust restoration compatibility boundaries. Add tests proving
-   that the old fingerprint now fails closed.
+   that the old fingerprint now fails closed. The cross-language pinned-profile
+   CI check must pass so a one-sided update or revocation cannot ship.
 5. Do not delete old private archives merely because support is revoked. Label
    their build evidence accurately and follow the private retention decision.
 
@@ -195,4 +196,3 @@ Before this becomes operational rather than a draft, record privately:
 - repository-host and release-account procedures;
 - notification decision authority and target response times;
 - next scheduled review and the events that force an immediate review.
-
