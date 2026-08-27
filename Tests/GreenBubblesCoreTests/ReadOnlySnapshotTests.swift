@@ -5,6 +5,14 @@ import Testing
 @testable import GreenBubblesCore
 
 struct ReadOnlySnapshotTests {
+  @Test
+  func convertsMonotonicDurationsToBoundedMilliseconds() {
+    #expect(SnapshotTiming.milliseconds(.seconds(2) + .milliseconds(345)) == 2_345)
+    #expect(SnapshotTiming.milliseconds(.microseconds(999)) == 0)
+    #expect(SnapshotTiming.milliseconds(.milliseconds(-1)) == 0)
+    #expect(SnapshotTiming.milliseconds(.seconds(Int64.max)) == UInt64.max)
+  }
+
   @Test func copiesDatabaseSetWithManifestAndOwnerOnlyPermissions() throws {
     let fixture = try SnapshotFixture()
     defer { fixture.remove() }

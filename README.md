@@ -155,6 +155,13 @@ Use `--integrity-scan` to force a scan immediately or
 The preserved directory is mode `0700`; copied files and its manifest are mode
 `0600`. Remove it when no longer needed.
 
+Snapshot command report format 2 includes monotonic planning, acquisition, and
+total durations in milliseconds. These relative values can be combined with the
+offline operator and follower timing reports during a controlled latency run.
+The snapshot report still contains a manifest and, for a preserved snapshot, a
+private local path; keep the complete report owner-private and publish only a
+reviewed aggregate.
+
 The native restoration engine works only from such a snapshot. A database
 passphrase must never be placed on the command line:
 

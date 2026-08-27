@@ -70,7 +70,9 @@ archive path and source fingerprint. Replica application and its distinct key
 remain isolated in `replica-follow`. Monotonic durations separately cover input
 validation, catalog preparation/decryption, restoration/merge, final
 audit/publication, and the complete command. They enable later latency evidence
-without disclosing absolute activity times.
+without disclosing absolute activity times. Snapshot command report format 2
+supplies the preceding planning/acquisition durations; because that report also
+contains its manifest and preserved path, it remains owner-private.
 
 This workflow supplies deterministic sequencing and synthetic fault coverage;
 it does not satisfy the plan's real disposable-account corpus, semantic/media

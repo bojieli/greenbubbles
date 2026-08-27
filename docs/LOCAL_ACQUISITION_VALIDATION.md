@@ -98,6 +98,11 @@ copy proportionality, not decoded message semantics or latency.
 
 ## Remaining restoration gate
 
+The snapshot command now records monotonic planning, descriptor-based
+acquisition, and total durations for future controlled runs. The retained
+validation snapshots predate those report fields, so no latency value is
+retroactively inferred from them.
+
 None of the encrypted database contents were read. Consequently this validation
 does not close row accounting, logical-type coverage, relationship resolution,
 attachment-path verification, playable media decoding, real-client replica

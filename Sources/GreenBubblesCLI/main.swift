@@ -212,6 +212,8 @@ do {
   case .notificationHints:
     try printJSON(NotificationHintAssessor().assess())
   case .snapshot:
+    let clock = ContinuousClock()
+    let totalStarted = clock.now
     let roots: [URL]
     if arguments.roots.isEmpty {
       roots = WeChatAccountDiscovery(includePaths: arguments.includePaths)
@@ -229,6 +231,9 @@ do {
       integrityScanInterval: TimeInterval(arguments.integrityScanIntervalSeconds),
       reconciliationWindow: TimeInterval(arguments.reconciliationWindowSeconds)
     )
+    let planningDurationMilliseconds = SnapshotTiming.milliseconds(
+      totalStarted.duration(to: clock.now))
+    let acquisitionStarted = clock.now
     let lease = try ReadOnlySnapshotter(
       baseDirectory: arguments.snapshotBase
         ?? FileManager.default.temporaryDirectory
@@ -236,12 +241,18 @@ do {
       includeSourcePaths: arguments.includePaths,
       clientBuild: clientBuild
     ).createSnapshot(of: plan, cleanUpOnDeinit: arguments.snapshotBase == nil)
+    let acquisitionDurationMilliseconds = SnapshotTiming.milliseconds(
+      acquisitionStarted.duration(to: clock.now))
     try printJSON(
       SnapshotCommandReport(
+        formatVersion: 2,
         databaseSetCount: sets.count,
         manifest: lease.manifest,
         automaticallyCleanedUp: arguments.snapshotBase == nil,
-        snapshotDirectory: arguments.snapshotBase == nil ? nil : lease.directory.path
+        snapshotDirectory: arguments.snapshotBase == nil ? nil : lease.directory.path,
+        planningDurationMilliseconds: planningDurationMilliseconds,
+        acquisitionDurationMilliseconds: acquisitionDurationMilliseconds,
+        totalDurationMilliseconds: SnapshotTiming.milliseconds(totalStarted.duration(to: clock.now))
       ))
   }
 } catch {
@@ -263,8 +274,12 @@ private func loadSnapshotManifest(_ url: URL) throws -> SnapshotManifest {
 }
 
 private struct SnapshotCommandReport: Encodable {
+  let formatVersion: Int
   let databaseSetCount: Int
   let manifest: SnapshotManifest
   let automaticallyCleanedUp: Bool
   let snapshotDirectory: String?
+  let planningDurationMilliseconds: UInt64
+  let acquisitionDurationMilliseconds: UInt64
+  let totalDurationMilliseconds: UInt64
 }

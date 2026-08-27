@@ -13,6 +13,20 @@ public enum SnapshotCaptureMethod: String, Codable, Sendable {
   case verifiedByteCopy
 }
 
+public enum SnapshotTiming {
+  public static func milliseconds(_ duration: Duration) -> UInt64 {
+    let components = duration.components
+    guard components.seconds >= 0, components.attoseconds >= 0 else { return 0 }
+    let seconds = UInt64(components.seconds)
+    let (wholeMilliseconds, secondsOverflow) = seconds.multipliedReportingOverflow(by: 1_000)
+    guard !secondsOverflow else { return UInt64.max }
+    let fractionalMilliseconds = UInt64(components.attoseconds / 1_000_000_000_000_000)
+    let (result, additionOverflow) = wholeMilliseconds.addingReportingOverflow(
+      fractionalMilliseconds)
+    return additionOverflow ? UInt64.max : result
+  }
+}
+
 public struct SourceFileFingerprint: Codable, Equatable, Sendable {
   public let deviceID: UInt64
   public let fileID: UInt64

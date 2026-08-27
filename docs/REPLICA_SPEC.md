@@ -134,6 +134,12 @@ each integrity scan establish a new anchor; incrementals carry it forward.
 `--integrity-scan` remains an immediate override. Frequent wake-up-driven
 incrementals therefore cannot postpone a full comparison forever.
 
+Snapshot command report format 2 separately measures monotonic planning,
+descriptor-based acquisition, and total command time. It contains private
+manifest/path material and is not itself a publishable benchmark report; only
+reviewed aggregate durations may be combined with offline publication and
+follower checkpoint deltas in a controlled real-data run.
+
 Incremental restoration fragments are deliberately not accepted directly by
 `replica-bootstrap` or `replica-sync`. `merge-incremental` first binds the
 fragment to the exact prior source fingerprint, removes prior records only from

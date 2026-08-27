@@ -596,12 +596,14 @@ sealed handoff, rejecting concurrent stale branches. It has no live-store or
 replica-key access and does not replace real-corpus evidence. See
 `docs/OFFLINE_PIPELINE.md`.
 
-Privacy-safe monotonic stage durations now cover offline input validation,
-catalog preparation, restoration/merge, audit/publication, and total runtime.
-Format-3 handoffs add a private publication time so follower reports and status
-can expose relative publication age, application runtime, and
-publication-to-checkpoint latency without absolute timestamps. This makes the
-future 60-second measurement reproducible; it does not manufacture the required
+Monotonic stage durations now cover snapshot planning/acquisition, offline input
+validation, catalog preparation, restoration/merge, audit/publication, and
+total runtime. The snapshot report remains owner-private because it includes
+manifest/path material; the later reports are aggregate-only. Format-3 handoffs
+add a private publication time so follower reports and status can expose
+relative publication age, application runtime, and publication-to-checkpoint
+latency without absolute timestamps. This makes the future 60-second
+measurement reproducible; it does not manufacture the required
 disposable-account samples.
 
 ## Phase 3 — agent-neutral connector service and drafts
