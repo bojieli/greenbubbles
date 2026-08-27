@@ -299,6 +299,7 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
         created_at: "2026-08-27T00:00:00Z".to_string(),
         source_fingerprint: "multimodal-fixture-fingerprint".to_string(),
         client_build: None,
+        acquisition: None,
         entries: vec![
             entry(
                 &message_db,

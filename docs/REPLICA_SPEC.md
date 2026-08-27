@@ -80,6 +80,29 @@ cross-account use and reuse against a replacement replica fail closed.
 Downstream consumers bootstrap canonical data through scoped APIs, then use
 this stream to know which stable entities require refresh.
 
+## Change-proportional acquisition
+
+Snapshot manifest format 3 carries a complete inventory of database/WAL/SHM
+sets while copying only sets selected for the current run. A bootstrap and an
+explicit integrity scan select every current set. A normal incremental plan
+selects sets whose file identity changed, plus unchanged sets modified inside a
+bounded reconciliation window; it also records source sets that disappeared.
+The planner verifies the whole inventory before and after copying so a source
+outside the selected subset cannot mutate unnoticed.
+
+An unchanged file's SHA-256 may be carried forward only when its device, inode,
+size, modification seconds, and modification nanoseconds are all unchanged.
+The manifest source fingerprint covers the complete current inventory and its
+content digests, not merely the copied fragment. Repeating a no-op plan
+therefore retains the same authoritative source identity.
+
+Incremental restoration fragments are deliberately not accepted by
+`replica-bootstrap` or `replica-sync` yet. They must first be merged with the
+prior authoritative normalized state using source-set identities; otherwise an
+unseen row from an unchanged shard could be misreported as deleted. This is an
+explicit fail-closed boundary while normalized fragment merging is completed,
+not a claim that changed-shard synchronization is already end-to-end.
+
 ## Exact retrieval and health
 
 `replica-search` combines encrypted FTS5 with deterministic structured filters:

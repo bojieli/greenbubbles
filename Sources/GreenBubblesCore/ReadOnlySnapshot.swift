@@ -64,14 +64,16 @@ public struct SnapshotManifest: Codable, Equatable, Sendable {
   public let createdAt: Date
   public let sourceFingerprint: String
   public let clientBuild: WeChatClientBuildFingerprint?
+  public let acquisition: SnapshotAcquisitionEvidence?
   public let entries: [SnapshotEntry]
 
   public init(
-    manifestFormatVersion: Int = 2,
+    manifestFormatVersion: Int = 3,
     snapshotID: UUID,
     createdAt: Date,
     sourceFingerprint: String,
     clientBuild: WeChatClientBuildFingerprint? = nil,
+    acquisition: SnapshotAcquisitionEvidence? = nil,
     entries: [SnapshotEntry]
   ) {
     self.manifestFormatVersion = manifestFormatVersion
@@ -79,6 +81,7 @@ public struct SnapshotManifest: Codable, Equatable, Sendable {
     self.createdAt = createdAt
     self.sourceFingerprint = sourceFingerprint
     self.clientBuild = clientBuild
+    self.acquisition = acquisition
     self.entries = entries
   }
 }
@@ -272,6 +275,16 @@ public struct ReadOnlySnapshotter: Sendable {
     cleanUpOnDeinit: Bool = true
   ) throws -> SnapshotLease {
     guard !sets.isEmpty else { throw SnapshotError.noDatabaseSets }
+    let plan = try SnapshotAcquisitionPlanner(includeSourcePaths: privacy.includePaths).plan(
+      sets: sets
+    )
+    return try createSnapshot(of: plan, cleanUpOnDeinit: cleanUpOnDeinit)
+  }
+
+  public func createSnapshot(
+    of plan: SnapshotAcquisitionPlan,
+    cleanUpOnDeinit: Bool = true
+  ) throws -> SnapshotLease {
     try ensureOwnerOnlyDirectory(baseDirectory)
 
     var lastError: Error?
@@ -285,7 +298,7 @@ public struct ReadOnlySnapshotter: Sendable {
       do {
         try ensureSafeChild(directory, of: baseDirectory)
         try ensureOwnerOnlyDirectory(directory)
-        let manifest = try snapshotAttempt(sets: sets, snapshotID: snapshotID, into: directory)
+        let manifest = try snapshotAttempt(plan: plan, snapshotID: snapshotID, into: directory)
         return SnapshotLease(
           directory: directory,
           manifest: manifest,
@@ -301,11 +314,13 @@ public struct ReadOnlySnapshotter: Sendable {
   }
 
   private func snapshotAttempt(
-    sets: [DatabaseFileSet],
+    plan: SnapshotAcquisitionPlan,
     snapshotID: UUID,
     into directory: URL
   ) throws -> SnapshotManifest {
-    let sources = try sets.enumerated().flatMap { index, set in
+    let acquisitionPlanner = SnapshotAcquisitionPlanner(includeSourcePaths: privacy.includePaths)
+    try acquisitionPlanner.verify(plan)
+    let sources = try plan.selectedSets.enumerated().flatMap { index, set in
       try plannedFiles(for: set, setIndex: index)
     }
     let baseline = try Dictionary(
@@ -341,12 +356,16 @@ public struct ReadOnlySnapshotter: Sendable {
       }
     }
 
+    try acquisitionPlanner.verify(plan)
+
     let sortedEntries = entries.sorted { $0.relativePath < $1.relativePath }
+    let acquisition = try acquisitionPlanner.finalizedEvidence(for: plan, entries: sortedEntries)
     let manifest = SnapshotManifest(
       snapshotID: snapshotID,
       createdAt: Date(),
-      sourceFingerprint: aggregateFingerprint(sortedEntries),
+      sourceFingerprint: acquisitionPlanner.sourceFingerprint(for: acquisition),
       clientBuild: clientBuild,
+      acquisition: acquisition,
       entries: sortedEntries
     )
     try writeManifest(manifest, to: directory.appending(path: "manifest.json"))
@@ -482,23 +501,6 @@ public struct ReadOnlySnapshotter: Sendable {
       modifiedSeconds: Int64(metadata.st_mtimespec.tv_sec),
       modifiedNanoseconds: Int64(metadata.st_mtimespec.tv_nsec)
     )
-  }
-
-  private func aggregateFingerprint(_ entries: [SnapshotEntry]) -> String {
-    var hasher = SHA256()
-    for entry in entries {
-      let value = [
-        entry.source.opaqueID,
-        String(entry.fingerprint.deviceID),
-        String(entry.fingerprint.fileID),
-        String(entry.fingerprint.byteCount),
-        String(entry.fingerprint.modifiedSeconds),
-        String(entry.fingerprint.modifiedNanoseconds),
-        entry.sha256,
-      ].joined(separator: ":")
-      hasher.update(data: Data(value.utf8))
-    }
-    return hasher.finalize().map { String(format: "%02x", $0) }.joined()
   }
 
   private func writeManifest(_ manifest: SnapshotManifest, to url: URL) throws {

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import GreenBubblesCore
 
@@ -33,6 +34,9 @@ struct Arguments {
   var roots: [URL] = []
   var accountID: String?
   var snapshotBase: URL?
+  var previousManifest: URL?
+  var integrityScan = false
+  var reconciliationWindowSeconds = 15 * 60
   var maxDepth = 10
   var maxArtifacts = 10_000
 
@@ -64,7 +68,13 @@ struct Arguments {
         index += 1
         guard index < arguments.count else { throw CLIError.missingValue(option) }
         snapshotBase = URL(fileURLWithPath: arguments[index])
-      case "--max-depth", "--max-artifacts":
+      case "--previous-manifest":
+        index += 1
+        guard index < arguments.count else { throw CLIError.missingValue(option) }
+        previousManifest = URL(fileURLWithPath: arguments[index])
+      case "--integrity-scan":
+        integrityScan = true
+      case "--max-depth", "--max-artifacts", "--reconciliation-window-seconds":
         index += 1
         guard index < arguments.count else { throw CLIError.missingValue(option) }
         let value = arguments[index]
@@ -73,6 +83,9 @@ struct Arguments {
         }
         if option == "--max-depth" { maxDepth = number }
         if option == "--max-artifacts" { maxArtifacts = number }
+        if option == "--reconciliation-window-seconds" {
+          reconciliationWindowSeconds = number
+        }
       case "-h", "--help":
         command = .help
       default:
@@ -98,6 +111,11 @@ private let usage = """
     --root <path>        Inventory a supplied root instead of discovered roots; repeatable
     --account <id>       Scope snapshot discovery to one opaque account ID
     --snapshot-base <p>  Preserve a snapshot under this owner-only base directory
+    --previous-manifest <p>
+                         Plan a change-proportional snapshot from this prior manifest
+    --integrity-scan     Select every current database set despite a prior manifest
+    --reconciliation-window-seconds <n>
+                         Revisit recently modified sets (default: 900)
     --include-paths      Include sensitive filesystem paths in local output
     --max-depth <n>      Limit recursive traversal depth (default: 10)
     --max-artifacts <n>  Stop after this many classified artifacts (default: 10000)
@@ -155,13 +173,20 @@ do {
     }
     let sets = DatabaseSetPlanner().findDatabaseSets(in: roots, maxDepth: arguments.maxDepth)
     let clientBuild = try WeChatClientBuildInspector().inspectDefaultInstallation()
+    let previousManifest = try arguments.previousManifest.map(loadSnapshotManifest)
+    let plan = try SnapshotAcquisitionPlanner(includeSourcePaths: arguments.includePaths).plan(
+      sets: sets,
+      previousManifest: previousManifest,
+      forceIntegrityScan: arguments.integrityScan,
+      reconciliationWindow: TimeInterval(arguments.reconciliationWindowSeconds)
+    )
     let lease = try ReadOnlySnapshotter(
       baseDirectory: arguments.snapshotBase
         ?? FileManager.default.temporaryDirectory
         .appending(path: "greenbubbles-snapshots", directoryHint: .isDirectory),
       includeSourcePaths: arguments.includePaths,
       clientBuild: clientBuild
-    ).createSnapshot(of: sets, cleanUpOnDeinit: arguments.snapshotBase == nil)
+    ).createSnapshot(of: plan, cleanUpOnDeinit: arguments.snapshotBase == nil)
     try printJSON(
       SnapshotCommandReport(
         databaseSetCount: sets.count,
@@ -174,6 +199,18 @@ do {
   printError(String(describing: error))
   printError("Run greenbubbles help for usage.")
   exit(2)
+}
+
+private func loadSnapshotManifest(_ url: URL) throws -> SnapshotManifest {
+  let descriptor = open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+  guard descriptor >= 0 else {
+    throw CLIError.invalidOption("unable to open previous manifest safely")
+  }
+  let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+  let data = try handle.readToEnd() ?? Data()
+  let decoder = JSONDecoder()
+  decoder.dateDecodingStrategy = .iso8601
+  return try decoder.decode(SnapshotManifest.self, from: data)
 }
 
 private struct SnapshotCommandReport: Encodable {

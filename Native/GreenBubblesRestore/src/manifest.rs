@@ -1,7 +1,9 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::RestoreError;
 
@@ -14,6 +16,8 @@ pub struct SnapshotManifest {
     pub source_fingerprint: String,
     #[serde(default)]
     pub client_build: Option<ClientBuildFingerprint>,
+    #[serde(default)]
+    pub acquisition: Option<SnapshotAcquisitionEvidence>,
     pub entries: Vec<SnapshotEntry>,
 }
 
@@ -70,6 +74,43 @@ const SUPPORTED_EXECUTABLE_SHA256: &str =
 const SUPPORTED_CODE_DIRECTORY_SHA256: &str =
     "fa11b242567cbe161e2b332139dbc459c534b85f3855a8603614252bf908106e";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SnapshotAcquisitionMode {
+    Bootstrap,
+    Incremental,
+    IntegrityScan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotSourceFileInventory {
+    pub role: SnapshotFileRole,
+    pub fingerprint: SourceFileFingerprint,
+    pub content_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotSourceSetInventory {
+    pub source_set_id: String,
+    pub logical_path: String,
+    pub files: Vec<SnapshotSourceFileInventory>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotAcquisitionEvidence {
+    pub format_version: u32,
+    pub mode: SnapshotAcquisitionMode,
+    pub previous_source_fingerprint: Option<String>,
+    pub reconciliation_window_seconds: u64,
+    pub changed_source_set_ids: Vec<String>,
+    pub reconciliation_source_set_ids: Vec<String>,
+    pub deleted_source_set_ids: Vec<String>,
+    pub source_sets: Vec<SnapshotSourceSetInventory>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotEntry {
@@ -90,7 +131,7 @@ pub struct PathReference {
     pub path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceFileFingerprint {
     pub device_id: u64,
@@ -100,7 +141,7 @@ pub struct SourceFileFingerprint {
     pub modified_nanoseconds: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SnapshotFileRole {
     Database,
@@ -114,7 +155,7 @@ impl SnapshotManifest {
         let data = fs::read(&manifest_path)
             .map_err(|e| RestoreError::Manifest(format!("{}: {e}", manifest_path.display())))?;
         let manifest: Self = serde_json::from_slice(&data)?;
-        if !matches!(manifest.manifest_format_version, 1 | 2) {
+        if !matches!(manifest.manifest_format_version, 1..=3) {
             return Err(RestoreError::Manifest(format!(
                 "unsupported format version {}",
                 manifest.manifest_format_version
@@ -125,12 +166,25 @@ impl SnapshotManifest {
                 "format-1 snapshot cannot contain client-build evidence".to_string(),
             ));
         }
+        if manifest.manifest_format_version < 3 && manifest.acquisition.is_some() {
+            return Err(RestoreError::Manifest(
+                "snapshot acquisition evidence requires format 3".to_string(),
+            ));
+        }
+        if manifest.manifest_format_version == 3 && manifest.acquisition.is_none() {
+            return Err(RestoreError::Manifest(
+                "format-3 snapshot requires acquisition evidence".to_string(),
+            ));
+        }
         if let Some(build) = &manifest.client_build {
             build.validate()?;
         }
         for entry in &manifest.entries {
             let _ = entry.resolved_path(snapshot_dir)?;
             validate_logical_path(&entry.logical_path)?;
+        }
+        if let Some(acquisition) = &manifest.acquisition {
+            acquisition.validate(&manifest)?;
         }
         Ok(manifest)
     }
@@ -239,6 +293,191 @@ impl SnapshotManifest {
     }
 }
 
+impl SnapshotAcquisitionEvidence {
+    pub fn selected_source_set_ids(&self) -> BTreeSet<&str> {
+        self.changed_source_set_ids
+            .iter()
+            .chain(&self.reconciliation_source_set_ids)
+            .map(String::as_str)
+            .collect()
+    }
+
+    pub fn is_full_scan(&self) -> bool {
+        matches!(
+            self.mode,
+            SnapshotAcquisitionMode::Bootstrap | SnapshotAcquisitionMode::IntegrityScan
+        )
+    }
+
+    fn validate(&self, manifest: &SnapshotManifest) -> Result<(), RestoreError> {
+        if self.format_version != 1 {
+            return Err(RestoreError::Manifest(
+                "unsupported acquisition evidence version".to_string(),
+            ));
+        }
+        validate_unique_sorted(&self.changed_source_set_ids, "changed source-set IDs")?;
+        validate_unique_sorted(
+            &self.reconciliation_source_set_ids,
+            "reconciliation source-set IDs",
+        )?;
+        validate_unique_sorted(&self.deleted_source_set_ids, "deleted source-set IDs")?;
+        let changed = self
+            .changed_source_set_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let reconciliation = self
+            .reconciliation_source_set_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if !changed.is_disjoint(&reconciliation) {
+            return Err(RestoreError::Manifest(
+                "changed and reconciliation source sets overlap".to_string(),
+            ));
+        }
+        let mut source_sets = BTreeMap::new();
+        for source_set in &self.source_sets {
+            if source_set.source_set_id.is_empty()
+                || source_sets
+                    .insert(source_set.source_set_id.as_str(), source_set)
+                    .is_some()
+            {
+                return Err(RestoreError::Manifest(
+                    "source inventory contains a missing or duplicate source-set ID".to_string(),
+                ));
+            }
+            validate_logical_path(&source_set.logical_path)?;
+            let mut roles = BTreeSet::new();
+            for file in &source_set.files {
+                if !roles.insert(file.role) {
+                    return Err(RestoreError::Manifest(
+                        "source inventory contains a duplicate file role".to_string(),
+                    ));
+                }
+                if !file.content_sha256.as_deref().is_some_and(valid_sha256) {
+                    return Err(RestoreError::Manifest(
+                        "source inventory has no verified content digest".to_string(),
+                    ));
+                }
+            }
+            if !roles.contains(&SnapshotFileRole::Database) {
+                return Err(RestoreError::Manifest(
+                    "source inventory set has no database".to_string(),
+                ));
+            }
+        }
+        let current_ids = source_sets.keys().copied().collect::<BTreeSet<_>>();
+        let deleted = self
+            .deleted_source_set_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if !current_ids.is_disjoint(&deleted) {
+            return Err(RestoreError::Manifest(
+                "deleted source set is still present in current inventory".to_string(),
+            ));
+        }
+        let selected = self.selected_source_set_ids();
+        if !selected.is_subset(&current_ids) {
+            return Err(RestoreError::Manifest(
+                "selected source set is missing from current inventory".to_string(),
+            ));
+        }
+        match self.mode {
+            SnapshotAcquisitionMode::Bootstrap => {
+                if self.previous_source_fingerprint.is_some()
+                    || selected != current_ids
+                    || !deleted.is_empty()
+                {
+                    return Err(RestoreError::Manifest(
+                        "bootstrap acquisition must select the complete current inventory"
+                            .to_string(),
+                    ));
+                }
+            }
+            SnapshotAcquisitionMode::IntegrityScan => {
+                if !self
+                    .previous_source_fingerprint
+                    .as_deref()
+                    .is_some_and(valid_sha256)
+                    || selected != current_ids
+                {
+                    return Err(RestoreError::Manifest(
+                        "integrity scan must have a baseline and select every current source set"
+                            .to_string(),
+                    ));
+                }
+            }
+            SnapshotAcquisitionMode::Incremental => {
+                if !self
+                    .previous_source_fingerprint
+                    .as_deref()
+                    .is_some_and(valid_sha256)
+                {
+                    return Err(RestoreError::Manifest(
+                        "incremental acquisition has no valid baseline fingerprint".to_string(),
+                    ));
+                }
+            }
+        }
+        let mut entry_keys = BTreeSet::new();
+        for entry in &manifest.entries {
+            if !selected.contains(entry.source_set_id.as_str()) {
+                return Err(RestoreError::Manifest(
+                    "snapshot contains an unselected source set".to_string(),
+                ));
+            }
+            let key = (entry.source_set_id.as_str(), entry.role);
+            if !entry_keys.insert(key) {
+                return Err(RestoreError::Manifest(
+                    "snapshot contains a duplicate source-set file role".to_string(),
+                ));
+            }
+            let inventory = source_sets
+                .get(entry.source_set_id.as_str())
+                .and_then(|set| set.files.iter().find(|file| file.role == entry.role))
+                .ok_or_else(|| {
+                    RestoreError::Manifest(
+                        "snapshot entry is absent from source inventory".to_string(),
+                    )
+                })?;
+            if inventory.fingerprint != entry.fingerprint
+                || !inventory
+                    .content_sha256
+                    .as_deref()
+                    .is_some_and(|digest| digest.eq_ignore_ascii_case(&entry.sha256))
+            {
+                return Err(RestoreError::Manifest(
+                    "snapshot entry disagrees with source inventory".to_string(),
+                ));
+            }
+        }
+        let expected_keys = selected
+            .iter()
+            .flat_map(|identifier| {
+                source_sets[identifier]
+                    .files
+                    .iter()
+                    .map(move |file| (*identifier, file.role))
+            })
+            .collect::<BTreeSet<_>>();
+        if entry_keys != expected_keys {
+            return Err(RestoreError::Manifest(
+                "selected source inventory was not copied completely".to_string(),
+            ));
+        }
+        if !source_inventory_fingerprint(&self.source_sets)
+            .eq_ignore_ascii_case(&manifest.source_fingerprint)
+        {
+            return Err(RestoreError::Manifest(
+                "source inventory fingerprint does not match manifest".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl ClientBuildFingerprint {
     fn validate(&self) -> Result<(), RestoreError> {
         let valid_hash =
@@ -283,6 +522,53 @@ fn compare_field(mismatches: &mut Vec<String>, field: &str, matches: bool) {
     }
 }
 
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn validate_unique_sorted(values: &[String], label: &str) -> Result<(), RestoreError> {
+    if values.windows(2).any(|pair| pair[0] >= pair[1]) || values.iter().any(String::is_empty) {
+        return Err(RestoreError::Manifest(format!(
+            "{label} must be nonempty, unique, and sorted"
+        )));
+    }
+    Ok(())
+}
+
+fn source_inventory_fingerprint(source_sets: &[SnapshotSourceSetInventory]) -> String {
+    let mut hasher = Sha256::new();
+    for source_set in source_sets {
+        hasher.update(source_set.source_set_id.as_bytes());
+        hasher.update([0]);
+        hasher.update(source_set.logical_path.as_bytes());
+        for file in &source_set.files {
+            let role = match file.role {
+                SnapshotFileRole::Database => "database",
+                SnapshotFileRole::WriteAheadLog => "writeAheadLog",
+                SnapshotFileRole::SharedMemory => "sharedMemory",
+            };
+            let fields = [
+                role.to_string(),
+                file.fingerprint.device_id.to_string(),
+                file.fingerprint.file_id.to_string(),
+                file.fingerprint.byte_count.to_string(),
+                file.fingerprint.modified_seconds.to_string(),
+                file.fingerprint.modified_nanoseconds.to_string(),
+                file.content_sha256
+                    .as_deref()
+                    .unwrap_or("missing")
+                    .to_string(),
+            ];
+            for field in fields {
+                hasher.update([0x1f]);
+                hasher.update(field.as_bytes());
+            }
+        }
+        hasher.update([0x1e]);
+    }
+    hex::encode(hasher.finalize())
+}
+
 impl SnapshotEntry {
     pub fn resolved_path(&self, snapshot_dir: &Path) -> Result<PathBuf, RestoreError> {
         let relative = Path::new(&self.relative_path);
@@ -325,6 +611,7 @@ mod tests {
             created_at: "2026-08-27T00:00:00Z".to_string(),
             source_fingerprint: "synthetic-source".to_string(),
             client_build: build,
+            acquisition: None,
             entries: Vec::new(),
         }
     }

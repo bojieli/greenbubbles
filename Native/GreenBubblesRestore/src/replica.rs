@@ -211,6 +211,7 @@ pub fn bootstrap_replica(
 ) -> Result<ReplicaBootstrapReport, RestoreError> {
     ensure_private_directory(archive_directory)?;
     let report = load_report(archive_directory)?;
+    require_authoritative_archive(&report)?;
     let mut opened = open_replica(replica_path, key)?;
     let existing_account: Option<String> = opened
         .connection
@@ -403,6 +404,7 @@ pub fn synchronize_replica(
 ) -> Result<ReplicaSyncReport, RestoreError> {
     ensure_private_directory(archive_directory)?;
     let report = load_report(archive_directory)?;
+    require_authoritative_archive(&report)?;
     let mut opened = open_replica(replica_path, key)?;
     let identity: Option<(String, Option<String>)> = opened
         .connection
@@ -1402,6 +1404,20 @@ fn import_archive_transactionally(
     )?;
     transaction.commit()?;
     Ok(counts)
+}
+
+fn require_authoritative_archive(report: &RestorationReport) -> Result<(), RestoreError> {
+    if report
+        .acquisition
+        .as_ref()
+        .is_some_and(|acquisition| !acquisition.is_full_scan())
+    {
+        return Err(RestoreError::Integrity(
+            "incremental acquisition must be merged with its prior authoritative state before replica mutation"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn reconcile_archive_transactionally(

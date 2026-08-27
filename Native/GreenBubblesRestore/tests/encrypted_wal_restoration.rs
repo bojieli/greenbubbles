@@ -52,6 +52,7 @@ fn decrypts_sqlcipher4_and_applies_committed_wal_frames() {
         created_at: "2026-08-27T00:00:00Z".to_string(),
         source_fingerprint: "encrypted-fixture-fingerprint".to_string(),
         client_build: None,
+        acquisition: None,
         entries: vec![
             entry(
                 &database,

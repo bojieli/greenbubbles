@@ -56,6 +56,14 @@ memory. The engine has no runtime network client. Decrypted databases exist
 only in an owner-only temporary directory and are removed when the catalog is
 dropped.
 
+Snapshot manifest format 3 separates the complete source-set inventory from
+the database sets copied in a particular acquisition. Database, WAL, and SHM
+presence and full file identity determine change selection. The format records
+bootstrap, incremental, or integrity-scan mode, the bounded reconciliation
+window, selected sets, deleted sets, and a verified SHA-256 for every current
+source file. Rust validates that the selected entries exactly match this
+inventory before opening a database.
+
 ## Message and auxiliary stores
 
 Message tables are discovered by both hashed `Msg_`/`Chat_` naming and required

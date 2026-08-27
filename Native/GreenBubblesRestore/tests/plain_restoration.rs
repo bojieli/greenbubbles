@@ -51,6 +51,7 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
         created_at: "2026-08-27T00:00:00Z".to_string(),
         source_fingerprint: "fixture-fingerprint".to_string(),
         client_build: None,
+        acquisition: None,
         entries: vec![SnapshotEntry {
             source: greenbubbles_restore::manifest::PathReference {
                 opaque_id: "source".to_string(),

@@ -133,3 +133,10 @@ digests under that same policy. It emits deterministic body-free events for
 additions, changes, and removals; repeating the same comparison produces the
 same event IDs. This is the recovery path for missed or duplicated wake-up
 hints.
+
+Snapshot acquisition mode is retained in `report.json`. Bootstrap and integrity
+scan inputs are authoritative full source inventories. An incremental input is
+a fragment even though its manifest fingerprints the complete source tree, so
+its `fullRestorationAchieved` flag is forced false and it cannot directly
+replace or reconcile a replica. This distinction prevents partial source
+selection from weakening the row equation or silently deleting history.

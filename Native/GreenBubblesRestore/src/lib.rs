@@ -15,7 +15,8 @@ pub use catalog::{prepare_catalog, PreparedCatalog, PreparedDatabase, StorageFam
 pub use error::RestoreError;
 pub use manifest::{
     ClientBuildCompatibilityEvidence, ClientBuildCompatibilityState, ClientBuildFingerprint,
-    SnapshotEntry, SnapshotFileRole, SnapshotManifest,
+    SnapshotAcquisitionEvidence, SnapshotAcquisitionMode, SnapshotEntry, SnapshotFileRole,
+    SnapshotManifest, SnapshotSourceFileInventory, SnapshotSourceSetInventory,
 };
 pub use model::*;
 pub use restore::{restore_catalog, RestorationOptions};
