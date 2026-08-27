@@ -22,13 +22,13 @@ fn decrypts_sqlcipher4_and_applies_committed_wal_frames() {
              PRAGMA wal_autocheckpoint = 0;
              CREATE TABLE Name2Id(user_name TEXT);
              INSERT INTO Name2Id(rowid, user_name) VALUES (1, 'wxid_alice');
-             CREATE TABLE Msg_0693e4da7db9e29637c64b95cc5162ca(
+             CREATE TABLE Msg_29a6db07e8bbdb53f5d54cc3c309f3f1(
                local_id INTEGER, server_id INTEGER, sort_seq INTEGER,
                local_type INTEGER, real_sender_id INTEGER, create_time INTEGER,
                status INTEGER, message_content BLOB
              );
              PRAGMA wal_checkpoint(TRUNCATE);
-             INSERT INTO Msg_0693e4da7db9e29637c64b95cc5162ca
+             INSERT INTO Msg_29a6db07e8bbdb53f5d54cc3c309f3f1
              VALUES (10, 20, 30, 1, 1, 1700000000, 2, x'68656c6c6f');",
         )
         .unwrap();
@@ -89,6 +89,8 @@ fn decrypts_sqlcipher4_and_applies_committed_wal_frames() {
     assert_eq!(report.integrity.source_row_count, 1);
     assert_eq!(report.integrity.restored_row_count, 1);
     assert_eq!(report.integrity.rejected_row_count, 0);
+    assert!(report.completion.semantic_message_coverage_complete);
+    assert!(report.completion.full_restoration_achieved);
 
     drop(connection);
 }

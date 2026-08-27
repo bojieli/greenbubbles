@@ -78,15 +78,34 @@ cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
 
 The output directory is owner-only and contains canonical message NDJSON,
 artifact NDJSON with exact verified local locations, a rejection ledger, a
-schema/type coverage report, and an integrity report. It also contains
-losslessly decoded image derivatives and raw SILK voice payloads when locally
-available. These files are plaintext private data: keep them out of Git, issue
-attachments, shell transcripts, and model prompts.
+schema/type coverage report, account-scoped conversation and participant
+records, and an integrity/completion report. It also contains losslessly decoded
+image derivatives, raw SILK voice payloads, and playable voice derivatives when
+decoding succeeds. These files are plaintext private data: keep them out of
+Git, issue attachments, shell transcripts, and model prompts.
 
 Production completeness is deliberately strict. The restoration report must
 satisfy `source rows = restored rows + rejected rows`, with zero rejections,
 zero duplicate canonical identities, no unknown observed message types, and no
 unexplained media state. See [docs/RESTORATION_SPEC.md](docs/RESTORATION_SPEC.md).
+
+Conversation reads require a separate owner-only policy. Creating one is an
+explicit local authorization step; cursors are bound to both the archive
+fingerprint and the selected conversation:
+
+```sh
+cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  policy <private-output-directory> <policy-file> \
+  <enabled-conversation-id> --max-page-size 100
+
+cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml -- \
+  read <private-output-directory> <policy-file> \
+  <enabled-conversation-id> --limit 50
+```
+
+The `read` command emits message bodies and is therefore intended only for
+explicit local use. A policy for one archive or conversation cannot be reused
+for another.
 
 ## Scope and authorization
 

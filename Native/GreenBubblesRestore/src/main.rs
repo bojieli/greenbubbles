@@ -1,7 +1,9 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::path::PathBuf;
 
 use greenbubbles_restore::{
+    archive::{create_conversation_policy, read_conversation_page},
     prepare_catalog, restore_catalog, DatabasePassphrase, RestorationOptions,
 };
 
@@ -54,13 +56,62 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        "policy" => {
+            let archive = required_path(arguments.next(), "archive directory")?;
+            let policy_path = required_path(arguments.next(), "policy path")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            let enabled = remaining
+                .iter()
+                .take_while(|value| !value.starts_with("--"))
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let maximum_page_size = option_usize(&remaining, "--max-page-size")?.unwrap_or(100);
+            let policy =
+                create_conversation_policy(&archive, &policy_path, enabled, maximum_page_size)?;
+            println!("{}", serde_json::to_string_pretty(&policy)?);
+        }
+        "read" => {
+            let archive = required_path(arguments.next(), "archive directory")?;
+            let policy = required_path(arguments.next(), "policy path")?;
+            let conversation = arguments
+                .next()
+                .ok_or_else(|| "missing conversation ID".to_string())?;
+            let remaining = arguments.collect::<Vec<_>>();
+            let cursor = option_string(&remaining, "--cursor")?;
+            let limit = option_usize(&remaining, "--limit")?.unwrap_or(100);
+            let page =
+                read_conversation_page(&archive, &policy, &conversation, cursor.as_deref(), limit)?;
+            println!("{}", serde_json::to_string_pretty(&page)?);
+        }
         _ => {
             eprintln!(
-                "Usage:\n  greenbubbles-restore probe <snapshot> [--passphrase-stdin]\n  greenbubbles-restore restore <snapshot> <output> [--account-root <path>] [--passphrase-stdin]"
+                "Usage:\n  greenbubbles-restore probe <snapshot> [--passphrase-stdin]\n  greenbubbles-restore restore <snapshot> <output> [--account-root <path>] [--passphrase-stdin]\n  greenbubbles-restore policy <archive> <policy-file> <conversation-id>... [--max-page-size <n>]\n  greenbubbles-restore read <archive> <policy-file> <conversation-id> [--cursor <cursor>] [--limit <n>]"
             );
         }
     }
     Ok(())
+}
+
+fn option_string(arguments: &[String], option: &str) -> Result<Option<String>, String> {
+    let Some(index) = arguments.iter().position(|value| value == option) else {
+        return Ok(None);
+    };
+    arguments
+        .get(index + 1)
+        .filter(|value| !value.starts_with("--"))
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| format!("missing value for {option}"))
+}
+
+fn option_usize(arguments: &[String], option: &str) -> Result<Option<usize>, String> {
+    option_string(arguments, option)?
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .map_err(|_| format!("invalid integer for {option}"))
+        })
+        .transpose()
 }
 
 fn option_path(arguments: &[String], option: &str) -> Result<Option<PathBuf>, String> {

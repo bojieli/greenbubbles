@@ -182,8 +182,13 @@ impl ArtifactResolver {
                     source_local_path: None,
                     account_relative_path: None,
                     source_byte_count: None,
+                    source_device_id: None,
+                    source_file_id: None,
+                    source_modified_seconds: None,
+                    source_modified_nanoseconds: None,
                     source_sha256: None,
                     detected_format: None,
+                    materialized_local_path: None,
                     decoded_local_path: None,
                     decoded_byte_count: None,
                     decoded_sha256: None,
@@ -317,8 +322,13 @@ impl ArtifactResolver {
                     source_local_path: None,
                     account_relative_path: None,
                     source_byte_count: None,
+                    source_device_id: None,
+                    source_file_id: None,
+                    source_modified_seconds: None,
+                    source_modified_nanoseconds: None,
                     source_sha256: None,
                     detected_format: None,
+                    materialized_local_path: None,
                     decoded_local_path: None,
                     decoded_byte_count: None,
                     decoded_sha256: None,
@@ -364,37 +374,67 @@ impl ArtifactResolver {
             let destination = self.output_directory.join(&relative);
             write_owner_only_once(&destination, &data)?;
             let detected = detect_format(&data, Some("silk"));
+            let mut artifact = CanonicalArtifact {
+                artifact_id: artifact_id.clone(),
+                kind: ArtifactKind::Voice,
+                role: ArtifactRole::VoicePayload,
+                availability: if ambiguous {
+                    ArtifactAvailability::Ambiguous
+                } else {
+                    ArtifactAvailability::MaterializedFromDatabase
+                },
+                source_md5: None,
+                source_local_path: None,
+                account_relative_path: None,
+                source_byte_count: Some(data.len() as u64),
+                source_device_id: None,
+                source_file_id: None,
+                source_modified_seconds: None,
+                source_modified_nanoseconds: None,
+                source_sha256: Some(sha256),
+                detected_format: Some(detected),
+                materialized_local_path: Some(destination.display().to_string()),
+                decoded_local_path: None,
+                decoded_byte_count: None,
+                decoded_sha256: None,
+                decoded_format: None,
+                decode_state: ArtifactDecodeState::Unsupported,
+                verification_detail: Some(if ambiguous {
+                    "multiple VoiceInfo rows matched; every lossless payload was materialized"
+                        .to_string()
+                } else {
+                    "lossless SILK payload materialized from the snapshot".to_string()
+                }),
+                source_resource_set_id: Some(locator.source_set_id),
+                source_resource_row_id: Some(locator.source_row_id),
+            };
+            match wx_media::transcode_silk_to_ogg_opus(&data) {
+                Ok(decoded) => {
+                    let decoded_relative = PathBuf::from("derived")
+                        .join("voice")
+                        .join(format!("{artifact_id}.{}", decoded.ext));
+                    let decoded_destination = self.output_directory.join(decoded_relative);
+                    write_owner_only_once(&decoded_destination, &decoded.data)?;
+                    artifact.decoded_local_path = Some(decoded_destination.display().to_string());
+                    artifact.decoded_byte_count = Some(decoded.data.len() as u64);
+                    artifact.decoded_sha256 = Some(hex::encode(Sha256::digest(&decoded.data)));
+                    artifact.decoded_format = Some(decoded.ext.to_string());
+                    artifact.decode_state = ArtifactDecodeState::Decoded;
+                    artifact.verification_detail = Some(
+                        "lossless SILK source retained and an Ogg Opus derivative was verified"
+                            .to_string(),
+                    );
+                }
+                Err(error) => {
+                    artifact.decode_state = ArtifactDecodeState::Failed;
+                    artifact.verification_detail = Some(format!(
+                        "lossless SILK source retained; playable derivative failed: {error}"
+                    ));
+                }
+            }
             self.artifacts
                 .entry(artifact_id.clone())
-                .or_insert(CanonicalArtifact {
-                    artifact_id: artifact_id.clone(),
-                    kind: ArtifactKind::Voice,
-                    role: ArtifactRole::VoicePayload,
-                    availability: if ambiguous {
-                        ArtifactAvailability::Ambiguous
-                    } else {
-                        ArtifactAvailability::MaterializedFromDatabase
-                    },
-                    source_md5: None,
-                    source_local_path: None,
-                    account_relative_path: None,
-                    source_byte_count: Some(data.len() as u64),
-                    source_sha256: Some(sha256.clone()),
-                    detected_format: Some(detected),
-                    decoded_local_path: Some(destination.display().to_string()),
-                    decoded_byte_count: Some(data.len() as u64),
-                    decoded_sha256: Some(sha256),
-                    decoded_format: Some("silk".to_string()),
-                    decode_state: ArtifactDecodeState::Unsupported,
-                    verification_detail: Some(if ambiguous {
-                        "multiple VoiceInfo rows matched; every payload was materialized".to_string()
-                    } else {
-                        "lossless SILK payload materialized from the snapshot; no lossy transcode was performed"
-                            .to_string()
-                    }),
-                    source_resource_set_id: Some(locator.source_set_id),
-                    source_resource_row_id: Some(locator.source_row_id),
-                });
+                .or_insert(artifact);
             result.push(MessageArtifactReference {
                 artifact_id,
                 role: ArtifactRole::VoicePayload,
@@ -547,8 +587,13 @@ impl ArtifactResolver {
             source_local_path: Some(canonical.display().to_string()),
             account_relative_path: Some(relative.display().to_string()),
             source_byte_count: Some(byte_count),
+            source_device_id: Some(before.dev()),
+            source_file_id: Some(before.ino()),
+            source_modified_seconds: Some(before.mtime()),
+            source_modified_nanoseconds: Some(before.mtime_nsec()),
             source_sha256: Some(source_sha256),
             detected_format: Some(detected_format),
+            materialized_local_path: None,
             decoded_local_path: None,
             decoded_byte_count: None,
             decoded_sha256: None,
@@ -666,8 +711,13 @@ impl ArtifactResolver {
                 source_local_path: None,
                 account_relative_path: None,
                 source_byte_count: None,
+                source_device_id: None,
+                source_file_id: None,
+                source_modified_seconds: None,
+                source_modified_nanoseconds: None,
                 source_sha256: None,
                 detected_format: None,
+                materialized_local_path: None,
                 decoded_local_path: None,
                 decoded_byte_count: None,
                 decoded_sha256: None,
@@ -787,28 +837,31 @@ fn load_voice_index(catalog: &PreparedCatalog) -> Result<(VoiceIndex, VoiceIndex
 
 fn build_file_index(account_root: &Path) -> Result<MediaFileIndex, RestoreError> {
     let mut result = MediaFileIndex::default();
-    let message_root = account_root.join("msg");
-    if !message_root.is_dir() {
-        return Ok(result);
-    }
-    for entry in WalkDir::new(&message_root).follow_links(false) {
-        let entry = entry.map_err(|_| {
-            RestoreError::Integrity(
-                "the authorized media tree could not be fully enumerated".to_string(),
-            )
-        })?;
-        if !entry.file_type().is_file() && !entry.file_type().is_symlink() {
-            continue;
-        }
-        let path = entry.path().to_path_buf();
-        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
-        result
-            .by_name
-            .entry(name.clone())
-            .or_default()
-            .push(path.clone());
-        for md5 in extract_hex32(name.as_bytes()) {
-            result.by_md5.entry(md5).or_default().push(path.clone());
+    let roots = [
+        account_root.join("msg"),
+        account_root.join("business/emoticon"),
+        account_root.join("business/InputTemp"),
+    ];
+    for root in roots.iter().filter(|root| root.is_dir()) {
+        for entry in WalkDir::new(root).follow_links(false) {
+            let entry = entry.map_err(|_| {
+                RestoreError::Integrity(
+                    "the authorized media tree could not be fully enumerated".to_string(),
+                )
+            })?;
+            if !entry.file_type().is_file() && !entry.file_type().is_symlink() {
+                continue;
+            }
+            let path = entry.path().to_path_buf();
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            result
+                .by_name
+                .entry(name.clone())
+                .or_default()
+                .push(path.clone());
+            for md5 in extract_hex32(name.as_bytes()) {
+                result.by_md5.entry(md5).or_default().push(path.clone());
+            }
         }
     }
     for paths in result.by_md5.values_mut() {
@@ -848,6 +901,8 @@ fn media_descriptor(message: &CanonicalMessage) -> Option<(ArtifactKind, Artifac
         (49, 3) => Some((ArtifactKind::Voice, ArtifactRole::VoicePayload)),
         (49, 4) => Some((ArtifactKind::Video, ArtifactRole::VideoPayload)),
         (49, 6) => Some((ArtifactKind::Document, ArtifactRole::FilePayload)),
+        (49, 51 | 63) => Some((ArtifactKind::Video, ArtifactRole::VideoPayload)),
+        (49, 74) => Some((ArtifactKind::Document, ArtifactRole::FilePayload)),
         _ => None,
     }
 }

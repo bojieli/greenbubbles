@@ -33,6 +33,8 @@ pub struct CanonicalMessage {
     pub compression_type: Option<i64>,
     pub raw_columns: BTreeMap<String, RawSQLiteValue>,
     pub typed_payload: TypedPayload,
+    pub semantic_decode_state: SemanticDecodeState,
+    pub semantic_gap_reason: Option<String>,
     pub relationships: Vec<MessageRelationship>,
     pub artifact_references: Vec<MessageArtifactReference>,
 }
@@ -77,7 +79,18 @@ pub struct MessageRelationship {
     pub target_server_id: Option<i64>,
     pub target_local_id: Option<i64>,
     pub resolved: bool,
+    pub resolution_state: RelationshipResolutionState,
     pub raw_reference_base64: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RelationshipResolutionState {
+    Pending,
+    Resolved,
+    TargetNotPresentLocally,
+    ReferenceIdentifierMissing,
+    Ambiguous,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -165,8 +178,13 @@ pub struct CanonicalArtifact {
     pub source_local_path: Option<String>,
     pub account_relative_path: Option<String>,
     pub source_byte_count: Option<u64>,
+    pub source_device_id: Option<u64>,
+    pub source_file_id: Option<u64>,
+    pub source_modified_seconds: Option<i64>,
+    pub source_modified_nanoseconds: Option<i64>,
     pub source_sha256: Option<String>,
     pub detected_format: Option<String>,
+    pub materialized_local_path: Option<String>,
     pub decoded_local_path: Option<String>,
     pub decoded_byte_count: Option<u64>,
     pub decoded_sha256: Option<String>,
@@ -175,6 +193,89 @@ pub struct CanonicalArtifact {
     pub verification_detail: Option<String>,
     pub source_resource_set_id: Option<String>,
     pub source_resource_row_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConversationKind {
+    Direct,
+    Group,
+    Business,
+    Chatbot,
+    System,
+    Unresolved,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EntityDecodeState {
+    Complete,
+    RawOnly,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalProfileState {
+    Hydrated,
+    MissingLocalRecord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntitySourceRecord {
+    pub source_set_id: String,
+    pub source_logical_path: String,
+    pub source_table_id: String,
+    pub source_table_name: String,
+    pub source_row_id: i64,
+    pub raw_columns: BTreeMap<String, RawSQLiteValue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanonicalParticipant {
+    pub participant_id: String,
+    pub account_id: String,
+    pub source_identifier_base64: String,
+    pub alias_base64: Option<String>,
+    pub remark_base64: Option<String>,
+    pub nickname_base64: Option<String>,
+    pub display_name_base64: Option<String>,
+    pub local_profile_state: LocalProfileState,
+    pub conversation_ids: Vec<String>,
+    pub source_records: Vec<EntitySourceRecord>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConversationMembershipRole {
+    DirectPeer,
+    Owner,
+    Member,
+    ObservedSender,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationMembership {
+    pub participant_id: String,
+    pub role: ConversationMembershipRole,
+    pub display_name_base64: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanonicalConversation {
+    pub conversation_id: String,
+    pub account_id: String,
+    pub source_identifier_base64: String,
+    pub kind: ConversationKind,
+    pub participant_ids: Vec<String>,
+    pub memberships: Vec<ConversationMembership>,
+    pub owner_participant_id: Option<String>,
+    pub entity_decode_state: EntityDecodeState,
+    pub source_records: Vec<EntitySourceRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,6 +293,16 @@ pub enum RawSQLiteValue {
 pub enum TypedPayload {
     Decoded(serde_json::Value),
     Unknown { reason: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SemanticDecodeState {
+    Complete,
+    Partial,
+    UnknownType,
+    Failed,
+    MissingType,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,6 +325,8 @@ pub struct RestorationIntegrity {
     pub duplicate_canonical_id_count: u64,
     pub unknown_payload_count: u64,
     pub unknown_payload_reason_counts: BTreeMap<String, u64>,
+    pub semantic_gap_count: u64,
+    pub semantic_gap_reason_counts: BTreeMap<String, u64>,
     pub logical_type_counts: BTreeMap<String, u64>,
     pub logical_sub_type_counts: BTreeMap<String, u64>,
     pub message_schema_counts: BTreeMap<String, u64>,
@@ -226,11 +339,23 @@ pub struct RestorationIntegrity {
     pub corrupt_artifact_count: u64,
     pub unsafe_artifact_count: u64,
     pub decoded_artifact_count: u64,
+    pub artifact_decode_gap_count: u64,
+    pub account_root_unavailable_artifact_count: u64,
     pub relationship_reference_count: u64,
     pub resolved_relationship_count: u64,
     pub unresolved_relationship_count: u64,
+    pub absent_relationship_target_count: u64,
+    pub missing_relationship_identifier_count: u64,
+    pub ambiguous_relationship_count: u64,
     pub ordering_basis_counts: BTreeMap<String, u64>,
     pub direction_counts: BTreeMap<String, u64>,
+    pub conversation_count: u64,
+    pub participant_count: u64,
+    pub group_member_count: u64,
+    pub entity_source_row_count: u64,
+    pub entity_decode_gap_count: u64,
+    pub missing_local_profile_count: u64,
+    pub unresolved_conversation_count: u64,
 }
 
 impl RestorationIntegrity {
@@ -247,9 +372,72 @@ pub struct RestorationReport {
     pub messages_path: String,
     pub rejections_path: String,
     pub artifacts_path: String,
+    pub conversations_path: String,
+    pub participants_path: String,
     pub coverage_path: String,
     pub report_path: String,
     pub integrity: RestorationIntegrity,
+    pub completion: RestorationCompletion,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestorationCompletion {
+    pub row_equation_holds: bool,
+    pub zero_rejected_rows: bool,
+    pub canonical_identities_unique: bool,
+    pub semantic_message_coverage_complete: bool,
+    pub directions_complete: bool,
+    pub entity_coverage_complete: bool,
+    pub relationship_coverage_complete: bool,
+    pub artifact_verification_complete: bool,
+    pub artifact_decoding_complete: bool,
+    pub full_restoration_achieved: bool,
+}
+
+impl RestorationCompletion {
+    pub fn evaluate(integrity: &RestorationIntegrity) -> Self {
+        let row_equation_holds = integrity.row_equation_holds();
+        let zero_rejected_rows = integrity.rejected_row_count == 0;
+        let canonical_identities_unique = integrity.duplicate_canonical_id_count == 0;
+        let semantic_message_coverage_complete = integrity.semantic_gap_count == 0;
+        let directions_complete = integrity
+            .direction_counts
+            .get("unknown")
+            .copied()
+            .unwrap_or_default()
+            == 0;
+        let entity_coverage_complete =
+            integrity.entity_decode_gap_count == 0 && integrity.unresolved_conversation_count == 0;
+        let relationship_coverage_complete = integrity.missing_relationship_identifier_count == 0
+            && integrity.ambiguous_relationship_count == 0;
+        let artifact_verification_complete = integrity.ambiguous_artifact_count == 0
+            && integrity.corrupt_artifact_count == 0
+            && integrity.unsafe_artifact_count == 0
+            && integrity.account_root_unavailable_artifact_count == 0;
+        let artifact_decoding_complete = integrity.artifact_decode_gap_count == 0;
+        let full_restoration_achieved = row_equation_holds
+            && zero_rejected_rows
+            && canonical_identities_unique
+            && semantic_message_coverage_complete
+            && directions_complete
+            && entity_coverage_complete
+            && relationship_coverage_complete
+            && artifact_verification_complete
+            && artifact_decoding_complete;
+        Self {
+            row_equation_holds,
+            zero_rejected_rows,
+            canonical_identities_unique,
+            semantic_message_coverage_complete,
+            directions_complete,
+            entity_coverage_complete,
+            relationship_coverage_complete,
+            artifact_verification_complete,
+            artifact_decoding_complete,
+            full_restoration_achieved,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +451,7 @@ pub struct RestorationCoverage {
     pub logical_type_counts: BTreeMap<String, u64>,
     pub logical_sub_type_counts: BTreeMap<String, u64>,
     pub unknown_payload_reason_counts: BTreeMap<String, u64>,
+    pub semantic_gap_reason_counts: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

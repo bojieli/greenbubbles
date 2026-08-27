@@ -1,6 +1,9 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use base64::Engine;
+use greenbubbles_restore::archive::{create_conversation_policy, read_conversation_page};
 use greenbubbles_restore::manifest::{
     PathReference, SnapshotEntry, SnapshotFileRole, SnapshotManifest, SourceFileFingerprint,
 };
@@ -9,6 +12,7 @@ use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
 const CHAT: &str = "wxid_alice";
+const GROUP: &str = "12345@chatroom";
 const IMAGE_MD5: &str = "11111111111111111111111111111111";
 const VIDEO_MD5: &str = "22222222222222222222222222222222";
 const FILE_MD5: &str = "33333333333333333333333333333333";
@@ -51,9 +55,13 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
     let message_db = snapshot.join("sets/0000/database.db");
     let resource_db = snapshot.join("sets/0001/database.db");
     let media_db = snapshot.join("sets/0002/database.db");
+    let contact_db = snapshot.join("sets/0003/database.db");
+    let session_db = snapshot.join("sets/0004/database.db");
     fs::create_dir_all(message_db.parent().unwrap()).unwrap();
     fs::create_dir_all(resource_db.parent().unwrap()).unwrap();
     fs::create_dir_all(media_db.parent().unwrap()).unwrap();
+    fs::create_dir_all(contact_db.parent().unwrap()).unwrap();
+    fs::create_dir_all(session_db.parent().unwrap()).unwrap();
 
     let image_packed = wx_db::encode_packed_info_for_test(Some(IMAGE_MD5), None);
     let video_packed = wx_db::encode_packed_info_for_test(None, Some(VIDEO_MD5));
@@ -64,6 +72,8 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
         .execute_batch(&format!(
             "CREATE TABLE Name2Id(user_name TEXT);
              INSERT INTO Name2Id(rowid, user_name) VALUES (1, '{CHAT}');
+             INSERT INTO Name2Id(rowid, user_name) VALUES (2, 'wxid_bob');
+             INSERT INTO Name2Id(rowid, user_name) VALUES (3, '{GROUP}');
              CREATE TABLE {table}(
                local_id INTEGER, server_id INTEGER, sort_seq INTEGER,
                local_type INTEGER, real_sender_id INTEGER, create_time INTEGER,
@@ -182,6 +192,30 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
             ],
         )
         .unwrap();
+    let group_table = format!("Msg_{:x}", md5::compute(GROUP.as_bytes()));
+    connection
+        .execute_batch(&format!(
+            "CREATE TABLE {group_table}(
+               local_id INTEGER, server_id INTEGER, sort_seq INTEGER,
+               local_type INTEGER, real_sender_id INTEGER, create_time INTEGER,
+               status INTEGER, message_content BLOB, packed_info_data BLOB
+             );"
+        ))
+        .unwrap();
+    connection
+        .execute(
+            &format!("INSERT INTO {group_table} VALUES (?1, ?2, ?3, ?4, ?5, ?6, 2, ?7, NULL)"),
+            rusqlite::params![
+                20_i64,
+                200_i64,
+                50_i64,
+                1_i64,
+                2_i64,
+                1_700_000_000_i64,
+                b"wxid_bob:\nhello group"
+            ],
+        )
+        .unwrap();
     drop(connection);
 
     let connection = Connection::open(&resource_db).unwrap();
@@ -212,6 +246,38 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
         .unwrap();
     drop(connection);
 
+    let connection = Connection::open(&contact_db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE contact(username TEXT, alias TEXT, remark TEXT, nick_name TEXT);
+             INSERT INTO contact VALUES ('wxid_alice', 'alice-id', 'Alice Remark', 'Alice');
+             INSERT INTO contact VALUES ('wxid_bob', 'bob-id', '', 'Bob');
+             INSERT INTO contact VALUES ('wxid_carol', 'carol-id', '', 'Carol');
+             CREATE TABLE chat_room(username TEXT, owner TEXT, ext_buffer BLOB);",
+        )
+        .unwrap();
+    let room_data = wx_db::encode_room_data_for_test(&[
+        ("wxid_bob", Some("Bob in group")),
+        ("wxid_carol", None),
+    ]);
+    connection
+        .execute(
+            "INSERT INTO chat_room VALUES (?1, ?2, ?3)",
+            rusqlite::params![GROUP, "wxid_bob", room_data],
+        )
+        .unwrap();
+    drop(connection);
+
+    let connection = Connection::open(&session_db).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE SessionTable(username TEXT, sort_timestamp INTEGER, summary BLOB);
+             INSERT INTO SessionTable VALUES ('wxid_alice', 1700000007, x'6869');
+             INSERT INTO SessionTable VALUES ('12345@chatroom', 1700000000, x'67726f7570');",
+        )
+        .unwrap();
+    drop(connection);
+
     let manifest = SnapshotManifest {
         manifest_format_version: 1,
         snapshot_id: "00000000-0000-4000-8000-000000000003".to_string(),
@@ -233,6 +299,20 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
                 1,
             ),
             entry(&media_db, &account, "set-media", "media/media_0.db", 2),
+            entry(
+                &contact_db,
+                &account,
+                "set-contact",
+                "contact/contact.db",
+                3,
+            ),
+            entry(
+                &session_db,
+                &account,
+                "set-session",
+                "session/session.db",
+                4,
+            ),
         ],
     };
     fs::write(
@@ -253,33 +333,47 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
     .unwrap();
 
     assert!(report.integrity.row_equation_holds());
-    assert_eq!(report.integrity.source_row_count, 7);
-    assert_eq!(report.integrity.restored_row_count, 7);
+    assert_eq!(report.integrity.source_row_count, 8);
+    assert_eq!(report.integrity.restored_row_count, 8);
     assert_eq!(report.integrity.rejected_row_count, 0);
     assert_eq!(report.integrity.artifact_reference_count, 7);
     assert_eq!(report.integrity.unique_artifact_count, 7);
     assert_eq!(report.integrity.missing_artifact_count, 1);
     assert_eq!(report.integrity.decoded_artifact_count, 1);
+    assert_eq!(report.integrity.artifact_decode_gap_count, 1);
     assert_eq!(report.integrity.unsafe_artifact_count, 1);
     assert_eq!(report.integrity.relationship_reference_count, 1);
     assert_eq!(report.integrity.resolved_relationship_count, 1);
+    assert_eq!(report.integrity.conversation_count, 2);
+    assert_eq!(report.integrity.participant_count, 3);
+    assert_eq!(report.integrity.group_member_count, 2);
+    assert_eq!(report.integrity.entity_source_row_count, 6);
+    assert_eq!(report.integrity.entity_decode_gap_count, 0);
+    assert!(!report.completion.artifact_verification_complete);
+    assert!(!report.completion.artifact_decoding_complete);
+    assert!(!report.completion.full_restoration_achieved);
 
     let messages = ndjson(output.join("messages.ndjson"));
-    let order = messages
+    let direct_identifier = base64::engine::general_purpose::STANDARD.encode(CHAT.as_bytes());
+    let direct_messages = messages
+        .iter()
+        .filter(|message| message["conversationSourceIdentifierBase64"] == direct_identifier)
+        .collect::<Vec<_>>();
+    let order = direct_messages
         .iter()
         .map(|message| message["sortSequence"].as_i64().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(order, vec![100, 200, 300, 400, 500, 600, 700]);
-    assert!(messages.iter().take(5).all(|message| {
+    assert!(direct_messages.iter().take(5).all(|message| {
         message["artifactReferences"]
             .as_array()
             .is_some_and(|value| !value.is_empty())
     }));
-    assert!(messages
+    assert!(direct_messages
         .iter()
         .all(|message| message["orderingBasis"] == "sortSequence"));
     assert_eq!(
-        messages
+        direct_messages
             .iter()
             .map(|message| message["conversationOrdinal"].as_u64().unwrap())
             .collect::<Vec<_>>(),
@@ -297,6 +391,26 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
     assert_eq!(quote["relationships"][0]["targetCanonicalId"], voice_id);
     assert_eq!(quote["relationships"][0]["resolved"], true);
 
+    let conversations = ndjson(output.join("conversations.ndjson"));
+    let group = conversations
+        .iter()
+        .find(|conversation| conversation["kind"] == "group")
+        .unwrap();
+    assert_eq!(group["participantIds"].as_array().unwrap().len(), 2);
+    let display_name = base64::engine::general_purpose::STANDARD.encode(b"Bob in group");
+    assert!(group["memberships"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|membership| {
+            membership["role"] == "member" && membership["displayNameBase64"] == display_name
+        }));
+    let participants = ndjson(output.join("participants.ndjson"));
+    assert_eq!(participants.len(), 3);
+    assert!(participants
+        .iter()
+        .any(|participant| participant["remarkBase64"] == "QWxpY2UgUmVtYXJr"));
+
     let artifacts = ndjson(output.join("artifacts.ndjson"));
     assert!(contains_exact_path(&artifacts, &image_path));
     assert!(contains_exact_path(&artifacts, &video_path));
@@ -310,8 +424,8 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
         .is_some_and(|path| Path::new(path).is_file()));
     assert!(artifacts.iter().any(|artifact| {
         artifact["availability"] == "materializedFromDatabase"
-            && artifact["decodedFormat"] == "silk"
-            && artifact["decodedLocalPath"]
+            && artifact["detectedFormat"] == "tencent-silk-v3"
+            && artifact["materializedLocalPath"]
                 .as_str()
                 .is_some_and(|path| Path::new(path).is_file())
     }));
@@ -321,6 +435,44 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
     assert!(artifacts.iter().any(|artifact| {
         artifact["availability"] == "unsafePath" && artifact["sourceLocalPath"].is_null()
     }));
+
+    let direct_conversation_id = direct_messages[0]["conversationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let group_conversation_id = messages
+        .iter()
+        .find(|message| message["conversationSourceIdentifierBase64"] != direct_identifier)
+        .unwrap()["conversationId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let policy_path = output.join("read-policy.json");
+    create_conversation_policy(
+        &output,
+        &policy_path,
+        BTreeSet::from([direct_conversation_id.clone()]),
+        2,
+    )
+    .unwrap();
+    let first_page =
+        read_conversation_page(&output, &policy_path, &direct_conversation_id, None, 100).unwrap();
+    assert_eq!(first_page.items.len(), 2);
+    let second_page = read_conversation_page(
+        &output,
+        &policy_path,
+        &direct_conversation_id,
+        first_page.next_cursor.as_deref(),
+        100,
+    )
+    .unwrap();
+    assert_eq!(second_page.items[0].conversation_ordinal, 2);
+    assert!(
+        read_conversation_page(&output, &policy_path, &group_conversation_id, None, 1)
+            .unwrap_err()
+            .to_string()
+            .contains("not enabled")
+    );
 
     let wrong_account = fixture.path().join("wxid_wrong_ab12");
     fs::create_dir_all(wrong_account.join("db_storage")).unwrap();

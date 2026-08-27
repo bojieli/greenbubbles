@@ -76,23 +76,23 @@ Status: **in progress**
 
 ### 1C. Storage format research
 
-- [ ] Create generated databases and sanitized binary fixtures covering known
+- [x] Create generated databases and sanitized binary fixtures covering known
   structural patterns.
-- [ ] Identify database families, page format, schema/version markers, and
+- [x] Identify database families, page format, schema/version markers, and
   serialization formats from authorized test data.
-- [ ] Keep any key-handling experiment in a small local component with no
+- [x] Keep any key-handling experiment in a small local component with no
   network access or model/log exposure.
-- [ ] Document uncertainty; never label guessed fields as verified.
+- [x] Document uncertainty; never label guessed fields as verified.
 
 ### 1D. Normalized conversation reader
 
 - [x] Define the lossless restoration and integrity contract in
   `docs/RESTORATION_SPEC.md`.
-- [ ] Define stable models for accounts, conversations, participants, messages,
+- [x] Define stable models for accounts, conversations, participants, messages,
   attachments, quotes, recalls, and provenance.
-- [ ] Implement cursor-based incremental reads and deterministic deduplication.
-- [ ] Reconcile contact/group identifiers without leaking identifiers into logs.
-- [ ] Expose only explicitly enabled conversations.
+- [x] Implement cursor-based incremental reads and deterministic deduplication.
+- [x] Reconcile contact/group identifiers without leaking identifiers into logs.
+- [x] Expose only explicitly enabled conversations.
 - [ ] Enumerate every message-bearing shard/table and prove
   `source rows = restored rows + rejected rows` with zero silent drops.
 - [ ] Decode every observed logical message type while retaining unknown raw

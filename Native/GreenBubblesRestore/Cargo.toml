@@ -10,6 +10,7 @@ base64 = "0.22"
 hex = "0.4"
 libc = "0.2"
 md5 = "0.7"
+prost = "0.13"
 rusqlite = { version = "0.40", features = ["bundled-sqlcipher"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -20,7 +21,7 @@ walkdir = "2"
 zeroize = { version = "1", features = ["derive"] }
 wx-db = { git = "https://github.com/pandorafuture/wx-cli", rev = "2abe708f55bfe135539a385df856fdc58f97fc74" }
 wx-decrypt = { git = "https://github.com/pandorafuture/wx-cli", rev = "2abe708f55bfe135539a385df856fdc58f97fc74" }
-wx-media = { git = "https://github.com/pandorafuture/wx-cli", rev = "2abe708f55bfe135539a385df856fdc58f97fc74" }
+wx-media = { git = "https://github.com/pandorafuture/wx-cli", rev = "2abe708f55bfe135539a385df856fdc58f97fc74", features = ["audio"] }
 
 [dev-dependencies]
 filetime = "0.2"

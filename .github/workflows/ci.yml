@@ -34,6 +34,10 @@ jobs:
         working-directory: Native/GreenBubblesRestore
         run: cargo fmt --check
 
+      - name: Lint restoration engine
+        working-directory: Native/GreenBubblesRestore
+        run: cargo clippy --locked --all-targets -- -D warnings
+
       - name: Run restoration-engine tests
         working-directory: Native/GreenBubblesRestore
         run: cargo test --locked --all-targets

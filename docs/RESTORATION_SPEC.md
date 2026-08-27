@@ -62,6 +62,13 @@ Each run produces counts that can be checked without printing message content:
 - source and output fingerprints;
 - decoder and supported-client versions.
 
+`report.json` also carries a component-by-component completion verdict. The
+top-level `fullRestorationAchieved` flag is true only when row accounting,
+canonical identity uniqueness, semantic decoding, directions, entities,
+relationships, artifact verification, and artifact decoding all pass. Retaining
+raw bytes is necessary for losslessness but does not by itself satisfy semantic
+or playable-media completeness.
+
 The completion invariant is:
 
 ```text
@@ -84,3 +91,27 @@ Encrypted `.dat` images and encoded voice data are separate from database
 decryption. The resolver must retain the encrypted source, identify the decoder
 version/key provenance, write any decoded derivative into connector-owned
 storage, hash both, and avoid modifying the original.
+
+The exact source path appears only in the explicitly authorized, owner-only
+local restoration output. Candidate files are opened read-only with symlink
+following disabled, bound to the account root recorded by the snapshot, and
+fingerprinted before and after reading. A disappearing, changing, ambiguous,
+or escaping path is never silently substituted.
+
+## Entity reconstruction
+
+The archive contains account-scoped `conversations.ndjson` and
+`participants.ndjson` alongside messages. Session, contact, and group rows are
+retained as raw SQLite values. Group ownership, membership, and per-group
+display names are normalized when their local protobuf is present. A missing
+contact row is represented as a participant with `missingLocalRecord`; an
+unparseable group-member payload is an entity coverage gap.
+
+## Cursor reads and scope
+
+The lossless archive is not an implicit read grant. A separate mode-`0600`
+policy lists the opaque conversation IDs that may be queried and caps page size.
+Every cursor includes the source fingerprint, conversation ID, and last emitted
+conversation ordinal. Cross-archive and cross-conversation cursor reuse fails
+closed. Duplicate canonical identities encountered during paging abort the
+read.

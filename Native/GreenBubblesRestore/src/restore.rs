@@ -7,11 +7,13 @@ use base64::Engine;
 use rusqlite::{types::ValueRef, Connection, OpenFlags, OptionalExtension, Row};
 use sha2::{Digest, Sha256};
 
+use crate::entities::{restore_entities, EntitySeeds};
 use crate::{
     artifact::ArtifactResolver, ArtifactAvailability, ArtifactDecodeState, CanonicalMessage,
     DirectionEvidence, MessageDirection, MessageOrderingBasis, MessageRelationship,
     MessageRelationshipKind, MessageTableCoverage, PreparedCatalog, RawSQLiteValue, RejectedRow,
-    RestorationCoverage, RestorationIntegrity, RestorationReport, RestoreError, TypedPayload,
+    RelationshipResolutionState, RestorationCompletion, RestorationCoverage, RestorationIntegrity,
+    RestorationReport, RestoreError, SemanticDecodeState, TypedPayload,
 };
 
 #[derive(Debug, Clone)]
@@ -83,6 +85,7 @@ pub fn restore_catalog(
         ..Default::default()
     };
     let mut table_coverage = Vec::new();
+    let mut entity_seeds = EntitySeeds::default();
 
     for database in &catalog.databases {
         let connection =
@@ -98,7 +101,7 @@ pub fn restore_catalog(
             integrity.message_table_count += 1;
             let table_id = opaque_id(table.as_bytes());
             let conversation = infer_conversation(table, &database.logical_path, names.values());
-            let conversation_id = opaque_id(conversation.as_bytes());
+            let conversation_id = scoped_opaque_id(&account_id, conversation.as_bytes());
             let schema_identity = columns
                 .iter()
                 .map(|value| value.to_ascii_lowercase())
@@ -141,6 +144,7 @@ pub fn restore_catalog(
                     Ok(mut message) => {
                         message.artifact_references =
                             artifact_resolver.resolve_message(&message)?;
+                        entity_seeds.observe_message(&message);
                         let logical_key = message
                             .logical_type
                             .map(|value| value.to_string())
@@ -162,6 +166,17 @@ pub fn restore_catalog(
                             *integrity
                                 .unknown_payload_reason_counts
                                 .entry(reason.clone())
+                                .or_default() += 1;
+                        }
+                        if message.semantic_decode_state != SemanticDecodeState::Complete {
+                            integrity.semantic_gap_count += 1;
+                            let reason = message
+                                .semantic_gap_reason
+                                .clone()
+                                .unwrap_or_else(|| "unspecified semantic coverage gap".to_string());
+                            *integrity
+                                .semantic_gap_reason_counts
+                                .entry(reason)
                                 .or_default() += 1;
                         }
                         let json = serde_json::to_vec(&message)?;
@@ -286,10 +301,23 @@ pub fn restore_catalog(
         integrity.artifact_reference_count += message.artifact_references.len() as u64;
         integrity.relationship_reference_count += message.relationships.len() as u64;
         for relationship in &message.relationships {
-            if relationship.resolved {
-                integrity.resolved_relationship_count += 1;
-            } else {
-                integrity.unresolved_relationship_count += 1;
+            match relationship.resolution_state {
+                RelationshipResolutionState::Resolved => integrity.resolved_relationship_count += 1,
+                RelationshipResolutionState::TargetNotPresentLocally => {
+                    integrity.unresolved_relationship_count += 1;
+                    integrity.absent_relationship_target_count += 1;
+                }
+                RelationshipResolutionState::ReferenceIdentifierMissing => {
+                    integrity.unresolved_relationship_count += 1;
+                    integrity.missing_relationship_identifier_count += 1;
+                }
+                RelationshipResolutionState::Ambiguous => {
+                    integrity.unresolved_relationship_count += 1;
+                    integrity.ambiguous_relationship_count += 1;
+                }
+                RelationshipResolutionState::Pending => {
+                    integrity.unresolved_relationship_count += 1;
+                }
             }
         }
         serde_json::to_writer(&mut messages, &message)?;
@@ -309,8 +337,11 @@ pub fn restore_catalog(
             | ArtifactAvailability::RemoteOnly
             | ArtifactAvailability::Expired
             | ArtifactAvailability::Deleted
-            | ArtifactAvailability::MetadataMissing
-            | ArtifactAvailability::AccountRootUnavailable => integrity.missing_artifact_count += 1,
+            | ArtifactAvailability::MetadataMissing => integrity.missing_artifact_count += 1,
+            ArtifactAvailability::AccountRootUnavailable => {
+                integrity.missing_artifact_count += 1;
+                integrity.account_root_unavailable_artifact_count += 1;
+            }
             ArtifactAvailability::Ambiguous => integrity.ambiguous_artifact_count += 1,
             ArtifactAvailability::Corrupt => integrity.corrupt_artifact_count += 1,
             ArtifactAvailability::UnsafePath => integrity.unsafe_artifact_count += 1,
@@ -318,10 +349,37 @@ pub fn restore_catalog(
         if artifact.decode_state == ArtifactDecodeState::Decoded {
             integrity.decoded_artifact_count += 1;
         }
+        if matches!(
+            artifact.availability,
+            ArtifactAvailability::Downloaded
+                | ArtifactAvailability::MaterializedFromDatabase
+                | ArtifactAvailability::Ambiguous
+        ) && matches!(
+            artifact.decode_state,
+            ArtifactDecodeState::KeyUnavailable
+                | ArtifactDecodeState::Unsupported
+                | ArtifactDecodeState::Failed
+        ) {
+            integrity.artifact_decode_gap_count += 1;
+        }
         serde_json::to_writer(&mut artifacts, artifact)?;
         artifacts.write_all(b"\n")?;
     }
     artifacts.flush()?;
+
+    let entity_result = restore_entities(
+        catalog,
+        &account_id,
+        entity_seeds,
+        &options.output_directory,
+    )?;
+    integrity.conversation_count = entity_result.conversation_count;
+    integrity.participant_count = entity_result.participant_count;
+    integrity.group_member_count = entity_result.group_member_count;
+    integrity.entity_source_row_count = entity_result.source_row_count;
+    integrity.entity_decode_gap_count = entity_result.decode_gap_count;
+    integrity.missing_local_profile_count = entity_result.missing_local_profile_count;
+    integrity.unresolved_conversation_count = entity_result.unresolved_conversation_count;
 
     table_coverage.sort_by(|left, right| {
         (
@@ -344,18 +402,23 @@ pub fn restore_catalog(
         logical_type_counts: integrity.logical_type_counts.clone(),
         logical_sub_type_counts: integrity.logical_sub_type_counts.clone(),
         unknown_payload_reason_counts: integrity.unknown_payload_reason_counts.clone(),
+        semantic_gap_reason_counts: integrity.semantic_gap_reason_counts.clone(),
     };
     write_owner_only_json(&coverage_path, &coverage)?;
 
+    let completion = RestorationCompletion::evaluate(&integrity);
     let report = RestorationReport {
         format_version: 2,
         source_fingerprint: catalog.manifest.source_fingerprint.clone(),
         messages_path: messages_path.display().to_string(),
         rejections_path: rejections_path.display().to_string(),
         artifacts_path: artifacts_path.display().to_string(),
+        conversations_path: entity_result.conversations_path.display().to_string(),
+        participants_path: entity_result.participants_path.display().to_string(),
         coverage_path: coverage_path.display().to_string(),
         report_path: report_path.display().to_string(),
         integrity,
+        completion,
     };
     write_owner_only_json(&report_path, &report)?;
     Ok(report)
@@ -424,7 +487,7 @@ fn restore_row(
         .and_then(|value| context.names.get(&value))
         .cloned();
     let mut decoded_sender = fallback_sender.clone();
-    let typed_payload = match raw_type {
+    let (typed_payload, semantic_decode_state, semantic_gap_reason) = match raw_type {
         Some(local_type) => match wx_db::decode_message_for_test(
             sort_sequence.unwrap_or_default(),
             server_id.unwrap_or_default(),
@@ -444,24 +507,75 @@ fn restore_row(
                     decoded_sender = Some(decoded.sender);
                 }
                 match decoded.content {
-                    wx_db::MessageContent::Unknown { msg_type, .. } => TypedPayload::Unknown {
-                        reason: format!("unsupported logical message type {msg_type}"),
-                    },
-                    known => match serde_json::to_value(known) {
-                        Ok(value) => TypedPayload::Decoded(value),
-                        Err(error) => TypedPayload::Unknown {
-                            reason: format!("typed serialization failed: {error}"),
-                        },
-                    },
+                    wx_db::MessageContent::Unknown { msg_type, .. } => {
+                        let reason = format!("unsupported logical message type {msg_type}");
+                        (
+                            TypedPayload::Unknown {
+                                reason: reason.clone(),
+                            },
+                            SemanticDecodeState::UnknownType,
+                            Some(reason),
+                        )
+                    }
+                    known => {
+                        let partial_reason = match &known {
+                            wx_db::MessageContent::AppGeneric { sub_type, .. } => Some(format!(
+                                "app message subtype {sub_type} has only generic XML decoding"
+                            )),
+                            wx_db::MessageContent::MergedMessages { .. } => Some(
+                                "merged-message children are retained in raw XML but not yet normalized"
+                                    .to_string(),
+                            ),
+                            wx_db::MessageContent::ChannelVideo { sub_type, .. } => Some(format!(
+                                "channel media subtype {sub_type} metadata is decoded but its nested media graph is not yet normalized"
+                            )),
+                            _ => None,
+                        };
+                        match serde_json::to_value(known) {
+                            Ok(value) => (
+                                TypedPayload::Decoded(value),
+                                if partial_reason.is_some() {
+                                    SemanticDecodeState::Partial
+                                } else {
+                                    SemanticDecodeState::Complete
+                                },
+                                partial_reason,
+                            ),
+                            Err(error) => {
+                                let reason = format!("typed serialization failed: {error}");
+                                (
+                                    TypedPayload::Unknown {
+                                        reason: reason.clone(),
+                                    },
+                                    SemanticDecodeState::Failed,
+                                    Some(reason),
+                                )
+                            }
+                        }
+                    }
                 }
             }
-            Err(error) => TypedPayload::Unknown {
-                reason: format!("typed decode failed: {error}"),
-            },
+            Err(error) => {
+                let reason = format!("typed decode failed: {error}");
+                (
+                    TypedPayload::Unknown {
+                        reason: reason.clone(),
+                    },
+                    SemanticDecodeState::Failed,
+                    Some(reason),
+                )
+            }
         },
-        None => TypedPayload::Unknown {
-            reason: "local_type column is absent or null".to_string(),
-        },
+        None => {
+            let reason = "local_type column is absent or null".to_string();
+            (
+                TypedPayload::Unknown {
+                    reason: reason.clone(),
+                },
+                SemanticDecodeState::MissingType,
+                Some(reason),
+            )
+        }
     };
 
     let identity = format!("{}:{}:{source_row_id}", context.set_id, context.table_id);
@@ -490,7 +604,7 @@ fn restore_row(
             .encode(context.conversation.as_bytes()),
         sender_id: decoded_sender
             .as_ref()
-            .map(|value| opaque_id(value.as_bytes())),
+            .map(|value| scoped_opaque_id(context.account_id, value.as_bytes())),
         sender_source_identifier_base64: decoded_sender
             .map(|value| base64::engine::general_purpose::STANDARD.encode(value.as_bytes())),
         local_id,
@@ -512,6 +626,8 @@ fn restore_row(
         compression_type,
         raw_columns,
         typed_payload,
+        semantic_decode_state,
+        semantic_gap_reason,
         relationships,
         artifact_references: Vec::new(),
     })
@@ -543,6 +659,7 @@ fn extract_relationships(
         target_server_id: extract_tagged_i64(raw, server_tags),
         target_local_id: extract_tagged_i64(raw, local_tags),
         resolved: false,
+        resolution_state: RelationshipResolutionState::Pending,
         raw_reference_base64: (!raw.is_empty())
             .then(|| base64::engine::general_purpose::STANDARD.encode(raw)),
     }]
@@ -639,33 +756,49 @@ fn resolve_relationships(
     message: &mut CanonicalMessage,
 ) -> Result<(), RestoreError> {
     for relationship in &mut message.relationships {
-        let target = if let Some(server_id) = relationship.target_server_id {
-            staging
-                .query_row(
-                    "SELECT canonical_id FROM staged_message
-                     WHERE conversation_id = ?1 AND server_id = ?2
-                     ORDER BY source_logical_path, source_table_id, source_row_id LIMIT 1",
-                    rusqlite::params![message.conversation_id, server_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
+        let targets = if let Some(server_id) = relationship.target_server_id {
+            relationship_targets(staging, &message.conversation_id, "server_id", server_id)?
         } else if let Some(local_id) = relationship.target_local_id {
-            staging
-                .query_row(
-                    "SELECT canonical_id FROM staged_message
-                     WHERE conversation_id = ?1 AND local_id = ?2
-                     ORDER BY source_logical_path, source_table_id, source_row_id LIMIT 1",
-                    rusqlite::params![message.conversation_id, local_id],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()?
+            relationship_targets(staging, &message.conversation_id, "local_id", local_id)?
         } else {
-            None
+            Vec::new()
         };
-        relationship.resolved = target.is_some();
-        relationship.target_canonical_id = target;
+        relationship.resolution_state =
+            if relationship.target_server_id.is_none() && relationship.target_local_id.is_none() {
+                RelationshipResolutionState::ReferenceIdentifierMissing
+            } else {
+                match targets.len() {
+                    0 => RelationshipResolutionState::TargetNotPresentLocally,
+                    1 => RelationshipResolutionState::Resolved,
+                    _ => RelationshipResolutionState::Ambiguous,
+                }
+            };
+        relationship.resolved =
+            relationship.resolution_state == RelationshipResolutionState::Resolved;
+        relationship.target_canonical_id = (targets.len() == 1).then(|| targets[0].clone());
     }
     Ok(())
+}
+
+fn relationship_targets(
+    staging: &Connection,
+    conversation_id: &str,
+    column: &str,
+    identifier: i64,
+) -> Result<Vec<String>, RestoreError> {
+    debug_assert!(matches!(column, "server_id" | "local_id"));
+    let sql = format!(
+        "SELECT canonical_id FROM staged_message
+         WHERE conversation_id = ?1 AND {column} = ?2
+         ORDER BY source_logical_path, source_table_id, source_row_id LIMIT 2"
+    );
+    let mut statement = staging.prepare(&sql)?;
+    let values = statement
+        .query_map(rusqlite::params![conversation_id, identifier], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(values)
 }
 
 fn column_index(columns: &[String], requested: &[&str]) -> Option<usize> {
@@ -815,6 +948,14 @@ fn quote_identifier(value: &str) -> String {
 fn opaque_id(value: &[u8]) -> String {
     let digest = Sha256::digest(value);
     hex::encode(digest)
+}
+
+pub(crate) fn scoped_opaque_id(scope: &str, value: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(scope.as_bytes());
+    hasher.update([0]);
+    hasher.update(value);
+    hex::encode(hasher.finalize())
 }
 
 fn owner_only_writer(path: &Path) -> Result<BufWriter<File>, RestoreError> {

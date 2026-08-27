@@ -20,7 +20,7 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
         .execute_batch(
             "CREATE TABLE Name2Id(user_name TEXT);
              INSERT INTO Name2Id(rowid, user_name) VALUES (1, 'wxid_alice');
-             CREATE TABLE Msg_0693e4da7db9e29637c64b95cc5162ca(
+             CREATE TABLE Msg_29a6db07e8bbdb53f5d54cc3c309f3f1(
                local_id INTEGER,
                server_id INTEGER,
                sort_seq INTEGER,
@@ -32,9 +32,9 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
                packed_info_data BLOB,
                WCDB_CT_message_content INTEGER
              );
-             INSERT INTO Msg_0693e4da7db9e29637c64b95cc5162ca
+             INSERT INTO Msg_29a6db07e8bbdb53f5d54cc3c309f3f1
              VALUES (10, 20, 30, 1, 1, 1700000000, 2, x'68656c6c6f', x'0102', 0);
-             INSERT INTO Msg_0693e4da7db9e29637c64b95cc5162ca
+             INSERT INTO Msg_29a6db07e8bbdb53f5d54cc3c309f3f1
              VALUES (11, 21, 31, 123456, 1, 1700000001, 2, x'00ff', NULL, 0);",
         )
         .unwrap();
@@ -89,6 +89,9 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
     assert_eq!(report.integrity.restored_row_count, 2);
     assert_eq!(report.integrity.rejected_row_count, 0);
     assert_eq!(report.integrity.unknown_payload_count, 1);
+    assert_eq!(report.integrity.semantic_gap_count, 1);
+    assert!(!report.completion.semantic_message_coverage_complete);
+    assert!(!report.completion.full_restoration_achieved);
     assert_eq!(
         fs::metadata(output.join("messages.ndjson"))
             .unwrap()

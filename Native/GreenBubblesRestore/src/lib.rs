@@ -1,5 +1,7 @@
+pub mod archive;
 pub mod artifact;
 pub mod catalog;
+pub mod entities;
 pub mod error;
 pub mod manifest;
 pub mod model;
