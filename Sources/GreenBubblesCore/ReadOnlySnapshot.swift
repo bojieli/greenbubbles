@@ -63,19 +63,22 @@ public struct SnapshotManifest: Codable, Equatable, Sendable {
   public let snapshotID: UUID
   public let createdAt: Date
   public let sourceFingerprint: String
+  public let clientBuild: WeChatClientBuildFingerprint?
   public let entries: [SnapshotEntry]
 
   public init(
-    manifestFormatVersion: Int = 1,
+    manifestFormatVersion: Int = 2,
     snapshotID: UUID,
     createdAt: Date,
     sourceFingerprint: String,
+    clientBuild: WeChatClientBuildFingerprint? = nil,
     entries: [SnapshotEntry]
   ) {
     self.manifestFormatVersion = manifestFormatVersion
     self.snapshotID = snapshotID
     self.createdAt = createdAt
     self.sourceFingerprint = sourceFingerprint
+    self.clientBuild = clientBuild
     self.entries = entries
   }
 }
@@ -232,17 +235,20 @@ public struct ReadOnlySnapshotter: Sendable {
   private let maxRetries: Int
   private let privacy: PathPrivacy
   private let hooks: SnapshotHooks
+  private let clientBuild: WeChatClientBuildFingerprint?
 
   public init(
     baseDirectory: URL = FileManager.default.temporaryDirectory
       .appending(path: "greenbubbles-snapshots", directoryHint: .isDirectory),
     maxRetries: Int = 2,
-    includeSourcePaths: Bool = false
+    includeSourcePaths: Bool = false,
+    clientBuild: WeChatClientBuildFingerprint? = nil
   ) {
     self.init(
       baseDirectory: baseDirectory,
       maxRetries: maxRetries,
       includeSourcePaths: includeSourcePaths,
+      clientBuild: clientBuild,
       hooks: SnapshotHooks()
     )
   }
@@ -251,11 +257,13 @@ public struct ReadOnlySnapshotter: Sendable {
     baseDirectory: URL,
     maxRetries: Int,
     includeSourcePaths: Bool,
+    clientBuild: WeChatClientBuildFingerprint? = nil,
     hooks: SnapshotHooks
   ) {
     self.baseDirectory = baseDirectory.standardizedFileURL
     self.maxRetries = max(0, maxRetries)
     self.privacy = PathPrivacy(includePaths: includeSourcePaths)
+    self.clientBuild = clientBuild
     self.hooks = hooks
   }
 
@@ -338,6 +346,7 @@ public struct ReadOnlySnapshotter: Sendable {
       snapshotID: snapshotID,
       createdAt: Date(),
       sourceFingerprint: aggregateFingerprint(sortedEntries),
+      clientBuild: clientBuild,
       entries: sortedEntries
     )
     try writeManifest(manifest, to: directory.appending(path: "manifest.json"))

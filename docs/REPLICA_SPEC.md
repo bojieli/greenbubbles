@@ -95,9 +95,12 @@ checkpoint invalidates pagination rather than producing a mixed-state page.
 stable JSON access to exact canonical data and machine-readable coverage.
 
 `replica-status` exposes the schema/cipher, opaque account and source
-fingerprints, canonical counts, authoritative checkpoint age, completion
-state, source/restored row counts, semantic/message-candidate gaps, missing and
+fingerprints, exact client-build compatibility state and mismatched fields,
+canonical counts, authoritative checkpoint age, completion state,
+source/restored row counts, semantic/message-candidate gaps, missing and
 undecoded artifacts, entity gaps, and the calculated semantic-decoder coverage
-ratio. A current replica with known gaps is reported as
+ratio. The evidence is persisted inside the encrypted coverage state rather
+than inferred from the client that happens to be installed when status is
+queried. A current replica with known gaps is reported as
 `currentWithCoverageGaps`; it is never labeled complete merely because the
 latest synchronization committed successfully.

@@ -4,6 +4,34 @@ This document records the evidence used by the current passive restoration
 adapter. It is a compatibility profile, not a promise about untested WeChat
 versions.
 
+## Supported client build
+
+Snapshot manifest format 2 carries signed-client evidence gathered before any
+database restoration. The only production-compatible profile currently is:
+
+- bundle/signing identifier `com.tencent.xinWeChat`;
+- marketing version `4.1.12`, build `269365`;
+- Team ID `5A4RE8SF68`;
+- architectures `arm64` and `x86_64`;
+- Hardened Runtime and a valid strict code signature;
+- executable SHA-256
+  `2c61ba7f64c2b98e897553cd226364642a1eb213b5b7f74556c6fc2efc363e32`;
+- full SHA-256 CodeDirectory hash
+  `fa11b242567cbe161e2b332139dbc459c534b85f3855a8603614252bf908106e`.
+
+The snapshotter opens the executable read-only without following symlinks,
+hashes it while checking file identity for mutation, invokes `codesign` and
+`lipo` directly without a shell, and stores the evidence in the snapshot
+manifest. Restoration classifies it as `supportedPinned`, `unsupported`, or
+`missing` and names every mismatched field. Old format-1 synthetic fixtures are
+classified separately as `legacySyntheticFixture` and never establish
+production support.
+
+An unsupported or missing build may still be parsed to retain authorized raw
+evidence, but format-2 output cannot set `fullRestorationAchieved` and no future
+active-read or write adapter may be enabled from it. Malformed fingerprints are
+rejected before database preparation.
+
 ## Supported encrypted database family
 
 The adapter targets the WCDB/SQLCipher-4 profile observed in macOS WeChat

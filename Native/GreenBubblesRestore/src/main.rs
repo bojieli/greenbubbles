@@ -43,6 +43,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let catalog = prepare_catalog(&snapshot, passphrase.as_ref())?;
             let report = serde_json::json!({
                 "snapshotId": catalog.manifest.snapshot_id,
+                "clientBuildCompatibility": catalog.manifest.client_build_compatibility(),
                 "databaseCount": catalog.databases.len(),
                 "storageFamilies": catalog.storage_family_counts(),
                 "databases": catalog.databases,

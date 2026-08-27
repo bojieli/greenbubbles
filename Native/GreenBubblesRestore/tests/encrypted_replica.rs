@@ -11,10 +11,11 @@ use greenbubbles_restore::replica::{
 };
 use greenbubbles_restore::{
     ArtifactAvailability, ArtifactDecodeState, ArtifactKind, ArtifactRole, CanonicalArtifact,
-    CanonicalConversation, CanonicalMessage, CanonicalParticipant, ConversationKind,
-    DirectionEvidence, EntityDecodeState, LocalProfileState, MessageArtifactReference,
-    MessageDirection, MessageOrderingBasis, ReplicaKey, RestorationCompletion, RestorationCoverage,
-    RestorationIntegrity, RestorationReport, SemanticDecodeState, TypedPayload,
+    CanonicalConversation, CanonicalMessage, CanonicalParticipant, ClientBuildCompatibilityState,
+    ConversationKind, DirectionEvidence, EntityDecodeState, LocalProfileState,
+    MessageArtifactReference, MessageDirection, MessageOrderingBasis, ReplicaKey,
+    RestorationCompletion, RestorationCoverage, RestorationIntegrity, RestorationReport,
+    SemanticDecodeState, TypedPayload,
 };
 use rusqlite::Connection;
 use serde::Serialize;
@@ -63,6 +64,10 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
     );
     assert_eq!(status.message_count, 1);
     assert!(status.last_checkpoint_unix_nanoseconds.is_some());
+    assert_eq!(
+        status.client_build_compatibility.unwrap().state,
+        ClientBuildCompatibilityState::LegacySyntheticFixture
+    );
     assert!(replica_status(&replica, &ReplicaKey::from_bytes(WRONG_KEY_BYTES)).is_err());
 
     let repeated = bootstrap_replica(&archive, &replica, &key).unwrap();
@@ -285,6 +290,7 @@ fn build_archive(parent: &Path, name: &str, account: &str, fingerprint: &str) ->
         format_version: 2,
         account_id: account.to_string(),
         source_fingerprint: fingerprint.to_string(),
+        client_build_compatibility: Default::default(),
         messages_path: "private".to_string(),
         rejections_path: "private".to_string(),
         artifacts_path: "private".to_string(),

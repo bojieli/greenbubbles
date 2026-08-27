@@ -432,11 +432,18 @@ pub fn restore_catalog(
     };
     write_owner_only_json(&coverage_path, &coverage)?;
 
-    let completion = RestorationCompletion::evaluate(&integrity);
+    let client_build_compatibility = catalog.manifest.client_build_compatibility();
+    let mut completion = RestorationCompletion::evaluate(&integrity);
+    if catalog.manifest.manifest_format_version >= 2
+        && !client_build_compatibility.production_compatible
+    {
+        completion.full_restoration_achieved = false;
+    }
     let report = RestorationReport {
-        format_version: 2,
+        format_version: 3,
         account_id,
         source_fingerprint: catalog.manifest.source_fingerprint.clone(),
+        client_build_compatibility,
         messages_path: messages_path.display().to_string(),
         rejections_path: rejections_path.display().to_string(),
         artifacts_path: artifacts_path.display().to_string(),

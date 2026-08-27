@@ -49,6 +49,7 @@ pub struct ReplicaStatus {
     pub replica_id: String,
     pub account_id: Option<String>,
     pub current_source_fingerprint: Option<String>,
+    pub client_build_compatibility: Option<crate::ClientBuildCompatibilityEvidence>,
     pub cipher_version: String,
     pub encrypted_at_rest: bool,
     pub conversation_count: u64,
@@ -357,6 +358,9 @@ pub fn replica_status(
         replica_id: replica_id(&opened.connection)?,
         account_id: identity.as_ref().map(|value| value.0.clone()),
         current_source_fingerprint: identity.as_ref().and_then(|value| value.1.clone()),
+        client_build_compatibility: stored_report
+            .as_ref()
+            .map(|report| report.client_build_compatibility.clone()),
         cipher_version: opened.cipher_version,
         encrypted_at_rest: true,
         conversation_count: table_count(&opened.connection, "conversation")?,

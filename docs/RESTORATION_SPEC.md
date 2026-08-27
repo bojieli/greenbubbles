@@ -64,12 +64,14 @@ Each run produces counts that can be checked without printing message content:
 - source and output fingerprints;
 - decoder and supported-client versions.
 
-`report.json` also carries a component-by-component completion verdict. The
-top-level `fullRestorationAchieved` flag is true only when row accounting,
-canonical identity uniqueness, semantic decoding, directions, entities,
-relationships, artifact verification, and artifact decoding all pass. Retaining
-raw bytes is necessary for losslessness but does not by itself satisfy semantic
-or playable-media completeness.
+`report.json` also carries signed-client compatibility evidence and a
+component-by-component completion verdict. For current format-2 snapshots, the
+top-level `fullRestorationAchieved` flag is true only when the client exactly
+matches the pinned supported profile and row accounting, canonical identity
+uniqueness, semantic decoding, directions, entities, relationships, artifact
+verification, and artifact decoding all pass. Retaining raw bytes is necessary
+for losslessness but does not by itself satisfy production compatibility,
+semantic completeness, or playable-media completeness.
 
 `coverage.json` format 2 contains the complete schema ledger in `allTables`.
 Any message-like name or column signature that does not match a supported safe

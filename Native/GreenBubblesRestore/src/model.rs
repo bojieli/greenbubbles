@@ -371,6 +371,8 @@ pub struct RestorationReport {
     pub format_version: u32,
     pub account_id: String,
     pub source_fingerprint: String,
+    #[serde(default)]
+    pub client_build_compatibility: crate::ClientBuildCompatibilityEvidence,
     pub messages_path: String,
     pub rejections_path: String,
     pub artifacts_path: String,

@@ -154,11 +154,13 @@ do {
       roots = arguments.roots
     }
     let sets = DatabaseSetPlanner().findDatabaseSets(in: roots, maxDepth: arguments.maxDepth)
+    let clientBuild = try WeChatClientBuildInspector().inspectDefaultInstallation()
     let lease = try ReadOnlySnapshotter(
       baseDirectory: arguments.snapshotBase
         ?? FileManager.default.temporaryDirectory
         .appending(path: "greenbubbles-snapshots", directoryHint: .isDirectory),
-      includeSourcePaths: arguments.includePaths
+      includeSourcePaths: arguments.includePaths,
+      clientBuild: clientBuild
     ).createSnapshot(of: sets, cleanUpOnDeinit: arguments.snapshotBase == nil)
     try printJSON(
       SnapshotCommandReport(

@@ -13,7 +13,10 @@ pub mod tools;
 
 pub use catalog::{prepare_catalog, PreparedCatalog, PreparedDatabase, StorageFamily};
 pub use error::RestoreError;
-pub use manifest::{SnapshotEntry, SnapshotFileRole, SnapshotManifest};
+pub use manifest::{
+    ClientBuildCompatibilityEvidence, ClientBuildCompatibilityState, ClientBuildFingerprint,
+    SnapshotEntry, SnapshotFileRole, SnapshotManifest,
+};
 pub use model::*;
 pub use restore::{restore_catalog, RestorationOptions};
 pub use secret::{DatabasePassphrase, ReplicaKey};

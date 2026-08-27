@@ -4,7 +4,8 @@ use greenbubbles_restore::manifest::{
     PathReference, SnapshotEntry, SnapshotFileRole, SnapshotManifest, SourceFileFingerprint,
 };
 use greenbubbles_restore::{
-    prepare_catalog, restore_catalog, DatabasePassphrase, RestorationOptions, StorageFamily,
+    prepare_catalog, restore_catalog, ClientBuildCompatibilityState, DatabasePassphrase,
+    RestorationOptions, StorageFamily,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -46,10 +47,11 @@ fn decrypts_sqlcipher4_and_applies_committed_wal_frames() {
     fs::copy(&live_wal, &wal).unwrap();
 
     let manifest = SnapshotManifest {
-        manifest_format_version: 1,
+        manifest_format_version: 2,
         snapshot_id: "00000000-0000-4000-8000-000000000002".to_string(),
         created_at: "2026-08-27T00:00:00Z".to_string(),
         source_fingerprint: "encrypted-fixture-fingerprint".to_string(),
+        client_build: None,
         entries: vec![
             entry(
                 &database,
@@ -90,7 +92,11 @@ fn decrypts_sqlcipher4_and_applies_committed_wal_frames() {
     assert_eq!(report.integrity.restored_row_count, 1);
     assert_eq!(report.integrity.rejected_row_count, 0);
     assert!(report.completion.semantic_message_coverage_complete);
-    assert!(report.completion.full_restoration_achieved);
+    assert!(!report.completion.full_restoration_achieved);
+    assert_eq!(
+        report.client_build_compatibility.state,
+        ClientBuildCompatibilityState::Missing
+    );
 
     drop(connection);
 }

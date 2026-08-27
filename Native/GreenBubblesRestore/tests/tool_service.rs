@@ -38,6 +38,7 @@ fn enforces_scopes_minimizes_context_and_creates_drafts_only() {
             format_version: 2,
             account_id: ACCOUNT_ID.to_string(),
             source_fingerprint: "synthetic-source".to_string(),
+            client_build_compatibility: Default::default(),
             messages_path: "private".to_string(),
             rejections_path: "private".to_string(),
             artifacts_path: "private".to_string(),
