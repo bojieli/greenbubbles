@@ -517,7 +517,7 @@ impl ClientBuildFingerprint {
     }
 }
 
-fn supported_client_build() -> ClientBuildFingerprint {
+pub(crate) fn supported_client_build() -> ClientBuildFingerprint {
     ClientBuildFingerprint {
         format_version: 1,
         bundle_identifier: "com.tencent.xinWeChat".to_string(),
@@ -552,7 +552,7 @@ fn validate_unique_sorted(values: &[String], label: &str) -> Result<(), RestoreE
     Ok(())
 }
 
-fn source_inventory_fingerprint(source_sets: &[SnapshotSourceSetInventory]) -> String {
+pub(crate) fn source_inventory_fingerprint(source_sets: &[SnapshotSourceSetInventory]) -> String {
     let mut hasher = Sha256::new();
     for source_set in source_sets {
         hasher.update(source_set.source_set_id.as_bytes());

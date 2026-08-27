@@ -1,3 +1,4 @@
+pub mod acquisition_audit;
 pub mod archive;
 pub mod artifact;
 pub mod audit;

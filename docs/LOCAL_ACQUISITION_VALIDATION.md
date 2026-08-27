@@ -87,6 +87,15 @@ the unchanged source fingerprint. This proves real changed-versus-idle source
 selection and a resumable acquisition baseline. It does not prove decoded
 message freshness or the 60-second p95 service objective.
 
+A later retained baseline/current pair on the larger account provides an
+independently replayable chain. The baseline held 25 sets and 75 DB/WAL/SHM
+entries. The next incremental retained 25 sets, selected 9 changed sets, copied
+27 entries, and reported no reconciliation-only or deleted sets. The offline
+`audit-acquisition-chain` command digest-verified both snapshots and reproduced
+exactly 9 content-changed sets from the complete inventories, with matching
+baseline fingerprint and pinned client build. This proves classification and
+copy proportionality, not decoded message semantics or latency.
+
 ## Remaining restoration gate
 
 None of the encrypted database contents were read. Consequently this validation

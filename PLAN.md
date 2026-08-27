@@ -352,6 +352,14 @@ root and 87 (1,469,805 bytes) in the smaller root, with no traversal errors; it
 did not inspect content or prove message linkage. See
 `docs/LOCAL_ACQUISITION_VALIDATION.md`.
 
+A new owner-authorized bootstrap/incremental pair independently reproduces the
+incremental's 9 changed sets from the two complete 25-set content inventories,
+with 27 copied entries versus 75 for bootstrap and exact baseline, build,
+deletion, and reconciliation continuity. This strengthens real
+change-proportional acquisition evidence but still does not establish decoded
+message latency or semantic synchronization. See
+`docs/ACQUISITION_CHAIN_AUDIT.md`.
+
 ### Ordinary-contact action feasibility gate
 
 - [ ] On a disposable test account and pinned client, determine whether the
@@ -553,6 +561,12 @@ every current database/WAL/SHM set, and records a new anchor. Normal
 incrementals carry the anchor forward, while `--integrity-scan` remains an
 explicit immediate override. Replica status separately reports the last
 committed integrity-scan time and age.
+
+`audit-acquisition-chain` now independently verifies any retained bootstrap to
+incremental/integrity-scan transition before restoration: it digest-verifies
+copied entries, compares complete source inventories, and fails closed when the
+baseline, build, deletion set, changed-set classification, or
+reconciliation-only classification disagrees.
 
 ## Phase 3 — agent-neutral connector service and drafts
 
