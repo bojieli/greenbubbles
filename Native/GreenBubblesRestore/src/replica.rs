@@ -578,7 +578,7 @@ pub fn get_replica_changes(
     }
     let after = decoded.map(|cursor| cursor.after_sequence).unwrap_or(0);
     let limit = requested_limit.clamp(1, 1_000);
-    let query_limit = checked_usize_i64(limit.saturating_add(1))?;
+    let query_limit = checked_usize_i64(limit)?;
     let mut statement = opened.connection.prepare(
         "SELECT sequence, source_fingerprint, change_kind, entity_kind, entity_id,
                 conversation_id, record_sha256, observed_at_unix_nanoseconds
@@ -603,10 +603,8 @@ pub fn get_replica_changes(
             },
         )?
         .collect::<Result<Vec<_>, _>>()?;
-    let has_more = values.len() > limit;
-    let mut items = Vec::with_capacity(values.len().min(limit));
-    for (sequence, source, kind, entity_kind, entity_id, conversation, digest, timestamp) in
-        values.into_iter().take(limit)
+    let mut items = Vec::with_capacity(values.len());
+    for (sequence, source, kind, entity_kind, entity_id, conversation, digest, timestamp) in values
     {
         items.push(ReplicaChange {
             sequence: u64::try_from(sequence).map_err(|_| {
@@ -625,18 +623,14 @@ pub fn get_replica_changes(
                 .map_err(|_| RestoreError::Integrity("change timestamp is invalid".to_string()))?,
         });
     }
-    let next_cursor = if has_more {
-        items.last().map(|change| {
-            encode_change_cursor(&ReplicaChangeCursor {
-                format_version: 1,
-                account_id: account_id.clone(),
-                replica_id,
-                after_sequence: change.sequence,
-            })
+    let next_cursor = items.last().map(|change| {
+        encode_change_cursor(&ReplicaChangeCursor {
+            format_version: 1,
+            account_id: account_id.clone(),
+            replica_id,
+            after_sequence: change.sequence,
         })
-    } else {
-        None
-    };
+    });
     Ok(ReplicaChangePage {
         account_id,
         items,

@@ -177,9 +177,9 @@ pub struct MinimizedMessage {
     pub payload_summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payload_summary_truncated: Option<bool>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifact_references: Vec<ToolArtifactReference>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relationships: Vec<ToolRelationshipReference>,
 }
 

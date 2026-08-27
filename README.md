@@ -29,6 +29,10 @@ The current passive-read slice provides:
   storage, and a separately authorized minimized connector/MCP view.
 
 See [PLAN.md](PLAN.md) for the phased roadmap and safety gates.
+The implemented downstream protocol and validation evidence are in
+[docs/SOURCE_CONNECTOR_CONTRACT.md](docs/SOURCE_CONNECTOR_CONTRACT.md),
+[docs/DOWNSTREAM_CONSUMER.md](docs/DOWNSTREAM_CONSUMER.md), and
+[docs/ECOSYSTEM_VALIDATION.md](docs/ECOSYSTEM_VALIDATION.md).
 
 ## Build and test
 
@@ -219,6 +223,22 @@ The `read` command emits message bodies and is therefore intended only for
 explicit local use. A policy remains valid for later archives from the same
 account, but not for another account; cursors remain bound to one archive and
 conversation.
+
+A runnable downstream example uses only the connector API, stores a durable
+change cursor, refreshes changed messages, and can maintain an escaped Markdown
+memory projection:
+
+```sh
+cargo run --locked --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --example change_consumer -- \
+  /private/greenbubbles-tools/connector.sock \
+  /private/greenbubbles-tools/downstream-state.json \
+  --markdown-output /private/greenbubbles-tools/conversations.md
+```
+
+It refuses account/cursor mismatch and replica replacement without changing
+the prior state. `--rebootstrap` is an explicit operator recovery action, not
+an automatic fallback.
 
 Periodic archive reconciliation is authoritative for incoming/change events:
 

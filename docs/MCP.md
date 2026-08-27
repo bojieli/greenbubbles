@@ -30,3 +30,8 @@ The MCP adapter intentionally exposes no send, internal-call, raw-SQL,
 passphrase, key, source-path, or session-credential tool. Its tool descriptions
 also state that drafts never execute. An MCP host can therefore use the same
 connector contract as scripts without becoming a new privilege boundary.
+
+Synthetic end-to-end and existing-host validation evidence is recorded in
+`ECOSYSTEM_VALIDATION.md`. The test suite exercises initialize, list, and a
+real status call through the Unix service; an installed Claude Code host was
+also able to launch the adapter and report it connected.

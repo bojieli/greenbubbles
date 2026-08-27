@@ -52,6 +52,13 @@ and exact checkpoint revision; any committed reconciliation invalidates them.
 Change cursors bind the account and replica generation but remain resumable
 across synchronization checkpoints.
 
+Every non-empty underlying change page returns a new durable cursor, even when
+policy filtering omits all of that page's records. A null cursor means the call
+examined no later underlying record, so consumers retain the previously stored
+cursor. This permits safe high-water capture and avoids replaying a final
+partial page. The complete bootstrap/resume protocol is documented in
+`SOURCE_CONNECTOR_CONTRACT.md`.
+
 ## Stable operations
 
 The version-1 union contains:

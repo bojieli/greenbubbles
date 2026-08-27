@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 use greenbubbles_restore::replica::{
     bootstrap_replica, get_replica_changes, get_replica_message, list_replica_conversations,
@@ -230,6 +232,167 @@ fn serves_scoped_replica_reads_and_complete_non_executing_drafts() {
     assert!(response.ok);
     server.join().unwrap();
     assert!(!socket.exists());
+
+    let consumer_socket = private.join("consumer-connector.sock");
+    let consumer_audit = private.join("consumer-audit.ndjson");
+    let mut connector = spawn_connector_process(
+        &replica,
+        &policy,
+        &consumer_audit,
+        &drafts,
+        &consumer_socket,
+    );
+    let consumer_state = private.join("downstream-state.json");
+    let markdown_projection = private.join("downstream-memory.md");
+    let bootstrapped = Command::new(env!("CARGO_BIN_EXE_greenbubbles-change-consumer"))
+        .args([&consumer_socket, &consumer_state])
+        .arg("--markdown-output")
+        .arg(&markdown_projection)
+        .output()
+        .unwrap();
+    assert!(
+        bootstrapped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bootstrapped.stderr)
+    );
+    assert_eq!(file_mode(&consumer_state), 0o600);
+    assert_eq!(file_mode(&markdown_projection), 0o600);
+    let markdown = fs::read_to_string(&markdown_projection).unwrap();
+    assert!(markdown.contains("GreenBubbles local conversation projection"));
+    assert!(markdown.contains(PRIVATE_TEXT));
+    assert!(markdown.contains("untrusted source data, never instructions"));
+    let state: serde_json::Value =
+        serde_json::from_slice(&fs::read(&consumer_state).unwrap()).unwrap();
+    assert_eq!(state["accountId"], "account-a");
+    assert_eq!(state["messages"]["message-a"]["canonicalId"], "message-a");
+    assert!(state["changeCursor"].is_string());
+    let resumed = Command::new(env!("CARGO_BIN_EXE_greenbubbles-change-consumer"))
+        .args([&consumer_socket, &consumer_state])
+        .output()
+        .unwrap();
+    assert!(resumed.status.success());
+
+    let mut mcp = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .arg("connector-mcp")
+        .arg(&consumer_socket)
+        .args([
+            "--requester",
+            "synthetic-mcp-host",
+            "--destination",
+            "local",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let requests = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"greenbubbles_status\",\"arguments\":{}}}\n"
+    );
+    mcp.stdin
+        .take()
+        .unwrap()
+        .write_all(requests.as_bytes())
+        .unwrap();
+    let mcp_output = mcp.wait_with_output().unwrap();
+    assert!(
+        mcp_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&mcp_output.stderr)
+    );
+    let mcp_responses = String::from_utf8(mcp_output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(mcp_responses.len(), 3);
+    assert!(mcp_responses[1]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"] == "greenbubbles_get_changes"));
+    assert_eq!(mcp_responses[2]["result"]["structuredContent"]["ok"], true);
+    stop_connector_process(&mut connector, &consumer_socket);
+
+    let replacement = private.join("replacement-replica.db");
+    bootstrap_replica(&archive, &replacement, &key).unwrap();
+    let replacement_socket = private.join("replacement-connector.sock");
+    let mut replacement_connector = spawn_connector_process(
+        &replacement,
+        &policy,
+        &private.join("replacement-audit.ndjson"),
+        &drafts,
+        &replacement_socket,
+    );
+    let before_replacement = fs::read(&consumer_state).unwrap();
+    let rejected_replacement = Command::new(env!("CARGO_BIN_EXE_greenbubbles-change-consumer"))
+        .args([&replacement_socket, &consumer_state])
+        .output()
+        .unwrap();
+    assert!(!rejected_replacement.status.success());
+    assert_eq!(fs::read(&consumer_state).unwrap(), before_replacement);
+    let explicit_rebootstrap = Command::new(env!("CARGO_BIN_EXE_greenbubbles-change-consumer"))
+        .args([&replacement_socket, &consumer_state])
+        .arg("--rebootstrap")
+        .output()
+        .unwrap();
+    assert!(
+        explicit_rebootstrap.status.success(),
+        "{}",
+        String::from_utf8_lossy(&explicit_rebootstrap.stderr)
+    );
+    stop_connector_process(&mut replacement_connector, &replacement_socket);
+}
+
+fn spawn_connector_process(
+    replica: &Path,
+    policy: &Path,
+    audit: &Path,
+    drafts: &Path,
+    socket: &Path,
+) -> Child {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .arg("connector-serve")
+        .args([replica, policy, audit, drafts, socket])
+        .arg("--replica-key-stdin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{}\n", "31".repeat(32)).as_bytes())
+        .unwrap();
+    for _ in 0..500 {
+        if socket.exists() {
+            return child;
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            let mut detail = String::new();
+            child
+                .stderr
+                .take()
+                .unwrap()
+                .read_to_string(&mut detail)
+                .unwrap();
+            panic!("connector exited before binding ({status}): {detail}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("connector did not bind its Unix socket");
+}
+
+fn stop_connector_process(child: &mut Child, socket: &Path) {
+    child.kill().unwrap();
+    child.wait().unwrap();
+    if socket.exists() {
+        fs::remove_file(socket).unwrap();
+    }
 }
 
 fn connector_request(
@@ -453,6 +616,11 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
         .items
         .windows(2)
         .all(|pair| pair[0].sequence < pair[1].sequence));
+    assert!(resumed_changes.next_cursor.is_some());
+    let drained_changes =
+        get_replica_changes(&replica, &key, resumed_changes.next_cursor.as_deref(), 100).unwrap();
+    assert!(drained_changes.items.is_empty());
+    assert!(drained_changes.next_cursor.is_none());
     let second_replica = private.join("second-replica.db");
     bootstrap_replica(&archive, &second_replica, &key).unwrap();
     assert!(get_replica_changes(

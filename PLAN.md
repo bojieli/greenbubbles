@@ -663,14 +663,14 @@ and cannot weaken the reliable local conversation path or authorize a write.
 
 ## Phase 6 — ecosystem validation before abstraction
 
-Status: **later**
+Status: **implemented for one MCP host and one resumable downstream workflow**
 
-- [ ] Integrate the stable connector with at least one existing agent host and
+- [x] Integrate the stable connector with at least one existing agent host and
   one downstream memory/synthesis workflow.
-- [ ] Prove that downstream consumers can bootstrap and then remain current via
+- [x] Prove that downstream consumers can bootstrap and then remain current via
   `get_changes(cursor)` without scraping CLI prose or accessing the replica
   database directly.
-- [ ] Document a minimal source connector contract based on GreenBubbles'
+- [x] Document a minimal source connector contract based on GreenBubbles'
   production behavior.
 - [ ] If a second source is worth pursuing, implement it in a separate
   repository and only then compare contracts and extract shared code.
@@ -680,6 +680,15 @@ workflows require at least several of the following: shared governance,
 cross-application identity reconciliation, durable derived assertions,
 agent-independent memory, or transactional queries across sources. Popularity
 of the “personal memory” label alone is not a reason to add that layer.
+
+The evidence is intentionally concrete: the real stdio MCP adapter completes
+initialize/list/status-call against the real Unix service on synthetic data;
+Claude Code 2.1.247 reports the temporarily registered server connected; and
+the runnable change consumer bootstraps, persists an owner-only cursor/state,
+builds an escaped Markdown memory projection, resumes, and fails closed across
+replica replacement until explicit rebootstrap. See
+`docs/ECOSYSTEM_VALIDATION.md`, `docs/DOWNSTREAM_CONSUMER.md`, and
+`docs/SOURCE_CONNECTOR_CONTRACT.md`.
 
 ## Technical architecture
 
