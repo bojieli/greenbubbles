@@ -264,10 +264,12 @@ pub(crate) fn ensure_private_directory(path: &Path) -> Result<(), RestoreError> 
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink()
         || !metadata.is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
         || metadata.permissions().mode() & 0o077 != 0
     {
         return Err(RestoreError::Integrity(
-            "restoration archive must be an owner-only, non-symlink directory".to_string(),
+            "restoration archive must be a current-user, owner-only, non-symlink directory"
+                .to_string(),
         ));
     }
     Ok(())
@@ -277,11 +279,12 @@ pub(crate) fn ensure_private_regular_file(path: &Path) -> Result<(), RestoreErro
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink()
         || !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
         || metadata.permissions().mode() & 0o077 != 0
         || metadata.nlink() != 1
     {
         return Err(RestoreError::Integrity(format!(
-            "private archive input is not an owner-only regular file: {}",
+            "private archive input is not a current-user, owner-only regular file: {}",
             path.file_name()
                 .and_then(|value| value.to_str())
                 .unwrap_or("unknown")
