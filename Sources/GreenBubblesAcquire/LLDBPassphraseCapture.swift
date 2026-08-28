@@ -122,13 +122,12 @@ public struct LLDBPassphraseCapture: Sendable {
     process.standardError = output
 
     let accumulator = OutputAccumulator()
+    let verboseRelay = verbose ? VerboseLineRelay(emit: { [self] in emit($0) }) : nil
     output.fileHandleForReading.readabilityHandler = { handle in
       let data = handle.availableData
       if !data.isEmpty {
         accumulator.append(data)
-        if self.verbose {
-          self.emit("lldb| " + String(decoding: data, as: UTF8.self))
-        }
+        verboseRelay?.append(data)
       }
     }
 
@@ -140,6 +139,7 @@ public struct LLDBPassphraseCapture: Sendable {
     }
     defer {
       output.fileHandleForReading.readabilityHandler = nil
+      verboseRelay?.flush()
       // Only ever terminate the child spawned here. On a successful capture the
       // script has already detached and quit; otherwise terminating lldb
       // detaches the target.
@@ -214,6 +214,52 @@ public struct LLDBPassphraseCapture: Sendable {
       lock.lock()
       defer { lock.unlock() }
       return buffer
+    }
+  }
+
+  /// Line-buffered verbose relay. Chunks from the pipe can split lines
+  /// anywhere, so redaction must wait for complete lines: a `memory read`
+  /// hexdump line carries the captured passphrase and is never emitted.
+  private final class VerboseLineRelay: @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending = ""
+    private let emitLine: (String) -> Void
+
+    init(emit: @escaping (String) -> Void) {
+      self.emitLine = emit
+    }
+
+    func append(_ data: Data) {
+      lock.lock()
+      pending.append(String(decoding: data, as: UTF8.self))
+      var lines: [String] = []
+      while let newline = pending.firstIndex(of: "\n") {
+        lines.append(String(pending[pending.startIndex..<newline]))
+        pending.removeSubrange(pending.startIndex...newline)
+      }
+      lock.unlock()
+      for line in lines {
+        emitLine("lldb| \(redact(line))")
+      }
+    }
+
+    func flush() {
+      lock.lock()
+      let rest = pending
+      pending = ""
+      lock.unlock()
+      guard !rest.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+      emitLine("lldb| \(redact(rest))")
+    }
+
+    private func redact(_ line: String) -> String {
+      let trimmed = line.trimmingCharacters(in: .whitespaces)
+      if LLDBOutputParser.isByteLine(trimmed)
+        || (trimmed.hasPrefix("0x") && trimmed.contains(": 0x"))
+      {
+        return "<hexdump redacted>"
+      }
+      return line
     }
   }
 }

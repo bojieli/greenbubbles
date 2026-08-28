@@ -49,6 +49,12 @@ public enum LLDBOutputParser {
     return false
   }
 
+  /// Whether a line is a `memory read --format x` byte-dump line (the shape
+  /// that carries the captured bytes; used to redact verbose output).
+  public static func isByteLine(_ line: String) -> Bool {
+    parseByteLine(line) != nil
+  }
+
   private static func parseByteLine(_ line: String) -> [UInt8]? {
     guard line.hasPrefix("0x"), let colon = line.firstIndex(of: ":") else { return nil }
     let address = line[line.index(line.startIndex, offsetBy: 2)..<colon]
