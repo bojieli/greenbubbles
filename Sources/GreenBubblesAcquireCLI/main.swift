@@ -452,6 +452,11 @@ do {
     }
     let root = try resolveDatabaseRoot(arguments.dbRoot)
     let inventory = try DatabaseSaltInventory(root: root)
+    printNote(
+      "why this step: the passphrase only crosses the system key-derivation "
+        + "function while WeChat opens its databases at login, so a fresh "
+        + "login is required"
+    )
     printNote("in WeChat, log out of the account (not just quit the app), then log back in")
     printNote("waiting up to \(arguments.timeoutSeconds) seconds for the login")
     var capture = LLDBPassphraseCapture()

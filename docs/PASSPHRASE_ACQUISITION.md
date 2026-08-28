@@ -41,6 +41,33 @@ gating and works with any WeChat build (validated on 4.1.12 and 4.1.13).
    little-endian page number). A passphrase that fails page-1 verification is
    not reported as captured.
 
+## Why a fresh login is required
+
+WeChat 4.1+ keeps only the 32-byte account passphrase; the per-database
+encryption keys are derived from it **only while the account's databases are
+being opened, which happens at login**. After that, the passphrase may remain
+somewhere in the process, but it never again crosses the exported
+`CCKeyDerivationPBKDF` symbol — and that crossing is the one moment a
+breakpoint on a system function can observe. So the capture has to stage
+itself around a fresh derivation:
+
+1. Log in first, so there is a running process with the account's data
+   (otherwise there is nothing meaningful to verify against, and no WeChat
+   process to attach to).
+2. Arm the breakpoint.
+3. Log the account out and back in. This forces WeChat to tear down and
+   re-derive every database key, sending the passphrase through the breakpoint
+   exactly once.
+
+The debugger reads it, immediately detaches, and never touches the process
+again; nothing is injected or hooked persistently.
+
+One client behavior worth knowing: on WeChat 4.1.13 the account logout makes
+the main process exit, and logging back in starts a **new** process with a new
+PID. `capture` detects this and re-arms the breakpoint on the new process
+automatically, so a logout/re-login that used to silently stall the capture
+still succeeds.
+
 The passphrase is written only to the owner-specified `--output` file as raw
 64-lowercase-hex plus a newline, with the file at mode `0600`, its parent
 directory at mode `0700`, and no silent overwrite (`--overwrite` is required to
@@ -139,6 +166,16 @@ greenbubbles-acquire verify --passphrase-stdin [--db-root <path>]
 - One database created later (`third_app_icon.db`) was covered by
   re-derivation with the same passphrase via `verify`, bringing the total to
   26 of 26 databases HMAC-verified without a second capture.
+
+## Validation evidence (2026-08-28)
+
+- A live capture on the 4.1.13 build (client auto-updated and owner
+  re-signed) verified 26 of 26 databases by SQLCipher4 page-1 HMAC in 45
+  seconds.
+- The capture observed WeChat 4.1.13's account logout terminating the main
+  process (old PID 64330 exiting) and login spawning a replacement (new PID
+  65614); the tool's target-exit detection and automatic re-attachment carried
+  the capture to success against the new process.
 
 ## Attribution
 
