@@ -738,6 +738,33 @@ the staged bundle is discarded instead of publishing mixed generations.
 inventory, hashes, counts, schemas, identities, references, and freshness while
 emitting only aggregate evidence.
 
+For personal-memory and retrieval frameworks, project an audited bundle into
+bounded conversational documents instead of sending millions of isolated
+message records to an LLM:
+
+```sh
+cargo run --locked --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  ai-memory-export /private/greenbubbles-tools/context-generation-1 \
+  /private/greenbubbles-tools/memory-generation-1
+```
+
+The atomic owner-only output contains `memories.jsonl` (role/content batches
+and flat metadata accepted by Mem0-style ingestion), `documents/` (one bounded
+Markdown document per chunk for QMD, Khoj, and similar stores),
+`documents.jsonl` (stable document hashes and paths), and `manifest.json`
+(source bundle/checkpoint/policy binding, chunk parameters, coverage,
+omissions, truncations, and framework-compatibility flags). Stable
+`greenbubbles:message:<opaque-id>` citations link every projected utterance
+back to canonical evidence. Source text is explicitly marked untrusted and is
+never treated as agent instructions. Corrupt individual records are omitted
+with typed counts; a wrong checkpoint, digest, key, policy, or unsafe path is
+still a hard failure. Run
+`audit-ai-memory <memory-generation-directory>` after copying a projection and
+before indexing it; the aggregate report verifies every chunk, citation, hash,
+permission, and Markdown document without printing content. See
+[docs/AI_MEMORY_INTEGRATION.md](docs/AI_MEMORY_INTEGRATION.md).
+
 The repository also includes the discoverable
 [`greenbubbles-context`](skills/greenbubbles-context/SKILL.md) skill. It teaches
 an AI agent to use only these GreenBubbles CLI surfaces, check coverage before

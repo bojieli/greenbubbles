@@ -1,6 +1,7 @@
 pub mod acquisition_audit;
 pub mod action;
 pub mod ai_context;
+pub mod ai_memory;
 pub mod archive;
 pub mod artifact;
 pub mod audit;

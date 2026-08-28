@@ -9,6 +9,11 @@ fn ai_commands_expose_help_without_opening_private_inputs() {
             "checkpoint-consistent, policy-scoped AI context bundle",
         ),
         ("audit-ai-context", "without printing content"),
+        (
+            "ai-memory-export",
+            "Mem0-compatible JSON message batches and QMD-compatible Markdown",
+        ),
+        ("audit-ai-memory", "without printing content"),
     ] {
         for help_flag in ["--help", "-h"] {
             let output = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))

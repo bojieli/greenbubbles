@@ -133,6 +133,57 @@ identities, raw columns, packed fields, original base64 payloads, raw XML,
 schema SQL, and absolute filesystem paths. The lossless encrypted replica and
 restoration archive retain those details inside the local trust boundary.
 
+## Personal-memory projection
+
+The canonical five-file bundle is an interchange and audit format. It is not
+an efficient prompt or memory-ingestion format when a corpus contains millions
+of individual message lines. Create a deterministic conversational projection
+after export:
+
+```text
+greenbubbles-restore ai-memory-export \
+  <AI-context-bundle-directory> <new-output-directory> \
+  [--max-messages-per-chunk <1..1000>] \
+  [--max-text-bytes-per-chunk <256..1048576>]
+```
+
+Defaults are 64 messages and 49,152 UTF-8 text bytes per chunk. Boundaries are
+deterministic for a source generation and option set. The output is owner-only
+and published atomically:
+
+| Output | Purpose |
+| --- | --- |
+| `manifest.json` | Projection/source IDs, account/checkpoint/policy binding, chunk parameters, source freshness, omission/truncation counts, limitations, and compatibility flags. |
+| `memories.jsonl` | Vendor-neutral chunks with `messages: [{role, content}]`, source-message evidence, stable citations, and flat metadata suitable for current Mem0-style `add(messages, user_id=..., metadata=...)` calls. |
+| `documents/` | One bounded Markdown document per chunk for QMD, Khoj, and Markdown-oriented retrieval systems. Paths and IDs are stable and contain no contact or conversation names. |
+| `documents.jsonl` | The Markdown document inventory with stable IDs, relative paths, byte counts, and SHA-256 digests. |
+| `README.md` | Local QMD and Mem0 ingestion examples and the role-mapping caveat. |
+
+The account holder maps to framework role `user`; other chat speakers map to
+`assistant`. This is only a transport convention for APIs that accept chat
+messages. Every content string repeats the actual speaker, `self`/`other` actor,
+timestamp, and `greenbubbles:message:<opaque-id>` citation, while
+`sourceMessages` retains structured evidence. Never interpret the role mapping
+as proof that another participant was an AI assistant.
+
+The projector verifies the source manifest identity and every source file's
+byte count, record count, and digest. A modified source generation, unsafe
+path, or inconsistent checkpoint fails closed. Within an otherwise
+integrity-bound generation, a malformed conversation/message record is skipped
+and reported through `projectionOmitted*Count` and `limitationCodes`; healthy
+records still publish. See [AI_MEMORY_INTEGRATION.md](AI_MEMORY_INTEGRATION.md)
+for tested framework workflows and update semantics.
+
+Before indexing or after copying a projection, run:
+
+```text
+greenbubbles-restore audit-ai-memory <AI-memory-output-directory>
+```
+
+The privacy-safe report verifies the projection/source binding, exact
+owner-only inventory, hashes, bounded chunk schemas, stable citations, and
+every Markdown document without emitting conversation names or content.
+
 When sender and direction fields are authorized, version 2 applies one rule:
 `senderId == selfParticipantId` is outgoing, and every other sender is incoming.
 A self sender is labelled `You`. AI query/export normalizes an authorized
