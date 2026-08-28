@@ -15,6 +15,7 @@ pub mod entities;
 pub mod error;
 pub mod follow;
 pub mod latency;
+pub mod live_query;
 pub mod manifest;
 pub mod merge;
 pub mod model;
