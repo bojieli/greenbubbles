@@ -161,3 +161,20 @@ bound and remains resumable across checkpoints. Generated summaries,
 embeddings, inferred relationships, and commitments are downstream derivatives,
 not GreenBubbles canonical facts, and should retain links to their source IDs
 and checkpoint.
+
+## Native human browser
+
+The `greenbubbles-history` SwiftUI application opens an audited static bundle
+without a replica key, independently rechecks its permissions, schemas, hashes,
+counts, identities, references, freshness, checkpoint, and policy binding, and
+builds a private atomic SQLite/FTS index for scalable chat navigation and
+multilingual search. It presents coverage limitations and per-record freshness
+alongside conversations, contacts, messages, relationships, and typed media
+metadata.
+
+Actual media remains outside the static bundle. An explicit preview calls the
+same read-only `ai-query/getArtifact` operation, supplies the replica key only
+over standard input, then rechecks descriptor identity, size, and SHA-256 while
+creating a private session-only copy for Quick Look. See
+[HISTORY_BROWSER.md](HISTORY_BROWSER.md) for the interaction, scaling, trust,
+and release architecture.

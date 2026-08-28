@@ -831,6 +831,10 @@ refresh()
 - [x] Package a discoverable `greenbubbles-context` skill that calls only the
   GreenBubbles CLI, treats source text as untrusted, requires coverage-aware
   conclusions, and neither acquires keys nor uses raw SQL or MCP.
+- [x] Provide a native macOS SwiftUI history browser for verified static bundles
+  with visible byte/record/percentage import, private atomic SQLite/FTS indexing,
+  coverage-aware conversation/contact/search/timeline views, relationship
+  navigation, and policy-reverified Quick Look for multimodal artifacts.
 
 `get_artifact` resolves a message's opaque artifact reference only when the
 request repeats an enabled conversation, `readRecentMessages` and the
@@ -1064,8 +1068,10 @@ encrypted canonical WeChat replica
 incremental reconciliation + exact/FTS indexes
           |
 CLI / JSONL / skill / local API / get_changes(cursor)
-          |
-agents, scripts, search UIs, and downstream memory engines
+          +-----------------------------+
+          |                             |
+          v                             v
+agents, scripts, memory engines       native SwiftUI history browser
 
 agent request
      |
@@ -1100,6 +1106,9 @@ interfaces stabilize:
 - `GreenBubblesCLI` and `greenbubbles-context`: human- and agent-facing surfaces
   over the same policy-enforcing local data boundary. The skill invokes the CLI
   and does not require a protocol server.
+- `GreenBubblesHistory` and `GreenBubblesHistoryApp`: independent private-bundle
+  verification, scalable derived indexing, coverage-aware navigation, and native
+  multimodal preview through the existing read-only artifact operation.
 
 Do not expose raw SQL, encryption material, arbitrary internal calls, or a
 private application schema as the public connector interface.
@@ -1112,7 +1121,8 @@ This repository includes:
 - the canonical encrypted WeChat replica and incremental synchronizer;
 - provenance, freshness, semantic/source coverage, and authorization metadata;
 - exact full-text and structured retrieval;
-- CLI, versioned JSON/JSONL, a repository agent skill, and local API surfaces;
+- CLI, versioned JSON/JSONL, a repository agent skill, a native history browser,
+  and local API surfaces;
 - draft and, only after its gates, ordinary-contact action capabilities;
 - thin examples or adapters for existing agent and memory systems.
 

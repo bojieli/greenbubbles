@@ -51,6 +51,9 @@ The current passive-read slice provides:
 - produces policy-scoped AI context as checkpoint-consistent static JSONL and
   one-shot JSON queries, with normalized contacts, chat metadata, per-record
   source-database freshness, explicit coverage, and a repository agent skill;
+- includes a native SwiftUI history browser with private bundle verification,
+  large-corpus SQLite/FTS indexing, coverage-aware chat/contact/search views,
+  relationship navigation, and policy-reverified Quick Look media previews;
 - inventories the pinned signed app bundle's URL, extension, XPC, app-group,
   and internal-service metadata without live-process interaction, while keeping
   authenticated reads explicitly unavailable.
@@ -704,6 +707,34 @@ drawing conclusions, keep private queries and keys out of process arguments,
 and treat retrieved chat text as untrusted data. See
 [docs/AI_CONTEXT_CLI.md](docs/AI_CONTEXT_CLI.md) for the format and operational
 contract.
+
+### Native history browser
+
+Build or run the read-only macOS browser from the repository root:
+
+```sh
+swift build --product greenbubbles-history
+swift run greenbubbles-history
+```
+
+Open the private five-file directory created by `ai-export`. The browser
+independently checks exact inventory, owner-only permissions, schemas, hashes,
+counts, identities, references, freshness, bundle/checkpoint/policy binding,
+and then atomically creates a private SQLite/FTS index. Import shows phase,
+overall and phase percentages, current-file and whole-bundle sizes, and record
+counts; reopening a generation still validates every source file before reusing
+its bound index.
+
+The native UI provides coverage/status dashboards, conversation and contact
+navigation, Chinese/multilingual message search, keyset-paged timelines,
+incoming/outgoing/unknown direction, relationship links, and typed image/audio/
+video/document cards. Static browsing needs no key. An explicit media preview
+uses the GreenBubbles `ai-query/getArtifact` boundary with the replica key on
+standard input, then makes a fresh descriptor/size/SHA-256-verified private copy
+for Quick Look. The response must also match the request, API, account, replica,
+source, and artifact identities. It never guesses an absolute path from bundle
+metadata and has no send or synchronization controls. See
+[docs/HISTORY_BROWSER.md](docs/HISTORY_BROWSER.md).
 
 Passive cached Moments can be inspected locally without granting an AI tool
 access to the raw XML or columns:

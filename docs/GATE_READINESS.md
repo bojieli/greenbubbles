@@ -16,7 +16,7 @@ permission to operate on a live account.
 | 0.5 | Not passed | Authorized disposable corpus, real-client synchronization evidence, ordinary-contact feasibility evidence, and qualified legal/distribution decisions. |
 | 1 | In progress | Real current-version row/type/media completion proof and cross-version/platform discovery evidence. |
 | 2 | Implemented, deeply audited, and recovery-drilled on synthetic encrypted replicas | Real disposable-account persistence and 60-second-p95 evidence. |
-| 3 | Complete for reads and non-executing drafts | No remaining Phase 3 checkbox. |
+| 3 | Complete for reads, native history browsing, and non-executing drafts | No remaining Phase 3 checkbox. |
 | 4 | Blocked | Phase 0.5 and Phase 1 exit gates, a supportable mechanism, a disposable account/conversation, and legal/account-safety approval. |
 | 5 | Passive cached reads implemented | Public article access is robots-denied; authenticated reads lack a proven high-level contract and disposable-account approval. |
 | 6 | Validated for the CLI skill, static AI bundle, and one resumable consumer | A second source is optional and requires a separate product/repository decision. |
