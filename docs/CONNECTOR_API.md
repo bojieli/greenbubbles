@@ -31,7 +31,9 @@ that process created. The client bounds request/response I/O and rejects a
 response whose API version or request ID does not match the request envelope.
 
 `connector-call` accepts a request only from an owner-only JSON file so private
-queries and draft bodies do not appear in process arguments:
+queries and draft bodies do not appear in process arguments. It opens that file
+without following a symlink, requires current-user ownership and a single link,
+and verifies the same descriptor before and after the bounded read:
 
 ```json
 {

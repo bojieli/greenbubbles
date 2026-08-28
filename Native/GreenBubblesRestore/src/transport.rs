@@ -1,11 +1,11 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::archive::{ensure_private_directory, ensure_private_regular_file};
+use crate::archive::ensure_private_directory;
 use crate::connector::{
     ConnectorRequest, ConnectorResponse, ConnectorService, CONNECTOR_API_VERSION,
 };
@@ -87,14 +87,69 @@ pub fn send_unix_request(
 }
 
 pub fn load_connector_request(path: &Path) -> Result<ConnectorRequest, RestoreError> {
-    ensure_private_regular_file(path)?;
-    let metadata = fs::metadata(path)?;
-    if metadata.len() > MAX_CONNECTOR_REQUEST_BYTES {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)?;
+    let before = file.metadata()?;
+    let identity = PrivateRequestIdentity::from_metadata(&before)?;
+    if identity.byte_count > MAX_CONNECTOR_REQUEST_BYTES {
         return Err(RestoreError::Integrity(
             "connector request exceeds its byte limit".to_string(),
         ));
     }
-    Ok(serde_json::from_slice(&fs::read(path)?)?)
+    let mut bytes = Vec::with_capacity(identity.byte_count as usize);
+    (&mut file)
+        .take(MAX_CONNECTOR_REQUEST_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_CONNECTOR_REQUEST_BYTES {
+        return Err(RestoreError::Integrity(
+            "connector request exceeds its byte limit".to_string(),
+        ));
+    }
+    let after = file.metadata()?;
+    if PrivateRequestIdentity::from_metadata(&after)? != identity
+        || bytes.len() as u64 != identity.byte_count
+    {
+        return Err(RestoreError::Integrity(
+            "connector request changed while it was being read".to_string(),
+        ));
+    }
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrivateRequestIdentity {
+    device: u64,
+    inode: u64,
+    byte_count: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+}
+
+impl PrivateRequestIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Result<Self, RestoreError> {
+        if !metadata.is_file()
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.nlink() != 1
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err(RestoreError::Integrity(
+                "connector request must be a current-user, owner-only regular file".to_string(),
+            ));
+        }
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            byte_count: metadata.len(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+            changed_seconds: metadata.ctime(),
+            changed_nanoseconds: metadata.ctime_nsec(),
+        })
+    }
 }
 
 fn bind_private_socket(path: &Path) -> Result<(UnixListener, SocketLease), RestoreError> {
@@ -210,8 +265,9 @@ impl Drop for SocketLease {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::OpenOptions;
     use std::io::{Read, Write};
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     use std::os::unix::net::UnixStream;
 
     use tempfile::tempdir;
@@ -235,6 +291,38 @@ mod tests {
         drop(lease);
 
         assert_eq!(fs::read(&socket).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn connector_request_is_read_from_one_private_descriptor() {
+        let fixture = tempdir().unwrap();
+        fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let path = fixture.path().join("request.json");
+        let request = ConnectorRequest {
+            api_version: CONNECTOR_API_VERSION.to_string(),
+            request_id: "descriptor-request".to_string(),
+            requester_id: "transport-test".to_string(),
+            destination: ConnectorDestination::Local,
+            operation: ConnectorOperation::Capabilities,
+        };
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        file.write_all(&serde_json::to_vec(&request).unwrap())
+            .unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+
+        let loaded = load_connector_request(&path).unwrap();
+        assert_eq!(loaded.request_id, request.request_id);
+        assert_eq!(loaded.requester_id, request.requester_id);
+
+        let hard_link = fixture.path().join("request-link.json");
+        fs::hard_link(&path, &hard_link).unwrap();
+        assert!(load_connector_request(&path).is_err());
     }
 
     #[test]
