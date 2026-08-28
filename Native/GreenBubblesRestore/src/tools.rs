@@ -311,6 +311,34 @@ pub fn create_tool_policy(
     )
 }
 
+/// Creates one identical, explicit scope for every conversation in an
+/// archive. Conversation identifiers are loaded internally so large accounts
+/// do not expose thousands of opaque IDs through process arguments.
+#[allow(clippy::too_many_arguments)]
+pub fn create_all_conversations_tool_policy_with_cached_moments(
+    archive_directory: &Path,
+    policy_path: &Path,
+    conversation_scope: ConversationToolScope,
+    cached_moments_scope: Option<CachedMomentsToolScope>,
+    maximum_result_count: usize,
+    maximum_message_summary_bytes: usize,
+    maximum_draft_bytes: usize,
+) -> Result<ToolAuthorizationPolicy, RestoreError> {
+    let conversation_scopes = load_conversation_ids(archive_directory)?
+        .into_iter()
+        .map(|conversation_id| (conversation_id, conversation_scope.clone()))
+        .collect();
+    create_tool_policy_with_cached_moments(
+        archive_directory,
+        policy_path,
+        conversation_scopes,
+        cached_moments_scope,
+        maximum_result_count,
+        maximum_message_summary_bytes,
+        maximum_draft_bytes,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn create_tool_policy_with_cached_moments(
     archive_directory: &Path,

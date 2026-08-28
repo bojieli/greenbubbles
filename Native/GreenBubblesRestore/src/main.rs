@@ -35,6 +35,7 @@ use greenbubbles_restore::{
     },
     restore_catalog_with_progress,
     tools::{
+        create_all_conversations_tool_policy_with_cached_moments,
         create_tool_policy_with_cached_moments, CachedMomentField, CachedMomentsToolScope,
         ConversationToolScope, LocalToolService, ToolCapability, ToolDataDestination,
         ToolMessageField,
@@ -784,34 +785,37 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .take_while(|value| !value.starts_with("--"))
                 .cloned()
                 .collect::<BTreeSet<_>>();
+            let all_conversations = remaining.iter().any(|value| value == "--all-conversations");
+            if all_conversations && !conversations.is_empty() {
+                return Err(
+                    "--all-conversations is mutually exclusive with conversation IDs".into(),
+                );
+            }
             let capabilities = match option_string(&remaining, "--capabilities")? {
                 Some(value) => parse_capabilities(&value)?,
-                None if conversations.is_empty() => BTreeSet::new(),
+                None if conversations.is_empty() && !all_conversations => BTreeSet::new(),
                 None => return Err("missing --capabilities".into()),
             };
-            let message_fields = option_string(&remaining, "--fields")?
-                .map(|value| parse_message_fields(&value))
-                .transpose()?
-                .unwrap_or_default();
+            let message_fields = match option_string(&remaining, "--fields")? {
+                Some(value) => parse_message_fields(&value)?,
+                None if conversations.is_empty() && !all_conversations => BTreeSet::new(),
+                None => return Err("missing --fields".into()),
+            };
             let not_before_unix = option_i64(&remaining, "--not-before-unix")?;
             let not_after_unix = option_i64(&remaining, "--not-after-unix")?;
             let allow_remote_model = remaining
                 .iter()
                 .any(|value| value == "--allow-remote-model");
+            let conversation_scope = ConversationToolScope {
+                capabilities: capabilities.clone(),
+                message_fields: message_fields.clone(),
+                not_before_unix,
+                not_after_unix,
+                allow_remote_model,
+            };
             let scopes = conversations
                 .into_iter()
-                .map(|conversation| {
-                    (
-                        conversation,
-                        ConversationToolScope {
-                            capabilities: capabilities.clone(),
-                            message_fields: message_fields.clone(),
-                            not_before_unix,
-                            not_after_unix,
-                            allow_remote_model,
-                        },
-                    )
-                })
+                .map(|conversation| (conversation, conversation_scope.clone()))
                 .collect::<BTreeMap<_, _>>();
             let cached_moments_scope = if remaining
                 .iter()
@@ -831,15 +835,32 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 None
             };
-            let policy = create_tool_policy_with_cached_moments(
-                &archive,
-                &policy_path,
-                scopes,
-                cached_moments_scope,
-                option_usize(&remaining, "--max-results")?.unwrap_or(100),
-                option_usize(&remaining, "--max-summary-bytes")?.unwrap_or(4_096),
-                option_usize(&remaining, "--max-draft-bytes")?.unwrap_or(16_384),
-            )?;
+            let maximum_result_count = option_usize(&remaining, "--max-results")?.unwrap_or(100);
+            let maximum_message_summary_bytes =
+                option_usize(&remaining, "--max-summary-bytes")?.unwrap_or(4_096);
+            let maximum_draft_bytes =
+                option_usize(&remaining, "--max-draft-bytes")?.unwrap_or(16_384);
+            let policy = if all_conversations {
+                create_all_conversations_tool_policy_with_cached_moments(
+                    &archive,
+                    &policy_path,
+                    conversation_scope,
+                    cached_moments_scope,
+                    maximum_result_count,
+                    maximum_message_summary_bytes,
+                    maximum_draft_bytes,
+                )?
+            } else {
+                create_tool_policy_with_cached_moments(
+                    &archive,
+                    &policy_path,
+                    scopes,
+                    cached_moments_scope,
+                    maximum_result_count,
+                    maximum_message_summary_bytes,
+                    maximum_draft_bytes,
+                )?
+            };
             println!("{}", serde_json::to_string_pretty(&policy)?);
         }
         "tool-list" => {
@@ -954,7 +975,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore connector-serve <replica-path> <policy-file> <audit-log> <draft-directory> <socket-path> --replica-key-stdin\n",
                     "  greenbubbles-restore connector-call <socket-path> <private-request-json>\n",
                     "  greenbubbles-restore connector-mcp <socket-path> --requester <id> [--destination local|remote]\n",
-                    "  greenbubbles-restore tool-policy <archive> <policy-file> [<conversation-id>...] [--capabilities list,read,search,draft] [--fields sender,created-at,direction,type,content,attachments,relationships] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--enable-cached-moments --cached-fields author,created-at,type,content,title,description,url,media-count,like-count,comment-count] [--cached-not-before-unix <seconds>] [--cached-not-after-unix <seconds>] [--allow-cached-remote-model] [--max-results <n>] [--max-summary-bytes <n>] [--max-draft-bytes <n>]\n",
+                    "  greenbubbles-restore tool-policy <archive> <policy-file> ([<conversation-id>...] | --all-conversations) [--capabilities list,read,search,draft] [--fields sender,created-at,direction,type,content,attachments,relationships] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--enable-cached-moments --cached-fields author,created-at,type,content,title,description,url,media-count,like-count,comment-count] [--cached-not-before-unix <seconds>] [--cached-not-after-unix <seconds>] [--allow-cached-remote-model] [--max-results <n>] [--max-summary-bytes <n>] [--max-draft-bytes <n>]\n",
                     "  greenbubbles-restore tool-list <archive> <policy-file> <audit-log> --requester <id> [--destination local|remote]\n",
                     "  greenbubbles-restore tool-recent <archive> <policy-file> <audit-log> <conversation-id> --requester <id> [--limit <n>] [--destination local|remote]\n",
                     "  greenbubbles-restore tool-search <archive> <policy-file> <audit-log> --requester <id> --query-stdin [--conversation <id>] [--limit <n>] [--destination local|remote]\n",
