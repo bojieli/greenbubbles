@@ -1,10 +1,14 @@
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::sync::Mutex;
 
 use greenbubbles_restore::manifest::{
     PathReference, SnapshotEntry, SnapshotFileRole, SnapshotManifest, SourceFileFingerprint,
 };
 use greenbubbles_restore::{
-    prepare_catalog, restore_catalog, ClientBuildCompatibilityState, DatabasePassphrase,
+    prepare_catalog, prepare_catalog_with_progress, restore_catalog, restore_catalog_with_progress,
+    ClientBuildCompatibilityState, DatabaseKeySet, DatabasePassphrase, DatabaseUnlockMaterial,
+    ProgressEvent, ProgressObserver, ProgressPhase, ProgressState, RestorationArchiveScope,
     RestorationOptions, StorageFamily,
 };
 use rusqlite::Connection;
@@ -46,7 +50,7 @@ fn decrypts_sqlcipher4_and_applies_committed_wal_frames() {
     fs::copy(&live, &database).unwrap();
     fs::copy(&live_wal, &wal).unwrap();
 
-    let manifest = SnapshotManifest {
+    let mut manifest = SnapshotManifest {
         manifest_format_version: 2,
         snapshot_id: "00000000-0000-4000-8000-000000000002".to_string(),
         created_at: "2026-08-27T00:00:00Z".to_string(),
@@ -100,7 +104,159 @@ fn decrypts_sqlcipher4_and_applies_committed_wal_frames() {
         ClientBuildCompatibilityState::Missing
     );
 
+    let salt = wx_decrypt::read_db_salt(&live).unwrap();
+    let encryption_key = wx_decrypt::kdf::derive_enc_key(
+        passphrase.expose_for_database_operation(),
+        &salt,
+        &wx_decrypt::MACOS_4_1_7_31,
+    );
+    let unavailable_dir = snapshot.join("sets/0001");
+    fs::create_dir_all(&unavailable_dir).unwrap();
+    let unavailable_database = unavailable_dir.join("database.db");
+    let mut unavailable_bytes = fs::read(&live).unwrap();
+    unavailable_bytes[0] ^= 0x01;
+    fs::write(&unavailable_database, unavailable_bytes).unwrap();
+    let mut unavailable_entry = entry(
+        &unavailable_database,
+        "sets/0001/database.db",
+        SnapshotFileRole::Database,
+    );
+    unavailable_entry.source_set_id = "set2".to_string();
+    unavailable_entry.logical_path = "third_app_icon/third_app_icon.db".to_string();
+    manifest.entries.push(unavailable_entry);
+    fs::write(
+        snapshot.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let key_file = fixture.path().join("exported-keys.json");
+    fs::write(
+        &key_file,
+        serde_json::to_vec(&serde_json::json!({
+            "stale-layout\\renamed-message.db": {
+                "enc_key": hex::encode(encryption_key),
+                "salt": hex::encode(salt),
+                "size_mb": 1.0
+            },
+            "_db_dir": "/untrusted/metadata/is/ignored"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(&key_file, fs::Permissions::from_mode(0o600)).unwrap();
+    let exported_keys = DatabaseKeySet::load(&key_file).unwrap();
+    let progress = CapturingProgress::default();
+    let direct_catalog = prepare_catalog_with_progress(
+        &snapshot,
+        DatabaseUnlockMaterial::ExportedKeys(&exported_keys),
+        &progress,
+    )
+    .unwrap();
+    let selection = direct_catalog
+        .available_database_selection
+        .as_ref()
+        .unwrap();
+    assert_eq!(selection.selected_database_count, 1);
+    assert_eq!(selection.unavailable_database_count, 1);
+    assert_eq!(
+        selection.unavailable_databases[0].logical_path,
+        "third_app_icon/third_app_icon.db"
+    );
+    let events = progress.events.lock().unwrap();
+    assert!(events.iter().any(|event| {
+        event.phase == ProgressPhase::KeyValidation && event.state == ProgressState::Completed
+    }));
+    assert!(events.iter().any(|event| {
+        event.phase == ProgressPhase::KeyValidation
+            && event.database_key_match_method.as_deref() == Some("uniqueSaltRelocation")
+            && event.storage_family.as_deref() == Some("wcdbSqlcipher4")
+            && event.database_byte_count.is_some_and(|bytes| bytes > 0)
+            && event
+                .write_ahead_log_byte_count
+                .is_some_and(|bytes| bytes > 0)
+    }));
+    assert!(events.iter().any(|event| {
+        event.phase == ProgressPhase::DatabasePreparation
+            && event.state == ProgressState::Completed
+            && event.table_count.is_some()
+    }));
+    assert!(events.iter().any(|event| {
+        event.phase == ProgressPhase::DatabasePreparation
+            && event.operation == "decryptDatabase"
+            && event.state == ProgressState::Completed
+    }));
+    assert!(events.iter().any(|event| {
+        event.phase == ProgressPhase::DatabasePreparation
+            && event.operation == "scanWriteAheadLog"
+            && event.state == ProgressState::Completed
+    }));
+    assert!(events.iter().any(|event| {
+        event.phase == ProgressPhase::DatabasePreparation
+            && event.operation == "applyWriteAheadLog"
+            && event.state == ProgressState::Completed
+            && event
+                .write_ahead_log_frame_count
+                .is_some_and(|count| count > 0)
+    }));
+    drop(events);
+    let direct_output = fixture.path().join("restored-from-exported-keys");
+    let direct_report = restore_catalog_with_progress(
+        &direct_catalog,
+        &RestorationOptions {
+            output_directory: direct_output,
+            account_root: None,
+            defer_media: false,
+        },
+        &progress,
+    )
+    .unwrap();
+    assert_eq!(direct_report.integrity.source_row_count, 1);
+    assert_eq!(direct_report.integrity.restored_row_count, 1);
+    assert_eq!(direct_report.integrity.rejected_row_count, 0);
+    assert_eq!(
+        direct_report.archive_scope,
+        RestorationArchiveScope::PartialDatabaseCoverage
+    );
+    let database_coverage = direct_report.database_coverage.as_ref().unwrap();
+    assert!(database_coverage.is_valid());
+    assert_eq!(database_coverage.total_database_count, 2);
+    assert_eq!(database_coverage.restored_database_count, 1);
+    assert_eq!(database_coverage.unavailable_database_count, 1);
+    assert!(direct_report.replica_mutation_eligible());
+    let events = progress.events.lock().unwrap();
+    assert!(events.iter().any(|event| {
+        event.phase == ProgressPhase::RecordPlanning
+            && event.state == ProgressState::Completed
+            && event.operation == "countDatabaseRecords"
+            && event.completed == 2
+            && event.total == 2
+            && event.table_count == Some(2)
+            && event.source_record_count == Some(1)
+            && event.restored_record_count.is_none()
+    }));
+    assert!(events.iter().any(|event| {
+        event.phase == ProgressPhase::RecordRestoration
+            && event.state == ProgressState::Completed
+            && event.restored_record_count == Some(1)
+    }));
+    assert!(events.iter().any(|event| {
+        event.phase == ProgressPhase::ArchiveFinalization
+            && event.state == ProgressState::Completed
+            && event.restored_record_count == Some(1)
+    }));
+
     drop(connection);
+}
+
+#[derive(Default)]
+struct CapturingProgress {
+    events: Mutex<Vec<ProgressEvent>>,
+}
+
+impl ProgressObserver for CapturingProgress {
+    fn observe(&self, event: ProgressEvent) {
+        self.events.lock().unwrap().push(event);
+    }
 }
 
 fn entry(path: &std::path::Path, relative: &str, role: SnapshotFileRole) -> SnapshotEntry {

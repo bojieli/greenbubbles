@@ -20,8 +20,9 @@ use crate::{
     ConversationMembership, ConversationMembershipRole, EntityDecodeState, EntitySourceRecord,
     LocalProfileState, MessageDirection, MessageOrderingBasis, RejectedRow,
     RelationshipResolutionState, RestorationArchiveScope, RestorationCompletion,
-    RestorationCoverage, RestorationIntegrity, RestorationMediaPhase, RestorationReport,
-    RestoreError, SemanticDecodeState, SnapshotAcquisitionMode, TableCoverageRole, TypedPayload,
+    RestorationCoverage, RestorationDatabaseCoverage, RestorationIntegrity, RestorationMediaPhase,
+    RestorationReport, RestorationUnavailableDatabase, RestoreError, SemanticDecodeState,
+    SnapshotAcquisitionMode, TableCoverageRole, TypedPayload,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -54,11 +55,19 @@ pub fn merge_incremental_archive(
     let acquisition = fragment_report.acquisition.as_ref().ok_or_else(|| {
         RestoreError::Integrity("incremental fragment has no acquisition evidence".to_string())
     })?;
-    let selected = acquisition
-        .selected_source_set_ids()
-        .into_iter()
-        .map(str::to_string)
-        .collect::<BTreeSet<_>>();
+    let requested_selected = match acquisition.mode {
+        SnapshotAcquisitionMode::Incremental => acquisition
+            .selected_source_set_ids()
+            .into_iter()
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>(),
+        SnapshotAcquisitionMode::Bootstrap | SnapshotAcquisitionMode::IntegrityScan => acquisition
+            .source_sets
+            .iter()
+            .map(|source_set| source_set.source_set_id.clone())
+            .collect::<BTreeSet<_>>(),
+    };
+    let selected = successfully_restored_source_sets(&fragment_report, &requested_selected)?;
     let deleted = acquisition
         .deleted_source_set_ids
         .iter()
@@ -149,6 +158,18 @@ pub fn merge_incremental_archive(
     } else {
         RestorationMediaPhase::Resolved
     };
+    let database_coverage = merge_database_coverage(
+        &previous_report,
+        &fragment_report,
+        &requested_selected,
+        &selected,
+    )?;
+    let archive_scope = if database_coverage.authoritative_database_coverage {
+        RestorationArchiveScope::Authoritative
+    } else {
+        completion.full_restoration_achieved = false;
+        RestorationArchiveScope::PartialDatabaseCoverage
+    };
 
     write_ndjson(&temporary.path().join("messages.ndjson"), &messages)?;
     write_ndjson(
@@ -189,12 +210,13 @@ pub fn merge_incremental_archive(
     });
 
     let final_report = RestorationReport {
-        format_version: 4,
+        format_version: 5,
         account_id: fragment_report.account_id.clone(),
         source_fingerprint: fragment_report.source_fingerprint.clone(),
         client_build_compatibility: fragment_report.client_build_compatibility.clone(),
         acquisition: fragment_report.acquisition.clone(),
-        archive_scope: RestorationArchiveScope::Authoritative,
+        archive_scope,
+        database_coverage: Some(database_coverage),
         media_phase,
         messages_path: output_archive.join("messages.ndjson").display().to_string(),
         rejections_path: output_archive
@@ -241,6 +263,128 @@ pub fn merge_incremental_archive(
         rejection_count: rejections.len() as u64,
         full_restoration_achieved: final_report.completion.full_restoration_achieved,
     })
+}
+
+fn successfully_restored_source_sets(
+    fragment: &RestorationReport,
+    requested: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, RestoreError> {
+    let Some(coverage) = fragment.database_coverage.as_ref() else {
+        return Ok(requested.clone());
+    };
+    if !coverage.is_valid() {
+        return Err(RestoreError::Integrity(
+            "incremental fragment has inconsistent database coverage evidence".to_string(),
+        ));
+    }
+    let fresh = coverage
+        .fresh_source_set_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if !fresh.is_subset(requested) {
+        return Err(RestoreError::Integrity(
+            "incremental fragment restored an unselected source set".to_string(),
+        ));
+    }
+    Ok(fresh)
+}
+
+fn merge_database_coverage(
+    previous: &RestorationReport,
+    fragment: &RestorationReport,
+    requested: &BTreeSet<String>,
+    restored: &BTreeSet<String>,
+) -> Result<RestorationDatabaseCoverage, RestoreError> {
+    let acquisition = fragment.acquisition.as_ref().ok_or_else(|| {
+        RestoreError::Integrity("incremental fragment has no acquisition evidence".to_string())
+    })?;
+    let snapshot = acquisition
+        .source_sets
+        .iter()
+        .map(|source_set| source_set.source_set_id.clone())
+        .collect::<BTreeSet<_>>();
+    let (mut fresh, mut stale, mut unavailable_details) =
+        if let Some(coverage) = previous.database_coverage.as_ref() {
+            if !coverage.is_valid() {
+                return Err(RestoreError::Integrity(
+                    "previous archive has inconsistent database coverage evidence".to_string(),
+                ));
+            }
+            (
+                coverage
+                    .fresh_source_set_ids
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>(),
+                coverage
+                    .preserved_stale_source_set_ids
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>(),
+                coverage
+                    .unavailable_databases
+                    .iter()
+                    .cloned()
+                    .map(|database| (database.source_set_id.clone(), database))
+                    .collect::<BTreeMap<String, RestorationUnavailableDatabase>>(),
+            )
+        } else {
+            // Legacy authoritative archives predate explicit database coverage.
+            // Their stored scope is the compatibility evidence that every current
+            // source set was included; using table presence would misclassify a
+            // valid empty database as unavailable.
+            (snapshot.clone(), BTreeSet::new(), BTreeMap::new())
+        };
+    fresh.retain(|source_set| snapshot.contains(source_set));
+    stale.retain(|source_set| snapshot.contains(source_set));
+    unavailable_details.retain(|source_set, _| snapshot.contains(source_set));
+    let previously_included = fresh.union(&stale).cloned().collect::<BTreeSet<_>>();
+    for source_set in requested {
+        if restored.contains(source_set) {
+            fresh.insert(source_set.clone());
+            stale.remove(source_set);
+            unavailable_details.remove(source_set);
+        } else {
+            fresh.remove(source_set);
+            if previously_included.contains(source_set) {
+                stale.insert(source_set.clone());
+            }
+        }
+    }
+    if let Some(fragment_coverage) = fragment.database_coverage.as_ref() {
+        for database in &fragment_coverage.unavailable_databases {
+            unavailable_details.insert(database.source_set_id.clone(), database.clone());
+        }
+    }
+    let unavailable = snapshot
+        .difference(&fresh)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    stale.retain(|source_set| unavailable.contains(source_set));
+    unavailable_details.retain(|source_set, _| unavailable.contains(source_set));
+    let authoritative_database_coverage = unavailable.is_empty();
+    let coverage = RestorationDatabaseCoverage {
+        format_version: 1,
+        total_database_count: snapshot.len(),
+        attempted_database_count: snapshot.len(),
+        restored_database_count: fresh.len(),
+        unavailable_database_count: unavailable.len(),
+        preserved_stale_database_count: stale.len(),
+        authoritative_database_coverage,
+        snapshot_source_set_ids: snapshot.iter().cloned().collect(),
+        attempted_source_set_ids: snapshot.iter().cloned().collect(),
+        fresh_source_set_ids: fresh.into_iter().collect(),
+        unavailable_source_set_ids: unavailable.into_iter().collect(),
+        preserved_stale_source_set_ids: stale.into_iter().collect(),
+        unavailable_databases: unavailable_details.into_values().collect(),
+    };
+    if !coverage.is_valid() {
+        return Err(RestoreError::Integrity(
+            "merged database coverage evidence is inconsistent".to_string(),
+        ));
+    }
+    Ok(coverage)
 }
 
 type MergedCachedSurfaces = (
@@ -474,11 +618,9 @@ fn validate_merge_inputs(
     previous: &RestorationReport,
     fragment: &RestorationReport,
 ) -> Result<(), RestoreError> {
-    if previous.archive_scope != RestorationArchiveScope::Authoritative
-        || fragment.archive_scope != RestorationArchiveScope::IncrementalFragment
-    {
+    if !previous.replica_mutation_eligible() {
         return Err(RestoreError::Integrity(
-            "merge requires one authoritative archive and one incremental fragment".to_string(),
+            "merge requires a replica-eligible previous archive".to_string(),
         ));
     }
     if previous.account_id != fragment.account_id {
@@ -489,12 +631,23 @@ fn validate_merge_inputs(
     let acquisition = fragment.acquisition.as_ref().ok_or_else(|| {
         RestoreError::Integrity("incremental fragment has no acquisition evidence".to_string())
     })?;
-    if acquisition.mode != SnapshotAcquisitionMode::Incremental
+    let valid_update_scope = matches!(
+        (acquisition.mode, fragment.archive_scope),
+        (
+            SnapshotAcquisitionMode::Incremental,
+            RestorationArchiveScope::IncrementalFragment
+        ) | (
+            SnapshotAcquisitionMode::IntegrityScan,
+            RestorationArchiveScope::Authoritative
+                | RestorationArchiveScope::PartialDatabaseCoverage
+        )
+    );
+    if !valid_update_scope
         || acquisition.previous_source_fingerprint.as_deref()
             != Some(previous.source_fingerprint.as_str())
     {
         return Err(RestoreError::Integrity(
-            "incremental fragment is not based on the supplied authoritative archive".to_string(),
+            "archive update is not based on the supplied previous archive".to_string(),
         ));
     }
     Ok(())
@@ -1075,6 +1228,11 @@ fn calculate_integrity(
             .iter()
             .filter(|table| table.role == TableCoverageRole::UnhandledMessageCandidate)
             .count() as u64,
+        observed_table_row_count: coverage
+            .all_tables
+            .iter()
+            .filter_map(|table| table.source_row_count)
+            .sum(),
         source_row_count: coverage
             .message_tables
             .iter()
@@ -1123,6 +1281,22 @@ fn calculate_integrity(
             .unwrap_or_default(),
         ..Default::default()
     };
+    for table in &coverage.all_tables {
+        let role = match table.role {
+            TableCoverageRole::Message => "message",
+            TableCoverageRole::KnownAuxiliary => "knownAuxiliary",
+            TableCoverageRole::Other => "other",
+            TableCoverageRole::UnhandledMessageCandidate => "unhandledMessageCandidate",
+        };
+        *integrity
+            .table_role_counts
+            .entry(role.to_string())
+            .or_default() += 1;
+        *integrity
+            .table_classification_reason_counts
+            .entry(table.classification_reason.clone())
+            .or_default() += 1;
+    }
     let counts = message_type_counts(messages);
     integrity.logical_type_counts = counts.0;
     integrity.logical_sub_type_counts = counts.1;

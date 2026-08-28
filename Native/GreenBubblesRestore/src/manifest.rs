@@ -44,6 +44,7 @@ pub struct ClientBuildFingerprint {
 #[serde(rename_all = "camelCase")]
 pub enum ClientBuildCompatibilityState {
     SupportedPinned,
+    SupportedCompatible,
     Unsupported,
     Missing,
     LegacySyntheticFixture,
@@ -71,6 +72,9 @@ impl Default for ClientBuildCompatibilityEvidence {
     }
 }
 
+// The exact 4.1.12 fingerprint remains the cross-language reference profile
+// and the acquisition helper's pin. Passive restoration applies the broader
+// signed 4.1+ compatibility policy in `client_build_compatibility`.
 const SUPPORTED_PROFILE_ID: &str = "wechat-macos-4.1.12-269365";
 const SUPPORTED_EXECUTABLE_SHA256: &str =
     "2c61ba7f64c2b98e897553cd226364642a1eb213b5b7f74556c6fc2efc363e32";
@@ -232,6 +236,7 @@ impl SnapshotManifest {
             };
         };
         let expected = supported_client_build();
+        let exact_pinned_build = observed == expected;
         let mut mismatched_fields = Vec::new();
         compare_field(
             &mut mismatched_fields,
@@ -246,19 +251,7 @@ impl SnapshotManifest {
         compare_field(
             &mut mismatched_fields,
             "marketingVersion",
-            observed.marketing_version == expected.marketing_version,
-        );
-        compare_field(
-            &mut mismatched_fields,
-            "buildVersion",
-            observed.build_version == expected.build_version,
-        );
-        compare_field(
-            &mut mismatched_fields,
-            "executableSHA256",
-            observed
-                .executable_sha256
-                .eq_ignore_ascii_case(&expected.executable_sha256),
+            supported_marketing_version(&observed.marketing_version),
         );
         compare_field(
             &mut mismatched_fields,
@@ -272,33 +265,20 @@ impl SnapshotManifest {
         );
         compare_field(
             &mut mismatched_fields,
-            "codeDirectorySHA256",
-            observed
-                .code_directory_sha256
-                .eq_ignore_ascii_case(&expected.code_directory_sha256),
-        );
-        let mut observed_architectures = observed.architectures.clone();
-        observed_architectures.sort();
-        observed_architectures.dedup();
-        compare_field(
-            &mut mismatched_fields,
-            "architectures",
-            observed_architectures == expected.architectures,
-        );
-        compare_field(
-            &mut mismatched_fields,
             "hardenedRuntime",
-            observed.hardened_runtime == expected.hardened_runtime,
+            observed.hardened_runtime,
         );
         compare_field(
             &mut mismatched_fields,
             "signatureValid",
-            observed.signature_valid == expected.signature_valid,
+            observed.signature_valid,
         );
         let production_compatible = mismatched_fields.is_empty();
         ClientBuildCompatibilityEvidence {
-            state: if production_compatible {
+            state: if exact_pinned_build {
                 ClientBuildCompatibilityState::SupportedPinned
+            } else if production_compatible {
+                ClientBuildCompatibilityState::SupportedCompatible
             } else {
                 ClientBuildCompatibilityState::Unsupported
             },
@@ -539,6 +519,20 @@ fn compare_field(mismatches: &mut Vec<String>, field: &str, matches: bool) {
     }
 }
 
+fn supported_marketing_version(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let Some(major) = parts.next().and_then(|part| part.parse::<u64>().ok()) else {
+        return false;
+    };
+    let Some(minor) = parts.next().and_then(|part| part.parse::<u64>().ok()) else {
+        return false;
+    };
+    if parts.any(|part| part.is_empty() || part.parse::<u64>().is_err()) {
+        return false;
+    }
+    major > 4 || (major == 4 && minor >= 1)
+}
+
 fn valid_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -645,7 +639,32 @@ mod tests {
     }
 
     #[test]
-    fn version_team_and_hash_drift_are_independently_reported() {
+    fn compatible_4_1_and_later_builds_do_not_require_pinned_hashes() {
+        let mut build = supported_client_build();
+        build.marketing_version = "4.1.13".to_string();
+        build.build_version = "new-build".to_string();
+        build.executable_sha256 = "0".repeat(64);
+        build.code_directory_sha256 = "1".repeat(64);
+        build.architectures = vec!["arm64".to_string()];
+        let evidence = manifest(2, Some(build)).client_build_compatibility();
+        assert_eq!(
+            evidence.state,
+            ClientBuildCompatibilityState::SupportedCompatible
+        );
+        assert!(evidence.production_compatible);
+        assert!(evidence.mismatched_fields.is_empty());
+
+        let mut future = supported_client_build();
+        future.marketing_version = "5.0".to_string();
+        assert!(
+            manifest(2, Some(future))
+                .client_build_compatibility()
+                .production_compatible
+        );
+    }
+
+    #[test]
+    fn incompatible_version_identity_and_signature_are_independently_reported() {
         fn assert_drift(expected_field: &str, mutate: fn(&mut ClientBuildFingerprint)) {
             let mut build = supported_client_build();
             mutate(&mut build);
@@ -655,13 +674,13 @@ mod tests {
             assert_eq!(evidence.mismatched_fields, [expected_field]);
         }
         assert_drift("marketingVersion", |build| {
-            build.marketing_version = "4.1.13".to_string();
+            build.marketing_version = "4.0.99".to_string();
         });
         assert_drift("teamIdentifier", |build| {
             build.team_identifier = "DIFFERENT1".to_string();
         });
-        assert_drift("executableSHA256", |build| {
-            build.executable_sha256 = "0".repeat(64);
+        assert_drift("signatureValid", |build| {
+            build.signature_valid = false;
         });
     }
 

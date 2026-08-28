@@ -37,6 +37,25 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
              VALUES (10, 20, 30, 1, 1, 1700000000, 2, x'68656c6c6f', x'0102', 0);
              INSERT INTO Msg_29a6db07e8bbdb53f5d54cc3c309f3f1
              VALUES (11, 21, 31, 123456, 1, 1700000001, 2, x'00ff', NULL, 0);
+             CREATE TABLE FMessageTable(
+               user_name_ TEXT,
+               type_ INTEGER,
+               timestamp_ INTEGER,
+               encrypt_user_name_ TEXT,
+               content_ BLOB,
+               is_sender_ INTEGER,
+               ticket_ BLOB,
+               scene_ INTEGER,
+               fmessage_detail_buf_ BLOB,
+               remark_ TEXT,
+               label_ids_ BLOB
+             );
+             INSERT INTO FMessageTable
+             VALUES ('wxid_friend', 37, 1700000004, 'opaque-friend', x'6869', 0,
+                     x'0102', 17, x'0304', 'synthetic', x'0506');
+             INSERT INTO FMessageTable
+             VALUES ('wxid_friend_2', 65, 1700000005, '', x'68656c6c6f', 1,
+                     x'0708', 18, x'090a', NULL, NULL);
              CREATE TABLE MessageShadow(local_id INTEGER, opaque_payload BLOB);
              CREATE TABLE Preference(key TEXT, value BLOB);",
         )
@@ -109,8 +128,8 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
     .unwrap();
 
     assert!(report.integrity.row_equation_holds());
-    assert_eq!(report.integrity.source_row_count, 4);
-    assert_eq!(report.integrity.restored_row_count, 4);
+    assert_eq!(report.integrity.source_row_count, 6);
+    assert_eq!(report.integrity.restored_row_count, 6);
     assert_eq!(report.integrity.rejected_row_count, 0);
     assert_eq!(report.integrity.unknown_payload_count, 1);
     assert_eq!(report.integrity.semantic_gap_count, 1);
@@ -130,13 +149,48 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(lines.len(), 4);
-    assert_eq!(lines[0]["contentBase64"], json!("aGVsbG8="));
-    assert_eq!(lines[1]["contentBase64"], json!("AP8="));
+    assert_eq!(lines.len(), 6);
+    let first_ordinary = lines
+        .iter()
+        .find(|message| {
+            message["sourceTableName"] == "Msg_29a6db07e8bbdb53f5d54cc3c309f3f1"
+                && message["sourceRowId"] == 1
+        })
+        .unwrap();
+    let second_ordinary = lines
+        .iter()
+        .find(|message| {
+            message["sourceTableName"] == "Msg_29a6db07e8bbdb53f5d54cc3c309f3f1"
+                && message["sourceRowId"] == 2
+        })
+        .unwrap();
+    assert_eq!(first_ordinary["contentBase64"], json!("aGVsbG8="));
+    assert_eq!(second_ordinary["contentBase64"], json!("AP8="));
     assert_eq!(
-        lines[0]["rawColumns"]["packed_info_data"],
+        first_ordinary["rawColumns"]["packed_info_data"],
         json!({"storageClass": "blobBase64", "value": "AQI="})
     );
+    let friend_request = lines
+        .iter()
+        .find(|message| message["sourceTableName"] == "FMessageTable")
+        .unwrap();
+    assert_eq!(friend_request["rawType"], json!(37));
+    assert_eq!(friend_request["createdAtUnix"], json!(1700000004_i64));
+    assert_eq!(friend_request["contentBase64"], json!("aGk="));
+    assert_eq!(
+        friend_request["rawColumns"]["fmessage_detail_buf_"],
+        json!({"storageClass": "blobBase64", "value": "AwQ="})
+    );
+    assert_eq!(friend_request["semanticDecodeState"], "complete");
+    assert_eq!(
+        friend_request["typedPayload"]["value"]["FriendContactEvent"]["eventCode"],
+        json!(37)
+    );
+    assert!(lines.iter().any(|message| {
+        message["sourceTableName"] == "FMessageTable"
+            && message["rawType"] == 65
+            && message["semanticDecodeState"] == "complete"
+    }));
     let merged = lines
         .iter()
         .find(|message| message["subType"] == 19)
@@ -166,13 +220,13 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
     assert!(channel_projection.contains("thumbUrl"));
     let coverage: serde_json::Value =
         serde_json::from_slice(&fs::read(output.join("coverage.json")).unwrap()).unwrap();
-    assert_eq!(coverage["formatVersion"], json!(3));
+    assert_eq!(coverage["formatVersion"], json!(4));
     assert_eq!(
         coverage["schemaProfileFingerprint"].as_str().unwrap().len(),
         64
     );
     let all_tables = coverage["allTables"].as_array().unwrap();
-    assert_eq!(all_tables.len(), 4);
+    assert_eq!(all_tables.len(), 5);
     assert!(all_tables.iter().all(|table| {
         table["schemaFingerprint"]
             .as_str()
@@ -184,6 +238,9 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
     assert!(all_tables.iter().any(|table| {
         table["sourceTableName"] == "MessageShadow" && table["role"] == "unhandledMessageCandidate"
     }));
+    assert!(all_tables.iter().any(|table| {
+        table["sourceTableName"] == "FMessageTable" && table["role"] == "message"
+    }));
     assert!(all_tables
         .iter()
         .any(|table| { table["sourceTableName"] == "Preference" && table["role"] == "other" }));
@@ -194,7 +251,7 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
     assert!(audit.all_artifact_references_resolve);
     assert!(audit.all_resolved_relationships_resolve);
     assert!(audit.all_recorded_artifact_files_match);
-    assert_eq!(audit.message_count, 4);
+    assert_eq!(audit.message_count, 6);
     assert!(!audit.full_restoration_verified);
     assert!(audit.completion_evidence.row_accounting_complete);
     assert!(audit.completion_evidence.non_empty_message_corpus_observed);

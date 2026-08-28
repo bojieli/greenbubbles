@@ -1,11 +1,15 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use greenbubbles_restore::merge::merge_incremental_archive;
-use greenbubbles_restore::replica::bootstrap_replica;
+use greenbubbles_restore::replica::{bootstrap_replica, synchronize_replica};
+use greenbubbles_restore::tools::{
+    create_tool_policy, ConversationToolScope, LocalToolService, ToolCapability,
+    ToolDataDestination, ToolMessageField, ToolSourceDatabaseFreshness,
+};
 use greenbubbles_restore::{
     audit::audit_archive, ArtifactAvailability, ArtifactDecodeState, ArtifactKind, ArtifactRole,
     CachedSurfaceCompleteness, CachedSurfaceCoverage, CachedSurfaceTableCoverage,
@@ -14,9 +18,11 @@ use greenbubbles_restore::{
     ConversationMembershipRole, DirectionEvidence, EntityDecodeState, LocalProfileState,
     MessageArtifactReference, MessageDirection, MessageOrderingBasis, MessageRelationship,
     MessageRelationshipKind, RawSQLiteValue, RelationshipResolutionState, ReplicaKey,
-    RestorationArchiveScope, RestorationCompletion, RestorationCoverage, RestorationIntegrity,
-    RestorationReport, SemanticDecodeState, SnapshotAcquisitionEvidence, SnapshotAcquisitionMode,
-    SnapshotSourceSetInventory, TableCoverageRole, TableSchemaCoverage, TypedPayload,
+    RestorationArchiveScope, RestorationCompletion, RestorationCoverage,
+    RestorationDatabaseCoverage, RestorationIntegrity, RestorationReport,
+    RestorationUnavailableDatabase, SemanticDecodeState, SnapshotAcquisitionEvidence,
+    SnapshotAcquisitionMode, SnapshotSourceSetInventory, TableCoverageRole, TableSchemaCoverage,
+    TypedPayload,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -39,8 +45,22 @@ fn merges_selected_source_sets_reorders_globally_and_resolves_cross_shard_relati
     let output = private.join("merged");
     let key = ReplicaKey::from_bytes([0x44; 32]);
     let rejected_replica = private.join("fragment-replica.db");
-    assert!(bootstrap_replica(&fragment, &rejected_replica, &key).is_err());
+    let fragment_error = bootstrap_replica(&fragment, &rejected_replica, &key).unwrap_err();
+    assert!(fragment_error
+        .to_string()
+        .contains("archive scope is incrementalFragment"));
     assert!(!rejected_replica.exists());
+
+    let diagnostic = build_archive(&private, "diagnostic", true);
+    let mut diagnostic_report: RestorationReport = read_json(&diagnostic.join("report.json"));
+    diagnostic_report.archive_scope = RestorationArchiveScope::DiagnosticSubset;
+    overwrite_json(&diagnostic.join("report.json"), &diagnostic_report);
+    let diagnostic_replica = private.join("diagnostic-replica.db");
+    let diagnostic_error = bootstrap_replica(&diagnostic, &diagnostic_replica, &key).unwrap_err();
+    assert!(diagnostic_error
+        .to_string()
+        .contains("archive scope is diagnosticSubset"));
+    assert!(!diagnostic_replica.exists());
 
     let report = merge_incremental_archive(&previous, &fragment, &output).unwrap();
     assert_eq!(report.previous_source_fingerprint, PREVIOUS_FINGERPRINT);
@@ -113,7 +133,7 @@ fn merges_selected_source_sets_reorders_globally_and_resolves_cross_shard_relati
 
     let audit = audit_archive(&output).unwrap();
     assert_eq!(audit.format_version, 2);
-    assert_eq!(audit.archive_format_version, 4);
+    assert_eq!(audit.archive_format_version, 5);
     assert_eq!(audit.message_count, 2);
     assert_eq!(audit.cached_moment_count, 2);
     assert!(audit.all_recorded_artifact_files_match);
@@ -173,6 +193,133 @@ fn rejects_a_fragment_with_the_wrong_authoritative_baseline() {
     assert!(!output.exists());
 }
 
+#[test]
+fn unavailable_incremental_database_preserves_prior_records_and_still_synchronizes() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let previous = build_archive(&private, "previous-partial", false);
+    let fragment = build_archive(&private, "fragment-partial", true);
+    let mut fragment_report: RestorationReport = read_json(&fragment.join("report.json"));
+    fragment_report
+        .acquisition
+        .as_mut()
+        .unwrap()
+        .changed_source_set_ids = vec!["set-a".to_string(), "set-b".to_string()];
+    fragment_report.database_coverage = Some(RestorationDatabaseCoverage {
+        format_version: 1,
+        total_database_count: 2,
+        attempted_database_count: 2,
+        restored_database_count: 1,
+        unavailable_database_count: 1,
+        preserved_stale_database_count: 0,
+        authoritative_database_coverage: false,
+        snapshot_source_set_ids: vec!["set-a".to_string(), "set-b".to_string()],
+        attempted_source_set_ids: vec!["set-a".to_string(), "set-b".to_string()],
+        fresh_source_set_ids: vec!["set-a".to_string()],
+        unavailable_source_set_ids: vec!["set-b".to_string()],
+        preserved_stale_source_set_ids: Vec::new(),
+        unavailable_databases: vec![RestorationUnavailableDatabase {
+            source_set_id: "set-b".to_string(),
+            logical_path: "message/set-b.db".to_string(),
+            storage_family: "wcdbSqlcipher4".to_string(),
+            database_byte_count: 4096,
+            write_ahead_log_byte_count: 0,
+            reason: "noExportedKeyAuthenticated".to_string(),
+        }],
+    });
+    overwrite_json(&fragment.join("report.json"), &fragment_report);
+    let output = private.join("merged-partial");
+    merge_incremental_archive(&previous, &fragment, &output).unwrap();
+    let report: RestorationReport = read_json(&output.join("report.json"));
+    assert_eq!(
+        report.archive_scope,
+        RestorationArchiveScope::PartialDatabaseCoverage
+    );
+    let database_coverage = report.database_coverage.as_ref().unwrap();
+    assert_eq!(database_coverage.fresh_source_set_ids, ["set-a"]);
+    assert_eq!(database_coverage.unavailable_source_set_ids, ["set-b"]);
+    assert_eq!(database_coverage.preserved_stale_source_set_ids, ["set-b"]);
+    assert_eq!(
+        database_coverage.unavailable_databases[0].reason,
+        "noExportedKeyAuthenticated"
+    );
+    assert!(report.replica_mutation_eligible());
+    let messages = read_ndjson::<CanonicalMessage>(&output.join("messages.ndjson"));
+    assert!(messages
+        .iter()
+        .any(|message| message.canonical_id == "message-new-a"));
+    assert!(messages
+        .iter()
+        .any(|message| message.canonical_id == "message-b"));
+    let audit = audit_archive(&output).unwrap();
+    assert!(!audit.authoritative_database_coverage);
+    assert_eq!(audit.unavailable_database_count, 1);
+    assert_eq!(audit.preserved_stale_database_count, 1);
+
+    let key = ReplicaKey::from_bytes([0x45; 32]);
+    let replica = private.join("partial-replica.db");
+    let bootstrapped = bootstrap_replica(&output, &replica, &key).unwrap();
+    assert!(!bootstrapped.authoritative_database_coverage);
+    assert_eq!(bootstrapped.unavailable_database_count, 1);
+    assert_eq!(bootstrapped.preserved_stale_database_count, 1);
+    let synchronized = synchronize_replica(&output, &replica, &key).unwrap();
+    assert_eq!(synchronized.message_count, 2);
+    assert!(synchronized.idempotent);
+    assert!(!synchronized.authoritative_database_coverage);
+    assert_eq!(synchronized.unavailable_database_count, 1);
+
+    let conversation_id = scoped_id(ACCOUNT, b"conversation");
+    let policy = private.join("partial-policy.json");
+    create_tool_policy(
+        &output,
+        &policy,
+        BTreeMap::from([(
+            conversation_id.clone(),
+            ConversationToolScope {
+                capabilities: BTreeSet::from([ToolCapability::ReadRecentMessages]),
+                message_fields: BTreeSet::from([ToolMessageField::Content]),
+                not_before_unix: None,
+                not_after_unix: None,
+                allow_remote_model: false,
+            },
+        )]),
+        10,
+        4_096,
+        4_096,
+    )
+    .unwrap();
+    let service = LocalToolService::open(
+        &output,
+        &policy,
+        &private.join("partial-tool-audit.ndjson"),
+        "partial-test",
+    )
+    .unwrap();
+    let minimized = service
+        .read_recent_messages(&conversation_id, 10, ToolDataDestination::LocalModel)
+        .unwrap()
+        .messages;
+    assert_eq!(minimized.len(), 2);
+    assert_eq!(
+        minimized
+            .iter()
+            .find(|message| message.canonical_id == "message-new-a")
+            .unwrap()
+            .source_database_freshness,
+        ToolSourceDatabaseFreshness::Fresh
+    );
+    assert_eq!(
+        minimized
+            .iter()
+            .find(|message| message.canonical_id == "message-b")
+            .unwrap()
+            .source_database_freshness,
+        ToolSourceDatabaseFreshness::PreservedStale
+    );
+}
+
 fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
     let archive = parent.join(name);
     fs::create_dir(&archive).unwrap();
@@ -205,8 +352,10 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
         cached_moment_count: cached_moments.len() as u64,
         ..Default::default()
     };
+    let mut completion = RestorationCompletion::evaluate(&integrity);
+    completion.full_restoration_achieved = false;
     let report = RestorationReport {
-        format_version: 4,
+        format_version: 5,
         account_id: ACCOUNT.to_string(),
         source_fingerprint: source_fingerprint.to_string(),
         client_build_compatibility: Default::default(),
@@ -216,18 +365,24 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
         } else {
             RestorationArchiveScope::Authoritative
         },
+        database_coverage: Some(database_coverage(fragment)),
         media_phase: Default::default(),
-        messages_path: "private".to_string(),
-        rejections_path: "private".to_string(),
-        artifacts_path: "private".to_string(),
-        conversations_path: "private".to_string(),
-        participants_path: "private".to_string(),
-        cached_moments_path: Some("private".to_string()),
-        cached_moment_interactions_path: Some("private".to_string()),
-        cached_surfaces_path: Some("private".to_string()),
-        coverage_path: "private".to_string(),
-        report_path: "private".to_string(),
-        completion: RestorationCompletion::evaluate(&integrity),
+        messages_path: archive.join("messages.ndjson").display().to_string(),
+        rejections_path: archive.join("rejections.ndjson").display().to_string(),
+        artifacts_path: archive.join("artifacts.ndjson").display().to_string(),
+        conversations_path: archive.join("conversations.ndjson").display().to_string(),
+        participants_path: archive.join("participants.ndjson").display().to_string(),
+        cached_moments_path: Some(archive.join("cached-moments.ndjson").display().to_string()),
+        cached_moment_interactions_path: Some(
+            archive
+                .join("cached-moment-interactions.ndjson")
+                .display()
+                .to_string(),
+        ),
+        cached_surfaces_path: Some(archive.join("cached-surfaces.json").display().to_string()),
+        coverage_path: archive.join("coverage.json").display().to_string(),
+        report_path: archive.join("report.json").display().to_string(),
+        completion,
         integrity,
     };
     let source_sets = if fragment {
@@ -257,6 +412,7 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
             source_table_id: table.source_table_id.clone(),
             source_table_name: table.source_table_name.clone(),
             columns: table.columns.clone(),
+            source_row_count: Some(table.source_row_count),
             schema_fingerprint: table.schema_fingerprint.clone(),
             role: TableCoverageRole::Message,
             classification_reason: "synthetic".to_string(),
@@ -272,6 +428,7 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
             "user_name".to_string(),
             "content".to_string(),
         ],
+        source_row_count: None,
         schema_fingerprint: Some(hex::encode(sha2::Sha256::digest(format!(
             "sns-schema-{source_set}"
         )))),
@@ -284,6 +441,7 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
         source_table_id: opaque_id(b"VoiceInfo"),
         source_table_name: "VoiceInfo".to_string(),
         columns: vec!["voice_data".to_string()],
+        source_row_count: None,
         schema_fingerprint: Some(hex::encode(sha2::Sha256::digest("voice-schema"))),
         role: TableCoverageRole::KnownAuxiliary,
         classification_reason: "synthetic voice payload table".to_string(),
@@ -411,6 +569,31 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
     write_json(&archive.join("cached-surfaces.json"), &cached_coverage);
     write_ndjson::<greenbubbles_restore::RejectedRow>(&archive.join("rejections.ndjson"), &[]);
     archive
+}
+
+fn database_coverage(fragment: bool) -> RestorationDatabaseCoverage {
+    let snapshot = vec!["set-a".to_string(), "set-b".to_string()];
+    let attempted = if fragment {
+        vec!["set-a".to_string()]
+    } else {
+        snapshot.clone()
+    };
+    let fresh = attempted.clone();
+    RestorationDatabaseCoverage {
+        format_version: 1,
+        total_database_count: snapshot.len(),
+        attempted_database_count: attempted.len(),
+        restored_database_count: fresh.len(),
+        unavailable_database_count: 0,
+        preserved_stale_database_count: 0,
+        authoritative_database_coverage: !fragment,
+        snapshot_source_set_ids: snapshot,
+        attempted_source_set_ids: attempted,
+        fresh_source_set_ids: fresh,
+        unavailable_source_set_ids: Vec::new(),
+        preserved_stale_source_set_ids: Vec::new(),
+        unavailable_databases: Vec::new(),
+    }
 }
 
 fn acquisition() -> SnapshotAcquisitionEvidence {

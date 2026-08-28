@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::sync::Mutex;
 
 use greenbubbles_restore::tools::{
     create_tool_policy_with_cached_moments, CachedMomentField, CachedMomentsToolScope,
 };
 use greenbubbles_restore::{
-    audit::audit_archive,
+    audit::{audit_archive, audit_archive_with_progress},
     connector::{
         ConnectorDestination, ConnectorOperation, ConnectorRequest, ConnectorResult,
         ConnectorService, CONNECTOR_API_VERSION,
@@ -17,8 +18,9 @@ use greenbubbles_restore::{
         search_replica_cached_moments, synchronize_replica, ReplicaCachedMomentFilter,
         ReplicaCachedSurfaceAvailability,
     },
-    restore_catalog, CanonicalCachedMoment, ReplicaKey, RestorationOptions, RestorationReport,
-    SemanticDecodeState, SnapshotEntry, SnapshotFileRole, SnapshotManifest,
+    restore_catalog, CanonicalCachedMoment, ProgressEvent, ProgressObserver, ProgressPhase,
+    ProgressState, ReplicaKey, RestorationOptions, RestorationReport, SemanticDecodeState,
+    SnapshotEntry, SnapshotFileRole, SnapshotManifest,
 };
 use rusqlite::Connection;
 use serde_json::json;
@@ -176,10 +178,17 @@ fn restores_cached_moments_and_interactions_without_claiming_cache_completeness(
         );
     }
 
-    let archive_audit = audit_archive(&output).unwrap();
+    let audit_progress = CapturingProgress::default();
+    let archive_audit = audit_archive_with_progress(&output, &audit_progress).unwrap();
     assert_eq!(archive_audit.cached_moment_count, 2);
     assert_eq!(archive_audit.cached_moment_interaction_count, 2);
     assert!(archive_audit.report_matches_archive);
+    assert!(audit_progress.events.lock().unwrap().iter().any(|event| {
+        event.phase == ProgressPhase::ArchiveAudit
+            && event.state == ProgressState::Completed
+            && event.operation == "auditArchive"
+            && event.restored_record_count == Some(4)
+    }));
 
     let mut identity_tampered = moments.clone();
     identity_tampered[0]["canonicalId"] = json!("substituted-cached-identity");
@@ -433,6 +442,17 @@ fn restores_cached_moments_and_interactions_without_claiming_cache_completeness(
         &key,
     )
     .is_err());
+}
+
+#[derive(Default)]
+struct CapturingProgress {
+    events: Mutex<Vec<ProgressEvent>>,
+}
+
+impl ProgressObserver for CapturingProgress {
+    fn observe(&self, event: ProgressEvent) {
+        self.events.lock().unwrap().push(event);
+    }
 }
 
 fn connector_request(

@@ -65,6 +65,7 @@ pub struct ReplicaHandoffReceipt {
     pub generation: u64,
     pub handoff_written: bool,
     pub authoritative_archive_required: bool,
+    pub replica_eligible_archive_required: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,11 +337,12 @@ fn publish_replica_handoff_locked(
         });
     write_publication_history(handoff_path, &publication_history)?;
     Ok(ReplicaHandoffReceipt {
-        format_version: 1,
+        format_version: 2,
         privacy_safe_summary: true,
         generation,
         handoff_written: true,
-        authoritative_archive_required: true,
+        authoritative_archive_required: false,
+        replica_eligible_archive_required: true,
     })
 }
 
@@ -677,7 +679,7 @@ pub fn follow_replica_once(
     } else if prior_state.is_none() {
         if !replica_matches_authoritative_archive(&archive_directory, replica_path, key)? {
             return Err(RestoreError::Integrity(
-                "existing replica cannot be adopted without an exact authoritative archive"
+                "existing replica cannot be adopted without an exact replica-eligible archive"
                     .to_string(),
             ));
         }
@@ -1348,10 +1350,10 @@ fn require_authoritative_handoff_report(
 ) -> Result<(), RestoreError> {
     if report.account_id.is_empty()
         || report.source_fingerprint.is_empty()
-        || report.archive_scope != crate::RestorationArchiveScope::Authoritative
+        || !report.replica_mutation_eligible()
     {
         return Err(RestoreError::Integrity(
-            "replica handoff requires an authoritative restoration archive".to_string(),
+            "replica handoff requires a replica-eligible restoration archive".to_string(),
         ));
     }
     Ok(())
@@ -1818,6 +1820,7 @@ mod tests {
             client_build_compatibility: Default::default(),
             acquisition: None,
             archive_scope: RestorationArchiveScope::Authoritative,
+            database_coverage: None,
             media_phase: RestorationMediaPhase::Resolved,
             messages_path: "unused".to_string(),
             rejections_path: "unused".to_string(),

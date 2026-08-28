@@ -103,6 +103,7 @@ pub struct ToolAuthorizationPolicy {
 #[serde(rename_all = "camelCase")]
 pub struct MinimizedCachedMoment {
     pub canonical_id: String,
+    pub source_database_freshness: ToolSourceDatabaseFreshness,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -160,6 +161,7 @@ pub struct ToolRelationshipReference {
 pub struct MinimizedMessage {
     pub canonical_id: String,
     pub conversation_id: String,
+    pub source_database_freshness: ToolSourceDatabaseFreshness,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sender_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -181,6 +183,36 @@ pub struct MinimizedMessage {
     pub artifact_references: Vec<ToolArtifactReference>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relationships: Vec<ToolRelationshipReference>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ToolSourceDatabaseFreshness {
+    Fresh,
+    PreservedStale,
+    Mixed,
+    Derived,
+}
+
+pub(crate) fn entity_source_database_freshness(
+    source_set_ids: impl Iterator<Item = String>,
+    preserved_stale_source_set_ids: &BTreeSet<String>,
+) -> ToolSourceDatabaseFreshness {
+    let mut fresh = false;
+    let mut stale = false;
+    for source_set_id in source_set_ids {
+        if preserved_stale_source_set_ids.contains(&source_set_id) {
+            stale = true;
+        } else {
+            fresh = true;
+        }
+    }
+    match (fresh, stale) {
+        (true, true) => ToolSourceDatabaseFreshness::Mixed,
+        (true, false) => ToolSourceDatabaseFreshness::Fresh,
+        (false, true) => ToolSourceDatabaseFreshness::PreservedStale,
+        (false, false) => ToolSourceDatabaseFreshness::Derived,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -321,6 +353,7 @@ pub struct LocalToolService {
     requester_id: String,
     policy: ToolAuthorizationPolicy,
     restoration_completion: RestorationCompletion,
+    preserved_stale_source_set_ids: BTreeSet<String>,
 }
 
 impl LocalToolService {
@@ -355,6 +388,15 @@ impl LocalToolService {
             requester_id: requester_id.to_string(),
             policy,
             restoration_completion: report.completion,
+            preserved_stale_source_set_ids: report
+                .database_coverage
+                .map(|coverage| {
+                    coverage
+                        .preserved_stale_source_set_ids
+                        .into_iter()
+                        .collect()
+                })
+                .unwrap_or_default(),
         })
     }
 
@@ -448,6 +490,7 @@ impl LocalToolService {
                 message,
                 self.policy.maximum_message_summary_bytes,
                 &scope.message_fields,
+                &self.preserved_stale_source_set_ids,
             ));
         }
         let messages = recent.into_iter().collect::<Vec<_>>();
@@ -554,6 +597,7 @@ impl LocalToolService {
                 message,
                 self.policy.maximum_message_summary_bytes,
                 &scope.message_fields,
+                &self.preserved_stale_source_set_ids,
             );
             if minimized
                 .payload_summary
@@ -823,6 +867,7 @@ pub(crate) fn minimize_message(
     message: CanonicalMessage,
     maximum_summary_bytes: usize,
     fields: &BTreeSet<ToolMessageField>,
+    preserved_stale_source_set_ids: &BTreeSet<String>,
 ) -> MinimizedMessage {
     let (payload_kind, payload_summary, payload_summary_truncated) =
         if fields.contains(&ToolMessageField::Content) {
@@ -835,6 +880,13 @@ pub(crate) fn minimize_message(
     MinimizedMessage {
         canonical_id: message.canonical_id,
         conversation_id: message.conversation_id,
+        source_database_freshness: if preserved_stale_source_set_ids
+            .contains(&message.source_set_id)
+        {
+            ToolSourceDatabaseFreshness::PreservedStale
+        } else {
+            ToolSourceDatabaseFreshness::Fresh
+        },
         sender_id: fields
             .contains(&ToolMessageField::Sender)
             .then_some(message.sender_id)
@@ -891,6 +943,7 @@ pub(crate) fn minimize_cached_moment(
     moment: CanonicalCachedMoment,
     maximum_text_bytes: usize,
     fields: &BTreeSet<CachedMomentField>,
+    preserved_stale_source_set_ids: &BTreeSet<String>,
 ) -> Result<MinimizedCachedMoment, RestoreError> {
     let mut remaining = maximum_text_bytes;
     let mut text_truncated = false;
@@ -928,6 +981,12 @@ pub(crate) fn minimize_cached_moment(
     )?;
     Ok(MinimizedCachedMoment {
         canonical_id: moment.canonical_id,
+        source_database_freshness: if preserved_stale_source_set_ids.contains(&moment.source_set_id)
+        {
+            ToolSourceDatabaseFreshness::PreservedStale
+        } else {
+            ToolSourceDatabaseFreshness::Fresh
+        },
         author_id: fields
             .contains(&CachedMomentField::Author)
             .then_some(moment.author_id)

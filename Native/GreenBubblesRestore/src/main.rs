@@ -1,24 +1,29 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::io::{self, Read, Write};
-use std::os::unix::fs::MetadataExt;
-use std::path::PathBuf;
-use std::time::Duration;
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufWriter, Read, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use greenbubbles_restore::{
     acquisition_audit::audit_acquisition_chain,
+    ai_context::{audit_ai_context, export_ai_context, load_ai_query_request, query_ai_context},
     archive::{create_conversation_policy, read_conversation_page},
-    audit::audit_archive,
+    audit::audit_archive_with_progress,
     benchmark::{run_synthetic_benchmark, SyntheticBenchmarkConfig},
     connector::{audit_connector_log, ConnectorDestination, ConnectorService},
+    diagnostic::{profile_archive_payloads_with_progress, profile_archive_schema_with_progress},
     follow::{
         follow_replica_once, publish_replica_handoff, quarantine_retired_replica_archives,
         replica_follower_status, restore_quarantined_replica_archive,
     },
     latency::{compose_latency_evidence_sample, summarize_latency_evidence_samples},
     merge::merge_incremental_archive,
-    operator::{restore_snapshot_and_publish, OfflineRestorePublishOptions},
-    preflight_snapshot, prepare_catalog,
+    operator::{restore_snapshot_and_publish_with_progress, OfflineRestorePublishOptions},
+    preflight_snapshot_with_progress, prepare_available_catalog_with_progress,
+    prepare_catalog_batch_with_progress, prepare_catalog_with_progress,
     reconcile::reconcile_archives,
     replica::{
         audit_replica, audit_replica_backup, bootstrap_replica, get_replica_changes,
@@ -26,14 +31,15 @@ use greenbubbles_restore::{
         prepare_replica_recovery, replica_coverage, replica_status, search_replica_cached_moments,
         search_replica_messages, synchronize_replica, ReplicaCachedMomentFilter,
     },
-    restore_catalog,
+    restore_catalog_with_progress,
     tools::{
         create_tool_policy_with_cached_moments, CachedMomentField, CachedMomentsToolScope,
         ConversationToolScope, LocalToolService, ToolCapability, ToolDataDestination,
         ToolMessageField,
     },
     transport::{load_connector_request, run_mcp_adapter, send_unix_request, serve_unix},
-    DatabasePassphrase, ReplicaKey, RestorationOptions,
+    DatabaseKeySet, DatabasePassphrase, DatabaseUnlockMaterial, ProgressEvent, ProgressObserver,
+    ProgressPhase, ProgressState, ProgressUnit, ReplicaKey, RestorationOptions,
 };
 use zeroize::Zeroizing;
 
@@ -66,13 +72,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         "probe" => {
             let snapshot = required_path(arguments.next(), "snapshot directory")?;
-            let use_passphrase = arguments.any(|value| value == "--passphrase-stdin");
-            let passphrase = if use_passphrase {
-                Some(DatabasePassphrase::read_stdin()?)
-            } else {
-                None
-            };
-            let catalog = prepare_catalog(&snapshot, passphrase.as_ref())?;
+            let remaining = arguments.collect::<Vec<_>>();
+            let unlock = load_database_unlock(&remaining)?;
+            let reporter = ProgressReporter::from_arguments(
+                &remaining,
+                ProgressWorkflow::Probe,
+                unlock.validates_exported_keys(),
+            )?;
+            let catalog = prepare_catalog_with_progress(&snapshot, unlock.material(), &reporter)?;
             let report = serde_json::json!({
                 "snapshotId": catalog.manifest.snapshot_id,
                 "clientBuildCompatibility": catalog.manifest.client_build_compatibility(),
@@ -84,44 +91,253 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         "preflight" => {
             let snapshot = required_path(arguments.next(), "snapshot directory")?;
-            let report = preflight_snapshot(&snapshot)?;
+            let remaining = arguments.collect::<Vec<_>>();
+            let reporter =
+                ProgressReporter::from_arguments(&remaining, ProgressWorkflow::Preflight, false)?;
+            let report = preflight_snapshot_with_progress(&snapshot, &reporter)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "restore" => {
             let snapshot = required_path(arguments.next(), "snapshot directory")?;
             let output = required_path(arguments.next(), "output directory")?;
             let remaining = arguments.collect::<Vec<_>>();
-            let use_passphrase = remaining.iter().any(|value| value == "--passphrase-stdin");
             let account_root = option_path(&remaining, "--account-root")?;
             let defer_media = remaining.iter().any(|value| value == "--defer-media");
-            let passphrase = if use_passphrase {
-                Some(DatabasePassphrase::read_stdin()?)
-            } else {
-                None
-            };
-            let catalog = prepare_catalog(&snapshot, passphrase.as_ref())?;
-            let report = restore_catalog(
+            let unlock = load_database_unlock(&remaining)?;
+            let reporter = ProgressReporter::from_arguments(
+                &remaining,
+                ProgressWorkflow::Restore,
+                unlock.validates_exported_keys(),
+            )?;
+            let catalog = prepare_catalog_with_progress(&snapshot, unlock.material(), &reporter)?;
+            let report = restore_catalog_with_progress(
                 &catalog,
                 &RestorationOptions {
                     output_directory: output,
                     account_root,
                     defer_media,
                 },
+                &reporter,
             )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        "diagnose-batch" => {
+            let snapshot = required_path(arguments.next(), "snapshot directory")?;
+            let output = required_path(arguments.next(), "diagnostic output directory")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            let offset = option_usize(&remaining, "--database-offset")?.unwrap_or(0);
+            let limit = option_usize(&remaining, "--database-limit")?.unwrap_or(1);
+            let unlock = load_database_unlock(&remaining)?;
+            let reporter = ProgressReporter::from_arguments(
+                &remaining,
+                ProgressWorkflow::RestoreAndAudit,
+                unlock.validates_exported_keys(),
+            )?;
+            let catalog = prepare_catalog_batch_with_progress(
+                &snapshot,
+                unlock.material(),
+                offset,
+                limit,
+                &reporter,
+            )?;
+            let batch = catalog
+                .diagnostic_batch
+                .ok_or("diagnostic catalog lost its batch boundary")?;
+            let report = restore_catalog_with_progress(
+                &catalog,
+                &RestorationOptions {
+                    output_directory: output.clone(),
+                    account_root: option_path(&remaining, "--account-root")?,
+                    defer_media: !remaining.iter().any(|value| value == "--resolve-media"),
+                },
+                &reporter,
+            )?;
+            let audit_progress = PhaseRangeProgress::new(&reporter, 0, 800_000);
+            let audit = audit_archive_with_progress(&output, &audit_progress)?;
+            let profile_progress = PhaseRangeProgress::new(&reporter, 800_000, 1_000_000);
+            let payload_profiles =
+                profile_archive_payloads_with_progress(&output, &profile_progress)?;
+            let summary = serde_json::json!({
+                "formatVersion": 3,
+                "privacySafeSummary": true,
+                "archiveScope": report.archive_scope,
+                "databaseOffset": batch.offset,
+                "databaseLimit": batch.limit,
+                "totalDatabaseCount": batch.total_database_count,
+                "selectedDatabaseCount": catalog.databases.len(),
+                "selectedDatabaseBytes": catalog.databases.iter().map(|database| database.database_byte_count).sum::<u64>(),
+                "selectedWriteAheadLogBytes": catalog.databases.iter().map(|database| database.write_ahead_log_byte_count).sum::<u64>(),
+                "sourceRowCount": report.integrity.source_row_count,
+                "messageSourceRowCount": report.integrity.source_row_count,
+                "observedTableRowCount": report.integrity.observed_table_row_count,
+                "restoredRowCount": report.integrity.restored_row_count,
+                "totalRestoredRecordCount": report.integrity.restored_row_count
+                    .saturating_add(report.integrity.cached_moment_count)
+                    .saturating_add(report.integrity.cached_moment_interaction_count),
+                "cachedMomentCount": report.integrity.cached_moment_count,
+                "cachedMomentInteractionCount": report.integrity.cached_moment_interaction_count,
+                "cachedSurfaceSemanticGapCount": report.integrity.cached_surface_semantic_gap_count,
+                "rejectedRowCount": report.integrity.rejected_row_count,
+                "messageTableCount": report.integrity.message_table_count,
+                "messageCandidateGapCount": report.integrity.message_candidate_gap_count,
+                "tableRoleCounts": report.integrity.table_role_counts,
+                "tableClassificationReasonCounts": report.integrity.table_classification_reason_counts,
+                "semanticGapCount": report.integrity.semantic_gap_count,
+                "unknownPayloadCount": report.integrity.unknown_payload_count,
+                "logicalTypeCounts": report.integrity.logical_type_counts,
+                "logicalSubTypeCounts": report.integrity.logical_sub_type_counts,
+                "payloadProfiles": payload_profiles,
+                "semanticGapReasonCounts": report.integrity.semantic_gap_reason_counts,
+                "conversationCount": report.integrity.conversation_count,
+                "participantCount": report.integrity.participant_count,
+                "rowEquationHolds": report.completion.row_equation_holds,
+                "zeroRejectedRows": report.completion.zero_rejected_rows,
+                "semanticMessageCoverageComplete": report.completion.semantic_message_coverage_complete,
+                "auditReportMatchesArchive": audit.report_matches_archive,
+                "auditMessageCount": audit.message_count,
+                "auditCachedMomentCount": audit.cached_moment_count,
+                "auditCachedMomentInteractionCount": audit.cached_moment_interaction_count,
+                "auditRestoredRecordCount": audit.restored_record_count(),
+                "auditRejectionCount": audit.rejection_count,
+                "clientBuildProductionCompatible": audit.client_build_production_compatible
+            });
+            emit_json_result(&summary, &remaining)?;
+        }
+        "diagnose-available" => {
+            let snapshot = required_path(arguments.next(), "snapshot directory")?;
+            let output = required_path(arguments.next(), "diagnostic output directory")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            let unlock = load_database_unlock(&remaining)?;
+            let keys = unlock.exported_keys().ok_or(
+                "diagnose-available requires --database-keys-file and does not acquire keys",
+            )?;
+            let reporter = ProgressReporter::from_arguments(
+                &remaining,
+                ProgressWorkflow::RestoreAndAudit,
+                true,
+            )?;
+            let catalog = prepare_available_catalog_with_progress(&snapshot, keys, &reporter)?;
+            let selection = catalog
+                .available_database_selection
+                .as_ref()
+                .ok_or("available catalog lost its explicit selection evidence")?;
+            let report = restore_catalog_with_progress(
+                &catalog,
+                &RestorationOptions {
+                    output_directory: output.clone(),
+                    account_root: option_path(&remaining, "--account-root")?,
+                    defer_media: !remaining.iter().any(|value| value == "--resolve-media"),
+                },
+                &reporter,
+            )?;
+            let audit_progress = PhaseRangeProgress::new(&reporter, 0, 800_000);
+            let audit = audit_archive_with_progress(&output, &audit_progress)?;
+            let profile_progress = PhaseRangeProgress::new(&reporter, 800_000, 1_000_000);
+            let payload_profiles =
+                profile_archive_payloads_with_progress(&output, &profile_progress)?;
+            let summary = serde_json::json!({
+                "formatVersion": 1,
+                "privacySafeSummary": true,
+                "archiveScope": report.archive_scope,
+                "authoritativeDatabaseCoverage": false,
+                "availableDatabaseSelection": selection,
+                "selectedDatabaseCount": catalog.databases.len(),
+                "selectedDatabaseBytes": selection.selected_database_byte_count,
+                "selectedWriteAheadLogBytes": selection.selected_write_ahead_log_byte_count,
+                "sourceRowCount": report.integrity.source_row_count,
+                "messageSourceRowCount": report.integrity.source_row_count,
+                "observedTableRowCount": report.integrity.observed_table_row_count,
+                "restoredRowCount": report.integrity.restored_row_count,
+                "totalRestoredRecordCount": report.integrity.restored_row_count
+                    .saturating_add(report.integrity.cached_moment_count)
+                    .saturating_add(report.integrity.cached_moment_interaction_count),
+                "cachedMomentCount": report.integrity.cached_moment_count,
+                "cachedMomentInteractionCount": report.integrity.cached_moment_interaction_count,
+                "cachedSurfaceSemanticGapCount": report.integrity.cached_surface_semantic_gap_count,
+                "rejectedRowCount": report.integrity.rejected_row_count,
+                "messageTableCount": report.integrity.message_table_count,
+                "messageCandidateGapCount": report.integrity.message_candidate_gap_count,
+                "tableRoleCounts": report.integrity.table_role_counts,
+                "tableClassificationReasonCounts": report.integrity.table_classification_reason_counts,
+                "semanticGapCount": report.integrity.semantic_gap_count,
+                "unknownPayloadCount": report.integrity.unknown_payload_count,
+                "logicalTypeCounts": report.integrity.logical_type_counts,
+                "logicalSubTypeCounts": report.integrity.logical_sub_type_counts,
+                "payloadProfiles": payload_profiles,
+                "semanticGapReasonCounts": report.integrity.semantic_gap_reason_counts,
+                "conversationCount": report.integrity.conversation_count,
+                "participantCount": report.integrity.participant_count,
+                "rowEquationHolds": report.completion.row_equation_holds,
+                "zeroRejectedRows": report.completion.zero_rejected_rows,
+                "semanticMessageCoverageComplete": report.completion.semantic_message_coverage_complete,
+                "auditReportMatchesArchive": audit.report_matches_archive,
+                "auditMessageCount": audit.message_count,
+                "auditCachedMomentCount": audit.cached_moment_count,
+                "auditCachedMomentInteractionCount": audit.cached_moment_interaction_count,
+                "auditRestoredRecordCount": audit.restored_record_count(),
+                "auditRejectionCount": audit.rejection_count,
+                "clientBuildProductionCompatible": audit.client_build_production_compatible
+            });
+            emit_json_result(&summary, &remaining)?;
+        }
+        "diagnose-archive-payloads" => {
+            let archive = required_path(arguments.next(), "archive directory")?;
+            let report_path = required_path(arguments.next(), "private diagnostic report")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            let reporter =
+                ProgressReporter::from_arguments(&remaining, ProgressWorkflow::Audit, false)?;
+            let report = profile_archive_payloads_with_progress(&archive, &reporter)?;
+            write_owner_only_json(&report_path, &report)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "formatVersion": 1,
+                    "privacySafe": true,
+                    "reportPath": report_path,
+                    "messageCount": report.message_count,
+                    "relationshipReferenceCount": report.relationship_reference_count,
+                    "relationshipIdentifierPresentCount": report.relationship_identifier_present_count,
+                    "relationshipIdentifierRecoverableFromDecodedXmlCount": report.relationship_identifier_recoverable_from_decoded_xml_count,
+                    "relationshipIdentifierMissingFromDecodedXmlCount": report.relationship_identifier_missing_from_decoded_xml_count,
+                    "relationshipDecodedXmlUnavailableCount": report.relationship_decoded_xml_unavailable_count,
+                    "adapterTypeProfileCount": report.adapter_type_profiles.len()
+                }))?
+            );
+        }
+        "diagnose-archive-schema" => {
+            let archive = required_path(arguments.next(), "archive directory")?;
+            let report_path = required_path(arguments.next(), "private diagnostic report")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            let reporter =
+                ProgressReporter::from_arguments(&remaining, ProgressWorkflow::Audit, false)?;
+            let report = profile_archive_schema_with_progress(&archive, &reporter)?;
+            write_owner_only_json(&report_path, &report)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "formatVersion": 1,
+                    "privacySafe": true,
+                    "reportPath": report_path,
+                    "tableCount": report.table_count,
+                    "sourceRowCount": report.source_row_count,
+                    "otherTableCount": report.other_table_count,
+                    "otherSourceRowCount": report.other_source_row_count,
+                    "otherFamilyCount": report.other_families.len()
+                }))?
+            );
+        }
         "restore-publish" => {
             let snapshot = required_path(arguments.next(), "snapshot directory")?;
-            let output = required_path(arguments.next(), "authoritative output directory")?;
+            let output = required_path(arguments.next(), "publication output directory")?;
             let handoff = required_path(arguments.next(), "replica handoff path")?;
             let remaining = arguments.collect::<Vec<_>>();
-            let use_passphrase = remaining.iter().any(|value| value == "--passphrase-stdin");
-            let passphrase = if use_passphrase {
-                Some(DatabasePassphrase::read_stdin()?)
-            } else {
-                None
-            };
-            let report = restore_snapshot_and_publish(
+            let unlock = load_database_unlock(&remaining)?;
+            let reporter = ProgressReporter::from_arguments(
+                &remaining,
+                ProgressWorkflow::RestoreAndAudit,
+                unlock.validates_exported_keys(),
+            )?;
+            let report = restore_snapshot_and_publish_with_progress(
                 &snapshot,
                 &OfflineRestorePublishOptions {
                     output_archive: output,
@@ -131,14 +347,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     account_root: option_path(&remaining, "--account-root")?,
                     defer_media: remaining.iter().any(|value| value == "--defer-media"),
                 },
-                passphrase.as_ref(),
+                unlock.material(),
+                &reporter,
             )?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "audit-archive" => {
             let archive = required_path(arguments.next(), "archive directory")?;
-            let report = audit_archive(&archive)?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            let remaining = arguments.collect::<Vec<_>>();
+            let reporter =
+                ProgressReporter::from_arguments(&remaining, ProgressWorkflow::Audit, false)?;
+            let report = audit_archive_with_progress(&archive, &reporter)?;
+            emit_json_result(&report, &remaining)?;
         }
         "audit-acquisition-chain" => {
             let previous = required_path(arguments.next(), "previous snapshot directory")?;
@@ -271,7 +491,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "replica-publish" => {
-            let archive = required_path(arguments.next(), "authoritative archive directory")?;
+            let archive = required_path(arguments.next(), "replica-eligible archive directory")?;
             let handoff = required_path(arguments.next(), "replica handoff path")?;
             let remaining = arguments.collect::<Vec<_>>();
             let generation = required_u64_option(&remaining, "--generation")?;
@@ -454,6 +674,52 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let report = replica_coverage(&replica, &key)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        "ai-query" => {
+            let replica = required_path(arguments.next(), "replica path")?;
+            let policy = required_path(arguments.next(), "tool policy path")?;
+            let audit = required_path(arguments.next(), "connector audit log")?;
+            let request_path = required_path(arguments.next(), "private AI query JSON path")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if !remaining.iter().any(|value| value == "--replica-key-stdin") {
+                return Err("replica keys must be supplied with --replica-key-stdin".into());
+            }
+            let request = load_ai_query_request(&request_path)?;
+            let key = ReplicaKey::read_stdin()?;
+            let response = query_ai_context(&replica, &key, &policy, &audit, request)?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        "ai-export" => {
+            let replica = required_path(arguments.next(), "replica path")?;
+            let policy = required_path(arguments.next(), "tool policy path")?;
+            let audit = required_path(arguments.next(), "connector audit log")?;
+            let output = required_path(arguments.next(), "AI context output directory")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if !remaining.iter().any(|value| value == "--replica-key-stdin") {
+                return Err("replica keys must be supplied with --replica-key-stdin".into());
+            }
+            let requester = required_option(&remaining, "--requester")?;
+            let destination =
+                parse_connector_destination(option_string(&remaining, "--destination")?)?;
+            let reporter =
+                ProgressReporter::from_arguments(&remaining, ProgressWorkflow::AiExport, false)?;
+            let key = ReplicaKey::read_stdin()?;
+            let manifest = export_ai_context(
+                &replica,
+                &key,
+                &policy,
+                &audit,
+                &output,
+                &requester,
+                destination,
+                &reporter,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
+        }
+        "audit-ai-context" => {
+            let bundle = required_path(arguments.next(), "AI context bundle directory")?;
+            let report = audit_ai_context(&bundle)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         "connector-serve" => {
             let replica = required_path(arguments.next(), "replica path")?;
             let policy = required_path(arguments.next(), "tool policy path")?;
@@ -620,11 +886,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 concat!(
                     "Usage:\n",
                     "  greenbubbles-restore synthetic-benchmark <private-work-directory> [--samples <n>] [--small-messages <n>] [--large-messages <n>] [--burst-messages <n>]\n",
-                    "  greenbubbles-restore preflight <snapshot>\n",
-                    "  greenbubbles-restore probe <snapshot> [--passphrase-stdin]\n",
-                    "  greenbubbles-restore restore <snapshot> <output> [--account-root <path>] [--defer-media] [--passphrase-stdin]\n",
-                    "  greenbubbles-restore restore-publish <snapshot> <authoritative-output> <handoff-file> [--previous-snapshot <path> --previous-archive <path>] [--account-root <path>] [--defer-media] [--passphrase-stdin]\n",
-                    "  greenbubbles-restore audit-archive <archive>\n",
+                    "  greenbubbles-restore preflight <snapshot> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles-restore probe <snapshot> [--passphrase-stdin | --database-keys-file <owner-only-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles-restore restore <snapshot> <output> [--account-root <path>] [--defer-media] [--passphrase-stdin | --database-keys-file <owner-only-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles-restore diagnose-batch <snapshot> <diagnostic-output> [--database-offset <n>] [--database-limit <n>] [--resolve-media --account-root <path>] [--passphrase-stdin | --database-keys-file <owner-only-json>] [--summary-file <private-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles-restore diagnose-available <snapshot> <diagnostic-output> --database-keys-file <owner-only-json> [--resolve-media --account-root <path>] [--summary-file <private-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles-restore diagnose-archive-payloads <archive> <private-report-json> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles-restore diagnose-archive-schema <archive> <private-report-json> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles-restore restore-publish <snapshot> <publication-output> <handoff-file> [--previous-snapshot <path> --previous-archive <path>] [--account-root <path>] [--defer-media] [--passphrase-stdin | --database-keys-file <owner-only-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles-restore audit-archive <archive> [--summary-file <private-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
                     "  greenbubbles-restore audit-acquisition-chain <previous-snapshot> <current-snapshot>\n",
                     "  greenbubbles-restore audit-connector-log <connector-audit-log>\n",
                     "  greenbubbles-restore audit-connector-state <replica-path> <policy-file> <connector-audit-log> <draft-directory> --replica-key-stdin\n",
@@ -638,7 +908,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore audit-replica-backup <pre-migration-backup-path> --replica-key-stdin\n",
                     "  greenbubbles-restore prepare-replica-recovery <pre-migration-backup-path> <new-candidate-path> --replica-key-stdin\n",
                     "  greenbubbles-restore replica-sync <archive> <replica-path> --replica-key-stdin\n",
-                    "  greenbubbles-restore replica-publish <authoritative-archive> <handoff-file> --generation <positive-integer>\n",
+                    "  greenbubbles-restore replica-publish <replica-eligible-archive> <handoff-file> --generation <positive-integer>\n",
                     "  greenbubbles-restore replica-archive-quarantine <handoff-file> <quarantine-directory> [--retain-publications <n, minimum 2>]\n",
                     "  greenbubbles-restore replica-archive-restore <handoff-file> <quarantine-directory> --generation <positive-integer>\n",
                     "  greenbubbles-restore compose-latency-evidence <private-snapshot-report> <private-offline-report> <private-follower-report> <private-handoff-file>\n",
@@ -652,6 +922,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore replica-message <replica-path> <canonical-id> --replica-key-stdin\n",
                     "  greenbubbles-restore replica-conversations <replica-path> --replica-key-stdin [--limit <n>]\n",
                     "  greenbubbles-restore replica-coverage <replica-path> --replica-key-stdin\n",
+                    "  greenbubbles-restore ai-query <replica-path> <policy-file> <connector-audit-log> <private-request-json> --replica-key-stdin\n",
+                    "  greenbubbles-restore ai-export <replica-path> <policy-file> <connector-audit-log> <new-output-directory> --replica-key-stdin --requester <id> [--destination local|remote] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles-restore audit-ai-context <AI-context-bundle-directory>\n",
                     "  greenbubbles-restore connector-serve <replica-path> <policy-file> <audit-log> <draft-directory> <socket-path> --replica-key-stdin\n",
                     "  greenbubbles-restore connector-call <socket-path> <private-request-json>\n",
                     "  greenbubbles-restore connector-mcp <socket-path> --requester <id> [--destination local|remote]\n",
@@ -665,6 +938,470 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+enum OwnedDatabaseUnlock {
+    None,
+    Passphrase(DatabasePassphrase),
+    ExportedKeys(DatabaseKeySet),
+}
+
+impl OwnedDatabaseUnlock {
+    fn material(&self) -> DatabaseUnlockMaterial<'_> {
+        match self {
+            Self::None => DatabaseUnlockMaterial::None,
+            Self::Passphrase(value) => DatabaseUnlockMaterial::Passphrase(value),
+            Self::ExportedKeys(value) => DatabaseUnlockMaterial::ExportedKeys(value),
+        }
+    }
+
+    fn validates_exported_keys(&self) -> bool {
+        matches!(self, Self::ExportedKeys(_))
+    }
+
+    fn exported_keys(&self) -> Option<&DatabaseKeySet> {
+        match self {
+            Self::ExportedKeys(value) => Some(value),
+            Self::None | Self::Passphrase(_) => None,
+        }
+    }
+}
+
+fn load_database_unlock(
+    arguments: &[String],
+) -> Result<OwnedDatabaseUnlock, Box<dyn std::error::Error>> {
+    let passphrase_stdin = arguments.iter().any(|value| value == "--passphrase-stdin");
+    let key_file = option_path(arguments, "--database-keys-file")?;
+    if passphrase_stdin && key_file.is_some() {
+        return Err(
+            "choose one database unlock source: --passphrase-stdin or --database-keys-file".into(),
+        );
+    }
+    if passphrase_stdin {
+        Ok(OwnedDatabaseUnlock::Passphrase(
+            DatabasePassphrase::read_stdin()?,
+        ))
+    } else if let Some(path) = key_file {
+        Ok(OwnedDatabaseUnlock::ExportedKeys(DatabaseKeySet::load(
+            &path,
+        )?))
+    } else {
+        Ok(OwnedDatabaseUnlock::None)
+    }
+}
+
+enum ProgressOutput {
+    Human,
+    Json,
+    Quiet,
+}
+
+#[derive(Clone, Copy)]
+enum ProgressWorkflow {
+    Preflight,
+    Probe,
+    Restore,
+    RestoreAndAudit,
+    Audit,
+    AiExport,
+}
+
+impl ProgressWorkflow {
+    fn phases(self, validates_exported_keys: bool) -> Vec<ProgressPhase> {
+        if matches!(self, Self::AiExport) {
+            return vec![ProgressPhase::ContextExport];
+        }
+        if matches!(self, Self::Preflight) {
+            return vec![ProgressPhase::SnapshotVerification];
+        }
+        if matches!(self, Self::Audit) {
+            return vec![ProgressPhase::ArchiveAudit];
+        }
+        let mut phases = vec![ProgressPhase::SnapshotVerification];
+        if validates_exported_keys {
+            phases.push(ProgressPhase::KeyValidation);
+        }
+        phases.push(ProgressPhase::DatabasePreparation);
+        if !matches!(self, Self::Probe) {
+            phases.extend([
+                ProgressPhase::RecordPlanning,
+                ProgressPhase::RecordRestoration,
+                ProgressPhase::ArchiveFinalization,
+            ]);
+        }
+        if matches!(self, Self::RestoreAndAudit) {
+            phases.push(ProgressPhase::ArchiveAudit);
+        }
+        phases
+    }
+}
+
+struct ProgressReporter {
+    output: ProgressOutput,
+    workflow_phases: Vec<ProgressPhase>,
+    progress_file: Option<Mutex<BufWriter<File>>>,
+    human_state: Mutex<HumanProgressState>,
+}
+
+#[derive(Default)]
+struct HumanProgressState {
+    last_emitted_at: Option<Instant>,
+    phase: Option<ProgressPhase>,
+    database_index: Option<usize>,
+}
+
+struct PhaseRangeProgress<'a> {
+    observer: &'a dyn ProgressObserver,
+    start: u64,
+    end: u64,
+}
+
+impl<'a> PhaseRangeProgress<'a> {
+    fn new(observer: &'a dyn ProgressObserver, start: u64, end: u64) -> Self {
+        debug_assert!(start <= end && end <= 1_000_000);
+        Self {
+            observer,
+            start,
+            end,
+        }
+    }
+}
+
+impl ProgressObserver for PhaseRangeProgress<'_> {
+    fn observe(&self, mut event: ProgressEvent) {
+        const RESOLUTION: u64 = 1_000_000;
+        let local = if event.phase_total > 0 {
+            (event.phase_completed.min(event.phase_total) as u128 * RESOLUTION as u128
+                / event.phase_total as u128) as u64
+        } else if event.state == ProgressState::Completed {
+            RESOLUTION
+        } else {
+            0
+        };
+        let span = self.end.saturating_sub(self.start);
+        event.phase_completed = self.start.saturating_add(
+            u64::try_from(local as u128 * span as u128 / RESOLUTION as u128).unwrap_or(span),
+        );
+        event.phase_total = RESOLUTION;
+        self.observer.observe(event);
+    }
+}
+
+impl ProgressReporter {
+    fn from_arguments(
+        arguments: &[String],
+        workflow: ProgressWorkflow,
+        validates_exported_keys: bool,
+    ) -> Result<Self, String> {
+        let json = arguments.iter().any(|value| value == "--progress-json");
+        let quiet = arguments.iter().any(|value| value == "--quiet-progress");
+        if json && quiet {
+            return Err("choose at most one of --progress-json and --quiet-progress".to_string());
+        }
+        let output = if json {
+            ProgressOutput::Json
+        } else if quiet {
+            ProgressOutput::Quiet
+        } else {
+            ProgressOutput::Human
+        };
+        let progress_file = option_path(arguments, "--progress-file")?
+            .map(|path| {
+                owner_only_create_new_writer(&path)
+                    .map(Mutex::new)
+                    .map_err(|error| format!("could not create private progress file: {error}"))
+            })
+            .transpose()?;
+        Ok(Self {
+            output,
+            workflow_phases: workflow.phases(validates_exported_keys),
+            progress_file,
+            human_state: Mutex::new(HumanProgressState::default()),
+        })
+    }
+}
+
+impl ProgressObserver for ProgressReporter {
+    fn observe(&self, mut event: ProgressEvent) {
+        event.attach_workflow(&self.workflow_phases);
+        if let Some(progress_file) = &self.progress_file {
+            let write_result = (|| -> Result<(), Box<dyn std::error::Error>> {
+                let mut writer = progress_file
+                    .lock()
+                    .map_err(|_| "private progress file lock was poisoned")?;
+                serde_json::to_writer(&mut *writer, &event)?;
+                writer.write_all(b"\n")?;
+                writer.flush()?;
+                Ok(())
+            })();
+            if let Err(error) = write_result {
+                eprintln!("error: could not append private progress event: {error}");
+            }
+        }
+        match self.output {
+            ProgressOutput::Quiet => {}
+            ProgressOutput::Json => {
+                if let Ok(value) = serde_json::to_string(&event) {
+                    eprintln!("{value}");
+                }
+            }
+            ProgressOutput::Human => {
+                let should_emit = self
+                    .human_state
+                    .lock()
+                    .map(|mut state| should_emit_human_progress(&event, &mut state, Instant::now()))
+                    .unwrap_or(true);
+                if should_emit {
+                    eprintln!("{}", human_progress(&event));
+                }
+            }
+        }
+    }
+}
+
+fn should_emit_human_progress(
+    event: &ProgressEvent,
+    state: &mut HumanProgressState,
+    now: Instant,
+) -> bool {
+    const MINIMUM_PERIODIC_INTERVAL: Duration = Duration::from_secs(1);
+
+    let phase_changed = state.phase != Some(event.phase);
+    state.phase = Some(event.phase);
+    let database_changed =
+        event.database_index.is_some() && state.database_index != event.database_index;
+    if event.database_index.is_some() {
+        state.database_index = event.database_index;
+    }
+
+    // A real corpus can contain thousands of tiny hashed message tables. Keep
+    // every event in JSON/progress files, but collapse their start/completion
+    // chatter in the default console to a periodic cumulative-row update.
+    let high_frequency_operation = matches!(
+        event.operation.as_str(),
+        "inspectTable" | "restoreMessageTable" | "restoreCachedSurfaceTable"
+    );
+    let milestone = phase_changed
+        || database_changed
+        || event.state == ProgressState::Planned
+        || (!high_frequency_operation && event.state != ProgressState::Advanced);
+    let periodic = state
+        .last_emitted_at
+        .is_none_or(|last| now.saturating_duration_since(last) >= MINIMUM_PERIODIC_INTERVAL);
+    let emit = milestone || periodic;
+    if emit {
+        state.last_emitted_at = Some(now);
+    }
+    emit
+}
+
+fn human_progress(event: &ProgressEvent) -> String {
+    let state = match event.state {
+        ProgressState::Planned => "plan",
+        ProgressState::Started => "start",
+        ProgressState::Advanced => "progress",
+        ProgressState::Completed => "done",
+    };
+    let workflow = event
+        .workflow_completed
+        .zip(event.workflow_total)
+        .map_or_else(
+            || "n/a".to_string(),
+            |(completed, total)| percentage(completed, total, event.state),
+        );
+    let phase = percentage(event.phase_completed, event.phase_total, event.state);
+    let current = percentage(event.completed, event.total, event.state);
+    let mut fields = vec![format!(
+        "[greenbubbles {state}] {:?} {} — workflow {workflow}, phase {phase}, current {current}",
+        event.phase, event.operation
+    )];
+    if let (Some(index), Some(count)) = (event.workflow_phase_index, event.workflow_phase_count) {
+        fields.push(format!("phase {index}/{count}"));
+    }
+    if let (Some(index), Some(count)) = (event.database_index, event.database_count) {
+        fields.push(format!("database {index}/{count}"));
+    } else if let Some(count) = event.database_count {
+        fields.push(format!("{count} databases"));
+    }
+    if let (Some(index), Some(count)) = (event.file_index, event.file_count) {
+        fields.push(format!("file {index}/{count}"));
+    } else if let Some(count) = event.file_count {
+        fields.push(format!("{count} files"));
+    }
+    if let Some(path) = &event.logical_path {
+        fields.push(path.clone());
+    }
+    if let Some(family) = &event.storage_family {
+        fields.push(family.clone());
+    }
+    if let Some(method) = &event.database_key_match_method {
+        fields.push(format!("key match {method}"));
+    }
+    if let Some(state) = &event.database_unlock_state {
+        fields.push(format!("unlock {state}"));
+    }
+    if let Some(count) = event.available_database_count {
+        fields.push(format!("{count} available"));
+    }
+    if let Some(count) = event.unavailable_database_count {
+        fields.push(format!("{count} unavailable"));
+    }
+    if let Some(bytes) = event.database_byte_count {
+        let wal = event.write_ahead_log_byte_count.unwrap_or(0);
+        fields.push(format!(
+            "database {}, WAL {}",
+            format_bytes(bytes),
+            format_bytes(wal)
+        ));
+    } else if event.unit == ProgressUnit::Bytes {
+        fields.push(format!(
+            "{} / {}",
+            format_bytes(event.completed),
+            format_bytes(event.total)
+        ));
+    } else {
+        let unit = match event.unit {
+            ProgressUnit::Records => "records",
+            ProgressUnit::Items => "items",
+            ProgressUnit::Bytes => unreachable!("byte progress handled above"),
+        };
+        fields.push(format!("{} / {} {unit}", event.completed, event.total));
+    }
+    if let Some(bytes) = event.file_byte_count {
+        fields.push(format!("file size {}", format_bytes(bytes)));
+    }
+    if let Some(tables) = event.table_count {
+        fields.push(format!("{tables} tables"));
+    }
+    if let Some(table) = &event.table_name {
+        fields.push(format!("table {table}"));
+    }
+    if let Some(role) = &event.table_role {
+        fields.push(format!("role {role}"));
+    }
+    if let Some(columns) = &event.table_columns {
+        fields.push(format!(
+            "{} columns [{}]",
+            columns.len(),
+            columns.join(", ")
+        ));
+    }
+    if let Some(frames) = event.write_ahead_log_frame_count {
+        let description = match event.operation.as_str() {
+            "scanWriteAheadLog" => "WAL frames scanned",
+            "applyWriteAheadLog" | "applyPlaintextWriteAheadLog" => "WAL frames applied",
+            _ => "WAL frames",
+        };
+        fields.push(format!("{frames} {description}"));
+    }
+    if let Some(records) = event.restored_record_count {
+        fields.push(format!("{records} restored"));
+    }
+    if let Some(records) = event.source_record_count {
+        fields.push(format!("{records} source records"));
+    }
+    if let Some(records) = event.rejected_record_count {
+        fields.push(format!("{records} rejected"));
+    }
+    if let Some(gaps) = event.semantic_gap_count {
+        fields.push(format!("{gaps} semantic gaps"));
+    }
+    if let Some(milliseconds) = event.elapsed_milliseconds {
+        fields.push(format!("{:.1}s", milliseconds as f64 / 1_000.0));
+    }
+    fields.join(" | ")
+}
+
+fn percentage(completed: u64, total: u64, state: ProgressState) -> String {
+    if total == 0 {
+        return if state == ProgressState::Completed {
+            "100.0%".to_string()
+        } else {
+            "0.0%".to_string()
+        };
+    }
+    format!("{:.1}%", completed.min(total) as f64 * 100.0 / total as f64)
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn emit_json_result<T: serde::Serialize>(
+    value: &T,
+    arguments: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(path) = option_path(arguments, "--summary-file")? {
+        if option_path(arguments, "--progress-file")?.as_ref() == Some(&path) {
+            return Err("--summary-file and --progress-file must be different paths".into());
+        }
+        write_owner_only_json(&path, value)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "privacySafeSummary": true,
+                "summaryPath": path
+            }))?
+        );
+    } else {
+        println!("{}", serde_json::to_string_pretty(value)?);
+    }
+    Ok(())
+}
+
+fn write_owner_only_json<T: serde::Serialize>(
+    path: &Path,
+    value: &T,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut writer = owner_only_create_new_writer(path)?;
+    serde_json::to_writer_pretty(&mut writer, value)?;
+    writer.write_all(b"\n")?;
+    writer.flush()?;
+    writer.get_ref().sync_all()?;
+    Ok(())
+}
+
+fn owner_only_create_new_writer(path: &Path) -> io::Result<BufWriter<File>> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent_metadata = std::fs::symlink_metadata(parent)?;
+    if !parent_metadata.is_dir()
+        || parent_metadata.file_type().is_symlink()
+        || parent_metadata.uid() != unsafe { libc::geteuid() }
+        || parent_metadata.mode() & 0o077 != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "report parent must be an owner-only, owner-controlled directory",
+        ));
+    }
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o077 != 0
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "report output is not an owner-only regular file",
+        ));
+    }
+    Ok(BufWriter::new(file))
 }
 
 fn option_string(arguments: &[String], option: &str) -> Result<Option<String>, String> {
@@ -856,5 +1593,72 @@ fn handoff_poll_marker(
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn human_progress_distinguishes_scanned_and_applied_wal_frames() {
+        let mut event = ProgressEvent::new(
+            ProgressPhase::DatabasePreparation,
+            ProgressState::Completed,
+            "scanWriteAheadLog",
+            ProgressUnit::Bytes,
+            32,
+            32,
+            32,
+            64,
+        );
+        event.write_ahead_log_frame_count = Some(9);
+        assert!(human_progress(&event).contains("9 WAL frames scanned"));
+
+        event.operation = "applyWriteAheadLog".to_string();
+        event.write_ahead_log_frame_count = Some(0);
+        assert!(human_progress(&event).contains("0 WAL frames applied"));
+    }
+
+    #[test]
+    fn human_progress_throttles_tiny_tables_but_keeps_database_milestones() {
+        let now = Instant::now();
+        let mut state = HumanProgressState::default();
+        let mut event = ProgressEvent::new(
+            ProgressPhase::RecordRestoration,
+            ProgressState::Started,
+            "restoreMessageTable",
+            ProgressUnit::Records,
+            0,
+            1,
+            0,
+            10,
+        );
+        event.database_index = Some(1);
+        event.database_count = Some(2);
+        assert!(should_emit_human_progress(&event, &mut state, now));
+
+        event.state = ProgressState::Completed;
+        event.completed = 1;
+        event.phase_completed = 1;
+        assert!(!should_emit_human_progress(
+            &event,
+            &mut state,
+            now + Duration::from_millis(10)
+        ));
+        assert!(should_emit_human_progress(
+            &event,
+            &mut state,
+            now + Duration::from_secs(1)
+        ));
+
+        event.state = ProgressState::Started;
+        event.completed = 0;
+        event.database_index = Some(2);
+        assert!(should_emit_human_progress(
+            &event,
+            &mut state,
+            now + Duration::from_millis(1_010)
+        ));
     }
 }

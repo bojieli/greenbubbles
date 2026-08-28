@@ -20,10 +20,11 @@ use crate::replica::{
     ReplicaCoverageView, ReplicaMessageFilter, ReplicaStatus,
 };
 use crate::tools::{
-    load_tool_policy, minimize_cached_moment, minimize_message, released_body_bytes,
-    released_cached_moment_body_bytes, CachedMomentsToolScope, ConversationToolScope,
-    MinimizedCachedMoment, MinimizedMessage, ToolAuthorizationPolicy, ToolCapability,
-    ToolDataDestination, ToolMessageField, MAX_SEARCH_QUERY_BYTES,
+    entity_source_database_freshness, load_tool_policy, minimize_cached_moment, minimize_message,
+    released_body_bytes, released_cached_moment_body_bytes, CachedMomentsToolScope,
+    ConversationToolScope, MinimizedCachedMoment, MinimizedMessage, ToolAuthorizationPolicy,
+    ToolCapability, ToolDataDestination, ToolMessageField, ToolSourceDatabaseFreshness,
+    MAX_SEARCH_QUERY_BYTES,
 };
 use crate::{
     ArtifactAvailability, ArtifactDecodeState, ArtifactKind, ArtifactRole, CanonicalArtifact,
@@ -246,6 +247,7 @@ pub struct ConnectorConversationView {
     pub kind: ConversationKind,
     pub participant_count: usize,
     pub entity_decode_state: EntityDecodeState,
+    pub source_database_freshness: ToolSourceDatabaseFreshness,
     pub human_label: String,
     pub capabilities: BTreeSet<ToolCapability>,
     pub message_fields: BTreeSet<ToolMessageField>,
@@ -329,6 +331,7 @@ pub struct ResolvedContact {
     pub participant_id: String,
     pub display_name: String,
     pub local_profile_available: bool,
+    pub source_database_freshness: ToolSourceDatabaseFreshness,
     pub enabled_conversation_ids: Vec<String>,
 }
 
@@ -350,6 +353,7 @@ pub struct ResolvedConversation {
     pub participants: Vec<RecipientParticipantEvidence>,
     pub owner_participant_id: Option<String>,
     pub entity_decode_state: EntityDecodeState,
+    pub source_database_freshness: ToolSourceDatabaseFreshness,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -515,6 +519,7 @@ pub struct ConnectorService<'a> {
     audit_path: PathBuf,
     draft_directory: PathBuf,
     cached_moment_request_times: Mutex<VecDeque<u128>>,
+    preserved_stale_source_set_ids: BTreeSet<String>,
 }
 
 impl<'a> ConnectorService<'a> {
@@ -536,6 +541,18 @@ impl<'a> ConnectorService<'a> {
                 "connector policy belongs to a different replica account".to_string(),
             ));
         }
+        let preserved_stale_source_set_ids = replica_restoration_report(replica_path, key)?
+            .ok_or_else(|| {
+                RestoreError::Integrity("connector replica has no restoration report".to_string())
+            })?
+            .database_coverage
+            .map(|coverage| {
+                coverage
+                    .preserved_stale_source_set_ids
+                    .into_iter()
+                    .collect()
+            })
+            .unwrap_or_default();
         for conversation_id in policy.conversation_scopes.keys() {
             if get_replica_conversation(replica_path, key, conversation_id)?.is_none() {
                 return Err(RestoreError::Integrity(format!(
@@ -560,6 +577,7 @@ impl<'a> ConnectorService<'a> {
             audit_path: audit_path.to_path_buf(),
             draft_directory: draft_directory.to_path_buf(),
             cached_moment_request_times: Mutex::new(VecDeque::new()),
+            preserved_stale_source_set_ids,
         })
     }
 
@@ -1126,6 +1144,7 @@ impl<'a> ConnectorService<'a> {
                     moment,
                     self.policy.maximum_message_summary_bytes,
                     &scope.fields,
+                    &self.preserved_stale_source_set_ids,
                 )
             })
             .collect::<Result<Vec<_>, _>>()
@@ -1181,6 +1200,7 @@ impl<'a> ConnectorService<'a> {
                 kind: conversation.kind,
                 participant_count: conversation.participant_ids.len(),
                 entity_decode_state: conversation.entity_decode_state,
+                source_database_freshness: resolved.source_database_freshness,
                 human_label: resolved.human_label,
                 capabilities: scope.capabilities.clone(),
                 message_fields: scope.message_fields.clone(),
@@ -1236,6 +1256,7 @@ impl<'a> ConnectorService<'a> {
                     message,
                     self.policy.maximum_message_summary_bytes,
                     &scope.message_fields,
+                    &self.preserved_stale_source_set_ids,
                 )
             })
             .collect::<Vec<_>>();
@@ -1303,6 +1324,7 @@ impl<'a> ConnectorService<'a> {
                         message,
                         self.policy.maximum_message_summary_bytes,
                         &scope.message_fields,
+                        &self.preserved_stale_source_set_ids,
                     )
                 })
                 .collect::<Vec<_>>();
@@ -1358,6 +1380,7 @@ impl<'a> ConnectorService<'a> {
                     message,
                     self.policy.maximum_message_summary_bytes,
                     &scope.message_fields,
+                    &self.preserved_stale_source_set_ids,
                 )
             }));
         }
@@ -1419,6 +1442,7 @@ impl<'a> ConnectorService<'a> {
             message,
             self.policy.maximum_message_summary_bytes,
             &scope.message_fields,
+            &self.preserved_stale_source_set_ids,
         );
         let released = result
             .payload_summary
@@ -1627,6 +1651,13 @@ impl<'a> ConnectorService<'a> {
             display_name,
             local_profile_available: participant.local_profile_state
                 == crate::LocalProfileState::Hydrated,
+            source_database_freshness: entity_source_database_freshness(
+                participant
+                    .source_records
+                    .iter()
+                    .map(|record| record.source_set_id.clone()),
+                &self.preserved_stale_source_set_ids,
+            ),
             enabled_conversation_ids: enabled,
         };
         self.audit(
@@ -1746,6 +1777,13 @@ impl<'a> ConnectorService<'a> {
             participants,
             owner_participant_id: conversation.owner_participant_id.clone(),
             entity_decode_state: conversation.entity_decode_state,
+            source_database_freshness: entity_source_database_freshness(
+                conversation
+                    .source_records
+                    .iter()
+                    .map(|record| record.source_set_id.clone()),
+                &self.preserved_stale_source_set_ids,
+            ),
         })
     }
 

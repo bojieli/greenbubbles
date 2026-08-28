@@ -28,6 +28,82 @@ fn restores_audits_merges_and_monotonically_publishes_offline_snapshots() {
     }
 
     let bootstrap_snapshot = build_bootstrap_snapshot(&private, &account_root);
+    let preflight_output = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .arg("preflight")
+        .arg(&bootstrap_snapshot)
+        .arg("--progress-json")
+        .output()
+        .unwrap();
+    assert!(
+        preflight_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preflight_output.stderr)
+    );
+    let preflight_events = String::from_utf8(preflight_output.stderr)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert!(preflight_events.iter().any(|event| {
+        event["fileIndex"].as_u64().is_some()
+            && event["fileCount"].as_u64().is_some()
+            && event["fileByteCount"].as_u64().is_some()
+    }));
+    assert_eq!(
+        preflight_events.last().unwrap()["workflowCompleted"],
+        preflight_events.last().unwrap()["workflowTotal"]
+    );
+
+    let probe_progress_path = private.join("probe-progress.ndjson");
+    let probe_output = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .arg("probe")
+        .arg(&bootstrap_snapshot)
+        .arg("--progress-json")
+        .arg("--progress-file")
+        .arg(&probe_progress_path)
+        .output()
+        .unwrap();
+    assert!(
+        probe_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&probe_output.stderr)
+    );
+    let probe_report: serde_json::Value = serde_json::from_slice(&probe_output.stdout).unwrap();
+    assert!(probe_report["databaseCount"].as_u64().is_some());
+    let progress_events = String::from_utf8(probe_output.stderr)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert!(!progress_events.is_empty());
+    assert!(progress_events.iter().all(|event| {
+        event["formatVersion"] == 2
+            && event["privacySafe"] == true
+            && event["workflowCompleted"].as_u64().is_some()
+            && event["workflowTotal"].as_u64().is_some()
+            && event["phaseCompleted"].as_u64().is_some()
+            && event.get("overallCompleted").is_none()
+    }));
+    let final_progress = progress_events.last().unwrap();
+    assert_eq!(
+        final_progress["workflowCompleted"],
+        final_progress["workflowTotal"]
+    );
+    let retained_progress = fs::read_to_string(&probe_progress_path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(retained_progress, progress_events);
+    assert_eq!(
+        fs::metadata(&probe_progress_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o077,
+        0
+    );
+
     let bootstrap_archive = private.join("archive-bootstrap");
     let handoff = private.join("handoff.json");
     let first = restore_snapshot_and_publish(
@@ -65,6 +141,11 @@ fn restores_audits_merges_and_monotonically_publishes_offline_snapshots() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let human_progress = String::from_utf8_lossy(&output.stderr);
+    assert!(human_progress.contains("workflow "));
+    assert!(human_progress.contains("phase "));
+    assert!(human_progress.contains("auditArchiveLedger"));
+    assert!(human_progress.contains("workflow 100.0%"));
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["formatVersion"], 2);
     assert_eq!(report["acquisitionMode"], "incremental");

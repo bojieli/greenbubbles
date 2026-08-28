@@ -3,6 +3,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -15,7 +16,8 @@ use crate::{
     CachedSurfaceTableRole, CanonicalArtifact, CanonicalCachedMoment,
     CanonicalCachedMomentInteraction, CanonicalConversation, CanonicalMessage,
     CanonicalParticipant, ConversationKind, ConversationMembershipRole, EntityDecodeState,
-    LocalProfileState, RawSQLiteValue, RejectedRow, RelationshipResolutionState,
+    LocalProfileState, NoProgress, ProgressEvent, ProgressObserver, ProgressPhase, ProgressState,
+    ProgressUnit, RawSQLiteValue, RejectedRow, RelationshipResolutionState,
     RestorationArchiveScope, RestorationCompletion, RestorationCoverage, RestorationMediaPhase,
     RestorationReport, RestoreError, SemanticDecodeState, TableCoverageRole, TypedPayload,
 };
@@ -28,6 +30,11 @@ pub struct ArchiveAuditReport {
     pub archive_format_version: u32,
     pub coverage_format_version: u32,
     pub archive_scope: RestorationArchiveScope,
+    pub authoritative_database_coverage: bool,
+    pub total_database_count: usize,
+    pub restored_database_count: usize,
+    pub unavailable_database_count: usize,
+    pub preserved_stale_database_count: usize,
     pub media_phase: RestorationMediaPhase,
     pub client_build_production_compatible: bool,
     pub message_count: u64,
@@ -58,6 +65,17 @@ pub struct ArchiveAuditReport {
     pub entity_decode_gap_count: u64,
     pub unresolved_relationship_count: u64,
     pub completion_evidence: AuditedRestorationCompletionEvidence,
+}
+
+impl ArchiveAuditReport {
+    /// Canonical source records retained by the archive. Conversations,
+    /// participants, and artifacts are derived/supporting ledgers and are not
+    /// counted as restored source records.
+    pub fn restored_record_count(&self) -> u64 {
+        self.message_count
+            .saturating_add(self.cached_moment_count)
+            .saturating_add(self.cached_moment_interaction_count)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,18 +167,28 @@ struct VerifiedFile {
 }
 
 pub fn audit_archive(archive_directory: &Path) -> Result<ArchiveAuditReport, RestoreError> {
+    audit_archive_with_progress(archive_directory, &NoProgress)
+}
+
+pub fn audit_archive_with_progress(
+    archive_directory: &Path,
+    observer: &dyn ProgressObserver,
+) -> Result<ArchiveAuditReport, RestoreError> {
     ensure_private_directory(archive_directory)?;
     let archive_root = fs::canonicalize(archive_directory)?;
+    let mut progress = ArchiveAuditProgress::new(&archive_root, observer)?;
     let report_path = archive_root.join("report.json");
     let coverage_path = archive_root.join("coverage.json");
     let report: RestorationReport = read_json(&report_path)?;
     let coverage: RestorationCoverage = read_json(&coverage_path)?;
 
-    if !matches!(report.format_version, 3 | 4) || !matches!(coverage.format_version, 2 | 3) {
+    if !matches!(report.format_version, 3..=5) || !matches!(coverage.format_version, 2..=4) {
         return Err(integrity(
             "archive or coverage format is not supported by this auditor",
         ));
     }
+    verify_database_coverage(&report)?;
+    verify_database_record_coverage(&report, &coverage)?;
     verify_report_paths(&archive_root, &report)?;
     verify_coverage(&coverage, &report)?;
 
@@ -168,18 +196,25 @@ pub fn audit_archive(archive_directory: &Path) -> Result<ArchiveAuditReport, Res
         &archive_root.join("conversations.ndjson"),
         |value| value.conversation_id.clone(),
         "conversation",
+        &mut progress,
     )?;
     let participants = read_unique_ndjson::<CanonicalParticipant, _, _>(
         &archive_root.join("participants.ndjson"),
         |value| value.participant_id.clone(),
         "participant",
+        &mut progress,
     )?;
     verify_entities(&conversations, &participants, &report, &coverage)?;
 
-    let messages = audit_messages(&archive_root.join("messages.ndjson"), &report, &coverage)?;
+    let messages = audit_messages(
+        &archive_root.join("messages.ndjson"),
+        &report,
+        &coverage,
+        &mut progress,
+    )?;
     verify_message_entities(&messages, &conversations, &participants)?;
 
-    let rejections = audit_rejections(&archive_root.join("rejections.ndjson"))?;
+    let rejections = audit_rejections(&archive_root.join("rejections.ndjson"), &mut progress)?;
     if rejections.count != report.integrity.rejected_row_count {
         return Err(integrity("rejection ledger count does not match report"));
     }
@@ -189,6 +224,7 @@ pub fn audit_archive(archive_directory: &Path) -> Result<ArchiveAuditReport, Res
         &archive_root,
         &archive_root.join("artifacts.ndjson"),
         &coverage,
+        &mut progress,
     )?;
     verify_message_artifacts(&messages, &artifacts)?;
     verify_integrity_counts(
@@ -202,7 +238,7 @@ pub fn audit_archive(archive_directory: &Path) -> Result<ArchiveAuditReport, Res
     )?;
 
     let (cached_moment_count, cached_interaction_count) =
-        audit_cached_surfaces(&archive_root, &report, &coverage)?;
+        audit_cached_surfaces(&archive_root, &report, &coverage, &mut progress)?;
     if cached_moment_count != report.integrity.cached_moment_count
         || cached_interaction_count != report.integrity.cached_moment_interaction_count
     {
@@ -226,12 +262,36 @@ pub fn audit_archive(archive_directory: &Path) -> Result<ArchiveAuditReport, Res
         artifacts.external_paths.len() as u64 + artifacts.connector_paths.len() as u64,
     );
 
-    Ok(ArchiveAuditReport {
+    let result = ArchiveAuditReport {
         format_version: 2,
         privacy_safe_summary: true,
         archive_format_version: report.format_version,
         coverage_format_version: coverage.format_version,
         archive_scope: report.archive_scope,
+        authoritative_database_coverage: report
+            .database_coverage
+            .as_ref()
+            .is_none_or(|coverage| coverage.authoritative_database_coverage),
+        total_database_count: report
+            .database_coverage
+            .as_ref()
+            .map_or(report.integrity.database_count as usize, |coverage| {
+                coverage.total_database_count
+            }),
+        restored_database_count: report
+            .database_coverage
+            .as_ref()
+            .map_or(report.integrity.database_count as usize, |coverage| {
+                coverage.restored_database_count
+            }),
+        unavailable_database_count: report
+            .database_coverage
+            .as_ref()
+            .map_or(0, |coverage| coverage.unavailable_database_count),
+        preserved_stale_database_count: report
+            .database_coverage
+            .as_ref()
+            .map_or(0, |coverage| coverage.preserved_stale_database_count),
         media_phase: report.media_phase,
         client_build_production_compatible: report.client_build_compatibility.production_compatible,
         message_count: messages.count,
@@ -262,7 +322,61 @@ pub fn audit_archive(archive_directory: &Path) -> Result<ArchiveAuditReport, Res
         entity_decode_gap_count: report.integrity.entity_decode_gap_count,
         unresolved_relationship_count: report.integrity.unresolved_relationship_count,
         completion_evidence,
-    })
+    };
+    progress.finish(&result);
+    Ok(result)
+}
+
+fn verify_database_coverage(report: &RestorationReport) -> Result<(), RestoreError> {
+    if report.format_version < 5 {
+        if report.archive_scope == RestorationArchiveScope::PartialDatabaseCoverage {
+            return Err(integrity(
+                "partial database coverage requires archive format 5 evidence",
+            ));
+        }
+        return Ok(());
+    }
+    let coverage = report
+        .database_coverage
+        .as_ref()
+        .ok_or_else(|| integrity("archive format 5 report has no database coverage evidence"))?;
+    if !coverage.is_valid() {
+        return Err(integrity("database coverage evidence is inconsistent"));
+    }
+    match report.archive_scope {
+        RestorationArchiveScope::Authoritative if !coverage.authoritative_database_coverage => Err(
+            integrity("authoritative archive has incomplete database coverage"),
+        ),
+        RestorationArchiveScope::PartialDatabaseCoverage
+            if coverage.authoritative_database_coverage
+                || coverage.attempted_source_set_ids != coverage.snapshot_source_set_ids =>
+        {
+            Err(integrity(
+                "partial archive does not account for the complete database inventory",
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn verify_database_record_coverage(
+    report: &RestorationReport,
+    coverage: &RestorationCoverage,
+) -> Result<(), RestoreError> {
+    let Some(database_coverage) = report.database_coverage.as_ref() else {
+        return Ok(());
+    };
+    let included = database_coverage.included_source_set_ids();
+    if coverage
+        .all_tables
+        .iter()
+        .any(|table| !included.contains(table.source_set_id.as_str()))
+    {
+        return Err(integrity(
+            "archive contains table records outside its included database coverage",
+        ));
+    }
+    Ok(())
 }
 
 pub fn verify_recorded_artifact_files(
@@ -381,6 +495,9 @@ fn verify_coverage(
     let mut message_table_ids = HashSet::new();
     let mut message_source_ids = HashSet::new();
     let mut schema_counts = BTreeMap::new();
+    let mut table_role_counts = BTreeMap::new();
+    let mut table_classification_reason_counts = BTreeMap::new();
+    let mut observed_table_rows = 0_u64;
     let mut candidate_gaps = 0_u64;
     for table in &coverage.all_tables {
         let identity = (
@@ -408,6 +525,23 @@ fn verify_coverage(
                 "coverage table lacks a complete schema fingerprint",
             ));
         }
+        if coverage.format_version >= 4 {
+            observed_table_rows = observed_table_rows.saturating_add(
+                table
+                    .source_row_count
+                    .ok_or_else(|| integrity("coverage table lacks its observed row count"))?,
+            );
+        }
+        let role_name = match table.role {
+            TableCoverageRole::Message => "message",
+            TableCoverageRole::KnownAuxiliary => "knownAuxiliary",
+            TableCoverageRole::Other => "other",
+            TableCoverageRole::UnhandledMessageCandidate => "unhandledMessageCandidate",
+        };
+        *table_role_counts.entry(role_name.to_string()).or_default() += 1;
+        *table_classification_reason_counts
+            .entry(table.classification_reason.clone())
+            .or_default() += 1;
         match table.role {
             TableCoverageRole::Message => {
                 message_table_ids.insert(identity);
@@ -456,6 +590,8 @@ fn verify_coverage(
         if complete.source_table_name != table.source_table_name
             || complete.columns != table.columns
             || complete.schema_fingerprint != table.schema_fingerprint
+            || (coverage.format_version >= 4
+                && complete.source_row_count != Some(table.source_row_count))
         {
             return Err(integrity(
                 "message-table provenance disagrees with complete coverage",
@@ -474,6 +610,16 @@ fn verify_coverage(
     {
         return Err(integrity(
             "coverage counts do not match restoration integrity",
+        ));
+    }
+    if coverage.format_version >= 4
+        && (observed_table_rows != report.integrity.observed_table_row_count
+            || table_role_counts != report.integrity.table_role_counts
+            || table_classification_reason_counts
+                != report.integrity.table_classification_reason_counts)
+    {
+        return Err(integrity(
+            "complete table-ledger counts do not match restoration integrity",
         ));
     }
     let profile = schema_profile_fingerprint(coverage.all_tables.iter().map(|table| {
@@ -495,6 +641,7 @@ fn audit_messages(
     path: &Path,
     report: &RestorationReport,
     coverage: &RestorationCoverage,
+    progress: &mut ArchiveAuditProgress<'_>,
 ) -> Result<MessageAudit, RestoreError> {
     let mut result = MessageAudit::default();
     let covered_tables = coverage
@@ -514,7 +661,7 @@ fn audit_messages(
     let mut previous_conversation: Option<String> = None;
     let mut expected_ordinal = 0_u64;
     let mut conversation_basis = None;
-    read_ndjson(path, |message: CanonicalMessage| {
+    read_ndjson(path, progress, |message: CanonicalMessage| {
         if message.canonical_id.is_empty()
             || message.account_id != report.account_id
             || message.conversation_id.is_empty()
@@ -799,9 +946,12 @@ fn audit_messages(
     Ok(result)
 }
 
-fn audit_rejections(path: &Path) -> Result<RejectionAudit, RestoreError> {
+fn audit_rejections(
+    path: &Path,
+    progress: &mut ArchiveAuditProgress<'_>,
+) -> Result<RejectionAudit, RestoreError> {
     let mut result = RejectionAudit::default();
-    read_ndjson(path, |row: RejectedRow| {
+    read_ndjson(path, progress, |row: RejectedRow| {
         if row.source_set_id.is_empty()
             || row.source_table_id.is_empty()
             || row.reason.is_empty()
@@ -885,6 +1035,7 @@ fn audit_artifacts(
     root: &Path,
     path: &Path,
     coverage: &RestorationCoverage,
+    progress: &mut ArchiveAuditProgress<'_>,
 ) -> Result<ArtifactAudit, RestoreError> {
     let mut result = ArtifactAudit::default();
     let mut verified_files = HashMap::<PathBuf, VerifiedFile>::new();
@@ -902,7 +1053,7 @@ fn audit_artifacts(
             )
         })
         .collect::<HashMap<_, _>>();
-    read_ndjson(path, |artifact: CanonicalArtifact| {
+    read_ndjson(path, progress, |artifact: CanonicalArtifact| {
         if artifact.artifact_id.is_empty()
             || !result.identifiers.insert(artifact.artifact_id.clone())
         {
@@ -1776,6 +1927,7 @@ fn audit_cached_surfaces(
     root: &Path,
     report: &RestorationReport,
     restoration_coverage: &RestorationCoverage,
+    progress: &mut ArchiveAuditProgress<'_>,
 ) -> Result<(u64, u64), RestoreError> {
     let coverage: CachedSurfaceCoverage = read_json(&root.join("cached-surfaces.json"))?;
     if !matches!(coverage.format_version, 1 | 2) {
@@ -1785,11 +1937,13 @@ fn audit_cached_surfaces(
         &root.join("cached-moments.ndjson"),
         |value| value.canonical_id.clone(),
         "cached Moment",
+        progress,
     )?;
     let interactions = read_unique_ndjson::<CanonicalCachedMomentInteraction, _, _>(
         &root.join("cached-moment-interactions.ndjson"),
         |value| value.canonical_id.clone(),
         "cached Moment interaction",
+        progress,
     )?;
     let mut moment_source_rows = HashSet::new();
     let mut interaction_source_rows = HashSet::new();
@@ -2059,13 +2213,7 @@ fn audit_cached_surfaces(
 }
 
 fn verify_completion(report: &RestorationReport) -> Result<RestorationCompletion, RestoreError> {
-    let mut expected = RestorationCompletion::evaluate(&report.integrity);
-    if report.media_phase == RestorationMediaPhase::Deferred
-        || report.archive_scope != RestorationArchiveScope::Authoritative
-        || !report.client_build_compatibility.production_compatible
-    {
-        expected.full_restoration_achieved = false;
-    }
+    let expected = RestorationCompletion::evaluate_report(report);
     let component_fields_match = expected.row_equation_holds
         == report.completion.row_equation_holds
         && expected.zero_rejected_rows == report.completion.zero_rejected_rows
@@ -2130,10 +2278,209 @@ fn required_artifact_path(value: Option<&str>, message: &str) -> Result<PathBuf,
         .ok_or_else(|| integrity(message))
 }
 
+struct AuditLedgerPlan {
+    path: PathBuf,
+    byte_count: u64,
+}
+
+struct ArchiveAuditProgress<'a> {
+    observer: &'a dyn ProgressObserver,
+    ledgers: Vec<AuditLedgerPlan>,
+    ledger_index: usize,
+    total_bytes: u64,
+    completed_work: u64,
+    total_work: u64,
+    started_at: Instant,
+}
+
+impl<'a> ArchiveAuditProgress<'a> {
+    fn new(
+        root: &Path,
+        observer: &'a dyn ProgressObserver,
+    ) -> Result<ArchiveAuditProgress<'a>, RestoreError> {
+        let mut ledgers = Vec::new();
+        let mut total_bytes = 0_u64;
+        let mut total_work = 0_u64;
+        for name in [
+            "conversations.ndjson",
+            "participants.ndjson",
+            "messages.ndjson",
+            "rejections.ndjson",
+            "artifacts.ndjson",
+            "cached-moments.ndjson",
+            "cached-moment-interactions.ndjson",
+        ] {
+            let path = root.join(name);
+            ensure_private_regular_file(&path)?;
+            let byte_count = path.metadata()?.len();
+            let work_count = byte_count.max(1);
+            total_bytes = total_bytes.saturating_add(byte_count);
+            total_work = total_work.saturating_add(work_count);
+            ledgers.push(AuditLedgerPlan { path, byte_count });
+        }
+        let mut event = ProgressEvent::new(
+            ProgressPhase::ArchiveAudit,
+            ProgressState::Started,
+            "auditArchive",
+            ProgressUnit::Bytes,
+            0,
+            total_bytes,
+            0,
+            total_work,
+        );
+        event.file_count = Some(ledgers.len());
+        observer.observe(event);
+        Ok(Self {
+            observer,
+            ledgers,
+            ledger_index: 0,
+            total_bytes,
+            completed_work: 0,
+            total_work,
+            started_at: Instant::now(),
+        })
+    }
+
+    fn begin_ledger(&self, path: &Path) -> Result<(usize, u64, Instant), RestoreError> {
+        let plan = self
+            .ledgers
+            .get(self.ledger_index)
+            .ok_or_else(|| integrity("archive audit encountered an unplanned extra ledger"))?;
+        if plan.path != path {
+            return Err(integrity(
+                "archive audit ledger order differs from its progress plan",
+            ));
+        }
+        let started = Instant::now();
+        self.observe_ledger(
+            ProgressState::Started,
+            path,
+            self.ledger_index,
+            plan.byte_count,
+            0,
+            0,
+            None,
+        );
+        Ok((self.ledger_index, plan.byte_count, started))
+    }
+
+    fn advance_ledger(
+        &self,
+        path: &Path,
+        index: usize,
+        byte_count: u64,
+        completed: u64,
+        records: u64,
+    ) {
+        self.observe_ledger(
+            ProgressState::Advanced,
+            path,
+            index,
+            byte_count,
+            completed,
+            records,
+            None,
+        );
+    }
+
+    fn complete_ledger(
+        &mut self,
+        path: &Path,
+        index: usize,
+        byte_count: u64,
+        records: u64,
+        started: Instant,
+    ) -> Result<(), RestoreError> {
+        if index != self.ledger_index {
+            return Err(integrity("archive audit ledger progress is out of order"));
+        }
+        self.observe_ledger(
+            ProgressState::Completed,
+            path,
+            index,
+            byte_count,
+            byte_count,
+            records,
+            Some(elapsed_milliseconds(started)),
+        );
+        self.completed_work = self.completed_work.saturating_add(byte_count.max(1));
+        self.ledger_index = self.ledger_index.saturating_add(1);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe_ledger(
+        &self,
+        state: ProgressState,
+        path: &Path,
+        index: usize,
+        byte_count: u64,
+        completed: u64,
+        records: u64,
+        elapsed_milliseconds: Option<u64>,
+    ) {
+        let mut event = ProgressEvent::new(
+            ProgressPhase::ArchiveAudit,
+            state,
+            "auditArchiveLedger",
+            ProgressUnit::Bytes,
+            completed.min(byte_count),
+            byte_count,
+            self.completed_work.saturating_add(
+                if byte_count == 0 && state == ProgressState::Completed {
+                    1
+                } else {
+                    completed.min(byte_count)
+                },
+            ),
+            self.total_work,
+        );
+        event.file_index = Some(index.saturating_add(1));
+        event.file_count = Some(self.ledgers.len());
+        event.file_byte_count = Some(byte_count);
+        event.logical_path = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string);
+        event.source_record_count = Some(records);
+        event.elapsed_milliseconds = elapsed_milliseconds;
+        self.observer.observe(event);
+    }
+
+    fn finish(&self, report: &ArchiveAuditReport) {
+        let mut event = ProgressEvent::new(
+            ProgressPhase::ArchiveAudit,
+            ProgressState::Completed,
+            "auditArchive",
+            ProgressUnit::Bytes,
+            self.total_bytes,
+            self.total_bytes,
+            self.total_work,
+            self.total_work,
+        );
+        event.file_count = Some(self.ledgers.len());
+        event.restored_record_count = Some(report.restored_record_count());
+        event.rejected_record_count = Some(report.rejection_count);
+        event.source_record_count = Some(
+            report
+                .message_count
+                .saturating_add(report.rejection_count)
+                .saturating_add(report.artifact_count)
+                .saturating_add(report.conversation_count)
+                .saturating_add(report.participant_count)
+                .saturating_add(report.cached_moment_count)
+                .saturating_add(report.cached_moment_interaction_count),
+        );
+        event.elapsed_milliseconds = Some(elapsed_milliseconds(self.started_at));
+        self.observer.observe(event);
+    }
+}
+
 fn read_unique_ndjson<T, K, F>(
     path: &Path,
     key: F,
     kind: &str,
+    progress: &mut ArchiveAuditProgress<'_>,
 ) -> Result<HashMap<K, T>, RestoreError>
 where
     T: DeserializeOwned,
@@ -2141,7 +2488,7 @@ where
     F: Fn(&T) -> K,
 {
     let mut values = HashMap::new();
-    read_ndjson(path, |value: T| {
+    read_ndjson(path, progress, |value: T| {
         if values.insert(key(&value), value).is_some() {
             return Err(integrity(format!(
                 "{kind} ledger contains a duplicate identity"
@@ -2152,25 +2499,65 @@ where
     Ok(values)
 }
 
-fn read_ndjson<T, F>(path: &Path, mut consume: F) -> Result<(), RestoreError>
+fn read_ndjson<T, F>(
+    path: &Path,
+    progress: &mut ArchiveAuditProgress<'_>,
+    mut consume: F,
+) -> Result<(), RestoreError>
 where
     T: DeserializeOwned,
     F: FnMut(T) -> Result<(), RestoreError>,
 {
     let file = open_private_readonly(path)?;
     let before = file.metadata()?;
+    let (ledger_index, planned_bytes, ledger_started) = progress.begin_ledger(path)?;
+    if planned_bytes != before.len() {
+        return Err(integrity(
+            "archive ledger size changed after audit progress planning",
+        ));
+    }
     let mut reader = BufReader::new(file);
-    for line in (&mut reader).lines() {
-        let line = line?;
-        if line.is_empty() {
+    let mut line = Vec::new();
+    let mut completed_bytes = 0_u64;
+    let mut record_count = 0_u64;
+    let report_increment = (planned_bytes / 100).max(4 * 1024 * 1024).max(1);
+    let mut next_report = report_increment;
+    let mut last_report = Instant::now();
+    loop {
+        line.clear();
+        let read = reader.read_until(b'\n', &mut line)?;
+        if read == 0 {
+            break;
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
             return Err(integrity("NDJSON ledger contains an empty record"));
         }
-        consume(serde_json::from_str(&line)?)?;
+        consume(serde_json::from_slice(&line)?)?;
+        completed_bytes = completed_bytes.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        record_count = record_count.saturating_add(1);
+        if completed_bytes >= next_report || last_report.elapsed() >= Duration::from_secs(2) {
+            progress.advance_ledger(
+                path,
+                ledger_index,
+                planned_bytes,
+                completed_bytes,
+                record_count,
+            );
+            next_report = completed_bytes.saturating_add(report_increment);
+            last_report = Instant::now();
+        }
     }
     let after = reader.get_ref().metadata()?;
-    if !same_file_version(&before, &after) {
+    if !same_file_version(&before, &after) || completed_bytes != before.len() {
         return Err(integrity("archive ledger changed while it was audited"));
     }
+    progress.complete_ledger(
+        path,
+        ledger_index,
+        planned_bytes,
+        record_count,
+        ledger_started,
+    )?;
     Ok(())
 }
 
@@ -2276,6 +2663,10 @@ fn same_file_version(before: &fs::Metadata, after: &fs::Metadata) -> bool {
         && before.len() == after.len()
         && before.mtime() == after.mtime()
         && before.mtime_nsec() == after.mtime_nsec()
+}
+
+fn elapsed_milliseconds(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn integrity(message: impl Into<String>) -> RestoreError {

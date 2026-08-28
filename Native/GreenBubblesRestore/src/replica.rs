@@ -38,6 +38,12 @@ pub struct ReplicaBootstrapReport {
     pub cipher_version: String,
     pub encrypted_at_rest: bool,
     pub idempotent: bool,
+    pub archive_scope: crate::RestorationArchiveScope,
+    pub authoritative_database_coverage: bool,
+    pub total_database_count: usize,
+    pub restored_database_count: usize,
+    pub unavailable_database_count: usize,
+    pub preserved_stale_database_count: usize,
     pub conversation_count: u64,
     pub participant_count: u64,
     pub message_count: u64,
@@ -61,6 +67,12 @@ pub struct ReplicaStatus {
     pub client_build_compatibility: Option<crate::ClientBuildCompatibilityEvidence>,
     pub acquisition_mode: Option<crate::SnapshotAcquisitionMode>,
     pub media_phase: Option<crate::RestorationMediaPhase>,
+    pub archive_scope: Option<crate::RestorationArchiveScope>,
+    pub authoritative_database_coverage: Option<bool>,
+    pub total_database_count: Option<usize>,
+    pub restored_database_count: Option<usize>,
+    pub unavailable_database_count: Option<usize>,
+    pub preserved_stale_database_count: Option<usize>,
     pub decoder_name: Option<String>,
     pub decoder_version: Option<String>,
     pub cipher_version: String,
@@ -183,6 +195,12 @@ pub struct ReplicaSyncReport {
     pub previous_source_fingerprint: String,
     pub current_source_fingerprint: String,
     pub idempotent: bool,
+    pub archive_scope: crate::RestorationArchiveScope,
+    pub authoritative_database_coverage: bool,
+    pub total_database_count: usize,
+    pub restored_database_count: usize,
+    pub unavailable_database_count: usize,
+    pub preserved_stale_database_count: usize,
     pub added_count: u64,
     pub changed_count: u64,
     pub removed_count: u64,
@@ -277,6 +295,8 @@ pub struct ReplicaConversationPage {
 pub struct ReplicaCoverageView {
     pub account_id: String,
     pub source_fingerprint: String,
+    pub archive_scope: crate::RestorationArchiveScope,
+    pub database_coverage: Option<crate::RestorationDatabaseCoverage>,
     pub coverage: RestorationCoverage,
     pub integrity: crate::RestorationIntegrity,
     pub completion: crate::RestorationCompletion,
@@ -365,6 +385,34 @@ struct CachedArchiveInputs {
     coverage: crate::CachedSurfaceCoverage,
 }
 
+#[derive(Clone, Copy)]
+struct DatabaseCoverageSummary {
+    authoritative: bool,
+    total: usize,
+    restored: usize,
+    unavailable: usize,
+    preserved_stale: usize,
+}
+
+fn database_coverage_summary(report: &RestorationReport) -> DatabaseCoverageSummary {
+    report.database_coverage.as_ref().map_or(
+        DatabaseCoverageSummary {
+            authoritative: report.archive_scope == crate::RestorationArchiveScope::Authoritative,
+            total: report.integrity.database_count as usize,
+            restored: report.integrity.database_count as usize,
+            unavailable: 0,
+            preserved_stale: 0,
+        },
+        |coverage| DatabaseCoverageSummary {
+            authoritative: coverage.authoritative_database_coverage,
+            total: coverage.total_database_count,
+            restored: coverage.restored_database_count,
+            unavailable: coverage.unavailable_database_count,
+            preserved_stale: coverage.preserved_stale_database_count,
+        },
+    )
+}
+
 pub fn bootstrap_replica(
     archive_directory: &Path,
     replica_path: &Path,
@@ -414,6 +462,7 @@ pub fn bootstrap_replica(
     let counts =
         import_archive_transactionally(&mut opened.connection, archive_directory, &report)?;
     checkpoint_and_secure(&opened.connection, replica_path)?;
+    let database_coverage = database_coverage_summary(&report);
     Ok(ReplicaBootstrapReport {
         format_version: REPLICA_FORMAT_VERSION,
         schema_version: CURRENT_SCHEMA_VERSION,
@@ -422,6 +471,12 @@ pub fn bootstrap_replica(
         cipher_version: opened.cipher_version,
         encrypted_at_rest: true,
         idempotent: false,
+        archive_scope: report.archive_scope,
+        authoritative_database_coverage: database_coverage.authoritative,
+        total_database_count: database_coverage.total,
+        restored_database_count: database_coverage.restored,
+        unavailable_database_count: database_coverage.unavailable,
+        preserved_stale_database_count: database_coverage.preserved_stale,
         conversation_count: counts.conversations,
         participant_count: counts.participants,
         message_count: counts.messages,
@@ -511,6 +566,7 @@ pub fn replica_status(
         }
         Some(_) => ReplicaHealthState::CurrentWithCoverageGaps,
     };
+    let database_coverage = stored_report.map(database_coverage_summary);
     let sync_health =
         load_sync_health(&opened.connection, identity.as_ref().map(|value| &value.0))?;
     let integrity_scan_age_seconds = sync_health
@@ -529,6 +585,12 @@ pub fn replica_status(
         acquisition_mode: stored_report
             .and_then(|report| report.acquisition.as_ref().map(|value| value.mode)),
         media_phase: stored_report.map(|report| report.media_phase),
+        archive_scope: stored_report.map(|report| report.archive_scope),
+        authoritative_database_coverage: database_coverage.map(|coverage| coverage.authoritative),
+        total_database_count: database_coverage.map(|coverage| coverage.total),
+        restored_database_count: database_coverage.map(|coverage| coverage.restored),
+        unavailable_database_count: database_coverage.map(|coverage| coverage.unavailable),
+        preserved_stale_database_count: database_coverage.map(|coverage| coverage.preserved_stale),
         decoder_name: stored_coverage.map(|coverage| coverage.decoder_name.clone()),
         decoder_version: stored_coverage.map(|coverage| coverage.decoder_version.clone()),
         cipher_version: opened.cipher_version,
@@ -991,6 +1053,9 @@ pub fn synchronize_replica(
     })?;
     let incoming_coverage = load_archive_coverage(archive_directory)?;
     let stored_state = load_coverage_state(&opened.connection, &account_id)?;
+    if let Some((stored_report, stored_coverage)) = stored_state.as_ref() {
+        ensure_partial_database_transition_is_lossless(stored_report, stored_coverage, &report)?;
+    }
     let unchanged_revision =
         stored_state
             .as_ref()
@@ -1003,7 +1068,7 @@ pub fn synchronize_replica(
             &opened.connection,
             &account_id,
             &previous_fingerprint,
-            &report.source_fingerprint,
+            &report,
             true,
             SyncCounts::default(),
             None,
@@ -1020,7 +1085,7 @@ pub fn synchronize_replica(
         &opened.connection,
         &account_id,
         &previous_fingerprint,
-        &report.source_fingerprint,
+        &report,
         false,
         counts,
         Some(committed),
@@ -1318,6 +1383,57 @@ pub fn search_replica_messages(
         items,
         next_cursor,
     })
+}
+
+pub(crate) fn count_replica_messages_for_scopes(
+    replica_path: &Path,
+    key: &ReplicaKey,
+    scopes: &[(String, Option<i64>, Option<i64>)],
+) -> Result<u64, RestoreError> {
+    let opened = open_replica(replica_path, key)?;
+    let (account_id, _) = current_replica_identity(&opened.connection)?;
+    let mut statement = opened.connection.prepare(
+        "SELECT COUNT(*) FROM message
+         WHERE account_id = :account
+           AND conversation_id = :conversation
+           AND (:not_before IS NULL OR created_at_unix >= :not_before)
+           AND (:not_after IS NULL OR created_at_unix <= :not_after)",
+    )?;
+    let mut total = 0_u64;
+    let mut seen = HashSet::new();
+    for (conversation_id, not_before_unix, not_after_unix) in scopes {
+        if conversation_id.is_empty() {
+            return Err(RestoreError::Integrity(
+                "AI context scope has an empty conversation identity".to_string(),
+            ));
+        }
+        if !seen.insert(conversation_id) {
+            return Err(RestoreError::Integrity(
+                "AI context scope repeats a conversation identity".to_string(),
+            ));
+        }
+        if not_before_unix
+            .zip(*not_after_unix)
+            .is_some_and(|(start, end)| start > end)
+        {
+            return Err(RestoreError::Integrity(
+                "AI context scope has an inverted time range".to_string(),
+            ));
+        }
+        let count: i64 = statement.query_row(
+            named_params! {
+                ":account": account_id,
+                ":conversation": conversation_id,
+                ":not_before": not_before_unix,
+                ":not_after": not_after_unix,
+            },
+            |row| row.get(0),
+        )?;
+        total = total.saturating_add(u64::try_from(count).map_err(|_| {
+            RestoreError::Integrity("replica returned a negative message count".to_string())
+        })?);
+    }
+    Ok(total)
 }
 
 pub fn search_replica_cached_moments(
@@ -1758,6 +1874,8 @@ pub fn replica_coverage(
     Ok(ReplicaCoverageView {
         account_id,
         source_fingerprint,
+        archive_scope: report.archive_scope,
+        database_coverage: report.database_coverage.clone(),
         coverage,
         integrity: report.integrity,
         completion: report.completion,
@@ -2425,11 +2543,11 @@ fn verify_replica_checkpoint_and_coverage(
     let coverage: RestorationCoverage = serde_json::from_slice(&coverage_bytes)?;
     let report: RestorationReport = serde_json::from_slice(&report_bytes)?;
     validate_restoration_coverage_schema(&coverage)?;
-    let recomputed_completion = crate::RestorationCompletion::evaluate(&report.integrity);
+    let recomputed_completion = crate::RestorationCompletion::evaluate_report(&report);
     if coverage_source != identity.1
         || report.account_id != identity.0
         || report.source_fingerprint != identity.1
-        || report.archive_scope != crate::RestorationArchiveScope::Authoritative
+        || require_authoritative_archive(&report).is_err()
         || report.completion.full_restoration_achieved != identity.2
         || stored_complete != identity.2
         || serde_json::to_vec(&recomputed_completion)? != serde_json::to_vec(&report.completion)?
@@ -2501,7 +2619,7 @@ fn verify_legacy_replica_coverage(
     let coverage: RestorationCoverage = serde_json::from_slice(&coverage_bytes)?;
     let report: RestorationReport = serde_json::from_slice(&report_bytes)?;
     validate_restoration_coverage_schema(&coverage)?;
-    let recomputed_completion = crate::RestorationCompletion::evaluate(&report.integrity);
+    let recomputed_completion = crate::RestorationCompletion::evaluate_report(&report);
     if source != identity.1
         || report.account_id != identity.0
         || report.source_fingerprint != identity.1
@@ -3511,9 +3629,70 @@ fn import_archive_transactionally(
 }
 
 fn require_authoritative_archive(report: &RestorationReport) -> Result<(), RestoreError> {
-    if report.archive_scope != crate::RestorationArchiveScope::Authoritative {
+    if report.replica_mutation_eligible() {
+        return Ok(());
+    }
+    {
+        let scope = match report.archive_scope {
+            crate::RestorationArchiveScope::Authoritative
+            | crate::RestorationArchiveScope::PartialDatabaseCoverage => "invalidDatabaseCoverage",
+            crate::RestorationArchiveScope::IncrementalFragment => "incrementalFragment",
+            crate::RestorationArchiveScope::DiagnosticSubset => "diagnosticSubset",
+        };
+        Err(RestoreError::Integrity(
+            format!(
+                "replica mutation requires an independently audited replica-eligible archive; archive scope is {scope}"
+            ),
+        ))
+    }
+}
+
+fn ensure_partial_database_transition_is_lossless(
+    previous_report: &RestorationReport,
+    previous_coverage: &RestorationCoverage,
+    incoming_report: &RestorationReport,
+) -> Result<(), RestoreError> {
+    if incoming_report.archive_scope != crate::RestorationArchiveScope::PartialDatabaseCoverage {
+        return Ok(());
+    }
+    let incoming = incoming_report.database_coverage.as_ref().ok_or_else(|| {
+        RestoreError::Integrity(
+            "partial replica synchronization has no database coverage evidence".to_string(),
+        )
+    })?;
+    let previous_included = previous_report
+        .database_coverage
+        .as_ref()
+        .map(|coverage| {
+            coverage
+                .included_source_set_ids()
+                .into_iter()
+                .map(str::to_string)
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+        .unwrap_or_else(|| {
+            previous_coverage
+                .all_tables
+                .iter()
+                .map(|table| table.source_set_id.clone())
+                .collect()
+        });
+    let current_inventory = incoming
+        .snapshot_source_set_ids
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let incoming_included = incoming
+        .included_source_set_ids()
+        .into_iter()
+        .map(str::to_string)
+        .collect::<std::collections::BTreeSet<_>>();
+    let would_drop_unavailable_records = previous_included
+        .intersection(&current_inventory)
+        .any(|source_set| !incoming_included.contains(source_set));
+    if would_drop_unavailable_records {
         return Err(RestoreError::Integrity(
-            "incremental acquisition must be merged with its prior authoritative state before replica mutation"
+            "partial replica synchronization would discard records from an unavailable database; merge it with the previous archive first"
                 .to_string(),
         ));
     }
@@ -4453,17 +4632,24 @@ fn sync_report(
     connection: &Connection,
     account_id: &str,
     previous_source_fingerprint: &str,
-    current_source_fingerprint: &str,
+    report: &RestorationReport,
     idempotent: bool,
     counts: SyncCounts,
     committed_at_unix_nanoseconds: Option<u128>,
 ) -> Result<ReplicaSyncReport, RestoreError> {
+    let database_coverage = database_coverage_summary(report);
     Ok(ReplicaSyncReport {
         format_version: REPLICA_FORMAT_VERSION,
         account_id: account_id.to_string(),
         previous_source_fingerprint: previous_source_fingerprint.to_string(),
-        current_source_fingerprint: current_source_fingerprint.to_string(),
+        current_source_fingerprint: report.source_fingerprint.clone(),
         idempotent,
+        archive_scope: report.archive_scope,
+        authoritative_database_coverage: database_coverage.authoritative,
+        total_database_count: database_coverage.total,
+        restored_database_count: database_coverage.restored,
+        unavailable_database_count: database_coverage.unavailable,
+        preserved_stale_database_count: database_coverage.preserved_stale,
         added_count: counts.added,
         changed_count: counts.changed,
         removed_count: counts.removed,
@@ -4627,6 +4813,7 @@ fn bootstrap_report(
     report: &RestorationReport,
     idempotent: bool,
 ) -> Result<ReplicaBootstrapReport, RestoreError> {
+    let database_coverage = database_coverage_summary(report);
     Ok(ReplicaBootstrapReport {
         format_version: REPLICA_FORMAT_VERSION,
         schema_version: CURRENT_SCHEMA_VERSION,
@@ -4635,6 +4822,12 @@ fn bootstrap_report(
         cipher_version: opened.cipher_version.clone(),
         encrypted_at_rest: true,
         idempotent,
+        archive_scope: report.archive_scope,
+        authoritative_database_coverage: database_coverage.authoritative,
+        total_database_count: database_coverage.total,
+        restored_database_count: database_coverage.restored,
+        unavailable_database_count: database_coverage.unavailable,
+        preserved_stale_database_count: database_coverage.preserved_stale,
         conversation_count: table_count(&opened.connection, "conversation")?,
         participant_count: table_count(&opened.connection, "participant")?,
         message_count: table_count(&opened.connection, "message")?,

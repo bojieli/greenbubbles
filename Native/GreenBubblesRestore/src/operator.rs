@@ -7,13 +7,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::acquisition_audit::audit_acquisition_chain;
 use crate::archive::{ensure_private_directory, load_report};
-use crate::audit::audit_archive;
+use crate::audit::{audit_archive, audit_archive_with_progress};
 use crate::follow::{capture_publication_predecessor, publish_replica_handoff_next_if_current};
 use crate::merge::merge_incremental_archive;
 use crate::{
-    prepare_catalog, restore_catalog, DatabasePassphrase, RestorationArchiveScope,
-    RestorationMediaPhase, RestorationOptions, RestoreError, SnapshotAcquisitionMode,
-    SnapshotManifest,
+    prepare_catalog_with_progress, restore_catalog_with_progress, DatabasePassphrase,
+    DatabaseUnlockMaterial, NoProgress, ProgressEvent, ProgressObserver, ProgressPhase,
+    ProgressState, ProgressUnit, RestorationArchiveScope, RestorationMediaPhase,
+    RestorationOptions, RestoreError, SnapshotAcquisitionMode, SnapshotManifest,
 };
 
 #[derive(Debug, Clone)]
@@ -36,6 +37,10 @@ pub struct OfflineRestorePublishReport {
     pub previous_archive_verified: bool,
     pub incremental_fragment_verified: bool,
     pub authoritative_archive_verified: bool,
+    pub archive_scope: RestorationArchiveScope,
+    pub authoritative_database_coverage: bool,
+    pub unavailable_database_count: usize,
+    pub preserved_stale_database_count: usize,
     pub generation: u64,
     pub media_phase: RestorationMediaPhase,
     pub full_restoration_achieved: bool,
@@ -58,13 +63,27 @@ pub fn restore_snapshot_and_publish(
     options: &OfflineRestorePublishOptions,
     passphrase: Option<&DatabasePassphrase>,
 ) -> Result<OfflineRestorePublishReport, RestoreError> {
+    let unlock = passphrase.map_or(
+        DatabaseUnlockMaterial::None,
+        DatabaseUnlockMaterial::Passphrase,
+    );
+    restore_snapshot_and_publish_with_progress(snapshot, options, unlock, &NoProgress)
+}
+
+pub fn restore_snapshot_and_publish_with_progress(
+    snapshot: &Path,
+    options: &OfflineRestorePublishOptions,
+    unlock: DatabaseUnlockMaterial<'_>,
+    progress: &dyn ProgressObserver,
+) -> Result<OfflineRestorePublishReport, RestoreError> {
     let total_started = Instant::now();
     let manifest = SnapshotManifest::load(snapshot)?;
     let manifest_binding = serde_json::to_vec(&manifest)?;
     let compatibility = manifest.client_build_compatibility();
     if !compatibility.production_compatible {
         return Err(RestoreError::Integrity(
-            "offline publication requires the exact pinned production client build".to_string(),
+            "offline publication requires a signed WeChat 4.1-or-later compatible client"
+                .to_string(),
         ));
     }
     let acquisition = manifest.acquisition.as_ref().ok_or_else(|| {
@@ -94,7 +113,7 @@ pub fn restore_snapshot_and_publish(
         && (options.previous_snapshot.is_none() || options.previous_archive.is_none())
     {
         return Err(RestoreError::Integrity(
-            "non-bootstrap publication requires both the previous snapshot and authoritative archive"
+            "non-bootstrap publication requires both the previous snapshot and replica-eligible archive"
                 .to_string(),
         ));
     } else if !requires_previous
@@ -113,17 +132,20 @@ pub fn restore_snapshot_and_publish(
     ) {
         audit_acquisition_chain(previous_snapshot, snapshot)?;
         let previous_audit = audit_archive(previous_archive)?;
-        if previous_audit.archive_scope != RestorationArchiveScope::Authoritative {
+        let previous_report = load_report(previous_archive)?;
+        if !previous_report.replica_mutation_eligible()
+            || previous_audit.archive_scope != previous_report.archive_scope
+        {
             return Err(RestoreError::Integrity(
-                "previous publication input is not an authoritative archive".to_string(),
+                "previous publication input is not a replica-eligible archive".to_string(),
             ));
         }
-        let previous_report = load_report(previous_archive)?;
         if acquisition.previous_source_fingerprint.as_deref()
             != Some(previous_report.source_fingerprint.as_str())
         {
             return Err(RestoreError::Integrity(
-                "previous authoritative archive does not match the snapshot baseline".to_string(),
+                "previous replica-eligible archive does not match the snapshot baseline"
+                    .to_string(),
             ));
         }
         previous_chain_verified = true;
@@ -136,7 +158,7 @@ pub fn restore_snapshot_and_publish(
     let input_validation_duration_milliseconds = elapsed_milliseconds(total_started);
 
     let catalog_started = Instant::now();
-    let catalog = prepare_catalog(snapshot, passphrase)?;
+    let catalog = prepare_catalog_with_progress(snapshot, unlock, progress)?;
     if serde_json::to_vec(&catalog.manifest)? != manifest_binding {
         return Err(RestoreError::Integrity(
             "snapshot manifest changed during offline publication".to_string(),
@@ -152,13 +174,14 @@ pub fn restore_snapshot_and_publish(
                 .tempdir_in(output_parent)?;
             fs::set_permissions(staging.path(), fs::Permissions::from_mode(0o700))?;
             let fragment = staging.path().join("incremental-fragment");
-            let fragment_report = restore_catalog(
+            let fragment_report = restore_catalog_with_progress(
                 &catalog,
                 &RestorationOptions {
                     output_directory: fragment.clone(),
                     account_root: options.account_root.clone(),
                     defer_media: options.defer_media,
                 },
+                progress,
             )?;
             if fragment_report.archive_scope != RestorationArchiveScope::IncrementalFragment {
                 return Err(RestoreError::Integrity(
@@ -177,18 +200,50 @@ pub fn restore_snapshot_and_publish(
                 &options.output_archive,
             )?;
         }
+        SnapshotAcquisitionMode::IntegrityScan if requires_previous => {
+            let staging = tempfile::Builder::new()
+                .prefix(".greenbubbles-offline-publish-")
+                .tempdir_in(output_parent)?;
+            fs::set_permissions(staging.path(), fs::Permissions::from_mode(0o700))?;
+            let replacement = staging.path().join("integrity-scan-restoration");
+            let replacement_report = restore_catalog_with_progress(
+                &catalog,
+                &RestorationOptions {
+                    output_directory: replacement.clone(),
+                    account_root: options.account_root.clone(),
+                    defer_media: options.defer_media,
+                },
+                progress,
+            )?;
+            if !replacement_report.replica_mutation_eligible() {
+                return Err(RestoreError::Integrity(
+                    "integrity scan did not produce a replica-eligible archive".to_string(),
+                ));
+            }
+            audit_archive(&replacement)?;
+            merge_incremental_archive(
+                options.previous_archive.as_deref().ok_or_else(|| {
+                    RestoreError::Integrity(
+                        "integrity-scan publication has no previous archive".to_string(),
+                    )
+                })?,
+                &replacement,
+                &options.output_archive,
+            )?;
+        }
         SnapshotAcquisitionMode::Bootstrap | SnapshotAcquisitionMode::IntegrityScan => {
-            let report = restore_catalog(
+            let report = restore_catalog_with_progress(
                 &catalog,
                 &RestorationOptions {
                     output_directory: options.output_archive.clone(),
                     account_root: options.account_root.clone(),
                     defer_media: options.defer_media,
                 },
+                progress,
             )?;
-            if report.archive_scope != RestorationArchiveScope::Authoritative {
+            if !report.replica_mutation_eligible() {
                 return Err(RestoreError::Integrity(
-                    "full snapshot did not restore as an authoritative archive".to_string(),
+                    "full snapshot did not restore as a replica-eligible archive".to_string(),
                 ));
             }
         }
@@ -196,8 +251,20 @@ pub fn restore_snapshot_and_publish(
     let restoration_duration_milliseconds = elapsed_milliseconds(restoration_started);
 
     let publication_started = Instant::now();
-    let archive_audit = audit_archive(&options.output_archive)?;
-    if archive_audit.archive_scope != RestorationArchiveScope::Authoritative
+    progress.observe(ProgressEvent::new(
+        ProgressPhase::ArchiveAudit,
+        ProgressState::Started,
+        "auditPublishedArchive",
+        ProgressUnit::Items,
+        0,
+        1,
+        0,
+        1,
+    ));
+    let archive_audit = audit_archive_with_progress(&options.output_archive, progress)?;
+    let report = load_report(&options.output_archive)?;
+    if !report.replica_mutation_eligible()
+        || archive_audit.archive_scope != report.archive_scope
         || !archive_audit.report_matches_archive
         || !archive_audit.all_artifact_references_resolve
         || !archive_audit.all_resolved_relationships_resolve
@@ -207,12 +274,25 @@ pub fn restore_snapshot_and_publish(
             "restored archive did not satisfy the independent publication audit".to_string(),
         ));
     }
-    let report = load_report(&options.output_archive)?;
     let receipt = publish_replica_handoff_next_if_current(
         &options.output_archive,
         &options.handoff_path,
         &publication_predecessor,
     )?;
+    let mut audit_finished = ProgressEvent::new(
+        ProgressPhase::ArchiveAudit,
+        ProgressState::Completed,
+        "auditPublishedArchive",
+        ProgressUnit::Items,
+        1,
+        1,
+        1,
+        1,
+    );
+    audit_finished.restored_record_count = Some(archive_audit.restored_record_count());
+    audit_finished.rejected_record_count = Some(archive_audit.rejection_count);
+    audit_finished.elapsed_milliseconds = Some(elapsed_milliseconds(publication_started));
+    progress.observe(audit_finished);
     let publication_validation_duration_milliseconds = elapsed_milliseconds(publication_started);
     Ok(OfflineRestorePublishReport {
         format_version: 2,
@@ -222,6 +302,19 @@ pub fn restore_snapshot_and_publish(
         previous_archive_verified,
         incremental_fragment_verified,
         authoritative_archive_verified: true,
+        archive_scope: report.archive_scope,
+        authoritative_database_coverage: report
+            .database_coverage
+            .as_ref()
+            .is_none_or(|coverage| coverage.authoritative_database_coverage),
+        unavailable_database_count: report
+            .database_coverage
+            .as_ref()
+            .map_or(0, |coverage| coverage.unavailable_database_count),
+        preserved_stale_database_count: report
+            .database_coverage
+            .as_ref()
+            .map_or(0, |coverage| coverage.preserved_stale_database_count),
         generation: receipt.generation,
         media_phase: report.media_phase,
         full_restoration_achieved: report.completion.full_restoration_achieved,

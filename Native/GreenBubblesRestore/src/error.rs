@@ -10,6 +10,23 @@ pub enum RestoreError {
     PassphraseRequired(String),
     #[error("database passphrase must be exactly 32 bytes or 64 hexadecimal characters")]
     InvalidPassphrase,
+    #[error("exported database key file is invalid: {0}")]
+    InvalidDatabaseKeyExport(String),
+    #[error("no exported database key matches encrypted database set {0}")]
+    DatabaseKeyRequired(String),
+    #[error(
+        "no exported database key authenticated encrypted database set {set_id} \
+         (exported entries: {exported_key_count}, exact path entry: {exact_path_entry}, \
+         matching salt entries: {matching_salt_entry_count}, authenticated entries: \
+         {authenticated_entry_count})"
+    )]
+    DatabaseKeyAssociation {
+        set_id: String,
+        exported_key_count: usize,
+        exact_path_entry: bool,
+        matching_salt_entry_count: usize,
+        authenticated_entry_count: usize,
+    },
     #[error("replica key must be exactly 32 bytes or 64 hexadecimal characters")]
     InvalidReplicaKey,
     #[error("database decryption failed for set {set_id}: {reason}")]

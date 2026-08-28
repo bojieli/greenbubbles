@@ -14,6 +14,7 @@ pub struct AcquisitionChainAuditReport {
     pub privacy_safe_summary: bool,
     pub chain_verified: bool,
     pub client_build_unchanged: bool,
+    pub previous_client_build_production_compatible: bool,
     pub current_client_build_production_compatible: bool,
     pub mode: SnapshotAcquisitionMode,
     pub previous_source_set_count: u64,
@@ -65,9 +66,12 @@ pub fn audit_acquisition_chain(
         ));
     }
     let client_build_unchanged = current.client_build == previous.client_build;
-    if !client_build_unchanged {
+    let previous_compatibility = previous.client_build_compatibility();
+    let current_compatibility = current.client_build_compatibility();
+    if !previous_compatibility.production_compatible || !current_compatibility.production_compatible
+    {
         return Err(integrity(
-            "client build changed across one acquisition chain",
+            "acquisition chain contains a client outside the signed WeChat 4.1+ compatibility family",
         ));
     }
 
@@ -126,13 +130,12 @@ pub fn audit_acquisition_chain(
     }
 
     Ok(AcquisitionChainAuditReport {
-        format_version: 1,
+        format_version: 2,
         privacy_safe_summary: true,
         chain_verified: true,
         client_build_unchanged,
-        current_client_build_production_compatible: current
-            .client_build_compatibility()
-            .production_compatible,
+        previous_client_build_production_compatible: previous_compatibility.production_compatible,
+        current_client_build_production_compatible: current_compatibility.production_compatible,
         mode: current_acquisition.mode,
         previous_source_set_count: previous_sets.len() as u64,
         current_source_set_count: current_sets.len() as u64,
@@ -206,6 +209,23 @@ mod tests {
         assert!(report.chain_verified);
         assert_eq!(report.reported_changed_source_set_count, 1);
         assert_eq!(report.content_changed_source_set_count, 1);
+
+        let mut updated_client = SnapshotManifest::load(&current).unwrap();
+        let build = updated_client.client_build.as_mut().unwrap();
+        build.marketing_version = "4.1.13".to_string();
+        build.build_version = "new-build".to_string();
+        build.executable_sha256 = "0".repeat(64);
+        build.code_directory_sha256 = "1".repeat(64);
+        fs::write(
+            current.join("manifest.json"),
+            serde_json::to_vec_pretty(&updated_client).unwrap(),
+        )
+        .unwrap();
+        let updated_report = audit_acquisition_chain(&previous, &current).unwrap();
+        assert!(updated_report.chain_verified);
+        assert!(!updated_report.client_build_unchanged);
+        assert!(updated_report.previous_client_build_production_compatible);
+        assert!(updated_report.current_client_build_production_compatible);
 
         write_snapshot(
             &current,

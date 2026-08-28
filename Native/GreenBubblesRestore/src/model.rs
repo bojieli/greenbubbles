@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -435,6 +435,12 @@ pub struct RestorationIntegrity {
     pub database_count: u64,
     pub message_table_count: u64,
     pub message_candidate_gap_count: u64,
+    #[serde(default)]
+    pub observed_table_row_count: u64,
+    #[serde(default)]
+    pub table_role_counts: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub table_classification_reason_counts: BTreeMap<String, u64>,
     pub source_row_count: u64,
     pub restored_row_count: u64,
     pub rejected_row_count: u64,
@@ -496,6 +502,8 @@ pub struct RestorationReport {
     #[serde(default)]
     pub archive_scope: RestorationArchiveScope,
     #[serde(default)]
+    pub database_coverage: Option<RestorationDatabaseCoverage>,
+    #[serde(default)]
     pub media_phase: RestorationMediaPhase,
     pub messages_path: String,
     pub rejections_path: String,
@@ -514,6 +522,31 @@ pub struct RestorationReport {
     pub completion: RestorationCompletion,
 }
 
+impl RestorationReport {
+    /// Whether an independently audited archive is safe to apply to a replica.
+    /// Partial archives are eligible only when every database in the snapshot
+    /// inventory is accounted for as either fresh or explicitly unavailable.
+    pub fn replica_mutation_eligible(&self) -> bool {
+        match self.archive_scope {
+            RestorationArchiveScope::Authoritative => {
+                self.database_coverage.as_ref().is_none_or(|coverage| {
+                    coverage.is_valid() && coverage.authoritative_database_coverage
+                })
+            }
+            RestorationArchiveScope::PartialDatabaseCoverage => {
+                self.format_version >= 5
+                    && self.database_coverage.as_ref().is_some_and(|coverage| {
+                        coverage.is_valid()
+                            && !coverage.authoritative_database_coverage
+                            && coverage.attempted_source_set_ids == coverage.snapshot_source_set_ids
+                    })
+            }
+            RestorationArchiveScope::IncrementalFragment
+            | RestorationArchiveScope::DiagnosticSubset => false,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RestorationMediaPhase {
@@ -527,7 +560,129 @@ pub enum RestorationMediaPhase {
 pub enum RestorationArchiveScope {
     #[default]
     Authoritative,
+    PartialDatabaseCoverage,
     IncrementalFragment,
+    DiagnosticSubset,
+}
+
+/// Database-level freshness evidence for fault-tolerant restoration. A partial
+/// archive may include records preserved from an earlier generation, but it
+/// must never present those records as freshly restored from the current
+/// snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestorationDatabaseCoverage {
+    pub format_version: u32,
+    pub total_database_count: usize,
+    pub attempted_database_count: usize,
+    pub restored_database_count: usize,
+    pub unavailable_database_count: usize,
+    pub preserved_stale_database_count: usize,
+    pub authoritative_database_coverage: bool,
+    #[serde(rename = "snapshotSourceSetIDs")]
+    pub snapshot_source_set_ids: Vec<String>,
+    #[serde(rename = "attemptedSourceSetIDs")]
+    pub attempted_source_set_ids: Vec<String>,
+    #[serde(rename = "freshSourceSetIDs")]
+    pub fresh_source_set_ids: Vec<String>,
+    #[serde(rename = "unavailableSourceSetIDs")]
+    pub unavailable_source_set_ids: Vec<String>,
+    #[serde(rename = "preservedStaleSourceSetIDs")]
+    pub preserved_stale_source_set_ids: Vec<String>,
+    #[serde(default)]
+    pub unavailable_databases: Vec<RestorationUnavailableDatabase>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestorationUnavailableDatabase {
+    #[serde(rename = "sourceSetID")]
+    pub source_set_id: String,
+    pub logical_path: String,
+    pub storage_family: String,
+    pub database_byte_count: u64,
+    pub write_ahead_log_byte_count: u64,
+    pub reason: String,
+}
+
+impl RestorationDatabaseCoverage {
+    pub fn included_source_set_ids(&self) -> BTreeSet<&str> {
+        self.fresh_source_set_ids
+            .iter()
+            .chain(&self.preserved_stale_source_set_ids)
+            .map(String::as_str)
+            .collect()
+    }
+
+    pub fn is_valid(&self) -> bool {
+        let sorted_unique = |values: &[String]| {
+            values.iter().all(|value| !value.is_empty())
+                && values.windows(2).all(|pair| pair[0] < pair[1])
+        };
+        if self.format_version != 1
+            || !sorted_unique(&self.snapshot_source_set_ids)
+            || !sorted_unique(&self.attempted_source_set_ids)
+            || !sorted_unique(&self.fresh_source_set_ids)
+            || !sorted_unique(&self.unavailable_source_set_ids)
+            || !sorted_unique(&self.preserved_stale_source_set_ids)
+        {
+            return false;
+        }
+        let snapshot = self
+            .snapshot_source_set_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let attempted = self
+            .attempted_source_set_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let fresh = self
+            .fresh_source_set_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let unavailable = self
+            .unavailable_source_set_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let stale = self
+            .preserved_stale_source_set_ids
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let unavailable_details = self
+            .unavailable_databases
+            .iter()
+            .map(|database| database.source_set_id.as_str())
+            .collect::<BTreeSet<_>>();
+        self.total_database_count == snapshot.len()
+            && self.attempted_database_count == attempted.len()
+            && self.restored_database_count == fresh.len()
+            && self.unavailable_database_count == unavailable.len()
+            && self.preserved_stale_database_count == stale.len()
+            && attempted.is_subset(&snapshot)
+            && fresh.is_subset(&attempted)
+            && unavailable.is_subset(&attempted)
+            && stale.is_subset(&unavailable)
+            && self.unavailable_databases.len() == unavailable_details.len()
+            && self
+                .unavailable_databases
+                .windows(2)
+                .all(|pair| pair[0].source_set_id < pair[1].source_set_id)
+            && unavailable_details == unavailable
+            && self.unavailable_databases.iter().all(|database| {
+                !database.logical_path.is_empty()
+                    && !database.storage_family.is_empty()
+                    && !database.reason.is_empty()
+            })
+            && fresh.is_disjoint(&unavailable)
+            && fresh.len() + unavailable.len() == attempted.len()
+            && self.authoritative_database_coverage
+                == (attempted == snapshot && unavailable.is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -591,6 +746,26 @@ impl RestorationCompletion {
             full_restoration_achieved,
         }
     }
+
+    /// Recompute completion in the context of the published archive. Row and
+    /// semantic evidence alone cannot make deferred media, partial database
+    /// coverage, a bounded fragment, or an unsupported client build a full
+    /// restoration.
+    pub fn evaluate_report(report: &RestorationReport) -> Self {
+        let mut completion = Self::evaluate(&report.integrity);
+        // Format 4 introduced these report-level conditions into the stored
+        // completion contract. Older replica backups must continue to verify
+        // against the completion semantics they actually persisted; their
+        // separate scope/build gates remain fail-closed at mutation time.
+        if report.format_version >= 4
+            && (report.media_phase == RestorationMediaPhase::Deferred
+                || report.archive_scope != RestorationArchiveScope::Authoritative
+                || !report.client_build_compatibility.production_compatible)
+        {
+            completion.full_restoration_achieved = false;
+        }
+        completion
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -628,6 +803,8 @@ pub struct TableSchemaCoverage {
     pub source_table_name: String,
     pub columns: Vec<String>,
     #[serde(default)]
+    pub source_row_count: Option<u64>,
+    #[serde(default)]
     pub schema_fingerprint: Option<String>,
     pub role: TableCoverageRole,
     pub classification_reason: String,
@@ -648,7 +825,11 @@ pub struct MessageTableCoverage {
 
 #[cfg(test)]
 mod tests {
-    use super::{RestorationCompletion, RestorationIntegrity};
+    use super::{
+        RestorationArchiveScope, RestorationCompletion, RestorationDatabaseCoverage,
+        RestorationIntegrity, RestorationMediaPhase, RestorationReport,
+        RestorationUnavailableDatabase,
+    };
 
     #[test]
     fn pending_relationships_cannot_satisfy_completion() {
@@ -668,5 +849,73 @@ mod tests {
             ..Default::default()
         };
         assert!(RestorationCompletion::evaluate(&explicitly_absent).relationship_coverage_complete);
+    }
+
+    #[test]
+    fn report_level_completion_gates_apply_from_archive_format_four() {
+        let integrity = RestorationIntegrity::default();
+        let mut report = RestorationReport {
+            format_version: 3,
+            account_id: String::new(),
+            source_fingerprint: String::new(),
+            client_build_compatibility: Default::default(),
+            acquisition: None,
+            archive_scope: RestorationArchiveScope::DiagnosticSubset,
+            database_coverage: None,
+            media_phase: RestorationMediaPhase::Deferred,
+            messages_path: String::new(),
+            rejections_path: String::new(),
+            artifacts_path: String::new(),
+            conversations_path: String::new(),
+            participants_path: String::new(),
+            cached_moments_path: None,
+            cached_moment_interactions_path: None,
+            cached_surfaces_path: None,
+            coverage_path: String::new(),
+            report_path: String::new(),
+            completion: RestorationCompletion::evaluate(&integrity),
+            integrity,
+        };
+        assert!(RestorationCompletion::evaluate_report(&report).full_restoration_achieved);
+
+        report.format_version = 4;
+        assert!(!RestorationCompletion::evaluate_report(&report).full_restoration_achieved);
+
+        report.format_version = 5;
+        report.archive_scope = RestorationArchiveScope::PartialDatabaseCoverage;
+        report.database_coverage = Some(RestorationDatabaseCoverage {
+            format_version: 1,
+            total_database_count: 2,
+            attempted_database_count: 2,
+            restored_database_count: 1,
+            unavailable_database_count: 1,
+            preserved_stale_database_count: 0,
+            authoritative_database_coverage: false,
+            snapshot_source_set_ids: vec!["set-a".to_string(), "set-b".to_string()],
+            attempted_source_set_ids: vec!["set-a".to_string(), "set-b".to_string()],
+            fresh_source_set_ids: vec!["set-a".to_string()],
+            unavailable_source_set_ids: vec!["set-b".to_string()],
+            preserved_stale_source_set_ids: Vec::new(),
+            unavailable_databases: vec![RestorationUnavailableDatabase {
+                source_set_id: "set-b".to_string(),
+                logical_path: "message/set-b.db".to_string(),
+                storage_family: "wcdbSqlcipher4".to_string(),
+                database_byte_count: 1,
+                write_ahead_log_byte_count: 0,
+                reason: "syntheticUnavailable".to_string(),
+            }],
+        });
+        assert!(report.replica_mutation_eligible());
+        report
+            .database_coverage
+            .as_mut()
+            .unwrap()
+            .attempted_source_set_ids = vec!["set-a".to_string()];
+        report
+            .database_coverage
+            .as_mut()
+            .unwrap()
+            .attempted_database_count = 1;
+        assert!(!report.replica_mutation_eligible());
     }
 }

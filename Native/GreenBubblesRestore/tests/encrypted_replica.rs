@@ -18,8 +18,12 @@ use greenbubbles_restore::replica::{
 };
 use greenbubbles_restore::tools::{
     create_tool_policy, ConversationToolScope, ToolCapability, ToolMessageField,
+    ToolSourceDatabaseFreshness,
 };
 use greenbubbles_restore::{
+    ai_context::{
+        audit_ai_context, export_ai_context, query_ai_context, AiQueryRequest, AiQueryResult,
+    },
     connector::{
         audit_connector_log, ConnectorDestination, ConnectorErrorCode, ConnectorOperation,
         ConnectorRequest, ConnectorResult, ConnectorService, CONNECTOR_API_VERSION,
@@ -30,14 +34,16 @@ use greenbubbles_restore::{
     ArtifactAvailability, ArtifactDecodeState, ArtifactKind, ArtifactRole, CanonicalArtifact,
     CanonicalConversation, CanonicalMessage, CanonicalParticipant, ClientBuildCompatibilityState,
     ConversationKind, DirectionEvidence, EntityDecodeState, LocalProfileState,
-    MessageArtifactReference, MessageDirection, MessageOrderingBasis, ReplicaKey,
-    RestorationCompletion, RestorationCoverage, RestorationIntegrity, RestorationReport,
-    SemanticDecodeState, SnapshotAcquisitionEvidence, SnapshotAcquisitionMode, TypedPayload,
+    MessageArtifactReference, MessageDirection, MessageOrderingBasis, NoProgress, ProgressEvent,
+    ProgressObserver, ProgressState, ReplicaKey, RestorationCompletion, RestorationCoverage,
+    RestorationIntegrity, RestorationReport, SemanticDecodeState, SnapshotAcquisitionEvidence,
+    SnapshotAcquisitionMode, TypedPayload,
 };
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::sync::Mutex;
 
 const KEY_BYTES: [u8; 32] = [0x31; 32];
 const WRONG_KEY_BYTES: [u8; 32] = [0x32; 32];
@@ -521,6 +527,283 @@ fn serves_scoped_replica_reads_and_complete_non_executing_drafts() {
         String::from_utf8_lossy(&explicit_rebootstrap.stderr)
     );
     stop_connector_process(&mut replacement_connector, &replacement_socket);
+}
+
+#[derive(Default)]
+struct CapturedProgress(Mutex<Vec<ProgressEvent>>);
+
+impl ProgressObserver for CapturedProgress {
+    fn observe(&self, event: ProgressEvent) {
+        self.0.lock().unwrap().push(event);
+    }
+}
+
+#[test]
+fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive = build_archive(&private, "archive", "account-a", "source-a");
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+    bootstrap_replica(&archive, &replica, &key).unwrap();
+    let policy = private.join("ai-policy.json");
+    create_tool_policy(
+        &archive,
+        &policy,
+        BTreeMap::from([(
+            "conversation-a".to_string(),
+            ConversationToolScope {
+                capabilities: BTreeSet::from([
+                    ToolCapability::ListConversations,
+                    ToolCapability::ReadRecentMessages,
+                    ToolCapability::SearchMessages,
+                ]),
+                message_fields: BTreeSet::from([
+                    ToolMessageField::Sender,
+                    ToolMessageField::CreatedAt,
+                    ToolMessageField::Direction,
+                    ToolMessageField::MessageType,
+                    ToolMessageField::Content,
+                    ToolMessageField::Attachments,
+                    ToolMessageField::Relationships,
+                ]),
+                not_before_unix: None,
+                not_after_unix: None,
+                allow_remote_model: false,
+            },
+        )]),
+        100,
+        4_096,
+        16_384,
+    )
+    .unwrap();
+    let audit = private.join("ai-audit.ndjson");
+
+    let response = query_ai_context(
+        &replica,
+        &key,
+        &policy,
+        &audit,
+        AiQueryRequest {
+            format_version: 1,
+            request_id: "query-1".to_string(),
+            requester_id: "synthetic-agent".to_string(),
+            destination: ConnectorDestination::Local,
+            operation: ConnectorOperation::SearchMessages {
+                query: "encrypted".to_string(),
+                conversation_id: Some("conversation-a".to_string()),
+                cursor: None,
+                limit: Some(10),
+            },
+        },
+    )
+    .unwrap();
+    assert!(response.ok);
+    assert_eq!(response.context.message_count, 1);
+    assert!(!response.context.coverage_note.is_empty());
+    let AiQueryResult::Messages(page) = response.result.unwrap() else {
+        panic!("unexpected AI query result")
+    };
+    assert_eq!(page.messages.len(), 1);
+    assert_eq!(
+        page.messages[0].payload_summary.as_deref(),
+        Some(PRIVATE_TEXT)
+    );
+    assert_eq!(
+        page.messages[0].source_database_freshness,
+        ToolSourceDatabaseFreshness::Fresh
+    );
+
+    let rejected = query_ai_context(
+        &replica,
+        &key,
+        &policy,
+        &audit,
+        AiQueryRequest {
+            format_version: 1,
+            request_id: "write-query".to_string(),
+            requester_id: "synthetic-agent".to_string(),
+            destination: ConnectorDestination::Local,
+            operation: ConnectorOperation::CreateMessageDraft {
+                conversation_id: "conversation-a".to_string(),
+                rendered_text: "must not be accepted".to_string(),
+                attachment_ids: Vec::new(),
+                expires_in_seconds: None,
+            },
+        },
+    )
+    .unwrap_err();
+    assert!(rejected.to_string().contains("read operations only"));
+
+    let output = private.join("ai-context");
+    let progress = CapturedProgress::default();
+    let manifest = export_ai_context(
+        &replica,
+        &key,
+        &policy,
+        &audit,
+        &output,
+        "synthetic-agent",
+        ConnectorDestination::Local,
+        &progress,
+    )
+    .unwrap();
+    assert!(manifest.export_complete);
+    assert_eq!(manifest.enabled_conversation_count, 1);
+    assert_eq!(manifest.exported_contact_count, 1);
+    assert_eq!(manifest.exported_message_count, 1);
+    assert_eq!(manifest.exported_artifact_count, 1);
+    assert_eq!(manifest.artifact_resolution_error_count, 0);
+    assert_eq!(file_mode(&output), 0o700);
+    for name in [
+        "manifest.json",
+        "conversations.jsonl",
+        "contacts.jsonl",
+        "messages.jsonl",
+        "artifacts.jsonl",
+    ] {
+        assert_eq!(file_mode(&output.join(name)), 0o600, "{name}");
+    }
+    let messages = fs::read_to_string(output.join("messages.jsonl")).unwrap();
+    assert!(messages.contains(PRIVATE_TEXT));
+    assert!(messages.contains("\"sourceDatabaseFreshness\":\"fresh\""));
+    assert!(!messages.contains("rawColumns"));
+    assert!(!messages.contains("sourceLogicalPath"));
+    assert!(!messages.contains("contentBase64"));
+    let artifacts = fs::read_to_string(output.join("artifacts.jsonl")).unwrap();
+    assert!(artifacts.contains("msg/image.jpg"));
+    assert!(!artifacts.contains(private.to_string_lossy().as_ref()));
+    assert!(!artifacts.contains("absolutePath"));
+
+    let events = progress.0.lock().unwrap();
+    assert_eq!(events.first().unwrap().state, ProgressState::Planned);
+    assert_eq!(events.last().unwrap().state, ProgressState::Completed);
+    assert_eq!(
+        events.last().unwrap().phase_completed,
+        events.last().unwrap().phase_total
+    );
+    assert!(events
+        .windows(2)
+        .all(|events| events[0].phase_completed <= events[1].phase_completed));
+    drop(events);
+
+    assert!(export_ai_context(
+        &replica,
+        &key,
+        &policy,
+        &audit,
+        &output,
+        "synthetic-agent",
+        ConnectorDestination::Local,
+        &NoProgress,
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("already exists"));
+    let bundle_audit = audit_ai_context(&output).unwrap();
+    assert!(bundle_audit.file_digests_verified);
+    assert!(bundle_audit.references_verified);
+    assert!(bundle_audit.source_freshness_verified);
+    assert_eq!(bundle_audit.conversation_count, 1);
+    assert_eq!(bundle_audit.contact_count, 1);
+    assert_eq!(bundle_audit.message_count, 1);
+    assert_eq!(bundle_audit.artifact_count, 1);
+
+    let cli_request = private.join("ai-cli-request.json");
+    write_json(
+        &cli_request,
+        &AiQueryRequest {
+            format_version: 1,
+            request_id: "cli-query".to_string(),
+            requester_id: "synthetic-cli-agent".to_string(),
+            destination: ConnectorDestination::Local,
+            operation: ConnectorOperation::GetMessages {
+                conversation_id: "conversation-a".to_string(),
+                cursor: None,
+                limit: Some(10),
+            },
+        },
+    );
+    let mut cli_query = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .args([
+            "ai-query",
+            replica.to_str().unwrap(),
+            policy.to_str().unwrap(),
+            audit.to_str().unwrap(),
+            cli_request.to_str().unwrap(),
+            "--replica-key-stdin",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    cli_query
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{}\n", hex::encode(KEY_BYTES)).as_bytes())
+        .unwrap();
+    let cli_query = cli_query.wait_with_output().unwrap();
+    assert!(cli_query.status.success(), "{:?}", cli_query.stderr);
+    let cli_response: greenbubbles_restore::ai_context::AiQueryResponse =
+        serde_json::from_slice(&cli_query.stdout).unwrap();
+    assert!(cli_response.ok);
+
+    let cli_output = private.join("ai-context-cli");
+    let mut cli_export = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .args([
+            "ai-export",
+            replica.to_str().unwrap(),
+            policy.to_str().unwrap(),
+            audit.to_str().unwrap(),
+            cli_output.to_str().unwrap(),
+            "--replica-key-stdin",
+            "--requester",
+            "synthetic-cli-agent",
+            "--quiet-progress",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    cli_export
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{}\n", hex::encode(KEY_BYTES)).as_bytes())
+        .unwrap();
+    let cli_export = cli_export.wait_with_output().unwrap();
+    assert!(cli_export.status.success(), "{:?}", cli_export.stderr);
+    let cli_manifest: greenbubbles_restore::ai_context::AiContextManifest =
+        serde_json::from_slice(&cli_export.stdout).unwrap();
+    assert!(cli_manifest.export_complete);
+    assert_eq!(cli_manifest.exported_message_count, 1);
+    let cli_audit = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .args(["audit-ai-context", cli_output.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(cli_audit.status.success(), "{:?}", cli_audit.stderr);
+    let cli_audit: greenbubbles_restore::ai_context::AiContextAuditReport =
+        serde_json::from_slice(&cli_audit.stdout).unwrap();
+    assert!(cli_audit.references_verified);
+
+    let mut tampered = OpenOptions::new()
+        .append(true)
+        .open(output.join("messages.jsonl"))
+        .unwrap();
+    tampered.write_all(b"{}\n").unwrap();
+    tampered.sync_all().unwrap();
+    assert!(audit_ai_context(&output)
+        .unwrap_err()
+        .to_string()
+        .contains("byte count"));
+    let audit_contents = fs::read_to_string(audit).unwrap();
+    assert!(!audit_contents.contains(PRIVATE_TEXT));
+    assert!(!audit_contents.contains("must not be accepted"));
 }
 
 fn spawn_connector_process(
@@ -1723,6 +2006,7 @@ fn build_archive(parent: &Path, name: &str, account: &str, fingerprint: &str) ->
         client_build_compatibility: Default::default(),
         acquisition: None,
         archive_scope: Default::default(),
+        database_coverage: None,
         media_phase: Default::default(),
         messages_path: archive.join("messages.ndjson").display().to_string(),
         rejections_path: archive.join("rejections.ndjson").display().to_string(),

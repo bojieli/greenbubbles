@@ -697,6 +697,7 @@ fn build_archive(
         client_build_compatibility: Default::default(),
         acquisition: None,
         archive_scope: RestorationArchiveScope::Authoritative,
+        database_coverage: None,
         media_phase: RestorationMediaPhase::Resolved,
         messages_path: "synthetic".to_string(),
         rejections_path: "synthetic".to_string(),
