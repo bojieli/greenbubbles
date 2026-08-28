@@ -13,9 +13,10 @@ use sha2::{Digest, Sha256};
 use crate::archive::{ensure_private_directory, ensure_private_regular_file};
 use crate::audit::verify_recorded_artifact_files;
 use crate::replica::{
-    get_replica_artifact, get_replica_changes, get_replica_conversation, get_replica_message,
-    get_replica_participant, replica_conversation_references_artifact_in_range, replica_coverage,
-    replica_restoration_report, replica_status, search_replica_cached_moments,
+    get_replica_artifact, get_replica_changes, get_replica_conversation,
+    get_replica_conversation_batch, get_replica_message, get_replica_participant,
+    get_replica_participant_batch, replica_conversation_references_artifact_in_range,
+    replica_coverage, replica_restoration_report, replica_status, search_replica_cached_moments,
     search_replica_messages, ReplicaCachedMomentFilter, ReplicaCachedSurfaceAvailability,
     ReplicaCoverageView, ReplicaMessageFilter, ReplicaStatus,
 };
@@ -311,6 +312,8 @@ pub struct ConnectorArtifactView {
     pub source: Option<ConnectorArtifactFile>,
     pub decoded: Option<ConnectorArtifactFile>,
     pub verification_detail: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,6 +353,8 @@ pub struct ResolvedContact {
     pub local_profile_available: bool,
     pub source_database_freshness: ToolSourceDatabaseFreshness,
     pub enabled_conversation_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -537,8 +542,19 @@ pub struct ConnectorService<'a> {
     policy_sha256: String,
     audit_path: PathBuf,
     draft_directory: PathBuf,
+    checkpoint_gate: Mutex<()>,
+    cache_checkpoint: Mutex<ConnectorCheckpointBinding>,
     cached_moment_request_times: Mutex<VecDeque<u128>>,
-    preserved_stale_source_set_ids: BTreeSet<String>,
+    conversation_cache: Mutex<BTreeMap<String, Option<CanonicalConversation>>>,
+    participant_cache: Mutex<BTreeMap<String, Option<CanonicalParticipant>>>,
+    resolved_conversation_cache: Mutex<BTreeMap<String, ResolvedConversation>>,
+    preserved_stale_source_set_ids: Mutex<BTreeSet<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConnectorCheckpointBinding {
+    source_fingerprint: String,
+    checkpoint_revision: String,
 }
 
 impl<'a> ConnectorService<'a> {
@@ -552,6 +568,7 @@ impl<'a> ConnectorService<'a> {
         let policy = load_tool_policy(policy_path)?;
         let policy_sha256 = hex::encode(Sha256::digest(fs::read(policy_path)?));
         let status = replica_status(replica_path, key)?;
+        let cache_checkpoint = connector_checkpoint_binding(&status)?;
         let account_id = status.account_id.ok_or_else(|| {
             RestoreError::Integrity("connector replica is not initialized".to_string())
         })?;
@@ -588,8 +605,13 @@ impl<'a> ConnectorService<'a> {
             policy_sha256,
             audit_path: audit_path.to_path_buf(),
             draft_directory: draft_directory.to_path_buf(),
+            checkpoint_gate: Mutex::new(()),
+            cache_checkpoint: Mutex::new(cache_checkpoint),
             cached_moment_request_times: Mutex::new(VecDeque::new()),
-            preserved_stale_source_set_ids,
+            conversation_cache: Mutex::new(BTreeMap::new()),
+            participant_cache: Mutex::new(BTreeMap::new()),
+            resolved_conversation_cache: Mutex::new(BTreeMap::new()),
+            preserved_stale_source_set_ids: Mutex::new(preserved_stale_source_set_ids),
         })
     }
 
@@ -726,27 +748,58 @@ impl<'a> ConnectorService<'a> {
     pub fn handle(&self, request: ConnectorRequest) -> ConnectorResponse {
         let request_id = request.request_id.clone();
         let result = self.dispatch(&request);
-        match result {
-            Ok(result) => ConnectorResponse {
-                api_version: CONNECTOR_API_VERSION.to_string(),
-                request_id,
-                ok: true,
-                result: Some(result),
-                error: None,
-            },
-            Err(failure) => ConnectorResponse {
-                api_version: CONNECTOR_API_VERSION.to_string(),
-                request_id,
-                ok: false,
-                result: None,
-                error: Some(failure),
-            },
-        }
+        connector_response(request_id, result)
+    }
+
+    /// Uses a checkpoint guard owned by the caller across one or more
+    /// connector operations. The AI query/export layer calls
+    /// `prepare_external_checkpoint_guard` once and verifies the same replica
+    /// status before and after the complete operation or generation.
+    pub(crate) fn handle_with_external_checkpoint_guard(
+        &self,
+        request: ConnectorRequest,
+    ) -> ConnectorResponse {
+        let request_id = request.request_id.clone();
+        let result = self.dispatch_internal(&request, false);
+        connector_response(request_id, result)
+    }
+
+    pub(crate) fn prepare_external_checkpoint_guard(&self) -> Result<(), RestoreError> {
+        self.refresh_checkpoint_bound_state()
+            .map(|_| ())
+            .map_err(|error| RestoreError::Integrity(error.message))
     }
 
     fn dispatch(&self, request: &ConnectorRequest) -> Result<ConnectorResult, ConnectorErrorBody> {
+        self.dispatch_internal(request, true)
+    }
+
+    fn dispatch_internal(
+        &self,
+        request: &ConnectorRequest,
+        verify_checkpoint: bool,
+    ) -> Result<ConnectorResult, ConnectorErrorBody> {
         self.validate_request(request)?;
-        match &request.operation {
+        // The connector may outlive a separately managed replica follower.
+        // Serialize checkpoint-bound reads, invalidate hydrated metadata when
+        // the follower advances, and never release a response assembled
+        // across two checkpoints. AI query/export own a wider equivalent
+        // guard, so they skip the per-call checks while paging one generation.
+        let _checkpoint_gate = if verify_checkpoint {
+            Some(self.checkpoint_gate.lock().map_err(|_| {
+                integrity_error(RestoreError::Integrity(
+                    "connector checkpoint gate is unavailable".to_string(),
+                ))
+            })?)
+        } else {
+            None
+        };
+        let before = if verify_checkpoint {
+            Some(self.refresh_checkpoint_bound_state()?)
+        } else {
+            None
+        };
+        let result = match &request.operation {
             ConnectorOperation::Capabilities => {
                 let value = self.capabilities().map_err(integrity_error)?;
                 self.audit_metadata(request, "capabilities")?;
@@ -883,7 +936,19 @@ impl<'a> ConnectorService<'a> {
                 "sourceAcquisitionNotInServingProcess",
                 "Source acquisition is intentionally isolated from the replica serving process; use the passive CLI workflow",
             )),
+        };
+        if result.is_ok() && verify_checkpoint {
+            let after = self.current_checkpoint_binding()?;
+            if Some(&after) != before.as_ref() {
+                // Clear any records observed before the concurrent commit so
+                // the retry starts entirely from the new checkpoint.
+                self.refresh_checkpoint_bound_state()?;
+                return Err(retryable_conflict(
+                    "replica checkpoint changed during the request; retry against the current checkpoint",
+                ));
+            }
         }
+        result
     }
 
     fn validate_request(&self, request: &ConnectorRequest) -> Result<(), ConnectorErrorBody> {
@@ -1158,6 +1223,7 @@ impl<'a> ConnectorService<'a> {
         let page =
             search_replica_cached_moments(&self.replica_path, self.key, &filter, cursor, limit)
                 .map_err(integrity_error)?;
+        let preserved_stale_source_set_ids = self.preserved_stale_sources()?;
         let mut moments = Vec::new();
         let mut omitted_moment_count = page.omitted_item_count;
         let mut limitation_codes = page.limitation_codes.into_iter().collect::<BTreeSet<_>>();
@@ -1166,7 +1232,7 @@ impl<'a> ConnectorService<'a> {
                 moment,
                 self.policy.maximum_message_summary_bytes,
                 &scope.fields,
-                &self.preserved_stale_source_set_ids,
+                &preserved_stale_source_set_ids,
             ) {
                 Ok(moment) => moments.push(moment),
                 Err(_) => {
@@ -1210,8 +1276,20 @@ impl<'a> ConnectorService<'a> {
             .account_id
             .ok_or_else(|| unavailable("replicaUninitialized", "Replica is not initialized"))?;
         let mut conversations = Vec::new();
-        let mut omitted_conversation_count = 0_u64;
         let mut limitation_codes = BTreeSet::new();
+        let enabled_conversation_ids = self
+            .policy
+            .conversation_scopes
+            .iter()
+            .filter(|(_, scope)| {
+                scope
+                    .capabilities
+                    .contains(&ToolCapability::ListConversations)
+                    && (destination != ToolDataDestination::RemoteModel || scope.allow_remote_model)
+            })
+            .map(|(conversation_id, _)| conversation_id.clone())
+            .collect::<BTreeSet<_>>();
+        self.warm_conversation_caches(&enabled_conversation_ids)?;
         for (conversation_id, scope) in &self.policy.conversation_scopes {
             if !scope
                 .capabilities
@@ -1220,20 +1298,13 @@ impl<'a> ConnectorService<'a> {
             {
                 continue;
             }
-            let conversation =
-                get_replica_conversation(&self.replica_path, self.key, conversation_id)
-                    .map_err(integrity_error)?;
-            let Some(conversation) = conversation else {
-                omitted_conversation_count = omitted_conversation_count.saturating_add(1);
-                continue;
-            };
-            let resolved = self.resolve_conversation(&conversation)?;
+            let resolved = self.resolve_conversation_by_id(conversation_id)?;
             limitation_codes.extend(resolved.limitation_codes.iter().cloned());
             conversations.push(ConnectorConversationView {
-                conversation_id: conversation.conversation_id,
-                kind: conversation.kind,
-                participant_count: conversation.participant_ids.len(),
-                entity_decode_state: conversation.entity_decode_state,
+                conversation_id: resolved.conversation_id,
+                kind: resolved.kind,
+                participant_count: resolved.participant_count,
+                entity_decode_state: resolved.entity_decode_state,
                 source_database_freshness: resolved.source_database_freshness,
                 human_label: resolved.human_label,
                 capabilities: scope.capabilities.clone(),
@@ -1257,13 +1328,8 @@ impl<'a> ConnectorService<'a> {
         Ok(ConnectorConversationList {
             account_id,
             conversations,
-            omitted_conversation_count,
-            limitation_codes: {
-                if omitted_conversation_count > 0 {
-                    limitation_codes.insert("unavailableConversationOmitted".to_string());
-                }
-                limitation_codes.into_iter().collect()
-            },
+            omitted_conversation_count: 0,
+            limitation_codes: limitation_codes.into_iter().collect(),
         })
     }
 
@@ -1289,6 +1355,7 @@ impl<'a> ConnectorService<'a> {
         };
         let page = search_replica_messages(&self.replica_path, self.key, &filter, cursor, limit)
             .map_err(integrity_error)?;
+        let preserved_stale_source_set_ids = self.preserved_stale_sources()?;
         let messages = page
             .items
             .into_iter()
@@ -1297,10 +1364,12 @@ impl<'a> ConnectorService<'a> {
                     message,
                     self.policy.maximum_message_summary_bytes,
                     &scope.message_fields,
-                    &self.preserved_stale_source_set_ids,
+                    &preserved_stale_source_set_ids,
                 )
             })
             .collect::<Vec<_>>();
+        let mut limitation_codes = page.limitation_codes.into_iter().collect::<BTreeSet<_>>();
+        extend_message_projection_limitations(&messages, &mut limitation_codes);
         let released = released_body_bytes(&messages);
         self.audit(
             request,
@@ -1319,7 +1388,7 @@ impl<'a> ConnectorService<'a> {
             messages,
             next_cursor: page.next_cursor,
             omitted_message_count: page.omitted_item_count,
-            limitation_codes: page.limitation_codes,
+            limitation_codes: limitation_codes.into_iter().collect(),
         })
     }
 
@@ -1342,6 +1411,7 @@ impl<'a> ConnectorService<'a> {
             ));
         }
         let limit = requested_limit.clamp(1, self.policy.maximum_result_count);
+        let preserved_stale_source_set_ids = self.preserved_stale_sources()?;
         if let Some(conversation_id) = conversation_id {
             let scope = self.authorize(
                 request,
@@ -1367,10 +1437,12 @@ impl<'a> ConnectorService<'a> {
                         message,
                         self.policy.maximum_message_summary_bytes,
                         &scope.message_fields,
-                        &self.preserved_stale_source_set_ids,
+                        &preserved_stale_source_set_ids,
                     )
                 })
                 .collect::<Vec<_>>();
+            let mut limitation_codes = page.limitation_codes.into_iter().collect::<BTreeSet<_>>();
+            extend_message_projection_limitations(&messages, &mut limitation_codes);
             let released = released_body_bytes(&messages);
             self.audit(
                 request,
@@ -1389,7 +1461,7 @@ impl<'a> ConnectorService<'a> {
                 messages,
                 next_cursor: page.next_cursor,
                 omitted_message_count: page.omitted_item_count,
-                limitation_codes: page.limitation_codes,
+                limitation_codes: limitation_codes.into_iter().collect(),
             });
         }
 
@@ -1429,7 +1501,7 @@ impl<'a> ConnectorService<'a> {
                     message,
                     self.policy.maximum_message_summary_bytes,
                     &scope.message_fields,
-                    &self.preserved_stale_source_set_ids,
+                    &preserved_stale_source_set_ids,
                 )
             }));
         }
@@ -1448,6 +1520,7 @@ impl<'a> ConnectorService<'a> {
                 ))
         });
         messages.truncate(limit);
+        extend_message_projection_limitations(&messages, &mut limitation_codes);
         let released = released_body_bytes(&messages);
         self.audit(
             request,
@@ -1489,11 +1562,12 @@ impl<'a> ConnectorService<'a> {
         if !scope.includes_message(&message) {
             return Err(unauthorized("message is outside the authorized time range"));
         }
+        let preserved_stale_source_set_ids = self.preserved_stale_sources()?;
         let result = minimize_message(
             message,
             self.policy.maximum_message_summary_bytes,
             &scope.message_fields,
-            &self.preserved_stale_source_set_ids,
+            &preserved_stale_source_set_ids,
         );
         let released = result
             .payload_summary
@@ -1575,9 +1649,23 @@ impl<'a> ConnectorService<'a> {
                 "artifact is not referenced within the authorized conversation time range",
             ));
         }
-        let artifact = get_replica_artifact(&self.replica_path, self.key, artifact_id)
+        let Some(artifact) = get_replica_artifact(&self.replica_path, self.key, artifact_id)
             .map_err(integrity_error)?
-            .ok_or_else(|| not_found("artifact was not found"))?;
+        else {
+            let result = unavailable_artifact(artifact_id);
+            self.audit(
+                request,
+                "getArtifact",
+                Some(conversation_id),
+                ConnectorAuditOutcome::Completed,
+                1,
+                0,
+                0,
+                None,
+                None,
+            )?;
+            return Ok(result);
+        };
         let report = replica_restoration_report(&self.replica_path, self.key)
             .map_err(integrity_error)?
             .ok_or_else(|| {
@@ -1671,13 +1759,12 @@ impl<'a> ConnectorService<'a> {
         request: &ConnectorRequest,
         participant_id: &str,
     ) -> Result<ResolvedContact, ConnectorErrorBody> {
-        let participant = get_replica_participant(&self.replica_path, self.key, participant_id)
-            .map_err(integrity_error)?
-            .ok_or_else(|| not_found("participant was not found"))?;
         let destination = ToolDataDestination::from(request.destination);
-        let enabled = participant
-            .conversation_ids
-            .iter()
+        let participant = self.cached_participant(participant_id)?;
+        let mut enabled = participant
+            .as_ref()
+            .into_iter()
+            .flat_map(|participant| participant.conversation_ids.iter())
             .filter(|identifier| {
                 self.policy
                     .conversation_scopes
@@ -1692,26 +1779,83 @@ impl<'a> ConnectorService<'a> {
                     })
             })
             .cloned()
-            .collect::<Vec<_>>();
+            .collect::<BTreeSet<_>>();
+
+        // A healthy participant carries its account-bound memberships, which
+        // are tiny compared with an all-conversation policy. Only a missing
+        // profile needs the broader conversation scan to prove that the
+        // requested opaque identity is still authorized before synthesizing
+        // a placeholder.
+        if participant.is_none() {
+            let allowed_conversation_ids = self
+                .policy
+                .conversation_scopes
+                .iter()
+                .filter(|(_, scope)| {
+                    (scope
+                        .capabilities
+                        .contains(&ToolCapability::ListConversations)
+                        || scope.capabilities.contains(&ToolCapability::CreateDraft))
+                        && (destination == ToolDataDestination::LocalModel
+                            || scope.allow_remote_model)
+                })
+                .map(|(identifier, _)| identifier.clone())
+                .collect::<BTreeSet<_>>();
+            self.warm_conversation_caches(&allowed_conversation_ids)?;
+            let conversations = self.conversation_cache.lock().map_err(|_| {
+                integrity_error(RestoreError::Integrity(
+                    "connector conversation cache is unavailable".to_string(),
+                ))
+            })?;
+            enabled.extend(
+                allowed_conversation_ids
+                    .iter()
+                    .filter(|identifier| {
+                        conversations
+                            .get(*identifier)
+                            .and_then(Option::as_ref)
+                            .is_some_and(|conversation| {
+                                conversation
+                                    .participant_ids
+                                    .iter()
+                                    .any(|candidate| candidate == participant_id)
+                            })
+                    })
+                    .cloned(),
+            );
+        }
         if enabled.is_empty() {
             return Err(unauthorized(
                 "participant has no enabled conversation for this destination",
             ));
         }
-        let display_name = participant_display_name(&participant);
-        let result = ResolvedContact {
-            participant_id: participant.participant_id,
-            display_name,
-            local_profile_available: participant.local_profile_state
-                == crate::LocalProfileState::Hydrated,
-            source_database_freshness: entity_source_database_freshness(
-                participant
-                    .source_records
-                    .iter()
-                    .map(|record| record.source_set_id.clone()),
-                &self.preserved_stale_source_set_ids,
-            ),
-            enabled_conversation_ids: enabled,
+        let preserved_stale_source_set_ids = self.preserved_stale_sources()?;
+        let result = if let Some(participant) = participant {
+            let display_name = participant_display_name(&participant);
+            ResolvedContact {
+                participant_id: participant.participant_id,
+                display_name,
+                local_profile_available: participant.local_profile_state
+                    == crate::LocalProfileState::Hydrated,
+                source_database_freshness: entity_source_database_freshness(
+                    participant
+                        .source_records
+                        .iter()
+                        .map(|record| record.source_set_id.clone()),
+                    &preserved_stale_source_set_ids,
+                ),
+                enabled_conversation_ids: enabled.into_iter().collect(),
+                limitation_codes: Vec::new(),
+            }
+        } else {
+            ResolvedContact {
+                participant_id: participant_id.to_string(),
+                display_name: short_identifier(participant_id),
+                local_profile_available: false,
+                source_database_freshness: ToolSourceDatabaseFreshness::Derived,
+                enabled_conversation_ids: enabled.into_iter().collect(),
+                limitation_codes: vec!["unavailableParticipantProfileSynthesized".to_string()],
+            }
         };
         self.audit(
             request,
@@ -1749,10 +1893,7 @@ impl<'a> ConnectorService<'a> {
                 "conversation resolution is outside the authorized scope",
             ));
         }
-        let conversation = get_replica_conversation(&self.replica_path, self.key, conversation_id)
-            .map_err(integrity_error)?
-            .ok_or_else(|| not_found("conversation was not found"))?;
-        let result = self.resolve_conversation(&conversation)?;
+        let result = self.resolve_conversation_by_id(conversation_id)?;
         self.audit(
             request,
             "resolveConversation",
@@ -1765,6 +1906,257 @@ impl<'a> ConnectorService<'a> {
             None,
         )?;
         Ok(result)
+    }
+
+    fn current_checkpoint_binding(&self) -> Result<ConnectorCheckpointBinding, ConnectorErrorBody> {
+        let status = replica_status(&self.replica_path, self.key).map_err(integrity_error)?;
+        if status.account_id.as_deref() != Some(self.policy.account_id.as_str()) {
+            return Err(integrity_error(RestoreError::Integrity(
+                "connector replica account changed after opening".to_string(),
+            )));
+        }
+        connector_checkpoint_binding(&status).map_err(integrity_error)
+    }
+
+    fn refresh_checkpoint_bound_state(
+        &self,
+    ) -> Result<ConnectorCheckpointBinding, ConnectorErrorBody> {
+        let current = self.current_checkpoint_binding()?;
+        let mut cached = self.cache_checkpoint.lock().map_err(|_| {
+            integrity_error(RestoreError::Integrity(
+                "connector checkpoint cache is unavailable".to_string(),
+            ))
+        })?;
+        if *cached == current {
+            return Ok(current);
+        }
+
+        let preserved_stale_source_set_ids =
+            replica_restoration_report(&self.replica_path, self.key)
+                .map_err(integrity_error)?
+                .ok_or_else(|| {
+                    integrity_error(RestoreError::Integrity(
+                        "connector replica has no restoration report".to_string(),
+                    ))
+                })?
+                .database_coverage
+                .map(|coverage| {
+                    coverage
+                        .preserved_stale_source_set_ids
+                        .into_iter()
+                        .collect()
+                })
+                .unwrap_or_default();
+        self.conversation_cache
+            .lock()
+            .map_err(|_| {
+                integrity_error(RestoreError::Integrity(
+                    "connector conversation cache is unavailable".to_string(),
+                ))
+            })?
+            .clear();
+        self.participant_cache
+            .lock()
+            .map_err(|_| {
+                integrity_error(RestoreError::Integrity(
+                    "connector participant cache is unavailable".to_string(),
+                ))
+            })?
+            .clear();
+        self.resolved_conversation_cache
+            .lock()
+            .map_err(|_| {
+                integrity_error(RestoreError::Integrity(
+                    "connector resolved-conversation cache is unavailable".to_string(),
+                ))
+            })?
+            .clear();
+        *self.preserved_stale_source_set_ids.lock().map_err(|_| {
+            integrity_error(RestoreError::Integrity(
+                "connector coverage cache is unavailable".to_string(),
+            ))
+        })? = preserved_stale_source_set_ids;
+        *cached = current.clone();
+        Ok(current)
+    }
+
+    fn preserved_stale_sources(&self) -> Result<BTreeSet<String>, ConnectorErrorBody> {
+        self.preserved_stale_source_set_ids
+            .lock()
+            .map(|sources| sources.clone())
+            .map_err(|_| {
+                integrity_error(RestoreError::Integrity(
+                    "connector coverage cache is unavailable".to_string(),
+                ))
+            })
+    }
+
+    fn warm_conversation_caches(
+        &self,
+        conversation_ids: &BTreeSet<String>,
+    ) -> Result<(), ConnectorErrorBody> {
+        let missing_conversation_ids = {
+            let cache = self.conversation_cache.lock().map_err(|_| {
+                integrity_error(RestoreError::Integrity(
+                    "connector conversation cache is unavailable".to_string(),
+                ))
+            })?;
+            conversation_ids
+                .iter()
+                .filter(|identifier| !cache.contains_key(*identifier))
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        };
+        if !missing_conversation_ids.is_empty() {
+            let mut loaded = get_replica_conversation_batch(
+                &self.replica_path,
+                self.key,
+                &missing_conversation_ids,
+            )
+            .map_err(integrity_error)?;
+            let mut cache = self.conversation_cache.lock().map_err(|_| {
+                integrity_error(RestoreError::Integrity(
+                    "connector conversation cache is unavailable".to_string(),
+                ))
+            })?;
+            for identifier in missing_conversation_ids {
+                cache.insert(identifier.clone(), loaded.remove(&identifier));
+            }
+        }
+
+        let participant_ids = {
+            let cache = self.conversation_cache.lock().map_err(|_| {
+                integrity_error(RestoreError::Integrity(
+                    "connector conversation cache is unavailable".to_string(),
+                ))
+            })?;
+            conversation_ids
+                .iter()
+                .filter_map(|identifier| cache.get(identifier).and_then(Option::as_ref))
+                .flat_map(|conversation| conversation.participant_ids.iter().cloned())
+                .collect::<BTreeSet<_>>()
+        };
+        let missing_participant_ids = {
+            let cache = self.participant_cache.lock().map_err(|_| {
+                integrity_error(RestoreError::Integrity(
+                    "connector participant cache is unavailable".to_string(),
+                ))
+            })?;
+            participant_ids
+                .iter()
+                .filter(|identifier| !cache.contains_key(*identifier))
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        };
+        if !missing_participant_ids.is_empty() {
+            let mut loaded = get_replica_participant_batch(
+                &self.replica_path,
+                self.key,
+                &missing_participant_ids,
+            )
+            .map_err(integrity_error)?;
+            let mut cache = self.participant_cache.lock().map_err(|_| {
+                integrity_error(RestoreError::Integrity(
+                    "connector participant cache is unavailable".to_string(),
+                ))
+            })?;
+            for identifier in missing_participant_ids {
+                cache.insert(identifier.clone(), loaded.remove(&identifier));
+            }
+        }
+        Ok(())
+    }
+
+    fn cached_conversation(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<CanonicalConversation>, ConnectorErrorBody> {
+        if let Some(cached) = self
+            .conversation_cache
+            .lock()
+            .map_err(|_| {
+                integrity_error(RestoreError::Integrity(
+                    "connector conversation cache is unavailable".to_string(),
+                ))
+            })?
+            .get(conversation_id)
+            .cloned()
+        {
+            return Ok(cached);
+        }
+        let loaded = get_replica_conversation(&self.replica_path, self.key, conversation_id)
+            .map_err(integrity_error)?;
+        self.conversation_cache
+            .lock()
+            .map_err(|_| {
+                integrity_error(RestoreError::Integrity(
+                    "connector conversation cache is unavailable".to_string(),
+                ))
+            })?
+            .insert(conversation_id.to_string(), loaded.clone());
+        Ok(loaded)
+    }
+
+    fn cached_participant(
+        &self,
+        participant_id: &str,
+    ) -> Result<Option<CanonicalParticipant>, ConnectorErrorBody> {
+        if let Some(cached) = self
+            .participant_cache
+            .lock()
+            .map_err(|_| {
+                integrity_error(RestoreError::Integrity(
+                    "connector participant cache is unavailable".to_string(),
+                ))
+            })?
+            .get(participant_id)
+            .cloned()
+        {
+            return Ok(cached);
+        }
+        let loaded = get_replica_participant(&self.replica_path, self.key, participant_id)
+            .map_err(integrity_error)?;
+        self.participant_cache
+            .lock()
+            .map_err(|_| {
+                integrity_error(RestoreError::Integrity(
+                    "connector participant cache is unavailable".to_string(),
+                ))
+            })?
+            .insert(participant_id.to_string(), loaded.clone());
+        Ok(loaded)
+    }
+
+    fn resolve_conversation_by_id(
+        &self,
+        conversation_id: &str,
+    ) -> Result<ResolvedConversation, ConnectorErrorBody> {
+        if let Some(cached) = self
+            .resolved_conversation_cache
+            .lock()
+            .map_err(|_| {
+                integrity_error(RestoreError::Integrity(
+                    "connector resolved-conversation cache is unavailable".to_string(),
+                ))
+            })?
+            .get(conversation_id)
+            .cloned()
+        {
+            return Ok(cached);
+        }
+        let resolved = match self.cached_conversation(conversation_id)? {
+            Some(conversation) => self.resolve_conversation(&conversation)?,
+            None => derived_conversation(conversation_id),
+        };
+        self.resolved_conversation_cache
+            .lock()
+            .map_err(|_| {
+                integrity_error(RestoreError::Integrity(
+                    "connector resolved-conversation cache is unavailable".to_string(),
+                ))
+            })?
+            .insert(conversation_id.to_string(), resolved.clone());
+        Ok(resolved)
     }
 
     fn resolve_conversation(
@@ -1787,8 +2179,7 @@ impl<'a> ConnectorService<'a> {
         let mut participants = Vec::new();
         let mut limitation_codes = BTreeSet::new();
         for participant_id in &conversation.participant_ids {
-            let participant = get_replica_participant(&self.replica_path, self.key, participant_id)
-                .map_err(integrity_error)?;
+            let participant = self.cached_participant(participant_id)?;
             if participant.is_none() {
                 limitation_codes.insert("unavailableParticipantProfile".to_string());
             }
@@ -1826,6 +2217,7 @@ impl<'a> ConnectorService<'a> {
         } else {
             names.join(", ")
         };
+        let preserved_stale_source_set_ids = self.preserved_stale_sources()?;
         Ok(ResolvedConversation {
             conversation_id: conversation.conversation_id.clone(),
             kind: conversation.kind,
@@ -1839,7 +2231,7 @@ impl<'a> ConnectorService<'a> {
                     .source_records
                     .iter()
                     .map(|record| record.source_set_id.clone()),
-                &self.preserved_stale_source_set_ids,
+                &preserved_stale_source_set_ids,
             ),
             limitation_codes: limitation_codes.into_iter().collect(),
         })
@@ -2671,6 +3063,38 @@ fn participant_display_name(participant: &CanonicalParticipant) -> String {
     .unwrap_or_else(|| short_identifier(&participant.participant_id))
 }
 
+fn derived_conversation(conversation_id: &str) -> ResolvedConversation {
+    ResolvedConversation {
+        conversation_id: conversation_id.to_string(),
+        kind: ConversationKind::Unresolved,
+        human_label: format!("Unresolved {}", short_identifier(conversation_id)),
+        participant_count: 0,
+        participants: Vec::new(),
+        owner_participant_id: None,
+        entity_decode_state: EntityDecodeState::Failed,
+        source_database_freshness: ToolSourceDatabaseFreshness::Derived,
+        limitation_codes: vec!["unavailableConversationMetadataSynthesized".to_string()],
+    }
+}
+
+fn extend_message_projection_limitations(
+    messages: &[MinimizedMessage],
+    limitation_codes: &mut BTreeSet<String>,
+) {
+    if messages
+        .iter()
+        .any(|message| message.omitted_artifact_reference_count > 0)
+    {
+        limitation_codes.insert("malformedArtifactReferenceOmitted".to_string());
+    }
+    if messages
+        .iter()
+        .any(|message| message.omitted_relationship_reference_count > 0)
+    {
+        limitation_codes.insert("malformedRelationshipReferenceOmitted".to_string());
+    }
+}
+
 fn decode_base64_text(value: &str) -> Option<String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(value)
@@ -3046,7 +3470,22 @@ fn connector_artifact_view(
         source,
         decoded,
         verification_detail,
+        limitation_codes: Vec::new(),
     })
+}
+
+fn unavailable_artifact(artifact_id: &str) -> ConnectorArtifactView {
+    ConnectorArtifactView {
+        artifact_id: artifact_id.to_string(),
+        kind: ArtifactKind::Unknown,
+        role: ArtifactRole::Unknown,
+        availability: ArtifactAvailability::MetadataMissing,
+        decode_state: ArtifactDecodeState::Failed,
+        source: None,
+        decoded: None,
+        verification_detail: "artifactMetadataUnavailable".to_string(),
+        limitation_codes: vec!["unavailableArtifactMetadataSynthesized".to_string()],
+    }
 }
 
 fn connector_artifact_file(
@@ -3078,6 +3517,43 @@ fn connector_artifact_file(
 
 fn valid_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn connector_checkpoint_binding(
+    status: &ReplicaStatus,
+) -> Result<ConnectorCheckpointBinding, RestoreError> {
+    Ok(ConnectorCheckpointBinding {
+        source_fingerprint: status.current_source_fingerprint.clone().ok_or_else(|| {
+            RestoreError::Integrity(
+                "connector replica has no current source fingerprint".to_string(),
+            )
+        })?,
+        checkpoint_revision: status.checkpoint_revision.clone().ok_or_else(|| {
+            RestoreError::Integrity("connector replica has no checkpoint revision".to_string())
+        })?,
+    })
+}
+
+fn connector_response(
+    request_id: String,
+    result: Result<ConnectorResult, ConnectorErrorBody>,
+) -> ConnectorResponse {
+    match result {
+        Ok(result) => ConnectorResponse {
+            api_version: CONNECTOR_API_VERSION.to_string(),
+            request_id,
+            ok: true,
+            result: Some(result),
+            error: None,
+        },
+        Err(failure) => ConnectorResponse {
+            api_version: CONNECTOR_API_VERSION.to_string(),
+            request_id,
+            ok: false,
+            result: None,
+            error: Some(failure),
+        },
+    }
 }
 
 fn invalid(message: &str) -> ConnectorErrorBody {
@@ -3117,6 +3593,14 @@ fn conflict(message: &str) -> ConnectorErrorBody {
         code: ConnectorErrorCode::Conflict,
         message: message.to_string(),
         retryable: false,
+    }
+}
+
+fn retryable_conflict(message: &str) -> ConnectorErrorBody {
+    ConnectorErrorBody {
+        code: ConnectorErrorCode::Conflict,
+        message: message.to_string(),
+        retryable: true,
     }
 }
 

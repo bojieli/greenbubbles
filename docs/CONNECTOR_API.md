@@ -52,6 +52,12 @@ and exact checkpoint revision; any committed reconciliation invalidates them.
 Change cursors bind the account and replica generation but remain resumable
 across synchronization checkpoints.
 
+A long-running connector binds its hydrated conversation, participant, and
+coverage caches to the source fingerprint and checkpoint revision. It clears
+them when a separately managed replica follower advances. If a commit lands
+during one request, that request returns a checkpoint conflict instead of
+mixing metadata from two generations; the caller can retry normally.
+
 Every non-empty underlying change page returns a new durable cursor, even when
 policy filtering omits all of that page's records. A null cursor means the call
 examined no later underlying record, so consumers retain the previously stored

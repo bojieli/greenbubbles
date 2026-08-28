@@ -297,7 +297,10 @@ replica generation, source fingerprint, and checkpoint revision. The response
 distinguishes `unavailable`, `availableEmpty`, and `available`; it also reports
 the exact observation time and `partialLocalCache` label. The raw canonical CLI
 surface remains local/private. Policy-scoped AI and connector consumers receive
-a separately authorized minimized view instead.
+a separately authorized minimized view instead. Cached table read failures are
+isolated: healthy tables still publish, while `omittedRowCount`, per-table
+`availability`/`limitationCode`, and aggregate `limitationCodes` preserve the
+gap through archive audit, replica coverage, status, and query responses.
 
 `replica-status` exposes the schema/cipher, opaque account and source
 fingerprints, exact client-build compatibility state and mismatched fields,
@@ -306,8 +309,19 @@ counts, authoritative checkpoint age, latest synchronization kind/start/
 duration, latest integrity-scan time and age, completion state,
 source/restored row counts, semantic/message-candidate gaps, missing and
 undecoded artifacts, entity gaps, and the calculated semantic-decoder coverage
-ratio. The evidence is persisted inside the encrypted coverage state rather
-than inferred from the client that happens to be installed when status is
-queried. A current replica with known gaps is reported as
+ratio. It also reports `cachedSurfaceOmittedRowCount` when planned optional
+cached rows could not be read. Bootstrap, synchronization, and replica audits
+also report omitted malformed relationship and artifact-reference counts with
+typed `limitationCodes`; those optional links never prevent the containing
+canonical message from being committed. Restoration and cached-surface
+evidence is persisted inside the encrypted coverage state rather than inferred
+from the client that happens to be installed when status is queried. A current
+replica with known gaps is reported as
 `currentWithCoverageGaps`; it is never labeled complete merely because the
 latest synchronization committed successfully.
+
+Artifact authorization normally uses the `message_artifact` projection. If
+that optional index is absent, incomplete, or unreadable, the connector scans
+the bounded authorized canonical message records instead. A missing artifact
+metadata row can then be represented as a typed metadata-unavailable result;
+if the canonical records cannot prove the reference, access remains denied.

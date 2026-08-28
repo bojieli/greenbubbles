@@ -55,9 +55,13 @@ Evaluation used QMD source commit
 `dbfd0b4736aeaf761d1a16ca8e424f071df8feb9`. That version indexes bounded
 Markdown documents at stable paths and supports collection-scoped lexical,
 vector, and hybrid queries. Point it only at the generated `documents/`
-directory:
+directory. Its config/cache also contain derived private content, so give both
+dedicated owner-only locations and use a restrictive umask:
 
 ```sh
+umask 077
+export QMD_CONFIG_DIR=/absolute/private/path/qmd-config
+export XDG_CACHE_HOME=/absolute/private/path/qmd-cache
 qmd collection add /absolute/path/to/memory-generation/documents \
   --name greenbubbles-memory
 qmd update
@@ -82,6 +86,7 @@ metadata. Each `memories.jsonl` record provides exactly those portable fields:
 import json
 from mem0 import Memory
 
+# Configure approved embedding and vector-store providers before ingestion.
 memory = Memory()
 with open("memories.jsonl", encoding="utf-8") as source:
     for line in source:
@@ -97,8 +102,12 @@ with open("memories.jsonl", encoding="utf-8") as source:
 `qmd search` is the inexpensive lexical smoke test and requires no model
 download. Run `qmd embed` only when semantic retrieval is desired. Mem0's
 default `infer=True` calls an LLM and consolidates facts; the example uses
-`infer=False` for a raw local ingestion smoke test. Enable inference
-deliberately with a configured local or policy-approved remote model.
+`infer=False` to bypass that extraction. It still invokes the configured
+embedding provider, and the pinned Mem0 revision defaults to OpenAI embeddings.
+For a strict no-network smoke test, use local fake embedding/storage adapters;
+for real ingestion, configure an on-device or policy-approved embedder and an
+owner-only vector store. Enable fact inference deliberately with a configured
+local or policy-approved remote model.
 
 The account holder maps to `user`; another chat participant maps to
 `assistant`. This is a transport mapping, not a claim that the participant is
@@ -120,7 +129,21 @@ The system distinguishes isolation from integrity:
   row, relationship, or attachment does not make healthy context unavailable.
   It is skipped or represented as derived evidence and increments a typed
   omission/limitation counter.
+- Missing participant and artifact metadata is represented by a typed derived
+  contact/artifact only when healthy canonical records still prove the
+  requested identity is authorized; otherwise the authorization boundary
+  remains fail-closed.
+- Optional cached-surface tables follow the same rule: unreadable rows cannot
+  abort archive publication, and their counts and limitation codes survive
+  archive audit, replica serving, and downstream coverage checks.
+- Optional media-metadata tables and individual media candidates are isolated
+  the same way: messages survive with typed `metadataMissing` or `corrupt`
+  artifact evidence, and no unverified file is released.
 - A malformed projected source record is omitted while other records continue.
+- Malformed attachment and relationship references are sanitized before
+  projection. Per-message omission counts and limitation codes survive in
+  `sourceMessages`; repeated relationship target IDs are deduplicated in the
+  framework-facing citation list rather than making the projection unauditable.
 - Missing records in unavailable or stale coverage are never evidence of
   deletion or nonexistence.
 - Wrong keys/accounts, authorization denials, unsafe paths, mixed checkpoints,

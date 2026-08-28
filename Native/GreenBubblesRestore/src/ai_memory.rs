@@ -19,6 +19,12 @@ use crate::{ConversationKind, MessageDirection, RestoreError};
 pub const AI_MEMORY_SCHEMA: &str = "greenbubbles.ai-memory.v1";
 const AI_MEMORY_FORMAT_VERSION: u32 = 1;
 const MAX_CONTEXT_RECORD_BYTES: usize = 16 * 1024 * 1024;
+const LEGACY_README_SHA256: [&str; 4] = [
+    "67ca8ee48df7513b8ed32b687e4ba730760ee83e55352f52ec0b14a08357c57e",
+    "1279644384aeaf89be978cb9f7cdc1a8c6346a6c3ba024ccf7d33636a7108510",
+    "eaf150d00252d15ae61264f2025a91162861c2f6de1bc10114e1b127f02cee0c",
+    "7a410be7b123f6d4700af957847b7576a5a8f8fa5aab44b5861b93eb2876077b",
+];
 const README_CONTENT: &str = r#"# GreenBubbles personal-memory projection
 
 This directory is a deterministic derivative of one policy-scoped,
@@ -29,9 +35,14 @@ an agent, an indexing tool, or a model.
 ## QMD and Markdown-compatible stores
 
 Each bounded chunk is an independent Markdown document below `documents/`.
-For QMD, create a private collection and index it:
+QMD's config and cache contain derived indexes of the private text too. Use a
+restrictive umask and dedicated owner-only locations, then create the
+collection:
 
 ```sh
+umask 077
+export QMD_CONFIG_DIR=/absolute/private/path/qmd-config
+export XDG_CACHE_HOME=/absolute/private/path/qmd-cache
 qmd collection add /absolute/path/to/this-directory/documents --name greenbubbles-memory
 qmd update
 qmd search -c greenbubbles-memory --json "search terms"
@@ -52,6 +63,7 @@ APIs without treating the source corpus as one enormous chat:
 import json
 from mem0 import Memory
 
+# Configure approved embedding and vector-store providers before ingestion.
 memory = Memory()
 with open("memories.jsonl", encoding="utf-8") as source:
     for line in source:
@@ -64,9 +76,11 @@ with open("memories.jsonl", encoding="utf-8") as source:
         )
 ```
 
-The example deliberately uses `infer=False` for a raw local ingestion smoke
-test. Mem0's default `infer=True` performs model-backed fact extraction and
-should only use a local or policy-approved remote model.
+The example deliberately uses `infer=False` to bypass model-backed fact
+extraction. It does not bypass embedding: at the pinned Mem0 revision,
+`Memory()` defaults to an OpenAI embedder. Configure an on-device or otherwise
+policy-approved embedder and an owner-only vector store before ingestion. A
+strict no-network smoke test should use local fake embedding/storage adapters.
 
 The `user`/`assistant` roles are transport mappings only: the account holder is
 mapped to `user`, and other chat participants are mapped to `assistant`. The
@@ -212,6 +226,10 @@ pub struct AiMemorySourceMessage {
     pub projection_content_truncated: bool,
     pub artifact_ids: Vec<String>,
     pub relationship_target_message_ids: Vec<String>,
+    #[serde(default)]
+    pub omitted_artifact_reference_count: u64,
+    #[serde(default)]
+    pub omitted_relationship_reference_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -402,7 +420,7 @@ impl<'a> MemoryProjector<'a> {
         self.global_limitation_codes.insert(code.to_string());
     }
 
-    fn accept(&mut self, message: AiContextMessage) -> Result<(), RestoreError> {
+    fn accept(&mut self, mut message: AiContextMessage) -> Result<(), RestoreError> {
         if message.format_version != self.source.format_version
             || message.message.canonical_id.is_empty()
             || message.message.conversation_id.is_empty()
@@ -416,6 +434,15 @@ impl<'a> MemoryProjector<'a> {
         {
             self.omit_message("duplicateContextMessageOmitted");
             return Ok(());
+        }
+        sanitize_memory_source_references(&mut message.message);
+        if message.message.omitted_artifact_reference_count > 0 {
+            self.global_limitation_codes
+                .insert("malformedArtifactReferenceOmitted".to_string());
+        }
+        if message.message.omitted_relationship_reference_count > 0 {
+            self.global_limitation_codes
+                .insert("malformedRelationshipReferenceOmitted".to_string());
         }
         let conversation = self
             .conversations
@@ -574,6 +601,7 @@ impl<'a> MemoryProjector<'a> {
                 .insert("memoryProjectionContentTruncated".to_string());
         }
         let content_bytes = content.len();
+        let mut seen_relationship_target_ids = BTreeSet::new();
         let source_message = AiMemorySourceMessage {
             message_id: message.message.canonical_id,
             citation,
@@ -598,7 +626,12 @@ impl<'a> MemoryProjector<'a> {
                 .relationships
                 .into_iter()
                 .filter_map(|relationship| relationship.target_canonical_id)
+                .filter(|identifier| seen_relationship_target_ids.insert(identifier.clone()))
                 .collect(),
+            omitted_artifact_reference_count: message.message.omitted_artifact_reference_count,
+            omitted_relationship_reference_count: message
+                .message
+                .omitted_relationship_reference_count,
         };
         (
             AiMemoryFrameworkMessage {
@@ -749,6 +782,48 @@ impl<'a> MemoryProjector<'a> {
             limitation_codes: self.global_limitation_codes,
         })
     }
+}
+
+fn sanitize_memory_source_references(message: &mut crate::tools::MinimizedMessage) {
+    let mut seen_artifact_ids = BTreeSet::new();
+    message.artifact_references = std::mem::take(&mut message.artifact_references)
+        .into_iter()
+        .filter(|reference| {
+            let valid = !reference.artifact_id.is_empty()
+                && seen_artifact_ids.insert(reference.artifact_id.clone());
+            if !valid {
+                message.omitted_artifact_reference_count =
+                    message.omitted_artifact_reference_count.saturating_add(1);
+            }
+            valid
+        })
+        .collect();
+
+    message.relationships = std::mem::take(&mut message.relationships)
+        .into_iter()
+        .filter_map(|mut relationship| {
+            let had_empty_target = relationship
+                .target_canonical_id
+                .as_deref()
+                .is_some_and(str::is_empty);
+            if had_empty_target {
+                relationship.target_canonical_id = None;
+                message.omitted_relationship_reference_count = message
+                    .omitted_relationship_reference_count
+                    .saturating_add(1);
+            }
+            if relationship.resolved && relationship.target_canonical_id.is_none() {
+                if !had_empty_target {
+                    message.omitted_relationship_reference_count = message
+                        .omitted_relationship_reference_count
+                        .saturating_add(1);
+                }
+                None
+            } else {
+                Some(relationship)
+            }
+        })
+        .collect();
 }
 
 struct ProjectionOutput {
@@ -1264,6 +1339,11 @@ fn validate_memory_chunk(
         ));
     }
     for (message, source) in chunk.messages.iter().zip(&chunk.source_messages) {
+        let artifact_ids = source.artifact_ids.iter().collect::<BTreeSet<_>>();
+        let relationship_ids = source
+            .relationship_target_message_ids
+            .iter()
+            .collect::<BTreeSet<_>>();
         if !matches!(message.role.as_str(), "user" | "assistant")
             || message.content.is_empty()
             || source.message_id.is_empty()
@@ -1272,6 +1352,22 @@ fn validate_memory_chunk(
             || !message
                 .content
                 .contains("untrusted GreenBubbles source data")
+            || artifact_ids.len() != source.artifact_ids.len()
+            || artifact_ids.iter().any(|identifier| identifier.is_empty())
+            || relationship_ids.len() != source.relationship_target_message_ids.len()
+            || relationship_ids
+                .iter()
+                .any(|identifier| identifier.is_empty())
+            || (source.omitted_artifact_reference_count > 0
+                && !chunk
+                    .limitation_codes
+                    .iter()
+                    .any(|code| code == "malformedArtifactReferenceOmitted"))
+            || (source.omitted_relationship_reference_count > 0
+                && !chunk
+                    .limitation_codes
+                    .iter()
+                    .any(|code| code == "malformedRelationshipReferenceOmitted"))
         {
             return Err(RestoreError::Integrity(
                 "AI memory message role, trust boundary, or citation is invalid".to_string(),
@@ -1324,10 +1420,11 @@ fn verify_plain_file(directory: &Path, evidence: &AiMemoryFile) -> Result<(), Re
     let path = directory.join(&evidence.relative_path);
     ensure_private_regular_file(&path)?;
     let bytes = read_bounded(&path, 4 * 1024 * 1024)?;
+    let digest = hex::encode(Sha256::digest(&bytes));
     if evidence.record_count != 1
         || evidence.byte_count != bytes.len() as u64
-        || evidence.sha256 != hex::encode(Sha256::digest(&bytes))
-        || bytes != README_CONTENT.as_bytes()
+        || evidence.sha256 != digest
+        || (bytes != README_CONTENT.as_bytes() && !LEGACY_README_SHA256.contains(&digest.as_str()))
     {
         return Err(RestoreError::Integrity(
             "AI memory plain file evidence does not match its manifest".to_string(),

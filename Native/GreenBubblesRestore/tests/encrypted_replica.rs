@@ -40,11 +40,11 @@ use greenbubbles_restore::{
     CanonicalArtifact, CanonicalCachedMoment, CanonicalCachedMomentInteraction,
     CanonicalConversation, CanonicalMessage, CanonicalParticipant, ClientBuildCompatibilityState,
     ConversationKind, DirectionEvidence, EntityDecodeState, LocalProfileState,
-    MessageArtifactReference, MessageDirection, MessageOrderingBasis, NoProgress, ProgressEvent,
-    ProgressObserver, ProgressPhase, ProgressState, RawSQLiteValue, ReplicaKey,
-    RestorationCompletion, RestorationCoverage, RestorationIntegrity, RestorationReport,
-    RestorationStorageEvidence, SemanticDecodeState, SnapshotAcquisitionEvidence,
-    SnapshotAcquisitionMode, TypedPayload,
+    MessageArtifactReference, MessageDirection, MessageOrderingBasis, MessageRelationship,
+    MessageRelationshipKind, NoProgress, ProgressEvent, ProgressObserver, ProgressPhase,
+    ProgressState, RawSQLiteValue, RelationshipResolutionState, ReplicaKey, RestorationCompletion,
+    RestorationCoverage, RestorationIntegrity, RestorationReport, RestorationStorageEvidence,
+    SemanticDecodeState, SnapshotAcquisitionEvidence, SnapshotAcquisitionMode, TypedPayload,
 };
 use rusqlite::Connection;
 use serde::Serialize;
@@ -485,6 +485,71 @@ fn serves_scoped_replica_reads_and_complete_non_executing_drafts() {
     stop_connector_process(&mut replacement_connector, &replacement_socket);
 }
 
+#[test]
+fn connector_hydration_cache_advances_with_the_replica_checkpoint() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private-connector-checkpoint-cache");
+    let drafts = private.join("drafts");
+    fs::create_dir(&private).unwrap();
+    fs::create_dir(&drafts).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&drafts, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive_a = build_archive(&private, "archive-a", "account-a", "source-a");
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+    bootstrap_replica(&archive_a, &replica, &key).unwrap();
+    let policy = private.join("policy.json");
+    create_tool_policy(
+        &archive_a,
+        &policy,
+        BTreeMap::from([(
+            "conversation-a".to_string(),
+            ConversationToolScope {
+                capabilities: BTreeSet::from([ToolCapability::ListConversations]),
+                message_fields: BTreeSet::new(),
+                not_before_unix: None,
+                not_after_unix: None,
+                allow_remote_model: false,
+            },
+        )]),
+        100,
+        4_096,
+        16_384,
+    )
+    .unwrap();
+    let audit = private.join("connector-audit.ndjson");
+    let service = ConnectorService::open(&replica, &key, &policy, &audit, &drafts).unwrap();
+
+    let first = service.handle(connector_request(
+        "list-before-checkpoint",
+        ConnectorDestination::Local,
+        ConnectorOperation::ListConversations,
+    ));
+    let ConnectorResult::Conversations(first) = first.result.unwrap() else {
+        panic!("unexpected connector result")
+    };
+    assert_ne!(first.conversations[0].human_label, "Checkpoint B");
+
+    let archive_b = clone_archive(&archive_a, &private, "archive-b", "source-b");
+    let participant_path = archive_b.join("participants.ndjson");
+    let mut participants = read_ndjson::<CanonicalParticipant>(&participant_path);
+    participants[0].display_name_base64 = Some("Q2hlY2twb2ludCBC".to_string());
+    overwrite_ndjson(&participant_path, &participants);
+    let synchronized = synchronize_replica(&archive_b, &replica, &key).unwrap();
+    assert_eq!(synchronized.changed_count, 1);
+
+    let second = service.handle(connector_request(
+        "list-after-checkpoint",
+        ConnectorDestination::Local,
+        ConnectorOperation::ListConversations,
+    ));
+    assert!(second.ok, "{:?}", second.error);
+    let ConnectorResult::Conversations(second) = second.result.unwrap() else {
+        panic!("unexpected connector result")
+    };
+    assert_eq!(second.conversations[0].human_label, "Checkpoint B");
+}
+
 #[derive(Default)]
 struct CapturedProgress(Mutex<Vec<ProgressEvent>>);
 
@@ -637,6 +702,28 @@ fn creates_an_explicit_local_scope_for_every_archive_conversation() {
         0o600
     );
 
+    let messages_path = archive.join("messages.ndjson");
+    let unavailable_messages_path = archive.join("messages.unavailable");
+    fs::rename(&messages_path, &unavailable_messages_path).unwrap();
+    let conversation_inventory_policy = create_all_conversations_tool_policy_with_cached_moments(
+        &archive,
+        &private.join("conversation-inventory-policy.json"),
+        ConversationToolScope {
+            capabilities: BTreeSet::from([ToolCapability::ListConversations]),
+            message_fields: BTreeSet::new(),
+            not_before_unix: None,
+            not_after_unix: None,
+            allow_remote_model: false,
+        },
+        None,
+        100,
+        4_096,
+        16_384,
+    )
+    .unwrap();
+    assert_eq!(conversation_inventory_policy.conversation_scopes.len(), 1);
+    fs::rename(&unavailable_messages_path, &messages_path).unwrap();
+
     let cli_policy_path = private.join("all-conversations-cli-policy.json");
     let cli = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
         .args([
@@ -739,6 +826,7 @@ fn malformed_replica_records_are_omitted_without_stalling_pages_or_ai_queries() 
     report.integrity.restored_row_count = 2;
     report.completion = RestorationCompletion::evaluate(&report.integrity);
     overwrite_json(&report_path, &report);
+    bind_synthetic_account_holder(&archive);
 
     let replica = private.join("replica.db");
     let key = ReplicaKey::from_bytes(KEY_BYTES);
@@ -857,6 +945,7 @@ fn malformed_replica_records_are_omitted_without_stalling_pages_or_ai_queries() 
                 message_fields: BTreeSet::from([
                     ToolMessageField::CreatedAt,
                     ToolMessageField::Content,
+                    ToolMessageField::Attachments,
                 ]),
                 not_before_unix: None,
                 not_after_unix: None,
@@ -892,6 +981,179 @@ fn malformed_replica_records_are_omitted_without_stalling_pages_or_ai_queries() 
     };
     assert_eq!(page.messages[0].canonical_id, "message-b");
     assert_eq!(page.omitted_message_count, 1);
+
+    let artifact = query_ai_context(
+        &replica,
+        &key,
+        &policy,
+        &private.join("audit.ndjson"),
+        AiQueryRequest {
+            format_version: 1,
+            request_id: "malformed-artifact-query".to_string(),
+            requester_id: "synthetic-agent".to_string(),
+            destination: ConnectorDestination::Local,
+            operation: ConnectorOperation::GetArtifact {
+                conversation_id: "conversation-a".to_string(),
+                artifact_id: "artifact-a".to_string(),
+            },
+        },
+    )
+    .unwrap();
+    assert!(artifact.ok);
+    let AiQueryResult::Artifact(artifact) = artifact.result.unwrap() else {
+        panic!("unexpected AI artifact result")
+    };
+    assert_eq!(artifact.availability, ArtifactAvailability::MetadataMissing);
+    assert!(artifact
+        .limitation_codes
+        .contains(&"unavailableArtifactMetadataSynthesized".to_string()));
+
+    let listed = query_ai_context(
+        &replica,
+        &key,
+        &policy,
+        &private.join("audit.ndjson"),
+        AiQueryRequest {
+            format_version: 1,
+            request_id: "malformed-conversation-list".to_string(),
+            requester_id: "synthetic-agent".to_string(),
+            destination: ConnectorDestination::Local,
+            operation: ConnectorOperation::ListConversations,
+        },
+    )
+    .unwrap();
+    assert!(listed.ok);
+    let AiQueryResult::Conversations(listed) = listed.result.unwrap() else {
+        panic!("unexpected AI query result")
+    };
+    assert_eq!(listed.conversations.len(), 1);
+    assert_eq!(listed.conversations[0].kind, ConversationKind::Unresolved);
+    assert!(listed
+        .limitation_codes
+        .contains(&"unavailableConversationMetadataSynthesized".to_string()));
+
+    let context = private.join("degraded-conversation-context");
+    let manifest = export_ai_context(
+        &replica,
+        &key,
+        &policy,
+        &private.join("audit.ndjson"),
+        &context,
+        "synthetic-agent",
+        ConnectorDestination::Local,
+        &NoProgress,
+    )
+    .unwrap();
+    assert_eq!(manifest.enabled_conversation_count, 1);
+    assert_eq!(manifest.exported_message_count, 1);
+    assert_eq!(manifest.exported_artifact_count, 1);
+    assert_eq!(manifest.artifact_resolution_error_count, 0);
+    assert_eq!(manifest.omitted_conversation_count, 0);
+    assert_eq!(manifest.omitted_message_count, 1);
+    assert!(manifest
+        .limitation_codes
+        .contains(&"unavailableConversationMetadataSynthesized".to_string()));
+    assert!(manifest
+        .limitation_codes
+        .contains(&"unavailableArtifactMetadataSynthesized".to_string()));
+    let audited = audit_ai_context(&context).unwrap();
+    assert_eq!(audited.conversation_count, 1);
+    assert_eq!(audited.message_count, 1);
+    assert_eq!(audited.artifact_count, 1);
+    assert!(!audited.content_complete);
+}
+
+#[test]
+fn unavailable_participant_profiles_are_synthesized_for_authorized_ai_context() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private-derived-participant");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive = build_archive(&private, "archive", "account-a", "source-a");
+    bind_synthetic_account_holder(&archive);
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+    bootstrap_replica(&archive, &replica, &key).unwrap();
+    let connection = keyed_connection(&replica);
+    connection
+        .execute("UPDATE participant SET record_json = ?1", [b"{".as_slice()])
+        .unwrap();
+    drop(connection);
+
+    let policy = private.join("policy.json");
+    create_tool_policy(
+        &archive,
+        &policy,
+        BTreeMap::from([(
+            "conversation-a".to_string(),
+            ConversationToolScope {
+                capabilities: BTreeSet::from([
+                    ToolCapability::ListConversations,
+                    ToolCapability::ReadRecentMessages,
+                ]),
+                message_fields: BTreeSet::from([ToolMessageField::Content]),
+                not_before_unix: None,
+                not_after_unix: None,
+                allow_remote_model: false,
+            },
+        )]),
+        100,
+        4_096,
+        4_096,
+    )
+    .unwrap();
+    let self_participant_id = "f".repeat(64);
+    let response = query_ai_context(
+        &replica,
+        &key,
+        &policy,
+        &private.join("audit.ndjson"),
+        AiQueryRequest {
+            format_version: 1,
+            request_id: "derived-contact".to_string(),
+            requester_id: "synthetic-agent".to_string(),
+            destination: ConnectorDestination::Local,
+            operation: ConnectorOperation::ResolveContact {
+                participant_id: self_participant_id,
+            },
+        },
+    )
+    .unwrap();
+    assert!(response.ok);
+    let AiQueryResult::Contact(contact) = response.result.unwrap() else {
+        panic!("unexpected AI contact result")
+    };
+    assert_eq!(contact.display_name, "You");
+    assert!(!contact.local_profile_available);
+    assert_eq!(
+        contact.source_database_freshness,
+        ToolSourceDatabaseFreshness::Derived
+    );
+    assert!(contact
+        .limitation_codes
+        .contains(&"unavailableParticipantProfileSynthesized".to_string()));
+
+    let context = private.join("derived-participant-context");
+    let manifest = export_ai_context(
+        &replica,
+        &key,
+        &policy,
+        &private.join("audit.ndjson"),
+        &context,
+        "synthetic-agent",
+        ConnectorDestination::Local,
+        &NoProgress,
+    )
+    .unwrap();
+    assert_eq!(manifest.exported_contact_count, 1);
+    assert_eq!(manifest.exported_message_count, 1);
+    assert!(manifest
+        .limitation_codes
+        .contains(&"unavailableParticipantProfileSynthesized".to_string()));
+    let audited = audit_ai_context(&context).unwrap();
+    assert_eq!(audited.contact_count, 1);
+    assert_eq!(audited.message_count, 1);
+    assert!(!audited.content_complete);
 }
 
 #[test]
@@ -1138,9 +1400,71 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
     let archive = build_archive(&private, "archive", "account-a", "source-a");
     bind_synthetic_account_holder(&archive);
+    let messages_path = archive.join("messages.ndjson");
+    let mut messages = read_ndjson::<CanonicalMessage>(&messages_path);
+    let duplicate_artifact = messages[0].artifact_references[0].clone();
+    messages[0].artifact_references.push(duplicate_artifact);
+    messages[0]
+        .artifact_references
+        .push(MessageArtifactReference {
+            artifact_id: String::new(),
+            role: ArtifactRole::Thumbnail,
+            preferred: false,
+        });
+    messages[0].relationships = vec![
+        MessageRelationship {
+            kind: MessageRelationshipKind::Reply,
+            target_canonical_id: Some("message-a".to_string()),
+            target_server_id: None,
+            target_local_id: None,
+            resolved: true,
+            resolution_state: RelationshipResolutionState::Resolved,
+            raw_reference_base64: None,
+        },
+        MessageRelationship {
+            kind: MessageRelationshipKind::Quote,
+            target_canonical_id: Some("message-a".to_string()),
+            target_server_id: None,
+            target_local_id: None,
+            resolved: true,
+            resolution_state: RelationshipResolutionState::Resolved,
+            raw_reference_base64: None,
+        },
+        MessageRelationship {
+            kind: MessageRelationshipKind::Edit,
+            target_canonical_id: None,
+            target_server_id: None,
+            target_local_id: None,
+            resolved: true,
+            resolution_state: RelationshipResolutionState::Resolved,
+            raw_reference_base64: None,
+        },
+        MessageRelationship {
+            kind: MessageRelationshipKind::Recall,
+            target_canonical_id: Some(String::new()),
+            target_server_id: None,
+            target_local_id: None,
+            resolved: false,
+            resolution_state: RelationshipResolutionState::Pending,
+            raw_reference_base64: None,
+        },
+    ];
+    overwrite_ndjson(&messages_path, &messages);
     let replica = private.join("replica.db");
     let key = ReplicaKey::from_bytes(KEY_BYTES);
-    bootstrap_replica(&archive, &replica, &key).unwrap();
+    let bootstrap = bootstrap_replica(&archive, &replica, &key).unwrap();
+    assert_eq!(bootstrap.message_count, 1);
+    assert_eq!(bootstrap.omitted_artifact_reference_count, 2);
+    assert_eq!(bootstrap.omitted_relationship_reference_count, 2);
+    assert!(bootstrap
+        .limitation_codes
+        .contains(&"malformedArtifactReferenceOmitted".to_string()));
+    assert!(bootstrap
+        .limitation_codes
+        .contains(&"malformedRelationshipReferenceOmitted".to_string()));
+    let replica_audit = audit_replica(&replica, &key).unwrap();
+    assert_eq!(replica_audit.omitted_artifact_reference_count, 2);
+    assert_eq!(replica_audit.omitted_relationship_reference_count, 2);
     let policy = private.join("ai-policy.json");
     create_tool_policy(
         &archive,
@@ -1213,6 +1537,16 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
         Some("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
     );
     assert_eq!(page.messages[0].direction, Some(MessageDirection::Outgoing));
+    assert_eq!(page.messages[0].artifact_references.len(), 1);
+    assert_eq!(page.messages[0].relationships.len(), 3);
+    assert_eq!(page.messages[0].omitted_artifact_reference_count, 2);
+    assert_eq!(page.messages[0].omitted_relationship_reference_count, 2);
+    assert!(page
+        .limitation_codes
+        .contains(&"malformedArtifactReferenceOmitted".to_string()));
+    assert!(page
+        .limitation_codes
+        .contains(&"malformedRelationshipReferenceOmitted".to_string()));
 
     let contact_response = query_ai_context(
         &replica,
@@ -1307,6 +1641,12 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     assert_eq!(manifest.exported_message_count, 1);
     assert_eq!(manifest.exported_artifact_count, 1);
     assert_eq!(manifest.artifact_resolution_error_count, 0);
+    assert!(manifest
+        .limitation_codes
+        .contains(&"malformedArtifactReferenceOmitted".to_string()));
+    assert!(manifest
+        .limitation_codes
+        .contains(&"malformedRelationshipReferenceOmitted".to_string()));
     assert_eq!(file_mode(&output), 0o700);
     for name in [
         "manifest.json",
@@ -1375,6 +1715,8 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     assert_eq!(bundle_audit.contact_count, 1);
     assert_eq!(bundle_audit.message_count, 1);
     assert_eq!(bundle_audit.artifact_count, 1);
+    assert_eq!(bundle_audit.omitted_artifact_reference_count, 2);
+    assert_eq!(bundle_audit.omitted_relationship_reference_count, 2);
 
     let cli_request = private.join("ai-cli-request.json");
     write_json(
@@ -1497,6 +1839,21 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
         .as_str()
         .unwrap()
         .starts_with("greenbubbles:message:"));
+    assert_eq!(
+        memory["sourceMessages"][0]["omittedArtifactReferenceCount"],
+        2
+    );
+    assert_eq!(
+        memory["sourceMessages"][0]["omittedRelationshipReferenceCount"],
+        2
+    );
+    assert_eq!(
+        memory["sourceMessages"][0]["relationshipTargetMessageIds"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     let document_inventory: serde_json::Value = serde_json::from_str(
         fs::read_to_string(memory_output.join("documents.jsonl"))
             .unwrap()
@@ -1600,6 +1957,26 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     let audit_contents = fs::read_to_string(audit).unwrap();
     assert!(!audit_contents.contains(PRIVATE_TEXT));
     assert!(!audit_contents.contains("must not be accepted"));
+
+    let synchronized_archive = clone_archive(
+        &archive,
+        &private,
+        "archive-reference-sync",
+        "source-reference-sync",
+    );
+    let synchronized_messages_path = synchronized_archive.join("messages.ndjson");
+    let mut synchronized_messages = read_ndjson::<CanonicalMessage>(&synchronized_messages_path);
+    synchronized_messages[0].typed_payload =
+        TypedPayload::Decoded(json!({"Text": "reference sync"}));
+    overwrite_ndjson(&synchronized_messages_path, &synchronized_messages);
+    let synchronized = synchronize_replica(&synchronized_archive, &replica, &key).unwrap();
+    assert_eq!(synchronized.changed_count, 1);
+    assert_eq!(synchronized.omitted_artifact_reference_count, 2);
+    assert_eq!(synchronized.omitted_relationship_reference_count, 2);
+    assert!(synchronized
+        .limitation_codes
+        .contains(&"malformedArtifactReferenceOmitted".to_string()));
+    assert!(audit_replica(&replica, &key).is_ok());
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::ffi::OsStringExt;
@@ -60,6 +60,12 @@ pub struct ReplicaBootstrapReport {
     pub cached_surface_omitted_row_count: u64,
     pub relationship_count: u64,
     pub message_artifact_count: u64,
+    #[serde(default)]
+    pub omitted_relationship_reference_count: u64,
+    #[serde(default)]
+    pub omitted_artifact_reference_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
     pub pre_migration_backup_file_name: Option<String>,
 }
 
@@ -144,6 +150,12 @@ pub struct ReplicaAuditReport {
     pub cached_moment_interaction_count: u64,
     pub relationship_count: u64,
     pub message_artifact_count: u64,
+    #[serde(default)]
+    pub omitted_relationship_reference_count: u64,
+    #[serde(default)]
+    pub omitted_artifact_reference_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
     pub change_count: u64,
 }
 
@@ -173,6 +185,12 @@ pub struct ReplicaBackupAuditReport {
     pub artifact_count: u64,
     pub relationship_count: u64,
     pub message_artifact_count: u64,
+    #[serde(default)]
+    pub omitted_relationship_reference_count: u64,
+    #[serde(default)]
+    pub omitted_artifact_reference_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,6 +238,12 @@ pub struct ReplicaSyncReport {
     pub added_count: u64,
     pub changed_count: u64,
     pub removed_count: u64,
+    #[serde(default)]
+    pub omitted_relationship_reference_count: u64,
+    #[serde(default)]
+    pub omitted_artifact_reference_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
     pub conversation_count: u64,
     pub participant_count: u64,
     pub message_count: u64,
@@ -398,6 +422,8 @@ struct ImportCounts {
     artifacts: u64,
     relationships: u64,
     message_artifacts: u64,
+    omitted_relationship_references: u64,
+    omitted_artifact_references: u64,
     cached_moments: u64,
     cached_moment_interactions: u64,
 }
@@ -419,6 +445,8 @@ struct SyncCounts {
     added: u64,
     changed: u64,
     removed: u64,
+    omitted_relationship_references: u64,
+    omitted_artifact_references: u64,
 }
 
 #[derive(Default)]
@@ -588,6 +616,12 @@ pub(crate) fn bootstrap_audited_replica_with_progress(
             cached_surface_omitted_row_count: report.integrity.cached_surface_omitted_row_count,
             relationship_count: counts.relationships,
             message_artifact_count: counts.message_artifacts,
+            omitted_relationship_reference_count: counts.omitted_relationship_references,
+            omitted_artifact_reference_count: counts.omitted_artifact_references,
+            limitation_codes: reference_omission_limitation_codes(
+                counts.omitted_relationship_references,
+                counts.omitted_artifact_references,
+            ),
             pre_migration_backup_file_name: opened.pre_migration_backup_file_name,
         })
     })();
@@ -860,6 +894,7 @@ pub fn audit_replica(
         ));
     }
     let initialized = identity_count == 1;
+    let mut record_audit = ReplicaRecordAudit::default();
     if initialized {
         let identity: (String, String, bool, String, String) = connection.query_row(
             "SELECT account_id, current_source_fingerprint, restoration_complete,
@@ -883,7 +918,7 @@ pub fn audit_replica(
                 "replica identity is incomplete".to_string(),
             ));
         }
-        let record_audit = audit_replica_records(connection, &identity.0, true)?;
+        record_audit = audit_replica_records(connection, &identity.0, true)?;
         if record_audit.conversation_count != conversation_count
             || record_audit.participant_count != participant_count
             || record_audit.message_count != message_count
@@ -957,6 +992,12 @@ pub fn audit_replica(
         cached_moment_interaction_count,
         relationship_count,
         message_artifact_count,
+        omitted_relationship_reference_count: record_audit.omitted_relationship_reference_count,
+        omitted_artifact_reference_count: record_audit.omitted_artifact_reference_count,
+        limitation_codes: reference_omission_limitation_codes(
+            record_audit.omitted_relationship_reference_count,
+            record_audit.omitted_artifact_reference_count,
+        ),
         change_count,
     })
 }
@@ -1106,6 +1147,12 @@ pub fn audit_replica_backup(
         artifact_count: record_audit.artifact_count,
         relationship_count: record_audit.relationships.len() as u64,
         message_artifact_count: record_audit.message_artifacts.len() as u64,
+        omitted_relationship_reference_count: record_audit.omitted_relationship_reference_count,
+        omitted_artifact_reference_count: record_audit.omitted_artifact_reference_count,
+        limitation_codes: reference_omission_limitation_codes(
+            record_audit.omitted_relationship_reference_count,
+            record_audit.omitted_artifact_reference_count,
+        ),
     })
 }
 
@@ -2301,6 +2348,34 @@ pub fn get_replica_artifact(
     get_replica_record(replica_path, key, "artifact", "artifact_id", artifact_id)
 }
 
+pub(crate) fn get_replica_conversation_batch(
+    replica_path: &Path,
+    key: &ReplicaKey,
+    conversation_ids: &BTreeSet<String>,
+) -> Result<BTreeMap<String, CanonicalConversation>, RestoreError> {
+    get_replica_record_batch(
+        replica_path,
+        key,
+        "conversation",
+        "conversation_id",
+        conversation_ids,
+    )
+}
+
+pub(crate) fn get_replica_participant_batch(
+    replica_path: &Path,
+    key: &ReplicaKey,
+    participant_ids: &BTreeSet<String>,
+) -> Result<BTreeMap<String, CanonicalParticipant>, RestoreError> {
+    get_replica_record_batch(
+        replica_path,
+        key,
+        "participant",
+        "participant_id",
+        participant_ids,
+    )
+}
+
 pub fn replica_restoration_report(
     replica_path: &Path,
     key: &ReplicaKey,
@@ -2371,7 +2446,7 @@ pub fn replica_conversation_references_artifact_in_range(
     }
     let opened = open_replica(replica_path, key)?;
     let (account_id, _) = current_replica_identity(&opened.connection)?;
-    let exists: bool = opened.connection.query_row(
+    let exists = opened.connection.query_row(
         "SELECT EXISTS(
            SELECT 1 FROM message_artifact AS a
            JOIN message AS m
@@ -2388,13 +2463,73 @@ pub fn replica_conversation_references_artifact_in_range(
             not_after_unix
         ],
         |row| row.get(0),
-    )?;
-    Ok(exists)
+    );
+    if exists.unwrap_or(false) {
+        return Ok(true);
+    }
+
+    // The link table is an optional projection. Prove authorization from the
+    // canonical message records when it is absent, incomplete, or damaged.
+    let mut statement = match opened.connection.prepare(
+        "SELECT canonical_id, conversation_ordinal, created_at_unix, record_json
+         FROM message
+         WHERE account_id = ?1 AND conversation_id = ?2
+           AND (?3 IS NULL OR created_at_unix >= ?3)
+           AND (?4 IS NULL OR created_at_unix <= ?4)",
+    ) {
+        Ok(statement) => statement,
+        Err(_) => return Ok(false),
+    };
+    let rows = match statement.query_map(
+        params![account_id, conversation_id, not_before_unix, not_after_unix],
+        |row| {
+            Ok((
+                row.get::<_, String>(0),
+                row.get::<_, i64>(1),
+                row.get::<_, Option<i64>>(2),
+                row.get::<_, Vec<u8>>(3),
+            ))
+        },
+    ) {
+        Ok(rows) => rows,
+        Err(_) => return Ok(false),
+    };
+    for row in rows {
+        let Ok((Ok(indexed_id), Ok(indexed_ordinal), Ok(indexed_created_at), Ok(bytes))) = row
+        else {
+            continue;
+        };
+        let Ok(indexed_ordinal) = u64::try_from(indexed_ordinal) else {
+            continue;
+        };
+        let Ok(message) = serde_json::from_slice::<CanonicalMessage>(&bytes) else {
+            continue;
+        };
+        if message.account_id != account_id
+            || message.canonical_id != indexed_id
+            || message.conversation_id != conversation_id
+            || message.conversation_ordinal != indexed_ordinal
+            || message.created_at_unix != indexed_created_at
+        {
+            continue;
+        }
+        if message
+            .artifact_references
+            .iter()
+            .any(|reference| reference.artifact_id == artifact_id)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 trait ReplicaRecordIdentity {
     fn replica_account_id(&self) -> Option<&str>;
     fn replica_record_id(&self) -> &str;
+    fn replica_record_is_usable(&self) -> bool {
+        true
+    }
 }
 
 impl ReplicaRecordIdentity for CanonicalConversation {
@@ -2405,6 +2540,20 @@ impl ReplicaRecordIdentity for CanonicalConversation {
     fn replica_record_id(&self) -> &str {
         &self.conversation_id
     }
+
+    fn replica_record_is_usable(&self) -> bool {
+        let participants = self.participant_ids.iter().collect::<BTreeSet<_>>();
+        participants.len() == self.participant_ids.len()
+            && participants.iter().all(|identifier| !identifier.is_empty())
+            && self.memberships.iter().all(|membership| {
+                !membership.participant_id.is_empty()
+                    && participants.contains(&membership.participant_id)
+            })
+            && self
+                .owner_participant_id
+                .as_ref()
+                .is_none_or(|owner| participants.contains(owner))
+    }
 }
 
 impl ReplicaRecordIdentity for CanonicalParticipant {
@@ -2414,6 +2563,14 @@ impl ReplicaRecordIdentity for CanonicalParticipant {
 
     fn replica_record_id(&self) -> &str {
         &self.participant_id
+    }
+
+    fn replica_record_is_usable(&self) -> bool {
+        let conversations = self.conversation_ids.iter().collect::<BTreeSet<_>>();
+        conversations.len() == self.conversation_ids.len()
+            && conversations
+                .iter()
+                .all(|identifier| !identifier.is_empty())
     }
 }
 
@@ -2470,10 +2627,115 @@ fn get_replica_record<T: DeserializeOwned + ReplicaRecordIdentity>(
         .replica_account_id()
         .is_some_and(|record_account| record_account != account_id)
         || value.replica_record_id() != identifier
+        || !value.replica_record_is_usable()
     {
         return Ok(None);
     }
     Ok(Some(value))
+}
+
+fn get_replica_record_batch<T: DeserializeOwned + ReplicaRecordIdentity>(
+    replica_path: &Path,
+    key: &ReplicaKey,
+    table: &str,
+    identifier_column: &str,
+    identifiers: &BTreeSet<String>,
+) -> Result<BTreeMap<String, T>, RestoreError> {
+    if identifiers.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    debug_assert!(matches!(table, "conversation" | "participant"));
+    debug_assert!(matches!(
+        identifier_column,
+        "conversation_id" | "participant_id"
+    ));
+    let opened = open_replica(replica_path, key)?;
+    let (account_id, _) = current_replica_identity(&opened.connection)?;
+    let query =
+        format!("SELECT {identifier_column}, record_json FROM {table} WHERE account_id = ?1");
+    let mut statement = match opened.connection.prepare(&query) {
+        Ok(statement) => statement,
+        Err(_) => return Ok(BTreeMap::new()),
+    };
+    let mut rows = match statement.query([&account_id]) {
+        Ok(rows) => rows,
+        Err(_) => return Ok(BTreeMap::new()),
+    };
+    let mut records = BTreeMap::new();
+    loop {
+        let row = match rows.next() {
+            Ok(Some(row)) => row,
+            Ok(None) => break,
+            Err(_) => break,
+        };
+        let Ok(identifier) = row.get::<_, String>(0) else {
+            continue;
+        };
+        if !identifiers.contains(&identifier) {
+            continue;
+        }
+        let Ok(bytes) = row.get::<_, Vec<u8>>(1) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<T>(&bytes) else {
+            continue;
+        };
+        if value
+            .replica_account_id()
+            .is_some_and(|record_account| record_account != account_id)
+            || value.replica_record_id() != identifier
+            || !value.replica_record_is_usable()
+        {
+            continue;
+        }
+        records.insert(identifier, value);
+    }
+    drop(rows);
+    drop(statement);
+
+    // If a damaged page interrupted the broad scan, retry only the unresolved
+    // identities with point lookups. One unreadable row must not hide healthy
+    // rows that SQLite can still reach elsewhere in the same domain table.
+    if records.len() < identifiers.len() {
+        let direct_query = format!(
+            "SELECT record_json FROM {table}
+             WHERE account_id = ?1 AND {identifier_column} = ?2"
+        );
+        let mut direct = match opened.connection.prepare(&direct_query) {
+            Ok(statement) => statement,
+            Err(_) => return Ok(records),
+        };
+        let unresolved = identifiers
+            .iter()
+            .filter(|identifier| !records.contains_key(*identifier))
+            .cloned()
+            .collect::<Vec<_>>();
+        for identifier in unresolved {
+            let bytes: Option<Vec<u8>> = match direct
+                .query_row(params![account_id, &identifier], |row| row.get(0))
+                .optional()
+            {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            let Some(bytes) = bytes else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_slice::<T>(&bytes) else {
+                continue;
+            };
+            if value
+                .replica_account_id()
+                .is_some_and(|record_account| record_account != account_id)
+                || value.replica_record_id() != identifier
+                || !value.replica_record_is_usable()
+            {
+                continue;
+            }
+            records.insert(identifier, value);
+        }
+    }
+    Ok(records)
 }
 
 pub fn list_replica_conversations(
@@ -2632,6 +2894,9 @@ struct ReplicaRecordAudit {
     memberships: BTreeSet<Vec<u8>>,
     relationships: BTreeSet<Vec<u8>>,
     message_artifacts: BTreeSet<Vec<u8>>,
+    artifact_ids: BTreeSet<String>,
+    omitted_relationship_reference_count: u64,
+    omitted_artifact_reference_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2905,6 +3170,7 @@ fn audit_replica_records(
                     "replica artifact projection differs from its canonical record".to_string(),
                 ));
             }
+            audit.artifact_ids.insert(value.artifact_id);
             audit.artifact_count = audit.artifact_count.saturating_add(1);
         }
     }
@@ -2949,6 +3215,11 @@ fn audit_replica_records(
                 ));
             }
             for (index, relationship) in value.relationships.iter().enumerate() {
+                if !relationship_reference_is_indexable(relationship) {
+                    audit.omitted_relationship_reference_count =
+                        audit.omitted_relationship_reference_count.saturating_add(1);
+                    continue;
+                }
                 audit.relationships.insert(serde_json::to_vec(&(
                     account_id,
                     &stored_id,
@@ -2959,7 +3230,16 @@ fn audit_replica_records(
                     serde_json::to_vec(relationship)?,
                 ))?);
             }
+            let mut seen_artifact_ids = BTreeSet::new();
             for (index, reference) in value.artifact_references.iter().enumerate() {
+                if reference.artifact_id.is_empty()
+                    || !seen_artifact_ids.insert(reference.artifact_id.as_str())
+                    || !audit.artifact_ids.contains(&reference.artifact_id)
+                {
+                    audit.omitted_artifact_reference_count =
+                        audit.omitted_artifact_reference_count.saturating_add(1);
+                    continue;
+                }
                 audit.message_artifacts.insert(serde_json::to_vec(&(
                     account_id,
                     &stored_id,
@@ -4688,35 +4968,17 @@ fn import_archive_transactionally(
                     search_text,
                 ],
             )?;
-            for (ordinal, relationship) in message.relationships.into_iter().enumerate() {
-                transaction.execute(
-                    "INSERT INTO message_relationship VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        report.account_id,
-                        message.canonical_id,
-                        checked_usize_i64(ordinal)?,
-                        json_enum(&relationship.kind)?,
-                        relationship.target_canonical_id,
-                        relationship.resolved,
-                        serde_json::to_vec(&relationship)?,
-                    ],
-                )?;
-                counts.relationships += 1;
-            }
-            for (ordinal, reference) in message.artifact_references.into_iter().enumerate() {
-                transaction.execute(
-                    "INSERT INTO message_artifact VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        report.account_id,
-                        message.canonical_id,
-                        checked_usize_i64(ordinal)?,
-                        reference.artifact_id,
-                        json_enum(&reference.role)?,
-                        reference.preferred,
-                    ],
-                )?;
-                counts.message_artifacts += 1;
-            }
+            let links = insert_message_links(&transaction, report, &message)?;
+            counts.relationships = counts.relationships.saturating_add(links.relationships);
+            counts.message_artifacts = counts
+                .message_artifacts
+                .saturating_add(links.message_artifacts);
+            counts.omitted_relationship_references = counts
+                .omitted_relationship_references
+                .saturating_add(links.omitted_relationship_references);
+            counts.omitted_artifact_references = counts
+                .omitted_artifact_references
+                .saturating_add(links.omitted_artifact_references);
             counts.messages += 1;
             Ok(())
         },
@@ -5323,7 +5585,13 @@ fn reconcile_archive_transactionally(
                 Some(_) => None,
             };
             if let Some(kind) = change_kind {
-                replace_message_links(&transaction, report, &message)?;
+                let links = replace_message_links(&transaction, report, &message)?;
+                counts.omitted_relationship_references = counts
+                    .omitted_relationship_references
+                    .saturating_add(links.omitted_relationship_references);
+                counts.omitted_artifact_references = counts
+                    .omitted_artifact_references
+                    .saturating_add(links.omitted_artifact_references);
                 record_change(
                     &transaction,
                     &mut counts,
@@ -5599,20 +5867,55 @@ fn update_message(
     Ok(())
 }
 
-fn replace_message_links(
+#[derive(Default)]
+struct MessageLinkCounts {
+    relationships: u64,
+    message_artifacts: u64,
+    omitted_relationship_references: u64,
+    omitted_artifact_references: u64,
+}
+
+fn reference_omission_limitation_codes(
+    omitted_relationship_reference_count: u64,
+    omitted_artifact_reference_count: u64,
+) -> Vec<String> {
+    let mut codes = Vec::new();
+    if omitted_artifact_reference_count > 0 {
+        codes.push("malformedArtifactReferenceOmitted".to_string());
+    }
+    if omitted_relationship_reference_count > 0 {
+        codes.push("malformedRelationshipReferenceOmitted".to_string());
+    }
+    codes
+}
+
+fn relationship_reference_is_indexable(relationship: &crate::MessageRelationship) -> bool {
+    let state_is_resolved =
+        relationship.resolution_state == crate::RelationshipResolutionState::Resolved;
+    let target_is_nonempty = relationship
+        .target_canonical_id
+        .as_deref()
+        .is_some_and(|identifier| !identifier.is_empty());
+    relationship.resolved == state_is_resolved
+        && if relationship.resolved {
+            target_is_nonempty
+        } else {
+            relationship.target_canonical_id.is_none()
+        }
+}
+
+fn insert_message_links(
     transaction: &Transaction<'_>,
     report: &RestorationReport,
     message: &CanonicalMessage,
-) -> Result<(), RestoreError> {
-    transaction.execute(
-        "DELETE FROM message_relationship WHERE account_id = ?1 AND source_canonical_id = ?2",
-        params![report.account_id, message.canonical_id],
-    )?;
-    transaction.execute(
-        "DELETE FROM message_artifact WHERE account_id = ?1 AND canonical_id = ?2",
-        params![report.account_id, message.canonical_id],
-    )?;
+) -> Result<MessageLinkCounts, RestoreError> {
+    let mut counts = MessageLinkCounts::default();
     for (ordinal, relationship) in message.relationships.iter().enumerate() {
+        if !relationship_reference_is_indexable(relationship) {
+            counts.omitted_relationship_references =
+                counts.omitted_relationship_references.saturating_add(1);
+            continue;
+        }
         transaction.execute(
             "INSERT INTO message_relationship VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
@@ -5625,10 +5928,26 @@ fn replace_message_links(
                 serde_json::to_vec(relationship)?,
             ],
         )?;
+        counts.relationships = counts.relationships.saturating_add(1);
     }
+
+    let mut seen_artifact_ids = BTreeSet::new();
     for (ordinal, reference) in message.artifact_references.iter().enumerate() {
-        transaction.execute(
-            "INSERT INTO message_artifact VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        if reference.artifact_id.is_empty()
+            || !seen_artifact_ids.insert(reference.artifact_id.as_str())
+        {
+            counts.omitted_artifact_references =
+                counts.omitted_artifact_references.saturating_add(1);
+            continue;
+        }
+        let inserted = transaction.execute(
+            "INSERT INTO message_artifact(
+               account_id, canonical_id, artifact_ordinal, artifact_id, role, preferred
+             )
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6
+             WHERE EXISTS (
+               SELECT 1 FROM artifact WHERE account_id = ?1 AND artifact_id = ?4
+             )",
             params![
                 report.account_id,
                 message.canonical_id,
@@ -5638,8 +5957,30 @@ fn replace_message_links(
                 reference.preferred,
             ],
         )?;
+        if inserted == 0 {
+            counts.omitted_artifact_references =
+                counts.omitted_artifact_references.saturating_add(1);
+        } else {
+            counts.message_artifacts = counts.message_artifacts.saturating_add(1);
+        }
     }
-    Ok(())
+    Ok(counts)
+}
+
+fn replace_message_links(
+    transaction: &Transaction<'_>,
+    report: &RestorationReport,
+    message: &CanonicalMessage,
+) -> Result<MessageLinkCounts, RestoreError> {
+    transaction.execute(
+        "DELETE FROM message_relationship WHERE account_id = ?1 AND source_canonical_id = ?2",
+        params![report.account_id, message.canonical_id],
+    )?;
+    transaction.execute(
+        "DELETE FROM message_artifact WHERE account_id = ?1 AND canonical_id = ?2",
+        params![report.account_id, message.canonical_id],
+    )?;
+    insert_message_links(transaction, report, message)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6065,6 +6406,12 @@ fn sync_report(
         added_count: counts.added,
         changed_count: counts.changed,
         removed_count: counts.removed,
+        omitted_relationship_reference_count: counts.omitted_relationship_references,
+        omitted_artifact_reference_count: counts.omitted_artifact_references,
+        limitation_codes: reference_omission_limitation_codes(
+            counts.omitted_relationship_references,
+            counts.omitted_artifact_references,
+        ),
         conversation_count: table_count(connection, "conversation")?,
         participant_count: table_count(connection, "participant")?,
         message_count: table_count(connection, "message")?,
@@ -6263,6 +6610,12 @@ fn bootstrap_report(
         cached_surface_omitted_row_count: report.integrity.cached_surface_omitted_row_count,
         relationship_count: table_count(&opened.connection, "message_relationship")?,
         message_artifact_count: table_count(&opened.connection, "message_artifact")?,
+        omitted_relationship_reference_count: 0,
+        omitted_artifact_reference_count: 0,
+        limitation_codes: (report.format_version < 3)
+            .then(|| "legacyReferenceOmissionCountsUnavailable".to_string())
+            .into_iter()
+            .collect(),
         pre_migration_backup_file_name: opened.pre_migration_backup_file_name.clone(),
     })
 }

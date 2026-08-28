@@ -125,7 +125,7 @@ The JSONL files are:
 | --- | --- |
 | `conversations.jsonl` | Stable conversation ID, human label, kind, participant names and roles, explicit `groupOwnerParticipantId` evidence, decode state, source-database freshness, capabilities, allowed fields, and time range. Group ownership is never interpreted as account ownership. |
 | `contacts.jsonl` | Stable participant ID, preferred normalized display name, local-profile availability, source-database freshness, enabled conversations, and per-conversation display names and roles. Every representation of the bound account holder is labelled `You`. |
-| `messages.jsonl` | Stable message/conversation IDs, conversation label, sender ID/name, creation time, ordinal, direction, logical type/subtype, normalized payload kind/summary, per-message source-database freshness, relationships, and attachment references. |
+| `messages.jsonl` | Stable message/conversation IDs, conversation label, sender ID/name, creation time, ordinal, direction, logical type/subtype, normalized payload kind/summary, per-message source-database freshness, sanitized relationships and attachment references, plus `omittedRelationshipReferenceCount` and `omittedArtifactReferenceCount`. |
 | `artifacts.jsonl` | Stable artifact ID, referencing conversations, availability/decode state, format, byte count, digest, safe account-relative path, and explicit resolution error when verification fails. |
 
 Static files deliberately omit source logical paths, database/table/row
@@ -216,6 +216,22 @@ earlier generation remain queryable, but are never presented as observations
 from the current sync. Neither an agent nor a downstream indexer may interpret
 absence from an unavailable shard as a deletion. Healthy databases,
 conversations, messages, contacts, and attachments continue to be served.
+The same isolation applies to a missing replica domain table, optional search
+index, or malformed row: the operation returns the healthy subset (or an empty
+successful page) with typed omission counts and `limitationCodes`. It does not
+turn key/account/checkpoint tampering, unsafe paths, or authorization failure
+into a recoverable data gap.
+Malformed, empty, duplicate, or structurally inconsistent optional message
+references are removed individually. The message remains queryable and
+exportable, and the corresponding `malformed*ReferenceOmitted` limitation is
+carried into the context and personal-memory audits.
+Participant and artifact lookups follow the same rule. If a healthy authorized
+conversation still proves participant membership, a missing profile becomes a
+derived contact with `unavailableParticipantProfileSynthesized`. If a healthy
+canonical message proves an attachment reference, a missing artifact record
+becomes a metadata-unavailable artifact with
+`unavailableArtifactMetadataSynthesized`. No placeholder is returned when the
+remaining data cannot prove that the requested identity is in policy scope.
 
 ## Downstream update model
 

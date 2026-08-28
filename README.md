@@ -659,7 +659,18 @@ printf '%s' '<64-hex-character-random-replica-key>' | cargo run \
 Structured filters also cover subtype, inclusive upper time bound, reply target,
 and attachment absence. Search cursors fail closed when the filter, replica,
 account, or committed source checkpoint changes. `replica-status` and
-`replica-coverage` expose freshness and known restoration limitations.
+`replica-coverage` expose freshness and known restoration limitations. A
+missing optional index or damaged domain table yields a successful empty or
+partial page with omission counts and `limitationCodes`; key, account,
+authorization, and checkpoint-integrity failures remain hard failures.
+Malformed or dangling message attachment/relationship references are likewise
+excluded from optional replica indexes and minimized AI records without
+discarding the containing message. Bootstrap, synchronization, replica audit,
+context audit, and memory audit expose their typed omission counts.
+When a participant profile or artifact record is unavailable, single-record AI
+operations return a typed derived placeholder if authorization can still be
+proven from a healthy conversation or canonical message. They still deny the
+request when the damaged data leaves authorization unprovable.
 
 ### AI-friendly CLI and static context
 

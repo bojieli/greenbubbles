@@ -197,6 +197,8 @@ pub struct AiContextContact {
     pub conversation_profiles: Vec<AiContactConversationProfile>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution_error_code: Option<ConnectorErrorCode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +236,8 @@ pub struct AiContextArtifactDetail {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub decoded: Option<AiContextArtifactFile>,
     pub verification_state: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -276,6 +280,8 @@ pub struct AiContextAuditReport {
     pub message_count: u64,
     pub artifact_count: u64,
     pub artifact_resolution_error_count: u64,
+    pub omitted_artifact_reference_count: u64,
+    pub omitted_relationship_reference_count: u64,
     pub preserved_stale_message_count: u64,
     pub omitted_conversation_count: u64,
     pub omitted_message_count: u64,
@@ -319,7 +325,8 @@ pub fn query_ai_context(
     let service =
         ConnectorService::open(replica_path, key, policy_path, audit_path, drafts.path())?;
     let before = replica_status(replica_path, key)?;
-    let connector_response = service.handle(ConnectorRequest {
+    service.prepare_external_checkpoint_guard()?;
+    let connector_response = service.handle_with_external_checkpoint_guard(ConnectorRequest {
         api_version: CONNECTOR_API_VERSION.to_string(),
         request_id: request.request_id,
         requester_id: request.requester_id,
@@ -403,6 +410,7 @@ pub fn export_ai_context(
     )?;
     let mut reader = AiConnectorReader::new(&service, requester_id, destination);
     let start_status = expect_status(reader.call(ConnectorOperation::Status)?)?;
+    service.prepare_external_checkpoint_guard()?;
     let start_health = context_health(&start_status.replica)?;
     require_bound_account_holder(&start_health)?;
     let list = expect_conversations(reader.call(ConnectorOperation::ListConversations)?)?;
@@ -526,6 +534,7 @@ pub fn export_ai_context(
             source_database_freshness,
             enabled_conversation_ids,
             resolution_error_code,
+            contact_limitation_codes,
         ) = match response.result {
             Some(ConnectorResult::Contact(contact)) if response.ok => (
                 contact.display_name,
@@ -533,6 +542,7 @@ pub fn export_ai_context(
                 contact.source_database_freshness,
                 contact.enabled_conversation_ids,
                 None,
+                contact.limitation_codes,
             ),
             _ => (
                 accumulated
@@ -554,8 +564,10 @@ pub fn export_ai_context(
                         .error
                         .map_or(ConnectorErrorCode::IntegrityFailure, |error| error.code),
                 ),
+                vec!["contactResolutionUnavailable".to_string()],
             ),
         };
+        limitation_codes.extend(contact_limitation_codes.iter().cloned());
         let is_self = start_health.self_participant_id.as_deref() == Some(participant_id.as_str());
         exported_contact_ids.insert(participant_id.clone());
         contact_writer.write(&AiContextContact {
@@ -571,6 +583,7 @@ pub fn export_ai_context(
             enabled_conversation_ids,
             conversation_profiles: accumulated.profiles,
             resolution_error_code,
+            limitation_codes: contact_limitation_codes,
         })?;
     }
     observe_export(
@@ -668,6 +681,7 @@ pub fn export_ai_context(
                                 role: "MessageSender".to_string(),
                             }],
                             resolution_error_code: Some(ConnectorErrorCode::NotFound),
+                            limitation_codes: vec!["missingSenderProfileSynthesized".to_string()],
                         })?;
                         exported_contact_ids.insert(sender_id.clone());
                         limitation_codes.insert("missingSenderProfileSynthesized".to_string());
@@ -730,7 +744,9 @@ pub fn export_ai_context(
         });
         let (detail, error) = match response.result {
             Some(ConnectorResult::Artifact(artifact)) if response.ok => {
-                (Some(sanitize_artifact(artifact)), None)
+                let detail = sanitize_artifact(artifact);
+                limitation_codes.extend(detail.limitation_codes.iter().cloned());
+                (Some(detail), None)
             }
             _ => {
                 artifact_error_count = artifact_error_count.saturating_add(1);
@@ -989,6 +1005,15 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
                 "AI context contacts repeat an identity".to_string(),
             ));
         }
+        if contact
+            .limitation_codes
+            .iter()
+            .any(|code| !manifest.limitation_codes.contains(code))
+        {
+            return Err(RestoreError::Integrity(
+                "AI context contact limitations lack manifest evidence".to_string(),
+            ));
+        }
         validate_entity_freshness(contact.source_database_freshness, &manifest.context)?;
         let enabled = contact
             .enabled_conversation_ids
@@ -1049,7 +1074,18 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
             ));
         }
         match (&artifact.detail, &artifact.error) {
-            (Some(detail), None) => validate_ai_artifact_detail(detail)?,
+            (Some(detail), None) => {
+                validate_ai_artifact_detail(detail)?;
+                if detail
+                    .limitation_codes
+                    .iter()
+                    .any(|code| !manifest.limitation_codes.contains(code))
+                {
+                    return Err(RestoreError::Integrity(
+                        "AI context artifact limitations lack manifest evidence".to_string(),
+                    ));
+                }
+            }
             (None, Some(error)) => {
                 artifact_error_count = artifact_error_count.saturating_add(1);
                 require_nonempty(&error.message, "artifact error message")?;
@@ -1073,6 +1109,8 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
     let mut referenced_artifact_ids = BTreeSet::new();
     let mut referenced_sender_ids = BTreeSet::new();
     let mut stale_message_count = 0_u64;
+    let mut omitted_artifact_reference_count = 0_u64;
+    let mut omitted_relationship_reference_count = 0_u64;
     let message_file = files["messages"];
     audit_ai_messages(bundle_directory, message_file, |message| {
         require_ai_record_format(message.format_version, manifest.format_version, "message")?;
@@ -1156,13 +1194,33 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
                 ));
             }
         }
+        omitted_artifact_reference_count = omitted_artifact_reference_count
+            .saturating_add(message.message.omitted_artifact_reference_count);
+        omitted_relationship_reference_count = omitted_relationship_reference_count
+            .saturating_add(message.message.omitted_relationship_reference_count);
+        let mut message_artifact_ids = BTreeSet::new();
         for reference in &message.message.artifact_references {
-            if !artifact_ids.contains(&reference.artifact_id) {
+            if reference.artifact_id.is_empty()
+                || !message_artifact_ids.insert(reference.artifact_id.as_str())
+                || !artifact_ids.contains(&reference.artifact_id)
+            {
                 return Err(RestoreError::Integrity(
-                    "AI context message references an absent artifact".to_string(),
+                    "AI context message references an absent, empty, or repeated artifact"
+                        .to_string(),
                 ));
             }
             referenced_artifact_ids.insert(reference.artifact_id.clone());
+        }
+        if message.message.relationships.iter().any(|relationship| {
+            relationship
+                .target_canonical_id
+                .as_deref()
+                .is_some_and(str::is_empty)
+                || relationship.resolved && relationship.target_canonical_id.is_none()
+        }) {
+            return Err(RestoreError::Integrity(
+                "AI context message contains a malformed relationship reference".to_string(),
+            ));
         }
         Ok(())
     })?;
@@ -1176,6 +1234,21 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
         return Err(RestoreError::Integrity(
             "AI context contacts do not exactly cover conversation participants and message senders"
                 .to_string(),
+        ));
+    }
+    if (omitted_artifact_reference_count > 0
+        && !manifest
+            .limitation_codes
+            .iter()
+            .any(|code| code == "malformedArtifactReferenceOmitted"))
+        || (omitted_relationship_reference_count > 0
+            && !manifest
+                .limitation_codes
+                .iter()
+                .any(|code| code == "malformedRelationshipReferenceOmitted"))
+    {
+        return Err(RestoreError::Integrity(
+            "AI context reference omission counts lack limitation evidence".to_string(),
         ));
     }
 
@@ -1222,6 +1295,8 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
         message_count: message_file.record_count,
         artifact_count: artifact_file.record_count,
         artifact_resolution_error_count: artifact_error_count,
+        omitted_artifact_reference_count,
+        omitted_relationship_reference_count,
         preserved_stale_message_count: stale_message_count,
         omitted_conversation_count: manifest.omitted_conversation_count,
         omitted_message_count: manifest.omitted_message_count,
@@ -1329,13 +1404,28 @@ fn validate_entity_freshness(
 }
 
 fn validate_ai_artifact_detail(detail: &AiContextArtifactDetail) -> Result<(), RestoreError> {
-    if detail.verification_state != "connectorDigestVerified"
-        || (detail.source.is_none() && detail.decoded.is_none())
+    let metadata_unavailable = detail.verification_state == "metadataUnavailable"
+        && detail.kind == ArtifactKind::Unknown
+        && detail.role == ArtifactRole::Unknown
+        && detail.availability == ArtifactAvailability::MetadataMissing
+        && detail.decode_state == ArtifactDecodeState::Failed
+        && detail.source.is_none()
+        && detail.decoded.is_none()
+        && detail
+            .limitation_codes
+            .iter()
+            .any(|code| code == "unavailableArtifactMetadataSynthesized");
+    let digest_verified = detail.verification_state == "connectorDigestVerified"
+        && !detail
+            .limitation_codes
+            .iter()
+            .any(|code| code == "unavailableArtifactMetadataSynthesized")
+        && !((detail.source.is_none() && detail.decoded.is_none())
             && matches!(
                 detail.availability,
                 ArtifactAvailability::Downloaded | ArtifactAvailability::MaterializedFromDatabase
-            )
-    {
+            ));
+    if !metadata_unavailable && !digest_verified {
         return Err(RestoreError::Integrity(
             "AI context artifact verification evidence is inconsistent".to_string(),
         ));
@@ -1392,6 +1482,8 @@ fn audit_ai_messages(
             "payloadSummaryTruncated",
             "artifactReferences",
             "relationships",
+            "omittedArtifactReferenceCount",
+            "omittedRelationshipReferenceCount",
         ];
         if object
             .keys()
@@ -1757,13 +1849,14 @@ impl<'a, 'b> AiConnectorReader<'a, 'b> {
 
     fn raw_call(&mut self, operation: ConnectorOperation) -> crate::connector::ConnectorResponse {
         self.sequence = self.sequence.saturating_add(1);
-        self.service.handle(ConnectorRequest {
-            api_version: CONNECTOR_API_VERSION.to_string(),
-            request_id: format!("ai-export-{}", self.sequence),
-            requester_id: self.requester_id.to_string(),
-            destination: self.destination,
-            operation,
-        })
+        self.service
+            .handle_with_external_checkpoint_guard(ConnectorRequest {
+                api_version: CONNECTOR_API_VERSION.to_string(),
+                request_id: format!("ai-export-{}", self.sequence),
+                requester_id: self.requester_id.to_string(),
+                destination: self.destination,
+                operation,
+            })
     }
 
     fn call(&mut self, operation: ConnectorOperation) -> Result<ConnectorResult, RestoreError> {
@@ -1808,6 +1901,15 @@ fn unexpected_connector_result(expected: &str) -> RestoreError {
 }
 
 fn sanitize_artifact(artifact: ConnectorArtifactView) -> AiContextArtifactDetail {
+    let verification_state = if artifact
+        .limitation_codes
+        .iter()
+        .any(|code| code == "unavailableArtifactMetadataSynthesized")
+    {
+        "metadataUnavailable"
+    } else {
+        "connectorDigestVerified"
+    };
     AiContextArtifactDetail {
         kind: artifact.kind,
         role: artifact.role,
@@ -1815,7 +1917,8 @@ fn sanitize_artifact(artifact: ConnectorArtifactView) -> AiContextArtifactDetail
         decode_state: artifact.decode_state,
         source: artifact.source.map(sanitize_artifact_file),
         decoded: artifact.decoded.map(sanitize_artifact_file),
-        verification_state: "connectorDigestVerified".to_string(),
+        verification_state: verification_state.to_string(),
+        limitation_codes: artifact.limitation_codes,
     }
 }
 
