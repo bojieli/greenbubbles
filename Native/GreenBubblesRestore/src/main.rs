@@ -28,10 +28,10 @@ use greenbubbles_restore::{
     prepare_catalog_batch_with_progress, prepare_catalog_with_progress,
     reconcile::reconcile_archives,
     replica::{
-        audit_replica, audit_replica_backup, bootstrap_replica, get_replica_changes,
+        audit_replica, audit_replica_backup, bootstrap_replica_with_progress, get_replica_changes,
         get_replica_message, list_replica_conversations, load_replica_message_filter,
         prepare_replica_recovery, replica_coverage, replica_status, search_replica_cached_moments,
-        search_replica_messages, synchronize_replica, ReplicaCachedMomentFilter,
+        search_replica_messages, synchronize_replica_with_progress, ReplicaCachedMomentFilter,
     },
     restore_catalog_with_progress,
     tools::{
@@ -461,8 +461,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if !remaining.iter().any(|value| value == "--replica-key-stdin") {
                 return Err("replica keys must be supplied with --replica-key-stdin".into());
             }
+            let reporter = ProgressReporter::from_arguments(
+                &remaining,
+                ProgressWorkflow::ReplicaApply,
+                false,
+            )?;
             let key = ReplicaKey::read_stdin()?;
-            let report = bootstrap_replica(&archive, &replica, &key)?;
+            let report = bootstrap_replica_with_progress(&archive, &replica, &key, &reporter)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "replica-status" => {
@@ -513,8 +518,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if !remaining.iter().any(|value| value == "--replica-key-stdin") {
                 return Err("replica keys must be supplied with --replica-key-stdin".into());
             }
+            let reporter = ProgressReporter::from_arguments(
+                &remaining,
+                ProgressWorkflow::ReplicaApply,
+                false,
+            )?;
             let key = ReplicaKey::read_stdin()?;
-            let report = synchronize_replica(&archive, &replica, &key)?;
+            let report = synchronize_replica_with_progress(&archive, &replica, &key, &reporter)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "replica-publish" => {
@@ -949,12 +959,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore read <archive> <policy-file> <conversation-id> [--cursor <cursor>] [--limit <n>]\n",
                     "  greenbubbles-restore reconcile <previous-archive> <current-archive> <policy-file> <events-output>\n",
                     "  greenbubbles-restore merge-incremental <previous-archive> <fragment-archive> <output-archive>\n",
-                    "  greenbubbles-restore replica-bootstrap <archive> <replica-path> --replica-key-stdin\n",
+                    "  greenbubbles-restore replica-bootstrap <archive> <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
                     "  greenbubbles-restore replica-status <replica-path> --replica-key-stdin\n",
                     "  greenbubbles-restore audit-replica <replica-path> --replica-key-stdin\n",
                     "  greenbubbles-restore audit-replica-backup <pre-migration-backup-path> --replica-key-stdin\n",
                     "  greenbubbles-restore prepare-replica-recovery <pre-migration-backup-path> <new-candidate-path> --replica-key-stdin\n",
-                    "  greenbubbles-restore replica-sync <archive> <replica-path> --replica-key-stdin\n",
+                    "  greenbubbles-restore replica-sync <archive> <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
                     "  greenbubbles-restore replica-publish <replica-eligible-archive> <handoff-file> --generation <positive-integer>\n",
                     "  greenbubbles-restore replica-archive-quarantine <handoff-file> <quarantine-directory> [--retain-publications <n, minimum 2>]\n",
                     "  greenbubbles-restore replica-archive-restore <handoff-file> <quarantine-directory> --generation <positive-integer>\n",
@@ -1090,6 +1100,7 @@ enum ProgressWorkflow {
     Restore,
     RestoreAndAudit,
     Audit,
+    ReplicaApply,
     AiExport,
 }
 
@@ -1103,6 +1114,12 @@ impl ProgressWorkflow {
         }
         if matches!(self, Self::Audit) {
             return vec![ProgressPhase::ArchiveAudit];
+        }
+        if matches!(self, Self::ReplicaApply) {
+            return vec![
+                ProgressPhase::ArchiveAudit,
+                ProgressPhase::ReplicaApplication,
+            ];
         }
         let mut phases = vec![ProgressPhase::SnapshotVerification];
         if validates_exported_keys {
@@ -1354,7 +1371,14 @@ fn human_progress(event: &ProgressEvent) -> String {
         };
         fields.push(format!("{} / {} {unit}", event.completed, event.total));
     }
-    if let Some(bytes) = event.file_byte_count {
+    if let (Some(completed), Some(total)) = (event.file_completed_byte_count, event.file_byte_count)
+    {
+        fields.push(format!(
+            "file read {} / {}",
+            format_bytes(completed),
+            format_bytes(total)
+        ));
+    } else if let Some(bytes) = event.file_byte_count {
         fields.push(format!("file size {}", format_bytes(bytes)));
     }
     if let Some(bytes) = event.source_byte_count {
@@ -1390,6 +1414,12 @@ fn human_progress(event: &ProgressEvent) -> String {
     }
     if let Some(bytes) = event.published_archive_byte_count {
         fields.push(format!("archive written {}", format_bytes(bytes)));
+    }
+    if let Some(bytes) = event.archive_byte_count {
+        fields.push(format!("archive input {}", format_bytes(bytes)));
+    }
+    if let Some(bytes) = event.replica_file_byte_count {
+        fields.push(format!("encrypted replica {}", format_bytes(bytes)));
     }
     if let Some(tables) = event.table_count {
         fields.push(format!("{tables} tables"));
