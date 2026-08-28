@@ -1,6 +1,6 @@
 # GreenBubbles product and engineering plan
 
-Last updated: 2026-08-27
+Last updated: 2026-08-28
 
 ## Strategic decision summary
 
@@ -13,10 +13,10 @@ connectors.
 > in a separately approved second product phase, use to reply or send files to
 > the user's real WeChat contacts.
 
-The connector must be independently useful from a CLI, JSON/JSONL, a local API,
-and MCP. OpenClaw, Codex, Claude, a Karpathy-style LLM-maintained wiki, or another
-memory system may consume it, but GreenBubbles will not depend on any one agent
-host or memory engine.
+The connector must be independently useful from a one-shot CLI, JSON/JSONL, a
+repository agent skill, and a local API. OpenClaw, Codex, Claude, a
+Karpathy-style LLM-maintained wiki, or another memory system may consume it, but
+GreenBubbles will not depend on any one agent host, protocol, or memory engine.
 
 The product is read-first but not read-only in its intended end state. Reliable
 restoration, identity resolution, synchronization, search, authorization, and
@@ -206,12 +206,14 @@ turning this repository into one of them.
 
 ### Agent integration
 
-Decision: provide stable, machine-readable, agent-neutral surfaces. A CLI and
-JSON/JSONL are the lowest common denominator; a local API supports long-running
-synchronization; MCP provides convenient typed tools. OpenClaw is an integration
-target, not the owner of the data model or process lifecycle. Codex, Claude,
-scripts, search interfaces, and personal-memory projects should be equally able
-to consume the connector.
+Decision: provide stable, machine-readable, agent-neutral surfaces. A one-shot
+CLI and JSON/JSONL are the primary agent interface; a local API may support
+long-running synchronization independently, but MCP is not a product dependency
+or current integration target. A repository skill teaches modern agent hosts to
+use the same CLI without creating another protocol or trust boundary. OpenClaw
+is an integration target, not the owner of the data model or process lifecycle.
+Codex, Claude, scripts, search interfaces, and personal-memory projects should
+be equally able to consume the connector.
 
 ## Research evidence informing the decisions
 
@@ -270,8 +272,10 @@ distributed safely. The acquisition and action gates below remain controlling.
 - **Source-faithful replica:** retain lossless source identities and explicit
   unknowns while adding stable indexes, provenance, freshness, and coverage for
   consumers.
-- **Version pinned:** fingerprint the official client and storage schema; unknown
-  versions fail closed.
+- **Version-aware:** fingerprint the official client and storage schema; accept
+  the signed WeChat 4.1+ family while retaining explicit schema/type drift and
+  failing closed only for incompatible identity, malformed evidence, or
+  unsupported observed structures.
 - **Evidence driven:** distinguish cached, observed, and server-fetched data and
   retain provenance for every normalized record.
 - **No stealth:** do not attempt to evade anti-tamper, environment, or account
@@ -329,18 +333,23 @@ legal/distribution and action items below remain fully in force.
 The signed client fingerprint binds bundle/build, executable, signing team,
 CodeDirectory, architectures, Hardened Runtime, and signature validity. Archive
 coverage format 3 now adds deterministic whole-profile and per-table schema
-fingerprints without emitting schema SQL. Build drift is incompatible;
-unhandled message candidates and unknown logical types remain raw-retained,
-machine-readable completion gaps; incremental merges recompute the schema
-profile. This satisfies the fingerprint/fail-closed item but not the remaining
-real-corpus and disposable-account requirements in this gate.
+fingerprints without emitting schema SQL. Passive restoration accepts signed,
+Hardened-Runtime official WeChat versions 4.1 and later; build, executable-hash,
+CodeDirectory-hash, and architecture drift are recorded as compatibility/audit
+evidence rather than blocking a restore. Incompatible version/signing identity
+or malformed evidence still fails closed. Unhandled message candidates and
+unknown logical types remain raw-retained, machine-readable completion gaps;
+incremental merges recompute the schema profile. This satisfies the
+fingerprint/fail-closed item but not the remaining real-corpus and disposable-
+account requirements in this gate.
 
-CI also extracts and compares every supported-build field from the Swift
-acquisition/static-inspection boundary and Rust restoration boundary. A
-one-sided version, identifier, architecture, signing, executable-hash,
-CodeDirectory-hash, Hardened Runtime, signature-validity, or profile-ID change
-now fails before merge, making revocation and future build updates atomic across
-the two implementations.
+CI also extracts and compares every exact reference-profile field from the
+Swift acquisition/static-inspection boundary and Rust restoration boundary. A
+one-sided reference version, identifier, architecture, signing, executable-
+hash, CodeDirectory-hash, Hardened Runtime, signature-validity, or profile-ID
+change fails before merge. This keeps the debugger acquisition helper's exact
+pin and cross-language reference evidence atomic without narrowing the passive
+4.1+ compatibility family.
 
 The bounded acquisition assessment statically confirms that the pinned client
 contains user-mediated backup/restore, chat-history migration, device-transfer,
@@ -361,13 +370,18 @@ true no-op incremental, and fresh active-account evidence captured exactly 8
 content-changed sets as 24 descriptor-based atomic APFS clones. The fresh
 25-set bootstrap completed in 3,362 ms and its immediate incremental in 1,996
 ms, but those capture timings omit source persistence, restoration,
-publication, replica application, and disposable-scenario labels. No database
-was decrypted, so this does not satisfy useful-content, semantic/media
-restoration, or real sync latency requirements. A separate content-free latest
-metadata pass observed 136,786 attachment candidates (38,874,071,097 bytes) in
-the larger attachment root and 87 (1,469,805 bytes) in the smaller root. One
-clean repeat completed without traversal issues, symbolic links, or a cap hit;
-it did not inspect content or prove message linkage. See
+publication, replica application, and disposable-scenario labels. Those
+acquisition measurements themselves did not decrypt a database. A subsequent
+GreenBubbles-only diagnostic restoration used an already exported owner-only
+per-database key set: 25 of 26 snapshot databases authenticate, while one
+auxiliary icon database has no available exported key. The workflow therefore
+preserves explicit missing-key evidence and unconditionally marks
+the archive `diagnosticSubset`; it does not convert the earlier timings into
+real synchronization evidence. A separate content-free latest metadata pass
+observed 136,786 attachment candidates (38,874,071,097 bytes) in the larger
+attachment root and 87 (1,469,805 bytes) in the smaller root. One clean repeat
+completed without traversal issues, symbolic links, or a cap hit; it did not
+prove message/media linkage. See
 `docs/LOCAL_ACQUISITION_VALIDATION.md`.
 
 A refreshed public-project survey found no ordinary user-visible or officially
@@ -532,7 +546,7 @@ states. See `docs/ARCHIVE_AUDIT.md`.
 
 Archive-audit format 2 now emits independently derived completion components
 for row accounting, observed types, direction, entities, relationships, media
-verification/decoding, archive scope, media phase, and pinned-build support. It
+verification/decoding, archive scope, media phase, and client compatibility. It
 also distinguishes non-empty message/media evidence from vacuous structural
 success and permanently marks authorization, disposable-scenario provenance,
 and observed-universe scope as external attestations. This makes the eventual
@@ -545,8 +559,58 @@ embedded forwarded-message documents and namespace evidence. The independent
 archive audit regenerates the projection from raw XML and rejects altered or
 unjustifiably complete records while remaining compatible with legacy partial
 archives. Synthetic fixtures close the previously known decoder-design gap;
-they do not prove that every variant in a real pinned corpus has been observed,
+they do not prove that every variant in a real compatible corpus has been observed,
 so the logical-type completion item remains unchecked.
+
+Real-corpus diagnostics are now incremental rather than an opaque decrypt-only
+wait. Progress-event format 2 exposes snapshot bytes, existing-key
+authentication, available/unavailable counts, per-database decrypt and WAL
+work, table/row planning, per-table restoration records, cached-surface work,
+ledger finalization, and independent audit. Human output shows workflow,
+phase, and current-item percentages plus database/file ordinals, byte sizes,
+record counts, gaps, and elapsed time. It coalesces repetitive tiny-table
+chatter while the create-new owner-only NDJSON stream retains every event;
+private JSON summary files support a UI or supervisor without exposing row
+values.
+
+The completed privacy-safe aggregate establishes that the selected corpus
+contains legitimate structured data rather than empty or nonsensical schemas.
+GreenBubbles authenticated 25 of 26 databases, classified all 6,542 tables and
+9,529,301 observed table rows as 6,291 message tables or 251 known auxiliary
+tables, and found zero generic `other` tables or unhandled message candidates.
+It restored 1,854,110/1,854,110 messages plus 23,589 cached Moments and 45,601
+interactions (1,923,300 restored source records) with zero rejected rows,
+duplicate canonical identities, unknown payloads, or cached-surface semantic
+gaps. The independent seven-ledger audit reproduced every count. The archive
+contains 4,581 conversations, 42,596 participants, and 235,108 explicitly
+deferred artifact references.
+
+The only message semantic gaps are two subtype `49:19` values that begin with
+closing XML fragments and contain no opening `<msg>` or `<appmsg>` structure;
+GreenBubbles retains the raw values and does not invent missing XML. Support
+for adjacent `voipinvitemsg`, optional `voipextinfo`, and `voiplocalinfo` roots
+closed 207 previously observed type-50 gaps. The aggregate also exposed a
+quote-link adapter error: it searched compressed source columns after typed
+decoding. Across all 193,503 relationship references, only 1 identifier was
+already present; the privacy-safe profiler proved that 192,991 are recoverable
+from source-preserving decoded XML, 511 are genuinely absent from that XML, and
+0 lack decoded-XML evidence. The importer now extracts identifiers from that
+already decoded XML while keeping original-column provenance unchanged.
+
+This evidence still does not check the three Phase 1 real-source items. The
+already written aggregate is a diagnostic subset, the run is not disposable-
+scenario synchronization evidence, and media was intentionally deferred. The
+observed signed 4.1.13 build now belongs to the supported passive-restoration
+family, and one unavailable database no longer blocks healthy restoration or
+replica synchronization: a new run records `partialDatabaseCoverage` and
+preserves prior records for unavailable changed sets as explicitly stale.
+Those improvements permit partial publication but do not turn the old
+diagnostic archive into production input or establish full-restoration,
+active-read, or action evidence.
+The diagnostic run also lacked a verified local-account identity for group
+direction inference, leaving 1,389,480 directions unknown, and the already
+written diagnostic archive predates the quote-link correction. Neither gap is
+silently promoted to complete evidence.
 
 ### 1E. Incoming event reconciler
 
@@ -556,7 +620,7 @@ so the logical-type completion item remains unchecked.
 - [x] Reconcile against normalized message identifiers and periodically recover
   missed/duplicate events.
 
-Exit gate: on supported, pinned versions, the bridge can reproduce selected
+Exit gate: on compatible signed 4.1+ versions, the bridge can reproduce selected
 cached conversations from a consistent snapshot without modifying the source
 or exposing raw keys/data outside the local boundary.
 
@@ -627,13 +691,15 @@ committed integrity-scan time and age.
 
 `audit-acquisition-chain` now independently verifies any retained bootstrap to
 incremental/integrity-scan transition before restoration: it digest-verifies
-copied entries, compares complete source inventories, and fails closed when the
-baseline, build, deletion set, changed-set classification, or
+copied entries, compares complete source inventories, accepts compatible 4.1+
+client updates, and fails closed when the baseline, client compatibility,
+deletion set, changed-set classification, or
 reconciliation-only classification disagrees.
 
 The continuous operator path now accepts atomic, generation-monotonic handoffs
 from the isolated restoration process. A low-idle-overhead follower validates
-each authoritative archive, bootstraps or synchronizes the encrypted replica,
+each replica-eligible authoritative or partial-database archive, bootstraps or
+synchronizes the encrypted replica,
 and records crash-safe state bound to the random replica ID and committed
 checkpoint. It cannot acquire a WeChat passphrase, inspect live stores, or
 accept an unmerged incremental fragment. Synthetic restart, rollback,
@@ -645,13 +711,15 @@ disposable-account latency evidence remains required. See
 `docs/REPLICA_FOLLOW.md`.
 
 An offline `restore-publish` transaction now removes manual sequencing between
-an already acquired snapshot and that handoff. It requires the exact pinned
-build, independently proves every non-bootstrap snapshot chain against both the
-retained prior snapshot and authoritative archive, restores and audits a bounded
-fragment, merges and audits the new authoritative archive, and allocates the
-next generation only if the supplied predecessor is still the exact current
-sealed handoff, rejecting concurrent stale branches. It has no live-store or
-replica-key access and does not replace real-corpus evidence. See
+an already acquired snapshot and that handoff. It requires a signed compatible
+4.1+ build, independently proves every non-bootstrap snapshot chain against
+both the retained prior snapshot and replica-eligible archive, restores and
+audits a bounded fragment, preserves prior records when a selected database is
+temporarily unavailable, merges and audits the new authoritative or explicit
+partial-database archive, and allocates the next generation only if the
+supplied predecessor is still the exact current sealed handoff, rejecting
+concurrent stale branches. It has no live-store or replica-key access and does
+not replace real-corpus evidence. See
 `docs/OFFLINE_PIPELINE.md`.
 
 Monotonic stage durations now cover snapshot planning/acquisition, offline input
@@ -722,8 +790,8 @@ Status: **complete for replica-backed reads and non-executing drafts**
 
 ### 3A. Stable connector surface
 
-Provide equivalent typed behavior through CLI/JSON, a local API, and MCP where
-appropriate:
+Provide equivalent typed behavior through CLI/JSON and a local API where
+appropriate. Agent workflows use the CLI through a repository skill:
 
 ```text
 capabilities()
@@ -750,14 +818,27 @@ refresh()
   query/model path.
 - [x] Prevent message content and prompt injection from expanding deterministic
   scopes or enabling unavailable tools.
+- [x] Add a one-shot, read-only `ai-query` CLI that accepts owner-only JSON,
+  applies the same replica policy/audit boundary without a daemon, and attaches
+  checkpoint, database freshness, and limitation evidence to every response.
+- [x] Add an atomic, checkpoint-consistent `ai-export` projection containing
+  normalized conversation, contact, message, relationship, and safe attachment
+  JSONL plus a hashed manifest; expose record/file/percentage progress and never
+  publish a mixed-generation bundle.
+- [x] Add an aggregate-only `audit-ai-context` verifier for permissions, exact
+  inventory, schemas, hashes/counts, identities, references, freshness, and
+  bundle/checkpoint/policy binding.
+- [x] Package a discoverable `greenbubbles-context` skill that calls only the
+  GreenBubbles CLI, treats source text as untrusted, requires coverage-aware
+  conclusions, and neither acquires keys nor uses raw SQL or MCP.
 
 `get_artifact` resolves a message's opaque artifact reference only when the
 request repeats an enabled conversation, `readRecentMessages` and the
 `attachments` field are allowed, and a referencing message falls inside the
 policy time range. It is local-only regardless of remote message permission and
 descriptor/digest-verifies the source and decoded files immediately before
-returning their exact paths. JSON/Unix, CLI request files, and MCP share this
-same operation and policy boundary.
+returning their exact paths. The one-shot CLI and optional local service share
+this same operation and policy boundary.
 
 ### 3B. Draft-only action layer
 
@@ -913,13 +994,13 @@ robots policy permit the exact path in the future.
 - [x] Keep active-read health, scopes, and failure independent from local
   conversation synchronization and write capabilities.
 
-`get_cached_moments` is available through the encrypted replica, connector
-JSON/Unix API, CLI, and MCP. Its cursor is checkpoint/filter bound; policy has
-independent fields, time retention, and destination scope; page and text sizes
-are capped; and the service applies a 60-request rolling minute limit. Raw
-columns/XML are never released by the AI-facing view. `load_more_moments` is
-unavailable because authenticated active-read feasibility has not passed Phase
-0.5.
+`get_cached_moments` is available through the encrypted replica, one-shot CLI,
+and optional connector JSON/Unix API. Its cursor is checkpoint/filter bound;
+policy has independent fields, time retention, and destination scope; page and
+text sizes are capped; and the service applies a 60-request rolling minute
+limit. Raw columns/XML are never released by the AI-facing view.
+`load_more_moments` is unavailable because authenticated active-read
+feasibility has not passed Phase 0.5.
 
 For the exact pinned build, the static inventory now records URL schemes,
 helper apps, Share and File Provider extension points, the bundled XPC service,
@@ -935,7 +1016,7 @@ and cannot weaken the reliable local conversation path or authorize a write.
 
 ## Phase 6 — ecosystem validation before abstraction
 
-Status: **implemented for one MCP host and one resumable downstream workflow**
+Status: **implemented for the CLI skill and one resumable downstream workflow**
 
 - [x] Integrate the stable connector with at least one existing agent host and
   one downstream memory/synthesis workflow.
@@ -953,13 +1034,17 @@ cross-application identity reconciliation, durable derived assertions,
 agent-independent memory, or transactional queries across sources. Popularity
 of the “personal memory” label alone is not a reason to add that layer.
 
-The evidence is intentionally concrete: the real stdio MCP adapter completes
-initialize/list/status-call against the real Unix service on synthetic data;
-Claude Code 2.1.247 reports the temporarily registered server connected; and
-the runnable change consumer bootstraps, persists an owner-only cursor/state,
-builds an escaped Markdown memory projection, resumes, and fails closed across
-replica replacement until explicit rebootstrap. See
-`docs/ECOSYSTEM_VALIDATION.md`, `docs/DOWNSTREAM_CONSUMER.md`, and
+The current proof is intentionally concrete: the repository
+`greenbubbles-context` skill routes agents to the one-shot `ai-query` and
+checkpoint-consistent `ai-export` commands; integration tests exercise policy-
+scoped search, static normalized conversations/contacts/messages/artifacts,
+coverage metadata, private file modes, path/raw-field suppression, write
+rejection, and progress completion. The runnable change consumer separately
+bootstraps, persists an owner-only cursor/state, builds an escaped Markdown
+memory projection, resumes, and fails closed across replica replacement until
+explicit rebootstrap. An older MCP compatibility adapter remains isolated for
+existing users, but is not the target interface for new development. See
+`docs/AI_CONTEXT_CLI.md`, `docs/DOWNSTREAM_CONSUMER.md`, and
 `docs/SOURCE_CONNECTOR_CONTRACT.md`.
 
 ## Technical architecture
@@ -968,7 +1053,7 @@ replica replacement until explicit rebootstrap. See
 Official WeChat local stores
           |
           v
-version-pinned passive-read adapter
+version-aware passive-read adapter
           |
 consistent database/WAL/SHM snapshots
           |
@@ -978,7 +1063,7 @@ encrypted canonical WeChat replica
           |
 incremental reconciliation + exact/FTS indexes
           |
-CLI / JSONL / local API / MCP / get_changes(cursor)
+CLI / JSONL / skill / local API / get_changes(cursor)
           |
 agents, scripts, search UIs, and downstream memory engines
 
@@ -1012,8 +1097,9 @@ interfaces stabilize:
   and health/lag reporting.
 - `GreenBubblesActions`: drafts, approvals, outbox state, action adapter, audit,
   and result reconciliation.
-- `GreenBubblesCLI` and `GreenBubblesMCP`: human- and agent-facing surfaces over
-  the same policy-enforcing local service.
+- `GreenBubblesCLI` and `greenbubbles-context`: human- and agent-facing surfaces
+  over the same policy-enforcing local data boundary. The skill invokes the CLI
+  and does not require a protocol server.
 
 Do not expose raw SQL, encryption material, arbitrary internal calls, or a
 private application schema as the public connector interface.
@@ -1026,7 +1112,7 @@ This repository includes:
 - the canonical encrypted WeChat replica and incremental synchronizer;
 - provenance, freshness, semantic/source coverage, and authorization metadata;
 - exact full-text and structured retrieval;
-- CLI, versioned JSON/JSONL, local API, and MCP surfaces;
+- CLI, versioned JSON/JSONL, a repository agent skill, and local API surfaces;
 - draft and, only after its gates, ordinary-contact action capabilities;
 - thin examples or adapters for existing agent and memory systems.
 
@@ -1066,6 +1152,15 @@ It does not initially include:
 8. Treat a license, public release, or separate second connector as explicit
    repository-owner product decisions, not inferred implementation tasks.
 
+The AI-facing normalization and retrieval milestone is now implemented: the
+encrypted replica remains source-faithful, while `ai-query`, `ai-export`, and
+the repository skill expose policy-minimized human labels, chat history,
+participant/contact context, relationships, attachment metadata, freshness,
+and partial-database coverage. Remaining items above require additional
+machines, disposable test-account activity, legal/product decisions, or a
+future client event; they are not safely inferable from the existing real
+archive alone.
+
 The exact evidence needed to resume each unchecked item is mapped in
 `docs/GATE_READINESS.md`.
 
@@ -1098,8 +1193,8 @@ engine” label.
   implementations in this repository.
 - Exhaustive recommendation-feed capture or a claim to observe most mobile-app
   activity despite platform sandboxing.
-- Supporting every WeChat version before one pinned current-version path is
-  reliable and its coverage is measurable.
+- Supporting pre-4.1 WeChat storage families or pretending every future schema
+  is understood merely because its signed client version is in the 4.1+ range.
 
 ## Decision review triggers
 
