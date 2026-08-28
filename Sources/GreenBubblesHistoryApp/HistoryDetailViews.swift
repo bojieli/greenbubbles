@@ -206,7 +206,7 @@ private struct MessageBubble: View {
 
   var body: some View {
     HStack {
-      if message.direction == "outgoing" { Spacer(minLength: 90) }
+      if resolvedDirection == "outgoing" { Spacer(minLength: 90) }
       bubbleContent
         .padding(.horizontal, 13)
         .padding(.vertical, 10)
@@ -226,7 +226,7 @@ private struct MessageBubble: View {
             NSPasteboard.general.setString(message.canonicalID, forType: .string)
           }
         }
-      if message.direction != "outgoing" { Spacer(minLength: 90) }
+      if resolvedDirection != "outgoing" { Spacer(minLength: 90) }
     }
   }
 
@@ -249,7 +249,7 @@ private struct MessageBubble: View {
 
   private var senderHeader: some View {
     HStack(spacing: 7) {
-      if let sender = message.senderDisplayName, message.direction != "outgoing" {
+      if let sender = message.senderDisplayName, resolvedDirection != "outgoing" {
         Text(sender)
           .font(.caption.weight(.semibold))
           .foregroundStyle(.secondary)
@@ -283,7 +283,7 @@ private struct MessageBubble: View {
         Text("•")
         Text(historyHumanize(payloadKind))
       }
-      if message.direction == "unknown" {
+      if resolvedDirection == "unknown" {
         Text("• direction unknown")
           .foregroundStyle(.orange)
       }
@@ -293,11 +293,15 @@ private struct MessageBubble: View {
   }
 
   private var bubbleColor: Color {
-    switch message.direction {
+    switch resolvedDirection {
     case "outgoing": .green.opacity(0.18)
     case "incoming": Color(nsColor: .controlBackgroundColor)
     default: .orange.opacity(0.10)
     }
+  }
+
+  private var resolvedDirection: String? {
+    model.resolvedDirection(for: message)
   }
 }
 

@@ -85,15 +85,17 @@ public struct SnapshotManifest: Codable, Equatable, Sendable {
   public let snapshotID: UUID
   public let createdAt: Date
   public let sourceFingerprint: String
+  public let accountBinding: SnapshotAccountBinding?
   public let clientBuild: WeChatClientBuildFingerprint?
   public let acquisition: SnapshotAcquisitionEvidence?
   public let entries: [SnapshotEntry]
 
   public init(
-    manifestFormatVersion: Int = 3,
+    manifestFormatVersion: Int = 4,
     snapshotID: UUID,
     createdAt: Date,
     sourceFingerprint: String,
+    accountBinding: SnapshotAccountBinding? = nil,
     clientBuild: WeChatClientBuildFingerprint? = nil,
     acquisition: SnapshotAcquisitionEvidence? = nil,
     entries: [SnapshotEntry]
@@ -102,6 +104,7 @@ public struct SnapshotManifest: Codable, Equatable, Sendable {
     self.snapshotID = snapshotID
     self.createdAt = createdAt
     self.sourceFingerprint = sourceFingerprint
+    self.accountBinding = accountBinding
     self.clientBuild = clientBuild
     self.acquisition = acquisition
     self.entries = entries
@@ -304,6 +307,21 @@ public struct ReadOnlySnapshotter: Sendable {
     return try createSnapshot(of: plan, cleanUpOnDeinit: cleanUpOnDeinit)
   }
 
+  /// Internal injection seam for unit fixtures outside a real `db_storage`
+  /// hierarchy. Exporting clients cannot override the derived account holder.
+  func createSnapshot(
+    of sets: [DatabaseFileSet],
+    accountBinding: SnapshotAccountBinding,
+    cleanUpOnDeinit: Bool = true
+  ) throws -> SnapshotLease {
+    guard !sets.isEmpty else { throw SnapshotError.noDatabaseSets }
+    let plan = try SnapshotAcquisitionPlanner(includeSourcePaths: privacy.includePaths).plan(
+      sets: sets,
+      accountBinding: accountBinding
+    )
+    return try createSnapshot(of: plan, cleanUpOnDeinit: cleanUpOnDeinit)
+  }
+
   public func createSnapshot(
     of plan: SnapshotAcquisitionPlan,
     cleanUpOnDeinit: Bool = true
@@ -407,7 +425,11 @@ public struct ReadOnlySnapshotter: Sendable {
     let manifest = SnapshotManifest(
       snapshotID: snapshotID,
       createdAt: Date(),
-      sourceFingerprint: acquisitionPlanner.sourceFingerprint(for: acquisition),
+      sourceFingerprint: acquisitionPlanner.sourceFingerprint(
+        for: acquisition,
+        accountBinding: plan.accountBinding
+      ),
+      accountBinding: plan.accountBinding,
       clientBuild: clientBuild,
       acquisition: acquisition,
       entries: sortedEntries

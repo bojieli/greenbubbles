@@ -16,7 +16,7 @@ public struct HistoryBundleLoader: Sendable {
     "messages": "messages.jsonl",
     "artifacts": "artifacts.jsonl",
   ]
-  private static let indexFormatVersion = "2"
+  private static let indexFormatVersion = "3"
 
   public init() {}
 
@@ -63,6 +63,7 @@ public struct HistoryBundleLoader: Sendable {
       bundle.appending(path: "manifest.json"), maximumBytes: 4 * 1_024 * 1_024)
     let manifest = try decodeStrict(
       HistoryBundleManifest.self, from: manifestData, role: "manifest")
+    try validateManifestShape(manifestData, manifest: manifest)
     try validate(manifest: manifest)
     let workload = try bundleWorkload(manifest.files)
     progress(
@@ -90,9 +91,14 @@ public struct HistoryBundleLoader: Sendable {
       workload: workload,
       progress: progress
     ) { data, _, _ in
+      try validateConversationShape(data, bundleFormatVersion: manifest.formatVersion)
       let conversation = try decodeStrict(
         HistoryConversation.self, from: data, role: "conversation")
-      try validate(conversation: conversation, context: manifest.context)
+      try validate(
+        conversation: conversation,
+        bundleFormatVersion: manifest.formatVersion,
+        context: manifest.context
+      )
       guard conversationIDs.insert(conversation.conversationID) else {
         throw HistoryBundleError.integrityFailure("conversation identities are not unique")
       }
@@ -122,7 +128,11 @@ public struct HistoryBundleLoader: Sendable {
     ) { data, _, _ in
       let contact = try decodeStrict(HistoryContact.self, from: data, role: "contact")
       try validate(
-        contact: contact, conversationIDs: conversationIDs.values, context: manifest.context)
+        contact: contact,
+        conversationIDs: conversationIDs.values,
+        bundleFormatVersion: manifest.formatVersion,
+        context: manifest.context
+      )
       guard contactIDs.insert(contact.participantID) else {
         throw HistoryBundleError.integrityFailure("contact identities are not unique")
       }
@@ -145,6 +155,7 @@ public struct HistoryBundleLoader: Sendable {
         evidence: messageEvidence,
         conversationIDs: conversationIDs.values,
         contactIDs: contactIDs.values,
+        bundleFormatVersion: manifest.formatVersion,
         context: manifest.context,
         workload: workload,
         progress: progress
@@ -153,6 +164,7 @@ public struct HistoryBundleLoader: Sendable {
         at: bundle.appending(path: artifactEvidence.relativePath),
         evidence: artifactEvidence,
         conversationIDs: conversationIDs.values,
+        bundleFormatVersion: manifest.formatVersion,
         expectedErrorCount: manifest.artifactResolutionErrorCount,
         workload: workload,
         progress: progress
@@ -213,13 +225,26 @@ public struct HistoryBundleLoader: Sendable {
   }
 
   private func validate(manifest: HistoryBundleManifest) throws {
-    guard manifest.formatVersion == 1, manifest.schema == greenBubblesAIContextSchema else {
+    let expectedSchema: String
+    switch manifest.formatVersion {
+    case 1: expectedSchema = greenBubblesLegacyAIContextSchema
+    case 2: expectedSchema = greenBubblesAIContextSchema
+    default: throw HistoryBundleError.unsupportedSchema(manifest.schema)
+    }
+    guard manifest.schema == expectedSchema else {
       throw HistoryBundleError.unsupportedSchema(manifest.schema)
     }
+    let bindingIsValid =
+      if manifest.formatVersion == 2 {
+        manifest.context.selfParticipantID.map(isSHA256) == true
+      } else {
+        manifest.context.selfParticipantID == nil
+      }
     guard manifest.exportComplete, manifest.createdAtUnixNanoseconds > 0,
       isSHA256(manifest.bundleID), isSHA256(manifest.policySHA256),
       !manifest.policySourceFingerprint.isEmpty, !manifest.requesterID.isEmpty,
       manifest.requesterID.utf8.count <= 256, !manifest.context.accountID.isEmpty,
+      bindingIsValid,
       !manifest.context.replicaID.isEmpty, !manifest.context.sourceFingerprint.isEmpty,
       !manifest.context.checkpointRevision.isEmpty
     else {
@@ -248,6 +273,7 @@ public struct HistoryBundleLoader: Sendable {
 
   private func validate(
     conversation: HistoryConversation,
+    bundleFormatVersion: Int,
     context: HistoryContextHealth
   ) throws {
     let validTimeRange: Bool
@@ -256,7 +282,7 @@ public struct HistoryBundleLoader: Sendable {
     } else {
       validTimeRange = true
     }
-    guard conversation.formatVersion == 1, !conversation.conversationID.isEmpty,
+    guard conversation.formatVersion == bundleFormatVersion, !conversation.conversationID.isEmpty,
       !conversation.humanLabel.isEmpty,
       !conversation.kind.isEmpty, !conversation.entityDecodeState.isEmpty,
       conversation.participantCount == conversation.participants.count,
@@ -264,9 +290,15 @@ public struct HistoryBundleLoader: Sendable {
       conversation.participants.allSatisfy({
         !$0.participantID.isEmpty && !$0.displayName.isEmpty && !$0.role.isEmpty
       }),
-      conversation.ownerParticipantID.map({ owner in
+      conversation.groupOwnerParticipantID.map({ owner in
         conversation.participants.contains { $0.participantID == owner }
       }) ?? true,
+      conversation.participants.allSatisfy({ participant in
+        guard bundleFormatVersion == 2,
+          participant.participantID == context.selfParticipantID
+        else { return true }
+        return participant.displayName == "You"
+      }),
       validTimeRange
     else {
       throw HistoryBundleError.integrityFailure("conversation record is inconsistent")
@@ -277,10 +309,15 @@ public struct HistoryBundleLoader: Sendable {
   private func validate(
     contact: HistoryContact,
     conversationIDs: Set<String>,
+    bundleFormatVersion: Int,
     context: HistoryContextHealth
   ) throws {
-    guard contact.formatVersion == 1, !contact.participantID.isEmpty,
+    guard contact.formatVersion == bundleFormatVersion, !contact.participantID.isEmpty,
       !contact.displayName.isEmpty,
+      bundleFormatVersion != 2 || contact.participantID != context.selfParticipantID
+        || contact.displayName == "You",
+      bundleFormatVersion != 2 || contact.participantID != context.selfParticipantID
+        || contact.conversationProfiles.allSatisfy({ $0.displayName == "You" }),
       contact.resolutionErrorCode?.isEmpty != true,
       Set(contact.enabledConversationIDs).count == contact.enabledConversationIDs.count,
       Set(contact.enabledConversationIDs).isSubset(of: conversationIDs),
@@ -301,12 +338,22 @@ public struct HistoryBundleLoader: Sendable {
     message: HistoryMessage,
     conversationIDs: Set<String>,
     contactIDs: Set<String>,
+    bundleFormatVersion: Int,
     context: HistoryContextHealth
   ) throws {
-    guard message.formatVersion == 1, !message.canonicalID.isEmpty,
+    let resolvedDirection = message.resolvedDirection(
+      selfParticipantID: bundleFormatVersion == 2 ? context.selfParticipantID : nil)
+    let directionIsConsistent =
+      bundleFormatVersion != 2 || message.senderID == nil || message.direction == nil
+      || message.direction == resolvedDirection
+    let selfLabelIsConsistent =
+      bundleFormatVersion != 2 || message.senderID != context.selfParticipantID
+      || message.senderDisplayName == "You"
+    guard message.formatVersion == bundleFormatVersion, !message.canonicalID.isEmpty,
       conversationIDs.contains(message.conversationID),
       !message.conversationLabel.isEmpty,
       message.senderID.map(contactIDs.contains) ?? true,
+      directionIsConsistent, selfLabelIsConsistent,
       message.artifactReferences.allSatisfy({
         !$0.artifactID.isEmpty && !$0.role.isEmpty
       }),
@@ -331,9 +378,10 @@ public struct HistoryBundleLoader: Sendable {
 
   private func validate(
     artifact: HistoryArtifact,
-    conversationIDs: Set<String>
+    conversationIDs: Set<String>,
+    bundleFormatVersion: Int
   ) throws {
-    guard artifact.formatVersion == 1, !artifact.artifactID.isEmpty,
+    guard artifact.formatVersion == bundleFormatVersion, !artifact.artifactID.isEmpty,
       !artifact.conversationIDs.isEmpty,
       Set(artifact.conversationIDs).count == artifact.conversationIDs.count,
       Set(artifact.conversationIDs).isSubset(of: conversationIDs),
@@ -392,6 +440,7 @@ public struct HistoryBundleLoader: Sendable {
     evidence: HistoryManifestFile,
     conversationIDs: Set<String>,
     contactIDs: Set<String>,
+    bundleFormatVersion: Int,
     context: HistoryContextHealth,
     workload: HistoryBundleWorkload,
     progress: ProgressHandler
@@ -410,6 +459,7 @@ public struct HistoryBundleLoader: Sendable {
       let message = try decodeStrict(HistoryMessage.self, from: data, role: "message")
       try validate(
         message: message, conversationIDs: conversationIDs, contactIDs: contactIDs,
+        bundleFormatVersion: bundleFormatVersion,
         context: context)
       count += 1
     }
@@ -423,6 +473,7 @@ public struct HistoryBundleLoader: Sendable {
     at url: URL,
     evidence: HistoryManifestFile,
     conversationIDs: Set<String>,
+    bundleFormatVersion: Int,
     expectedErrorCount: UInt64,
     workload: HistoryBundleWorkload,
     progress: ProgressHandler
@@ -440,7 +491,11 @@ public struct HistoryBundleLoader: Sendable {
       progress: progress
     ) { data, _, _ in
       let artifact = try decodeStrict(HistoryArtifact.self, from: data, role: "artifact")
-      try validate(artifact: artifact, conversationIDs: conversationIDs)
+      try validate(
+        artifact: artifact,
+        conversationIDs: conversationIDs,
+        bundleFormatVersion: bundleFormatVersion
+      )
       count += 1
       if artifact.error != nil { errorCount += 1 }
     }
@@ -513,6 +568,7 @@ public struct HistoryBundleLoader: Sendable {
         let message = try decodeStrict(HistoryMessage.self, from: data, role: "message")
         try validate(
           message: message, conversationIDs: conversationIDs, contactIDs: contactIDs,
+          bundleFormatVersion: manifest.formatVersion,
           context: manifest.context)
         insertMessage.reset()
         try insertMessage.bind(message.canonicalID, at: 1)
@@ -579,7 +635,11 @@ public struct HistoryBundleLoader: Sendable {
         progress: progress
       ) { data, offset, length in
         let artifact = try decodeStrict(HistoryArtifact.self, from: data, role: "artifact")
-        try validate(artifact: artifact, conversationIDs: conversationIDs)
+        try validate(
+          artifact: artifact,
+          conversationIDs: conversationIDs,
+          bundleFormatVersion: manifest.formatVersion
+        )
         insertArtifact.reset()
         try insertArtifact.bind(artifact.artifactID, at: 1)
         try insertArtifact.bind(artifact.detail?.kind, at: 2)
@@ -941,9 +1001,9 @@ public struct HistoryBundleLoader: Sendable {
   }
 
   private func bundleIdentity(for manifest: HistoryBundleManifest) throws -> String {
-    let identity: [String: Any] = [
-      "formatVersion": 1,
-      "schema": greenBubblesAIContextSchema,
+    var identity: [String: Any] = [
+      "formatVersion": manifest.formatVersion,
+      "schema": manifest.schema,
       "accountId": manifest.context.accountID,
       "replicaId": manifest.context.replicaID,
       "sourceFingerprint": manifest.context.sourceFingerprint,
@@ -952,6 +1012,9 @@ public struct HistoryBundleLoader: Sendable {
       "policySourceFingerprint": manifest.policySourceFingerprint,
       "destination": manifest.destination,
     ]
+    if manifest.formatVersion == 2, let selfParticipantID = manifest.context.selfParticipantID {
+      identity["selfParticipantId"] = selfParticipantID
+    }
     let data = try JSONSerialization.data(
       withJSONObject: identity, options: [.sortedKeys, .withoutEscapingSlashes])
     return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
@@ -1032,10 +1095,13 @@ extension HistoryBundleManifest: StrictHistoryRoot {
 extension HistoryConversation: StrictHistoryRoot {
   fileprivate static let allowedJSONFields: Set<String> = [
     "formatVersion", "conversationId", "humanLabel", "kind", "participantCount",
-    "participants", "ownerParticipantId", "entityDecodeState", "sourceDatabaseFreshness",
-    "capabilities", "messageFields", "notBeforeUnix", "notAfterUnix",
+    "participants", "ownerParticipantId", "groupOwnerParticipantId", "entityDecodeState",
+    "sourceDatabaseFreshness", "capabilities", "messageFields", "notBeforeUnix",
+    "notAfterUnix",
   ]
-  fileprivate static let requiredJSONFields = allowedJSONFields
+  fileprivate static let requiredJSONFields = allowedJSONFields.subtracting([
+    "ownerParticipantId", "groupOwnerParticipantId",
+  ])
 }
 
 extension HistoryContact: StrictHistoryRoot {
@@ -1067,6 +1133,53 @@ extension HistoryArtifact: StrictHistoryRoot {
   fileprivate static let requiredJSONFields: Set<String> = [
     "formatVersion", "artifactId", "conversationIds",
   ]
+}
+
+private func validateManifestShape(
+  _ data: Data,
+  manifest: HistoryBundleManifest
+) throws {
+  guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+    let context = root["context"] as? [String: Any]
+  else {
+    throw HistoryBundleError.integrityFailure("manifest context schema is invalid")
+  }
+  var expected: Set<String> = [
+    "accountId", "replicaId", "sourceFingerprint", "checkpointRevision", "health",
+    "clientBuildCompatibility", "archiveScope", "authoritativeDatabaseCoverage",
+    "totalDatabaseCount", "freshDatabaseCount", "unavailableDatabaseCount",
+    "preservedStaleDatabaseCount", "conversationCount", "participantCount", "messageCount",
+    "artifactCount", "semanticGapCount", "messageCandidateGapCount",
+    "unavailableArtifactCount", "artifactDecodeGapCount", "entityDecodeGapCount",
+    "checkpointAgeSeconds", "sourceCoverageComplete", "limitationCodes", "coverageNote",
+  ]
+  if manifest.formatVersion == 2 { expected.insert("selfParticipantId") }
+  guard Set(context.keys) == expected else {
+    throw HistoryBundleError.integrityFailure("manifest context field set is invalid")
+  }
+}
+
+private func validateConversationShape(
+  _ data: Data,
+  bundleFormatVersion: Int
+) throws {
+  guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+    throw HistoryBundleError.integrityFailure("conversation schema is invalid")
+  }
+  var expected: Set<String> = [
+    "formatVersion", "conversationId", "humanLabel", "kind", "participantCount",
+    "participants", "entityDecodeState", "sourceDatabaseFreshness", "capabilities",
+    "messageFields", "notBeforeUnix", "notAfterUnix",
+  ]
+  switch bundleFormatVersion {
+  case 1: expected.insert("ownerParticipantId")
+  case 2: expected.insert("groupOwnerParticipantId")
+  default:
+    throw HistoryBundleError.integrityFailure("conversation format version is unsupported")
+  }
+  guard Set(root.keys) == expected else {
+    throw HistoryBundleError.integrityFailure("conversation field set is invalid")
+  }
 }
 
 private struct HistoryBundleWorkload {

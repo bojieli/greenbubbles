@@ -16,10 +16,15 @@ struct SnapshotAcquisitionPlannerTests {
       DatabaseFileSet(database: second, logicalPath: "message/second.db"),
     ]
     let snapshotter = ReadOnlySnapshotter(baseDirectory: fixture.snapshots, maxRetries: 0)
-    let bootstrap = try snapshotter.createSnapshot(of: sets, cleanUpOnDeinit: false)
+    let bootstrap = try snapshotter.createSnapshot(
+      of: sets,
+      accountBinding: acquisitionTestAccountBinding,
+      cleanUpOnDeinit: false
+    )
     defer { try? bootstrap.cleanUp() }
 
-    #expect(bootstrap.manifest.manifestFormatVersion == 3)
+    #expect(bootstrap.manifest.manifestFormatVersion == 4)
+    #expect(bootstrap.manifest.accountBinding == acquisitionTestAccountBinding)
     #expect(bootstrap.manifest.acquisition?.mode == .bootstrap)
     #expect(bootstrap.manifest.entries.count == 2)
     #expect(
@@ -30,6 +35,7 @@ struct SnapshotAcquisitionPlannerTests {
     try Data([9, 8, 7, 6]).write(to: second)
     let plan = try SnapshotAcquisitionPlanner().plan(
       sets: sets,
+      accountBinding: acquisitionTestAccountBinding,
       previousManifest: bootstrap.manifest,
       reconciliationWindow: 1,
       now: Date().addingTimeInterval(3_600)
@@ -52,6 +58,7 @@ struct SnapshotAcquisitionPlannerTests {
 
     let noOp = try SnapshotAcquisitionPlanner().plan(
       sets: sets,
+      accountBinding: acquisitionTestAccountBinding,
       previousManifest: incremental.manifest,
       reconciliationWindow: 1,
       now: Date().addingTimeInterval(7_200)
@@ -71,11 +78,16 @@ struct SnapshotAcquisitionPlannerTests {
     let second = try fixture.createFile("source/second.db", bytes: [2])
     let sets = [DatabaseFileSet(database: first), DatabaseFileSet(database: second)]
     let snapshotter = ReadOnlySnapshotter(baseDirectory: fixture.snapshots, maxRetries: 0)
-    let bootstrap = try snapshotter.createSnapshot(of: sets, cleanUpOnDeinit: false)
+    let bootstrap = try snapshotter.createSnapshot(
+      of: sets,
+      accountBinding: acquisitionTestAccountBinding,
+      cleanUpOnDeinit: false
+    )
     defer { try? bootstrap.cleanUp() }
     try Data([3]).write(to: second)
     let plan = try SnapshotAcquisitionPlanner().plan(
       sets: sets,
+      accountBinding: acquisitionTestAccountBinding,
       previousManifest: bootstrap.manifest,
       reconciliationWindow: 1,
       now: Date().addingTimeInterval(3_600)
@@ -96,11 +108,16 @@ struct SnapshotAcquisitionPlannerTests {
     let second = try fixture.createFile("source/second.db", bytes: [2])
     let sets = [DatabaseFileSet(database: first), DatabaseFileSet(database: second)]
     let snapshotter = ReadOnlySnapshotter(baseDirectory: fixture.snapshots, maxRetries: 0)
-    let bootstrap = try snapshotter.createSnapshot(of: sets, cleanUpOnDeinit: false)
+    let bootstrap = try snapshotter.createSnapshot(
+      of: sets,
+      accountBinding: acquisitionTestAccountBinding,
+      cleanUpOnDeinit: false
+    )
     defer { try? bootstrap.cleanUp() }
 
     let withinWindow = try SnapshotAcquisitionPlanner().plan(
       sets: sets,
+      accountBinding: acquisitionTestAccountBinding,
       previousManifest: bootstrap.manifest,
       reconciliationWindow: 3_600,
       now: Date()
@@ -111,6 +128,7 @@ struct SnapshotAcquisitionPlannerTests {
 
     let integrity = try SnapshotAcquisitionPlanner().plan(
       sets: sets,
+      accountBinding: acquisitionTestAccountBinding,
       previousManifest: bootstrap.manifest,
       forceIntegrityScan: true,
       now: Date().addingTimeInterval(7_200)
@@ -121,6 +139,7 @@ struct SnapshotAcquisitionPlannerTests {
 
     let scheduled = try SnapshotAcquisitionPlanner().plan(
       sets: sets,
+      accountBinding: acquisitionTestAccountBinding,
       previousManifest: bootstrap.manifest,
       integrityScanInterval: 3_600,
       reconciliationWindow: 1,
@@ -137,6 +156,7 @@ struct SnapshotAcquisitionPlannerTests {
     defer { try? scheduledSnapshot.cleanUp() }
     let notDue = try SnapshotAcquisitionPlanner().plan(
       sets: sets,
+      accountBinding: acquisitionTestAccountBinding,
       previousManifest: scheduledSnapshot.manifest,
       integrityScanInterval: 3_600,
       reconciliationWindow: 1,
@@ -154,11 +174,16 @@ struct SnapshotAcquisitionPlannerTests {
     let second = try fixture.createFile("source/second.db", bytes: [2])
     let allSets = [DatabaseFileSet(database: first), DatabaseFileSet(database: second)]
     let snapshotter = ReadOnlySnapshotter(baseDirectory: fixture.snapshots, maxRetries: 0)
-    let bootstrap = try snapshotter.createSnapshot(of: allSets, cleanUpOnDeinit: false)
+    let bootstrap = try snapshotter.createSnapshot(
+      of: allSets,
+      accountBinding: acquisitionTestAccountBinding,
+      cleanUpOnDeinit: false
+    )
     defer { try? bootstrap.cleanUp() }
 
     let plan = try SnapshotAcquisitionPlanner().plan(
       sets: [DatabaseFileSet(database: first)],
+      accountBinding: acquisitionTestAccountBinding,
       previousManifest: bootstrap.manifest,
       reconciliationWindow: 1,
       now: Date().addingTimeInterval(3_600)
@@ -167,7 +192,103 @@ struct SnapshotAcquisitionPlannerTests {
     #expect(plan.evidence.deletedSourceSetIDs.count == 1)
     #expect(!plan.isNoOp)
   }
+
+  @Test
+  func incrementalPlanningRejectsLegacyManifestWithoutAccountBinding() throws {
+    let fixture = try AcquisitionFixture()
+    defer { fixture.remove() }
+    let database = try fixture.createFile("source/messages.db", bytes: [1])
+    let previous = SnapshotManifest(
+      manifestFormatVersion: 3,
+      snapshotID: UUID(),
+      createdAt: Date(),
+      sourceFingerprint: String(repeating: "0", count: 64),
+      accountBinding: nil,
+      entries: []
+    )
+
+    #expect(throws: SnapshotAcquisitionPlannerError.previousAccountBindingMissing) {
+      _ = try SnapshotAcquisitionPlanner().plan(
+        sets: [DatabaseFileSet(database: database)],
+        accountBinding: acquisitionTestAccountBinding,
+        previousManifest: previous
+      )
+    }
+  }
+
+  @Test
+  func incrementalPlanningRejectsChangedAccountBinding() throws {
+    let fixture = try AcquisitionFixture()
+    defer { fixture.remove() }
+    let database = try fixture.createFile("source/messages.db", bytes: [1])
+    let previous = SnapshotManifest(
+      snapshotID: UUID(),
+      createdAt: Date(),
+      sourceFingerprint: String(repeating: "0", count: 64),
+      accountBinding: acquisitionTestAccountBinding,
+      entries: []
+    )
+    let changed = SnapshotAccountBinding(
+      accountID: String(repeating: "c", count: 64),
+      selfSourceIdentifierBase64: Data("wxid_other".utf8).base64EncodedString()
+    )
+
+    #expect(throws: SnapshotAcquisitionPlannerError.accountBindingChanged) {
+      _ = try SnapshotAcquisitionPlanner().plan(
+        sets: [DatabaseFileSet(database: database)],
+        accountBinding: changed,
+        previousManifest: previous
+      )
+    }
+  }
+
+  @Test
+  func accountBoundFingerprintMatchesNativeCrossLanguageVector() {
+    let binding = SnapshotAccountBinding(
+      accountID: String(repeating: "c", count: 64),
+      selfSourceIdentifierBase64: Data("wxid_fixture".utf8).base64EncodedString()
+    )
+    let evidence = SnapshotAcquisitionEvidence(
+      mode: .bootstrap,
+      previousSourceFingerprint: nil,
+      reconciliationWindowSeconds: 900,
+      changedSourceSetIDs: ["set"],
+      reconciliationSourceSetIDs: [],
+      deletedSourceSetIDs: [],
+      sourceSets: [
+        SnapshotSourceSetInventory(
+          sourceSetID: "set",
+          logicalPath: "message/message_0.db",
+          files: [
+            SnapshotSourceFileInventory(
+              role: .database,
+              fingerprint: SourceFileFingerprint(
+                deviceID: 1,
+                fileID: 2,
+                byteCount: 3,
+                modifiedSeconds: 4,
+                modifiedNanoseconds: 5
+              ),
+              contentSHA256: String(repeating: "a", count: 64)
+            )
+          ]
+        )
+      ]
+    )
+
+    #expect(
+      SnapshotAcquisitionPlanner().sourceFingerprint(
+        for: evidence,
+        accountBinding: binding
+      ) == "1806149d265dd50486f815d125e7f75b3938927fdf23578cd200c45f64cb308d"
+    )
+  }
 }
+
+private let acquisitionTestAccountBinding = SnapshotAccountBinding(
+  accountID: String(repeating: "b", count: 64),
+  selfSourceIdentifierBase64: Data("wxid_acquisition_fixture".utf8).base64EncodedString()
+)
 
 private struct AcquisitionFixture {
   let root: URL

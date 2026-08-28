@@ -123,6 +123,36 @@ struct HistoryBundleLoaderTests {
     }
   }
 
+  @Test("accepts legacy v1 bundles and rejects v2 sender-direction disagreement")
+  func versionsAndAccountDirection() async throws {
+    let legacy = try HistoryBundleFixture(legacyFormat: true)
+    defer { legacy.remove() }
+    let legacySession = try await HistoryBundleLoader().load(
+      bundleURL: legacy.bundleURL,
+      indexDirectory: legacy.indexURL
+    )
+    #expect(legacySession.manifest.formatVersion == 1)
+    #expect(legacySession.manifest.context.selfParticipantID == nil)
+
+    let conflicted = try HistoryBundleFixture(directionConflict: true)
+    defer { conflicted.remove() }
+    await #expect(throws: HistoryBundleError.self) {
+      try await HistoryBundleLoader().load(
+        bundleURL: conflicted.bundleURL,
+        indexDirectory: conflicted.indexURL
+      )
+    }
+
+    let mislabeledProfile = try HistoryBundleFixture(selfProfileDisplayName: "Me")
+    defer { mislabeledProfile.remove() }
+    await #expect(throws: HistoryBundleError.self) {
+      try await HistoryBundleLoader().load(
+        bundleURL: mislabeledProfile.bundleURL,
+        indexDirectory: mislabeledProfile.indexURL
+      )
+    }
+  }
+
   @Test("streams and pages a multi-transaction synthetic history")
   func indexesLargeHistory() async throws {
     let extraMessageCount = 20_500
@@ -239,7 +269,10 @@ private struct HistoryBundleFixture {
     extraMessageField: Bool = false,
     extraMessageCount: Int = 0,
     crossConversationRelationship: Bool = false,
-    mismatchedArtifactConversation: Bool = false
+    mismatchedArtifactConversation: Bool = false,
+    legacyFormat: Bool = false,
+    directionConflict: Bool = false,
+    selfProfileDisplayName: String? = nil
   ) throws {
     rootURL = FileManager.default.temporaryDirectory.appending(
       path: "greenbubbles-history-tests-\(UUID().uuidString)")
@@ -249,18 +282,27 @@ private struct HistoryBundleFixture {
     try privateDirectory(bundleURL)
     try privateDirectory(indexURL)
 
+    let formatVersion = legacyFormat ? 1 : 2
+    let schema = legacyFormat ? greenBubblesLegacyAIContextSchema : greenBubblesAIContextSchema
+    let selfParticipantID = String(repeating: "e", count: 64)
+    let selfDisplayName = legacyFormat ? "Me" : "You"
+    let groupOwnerField = legacyFormat ? "ownerParticipantId" : "groupOwnerParticipantId"
+
     let conversations: [[String: Any]] = [
       [
-        "formatVersion": 1,
+        "formatVersion": formatVersion,
         "conversationId": "conversation-a",
         "humanLabel": "Project Group",
         "kind": "group",
         "participantCount": 2,
         "participants": [
-          ["participantId": "owner", "displayName": "Me", "role": "owner"],
+          [
+            "participantId": selfParticipantID, "displayName": selfDisplayName,
+            "role": "member",
+          ],
           ["participantId": "alice", "displayName": "Alice", "role": "member"],
         ],
-        "ownerParticipantId": "owner",
+        groupOwnerField: legacyFormat ? selfParticipantID : "alice",
         "entityDecodeState": "complete",
         "sourceDatabaseFreshness": "fresh",
         "capabilities": ["listConversations", "readRecentMessages", "searchMessages"],
@@ -269,7 +311,7 @@ private struct HistoryBundleFixture {
         "notAfterUnix": NSNull(),
       ],
       [
-        "formatVersion": 1,
+        "formatVersion": formatVersion,
         "conversationId": "conversation-b",
         "humanLabel": "预算讨论",
         "kind": "direct",
@@ -277,7 +319,7 @@ private struct HistoryBundleFixture {
         "participants": [
           ["participantId": "bob", "displayName": "小博", "role": "recipient"]
         ],
-        "ownerParticipantId": NSNull(),
+        groupOwnerField: NSNull(),
         "entityDecodeState": "complete",
         "sourceDatabaseFreshness": "preservedStale",
         "capabilities": ["readRecentMessages", "searchMessages"],
@@ -288,21 +330,21 @@ private struct HistoryBundleFixture {
     ]
     let contacts: [[String: Any]] = [
       [
-        "formatVersion": 1,
-        "participantId": "owner",
-        "displayName": "Me",
+        "formatVersion": formatVersion,
+        "participantId": selfParticipantID,
+        "displayName": selfDisplayName,
         "localProfileAvailable": true,
         "sourceDatabaseFreshness": "fresh",
         "enabledConversationIds": ["conversation-a"],
         "conversationProfiles": [
           [
             "conversationId": "conversation-a", "conversationLabel": "Project Group",
-            "displayName": "Me", "role": "owner",
+            "displayName": selfProfileDisplayName ?? selfDisplayName, "role": "member",
           ]
         ],
       ],
       [
-        "formatVersion": 1,
+        "formatVersion": formatVersion,
         "participantId": "alice",
         "displayName": "Alice",
         "localProfileAvailable": true,
@@ -316,7 +358,7 @@ private struct HistoryBundleFixture {
         ],
       ],
       [
-        "formatVersion": 1,
+        "formatVersion": formatVersion,
         "participantId": "bob",
         "displayName": "小博",
         "localProfileAvailable": false,
@@ -332,7 +374,7 @@ private struct HistoryBundleFixture {
     ]
     var messages: [[String: Any]] = [
       [
-        "formatVersion": 1,
+        "formatVersion": formatVersion,
         "conversationLabel": "Project Group",
         "senderDisplayName": "Alice",
         "canonicalId": "message-1",
@@ -347,16 +389,16 @@ private struct HistoryBundleFixture {
         "payloadSummary": "Budget meeting notes",
       ],
       [
-        "formatVersion": 1,
+        "formatVersion": formatVersion,
         "conversationLabel": "Project Group",
-        "senderDisplayName": "Me",
+        "senderDisplayName": selfDisplayName,
         "canonicalId": "message-2",
         "conversationId": "conversation-a",
         "sourceDatabaseFreshness": "fresh",
-        "senderId": "owner",
+        "senderId": selfParticipantID,
         "createdAtUnix": 1_700_000_002,
         "conversationOrdinal": 2,
-        "direction": "outgoing",
+        "direction": directionConflict ? "incoming" : "outgoing",
         "logicalType": 3,
         "payloadKind": "image",
         "payloadSummary": "Design mockup",
@@ -368,7 +410,7 @@ private struct HistoryBundleFixture {
         ],
       ],
       [
-        "formatVersion": 1,
+        "formatVersion": formatVersion,
         "conversationLabel": "预算讨论",
         "senderDisplayName": "小博",
         "canonicalId": "message-3",
@@ -394,7 +436,7 @@ private struct HistoryBundleFixture {
     if extraMessageCount > 0 {
       for index in 0..<extraMessageCount {
         messages.append([
-          "formatVersion": 1,
+          "formatVersion": formatVersion,
           "conversationLabel": "Project Group",
           "senderDisplayName": "Alice",
           "canonicalId": "scale-message-\(index)",
@@ -412,7 +454,7 @@ private struct HistoryBundleFixture {
     }
     let artifacts: [[String: Any]] = [
       [
-        "formatVersion": 1,
+        "formatVersion": formatVersion,
         "artifactId": "artifact-1",
         "conversationIds": [
           mismatchedArtifactConversation ? "conversation-b" : "conversation-a"
@@ -441,7 +483,7 @@ private struct HistoryBundleFixture {
       writeJSONL(artifacts, role: "artifacts", name: "artifacts.jsonl"),
     ]
     let policySHA = String(repeating: "a", count: 64)
-    let context: [String: Any] = [
+    var context: [String: Any] = [
       "accountId": "account-1",
       "replicaId": "replica-1",
       "sourceFingerprint": "source-fingerprint-1",
@@ -468,9 +510,12 @@ private struct HistoryBundleFixture {
       "limitationCodes": ["unavailableDatabases", "preservedStaleDatabases"],
       "coverageNote": "One database is unavailable; preserved records may be stale.",
     ]
-    let identity: [String: Any] = [
-      "formatVersion": 1,
-      "schema": greenBubblesAIContextSchema,
+    if !legacyFormat {
+      context["selfParticipantId"] = selfParticipantID
+    }
+    var identity: [String: Any] = [
+      "formatVersion": formatVersion,
+      "schema": schema,
       "accountId": "account-1",
       "replicaId": "replica-1",
       "sourceFingerprint": "source-fingerprint-1",
@@ -479,12 +524,15 @@ private struct HistoryBundleFixture {
       "policySourceFingerprint": "source-fingerprint-1",
       "destination": "local",
     ]
+    if !legacyFormat {
+      identity["selfParticipantId"] = selfParticipantID
+    }
     let identityData = try JSONSerialization.data(
       withJSONObject: identity, options: [.sortedKeys, .withoutEscapingSlashes])
     let bundleID = hexDigest(identityData)
     let manifest: [String: Any] = [
-      "formatVersion": 1,
-      "schema": greenBubblesAIContextSchema,
+      "formatVersion": formatVersion,
+      "schema": schema,
       "bundleId": bundleID,
       "createdAtUnixNanoseconds": 1_700_000_000_000_000_000 as UInt64,
       "destination": "local",

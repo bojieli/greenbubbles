@@ -128,6 +128,12 @@ final class HistoryBrowserModel {
     }
   }
 
+  func resolvedDirection(for message: HistoryMessage) -> String? {
+    message.resolvedDirection(
+      selfParticipantID: session?.manifest.context.selfParticipantID
+    )
+  }
+
   func chooseBundle() {
     let panel = NSOpenPanel()
     panel.title = "Open GreenBubbles AI Context Bundle"

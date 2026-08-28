@@ -28,7 +28,8 @@ struct ReadOnlySnapshotTests {
       baseDirectory: fixture.snapshots,
       maxRetries: 0
     ).createSnapshot(
-      of: [DatabaseFileSet(database: database, writeAheadLog: wal, sharedMemory: shm)]
+      of: [DatabaseFileSet(database: database, writeAheadLog: wal, sharedMemory: shm)],
+      accountBinding: snapshotTestAccountBinding
     )
 
     #expect(lease.manifest.entries.count == 3)
@@ -72,7 +73,10 @@ struct ReadOnlySnapshotTests {
     )
 
     #expect(throws: SnapshotError.self) {
-      _ = try snapshotter.createSnapshot(of: [DatabaseFileSet(database: database)])
+      _ = try snapshotter.createSnapshot(
+        of: [DatabaseFileSet(database: database)],
+        accountBinding: snapshotTestAccountBinding
+      )
     }
     let remaining = try FileManager.default.contentsOfDirectory(atPath: fixture.snapshots.path)
     #expect(remaining.isEmpty)
@@ -87,7 +91,10 @@ struct ReadOnlySnapshotTests {
       maxRetries: 0,
       includeSourcePaths: false,
       hooks: SnapshotHooks(allowAtomicClone: false)
-    ).createSnapshot(of: [DatabaseFileSet(database: database)])
+    ).createSnapshot(
+      of: [DatabaseFileSet(database: database)],
+      accountBinding: snapshotTestAccountBinding
+    )
 
     #expect(lease.manifest.entries.count == 1)
     #expect(lease.manifest.entries[0].captureMethod == .verifiedByteCopy)
@@ -136,6 +143,11 @@ struct ReadOnlySnapshotTests {
     #expect(FileManager.default.fileExists(atPath: unrelated.path))
   }
 }
+
+private let snapshotTestAccountBinding = SnapshotAccountBinding(
+  accountID: String(repeating: "a", count: 64),
+  selfSourceIdentifierBase64: Data("wxid_snapshot_fixture".utf8).base64EncodedString()
+)
 
 private struct SnapshotFixture {
   let root: URL

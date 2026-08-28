@@ -1,6 +1,7 @@
 import Foundation
 
-public let greenBubblesAIContextSchema = "greenbubbles.ai-context.v1"
+public let greenBubblesAIContextSchema = "greenbubbles.ai-context.v2"
+public let greenBubblesLegacyAIContextSchema = "greenbubbles.ai-context.v1"
 
 public struct HistoryManifestFile: Codable, Equatable, Sendable {
   public let role: String
@@ -12,6 +13,7 @@ public struct HistoryManifestFile: Codable, Equatable, Sendable {
 
 public struct HistoryContextHealth: Codable, Equatable, Sendable {
   public let accountID: String
+  public let selfParticipantID: String?
   public let replicaID: String
   public let sourceFingerprint: String
   public let checkpointRevision: String
@@ -39,6 +41,7 @@ public struct HistoryContextHealth: Codable, Equatable, Sendable {
 
   enum CodingKeys: String, CodingKey {
     case accountID = "accountId"
+    case selfParticipantID = "selfParticipantId"
     case replicaID = "replicaId"
     case sourceFingerprint
     case checkpointRevision
@@ -129,7 +132,7 @@ public struct HistoryConversation: Codable, Equatable, Identifiable, Sendable {
   public let kind: String
   public let participantCount: Int
   public let participants: [HistoryParticipant]
-  public let ownerParticipantID: String?
+  public let groupOwnerParticipantID: String?
   public let entityDecodeState: String
   public let sourceDatabaseFreshness: String
   public let capabilities: [String]
@@ -146,7 +149,8 @@ public struct HistoryConversation: Codable, Equatable, Identifiable, Sendable {
     case kind
     case participantCount
     case participants
-    case ownerParticipantID = "ownerParticipantId"
+    case groupOwnerParticipantID = "groupOwnerParticipantId"
+    case legacyOwnerParticipantID = "ownerParticipantId"
     case entityDecodeState
     case sourceDatabaseFreshness
     case capabilities
@@ -154,6 +158,50 @@ public struct HistoryConversation: Codable, Equatable, Identifiable, Sendable {
     case notBeforeUnix
     case notAfterUnix
   }
+
+  public init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    formatVersion = try values.decode(Int.self, forKey: .formatVersion)
+    conversationID = try values.decode(String.self, forKey: .conversationID)
+    humanLabel = try values.decode(String.self, forKey: .humanLabel)
+    kind = try values.decode(String.self, forKey: .kind)
+    participantCount = try values.decode(Int.self, forKey: .participantCount)
+    participants = try values.decode([HistoryParticipant].self, forKey: .participants)
+    groupOwnerParticipantID =
+      try values.decodeIfPresent(String.self, forKey: .groupOwnerParticipantID)
+      ?? values.decodeIfPresent(String.self, forKey: .legacyOwnerParticipantID)
+    entityDecodeState = try values.decode(String.self, forKey: .entityDecodeState)
+    sourceDatabaseFreshness = try values.decode(
+      String.self, forKey: .sourceDatabaseFreshness)
+    capabilities = try values.decode([String].self, forKey: .capabilities)
+    messageFields = try values.decode([String].self, forKey: .messageFields)
+    notBeforeUnix = try values.decodeIfPresent(Int64.self, forKey: .notBeforeUnix)
+    notAfterUnix = try values.decodeIfPresent(Int64.self, forKey: .notAfterUnix)
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var values = encoder.container(keyedBy: CodingKeys.self)
+    try values.encode(formatVersion, forKey: .formatVersion)
+    try values.encode(conversationID, forKey: .conversationID)
+    try values.encode(humanLabel, forKey: .humanLabel)
+    try values.encode(kind, forKey: .kind)
+    try values.encode(participantCount, forKey: .participantCount)
+    try values.encode(participants, forKey: .participants)
+    if formatVersion == 1 {
+      try values.encodeIfPresent(groupOwnerParticipantID, forKey: .legacyOwnerParticipantID)
+    } else {
+      try values.encodeIfPresent(groupOwnerParticipantID, forKey: .groupOwnerParticipantID)
+    }
+    try values.encode(entityDecodeState, forKey: .entityDecodeState)
+    try values.encode(sourceDatabaseFreshness, forKey: .sourceDatabaseFreshness)
+    try values.encode(capabilities, forKey: .capabilities)
+    try values.encode(messageFields, forKey: .messageFields)
+    try values.encodeIfPresent(notBeforeUnix, forKey: .notBeforeUnix)
+    try values.encodeIfPresent(notAfterUnix, forKey: .notAfterUnix)
+  }
+
+  @available(*, deprecated, renamed: "groupOwnerParticipantID")
+  public var ownerParticipantID: String? { groupOwnerParticipantID }
 }
 
 public struct HistoryContactConversationProfile: Codable, Equatable, Identifiable, Sendable {
@@ -253,6 +301,11 @@ public struct HistoryMessage: Codable, Equatable, Identifiable, Sendable {
     if let payloadSummary, !payloadSummary.isEmpty { return payloadSummary }
     if let payloadKind, !payloadKind.isEmpty { return "[\(payloadKind)]" }
     return "[Message content unavailable]"
+  }
+
+  public func resolvedDirection(selfParticipantID: String?) -> String? {
+    guard let senderID, let selfParticipantID else { return direction }
+    return senderID == selfParticipantID ? "outgoing" : "incoming"
   }
 
   enum CodingKeys: String, CodingKey {

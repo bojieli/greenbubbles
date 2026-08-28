@@ -80,6 +80,7 @@ public struct SnapshotAcquisitionEvidence: Codable, Equatable, Sendable {
 
 public struct SnapshotAcquisitionPlan: Sendable {
   public let evidence: SnapshotAcquisitionEvidence
+  public let accountBinding: SnapshotAccountBinding
   public let selectedSets: [DatabaseFileSet]
 
   let allSets: [DatabaseFileSet]
@@ -97,6 +98,8 @@ public enum SnapshotAcquisitionPlannerError: Error, Equatable, CustomStringConve
   case invalidIntegrityScanInterval
   case unsafeSource(String)
   case sourceChanged(String)
+  case previousAccountBindingMissing
+  case accountBindingChanged
 
   public var description: String {
     switch self {
@@ -110,6 +113,12 @@ public enum SnapshotAcquisitionPlannerError: Error, Equatable, CustomStringConve
       return "A snapshot source is missing, symbolic, or not a regular file: \(sourceID)"
     case .sourceChanged(let sourceID):
       return "Source inventory changed while taking the snapshot: \(sourceID)"
+    case .previousAccountBindingMissing:
+      return
+        "The previous snapshot has no integrity-bound account evidence; start a new bootstrap "
+        + "snapshot"
+    case .accountBindingChanged:
+      return "The selected WeChat account does not match the previous snapshot"
     }
   }
 }
@@ -129,7 +138,43 @@ public struct SnapshotAcquisitionPlanner: Sendable {
     reconciliationWindow: TimeInterval = 15 * 60,
     now: Date = Date()
   ) throws -> SnapshotAcquisitionPlan {
+    try plan(
+      sets: sets,
+      accountBinding: nil,
+      previousManifest: previousManifest,
+      forceIntegrityScan: forceIntegrityScan,
+      integrityScanInterval: integrityScanInterval,
+      reconciliationWindow: reconciliationWindow,
+      now: now
+    )
+  }
+
+  /// Internal injection seam for deterministic unit fixtures. Production
+  /// callers always use the public overload, which derives the binding from
+  /// the selected account directory.
+  func plan(
+    sets: [DatabaseFileSet],
+    accountBinding suppliedAccountBinding: SnapshotAccountBinding?,
+    previousManifest: SnapshotManifest? = nil,
+    forceIntegrityScan: Bool = false,
+    integrityScanInterval: TimeInterval? = nil,
+    reconciliationWindow: TimeInterval = 15 * 60,
+    now: Date = Date()
+  ) throws -> SnapshotAcquisitionPlan {
     guard !sets.isEmpty else { throw SnapshotAcquisitionPlannerError.noDatabaseSets }
+    let accountBinding =
+      try suppliedAccountBinding
+      ?? SnapshotAccountBinder(includeSourcePaths: privacy.includePaths).bind(sets: sets)
+    try SnapshotAccountBinder(includeSourcePaths: privacy.includePaths).validate(accountBinding)
+    if let previousManifest {
+      guard let previousBinding = previousManifest.accountBinding else {
+        throw SnapshotAcquisitionPlannerError.previousAccountBindingMissing
+      }
+      try SnapshotAccountBinder(includeSourcePaths: privacy.includePaths).validate(previousBinding)
+      guard previousBinding == accountBinding else {
+        throw SnapshotAcquisitionPlannerError.accountBindingChanged
+      }
+    }
     guard reconciliationWindow >= 0, reconciliationWindow <= Double(Int.max) else {
       throw SnapshotAcquisitionPlannerError.invalidReconciliationWindow
     }
@@ -203,6 +248,7 @@ public struct SnapshotAcquisitionPlanner: Sendable {
     )
     return SnapshotAcquisitionPlan(
       evidence: evidence,
+      accountBinding: accountBinding,
       selectedSets: selectedSets,
       allSets: orderedSets
     )
@@ -279,7 +325,10 @@ public struct SnapshotAcquisitionPlanner: Sendable {
     )
   }
 
-  func sourceFingerprint(for evidence: SnapshotAcquisitionEvidence) -> String {
+  func sourceFingerprint(
+    for evidence: SnapshotAcquisitionEvidence,
+    accountBinding: SnapshotAccountBinding
+  ) -> String {
     var hasher = SHA256()
     for sourceSet in evidence.sourceSets {
       hasher.update(data: Data(sourceSet.sourceSetID.utf8))
@@ -301,6 +350,17 @@ public struct SnapshotAcquisitionPlanner: Sendable {
         }
       }
       hasher.update(data: Data([0x1e]))
+    }
+    hasher.update(data: Data([0x1d]))
+    for field in [
+      "accountBinding",
+      String(accountBinding.formatVersion),
+      accountBinding.accountID,
+      accountBinding.selfSourceIdentifierBase64,
+      accountBinding.evidence.rawValue,
+    ] {
+      hasher.update(data: Data([0x1f]))
+      hasher.update(data: Data(field.utf8))
     }
     return hasher.finalize().map { String(format: "%02x", $0) }.joined()
   }
