@@ -107,7 +107,8 @@ revision.
 ## Privacy-safe output
 
 On success, the command emits only aggregate counts, format/scope states,
-coverage-gap counts, and booleans. It emits no message body, identifier,
+coverage-gap counts, database freshness/unavailable/stale counts, and booleans.
+It emits no message body, identifier,
 filesystem path, source fingerprint, file digest, table name, or failure-row
 identity. Errors name the failed invariant but not the sensitive record.
 
@@ -115,8 +116,8 @@ Audit-report format 2 includes `completionEvidence`, an independently derived
 component verdict rather than a copy of the writer's top-level flag. It reports
 row accounting (including zero rejections and unique identities), observed
 message-type semantics, direction, entity, relationship, artifact verification,
-artifact decoding, authoritative source scope, resolved media phase, and pinned
-client-build compatibility separately. It also states whether the archive
+artifact decoding, authoritative source scope, resolved media phase, and signed
+4.1+-client compatibility separately. It also states whether the archive
 actually contains messages, media references, and at least one still-verified
 local source or connector-owned media file. This prevents a structurally empty
 or media-free synthetic run from being mistaken for the representative corpus
@@ -132,9 +133,10 @@ Those attestations must never be flipped by archive contents.
 
 `fullRestorationVerified` is true only when all archive checks pass and the
 archive itself claims full restoration from an authoritative, media-resolved,
-production-compatible pinned build. A structurally valid archive with an
+production-compatible signed 4.1+ build. A structurally valid archive with an
 unknown message type, missing media, unsupported relationship, schema gap,
-unrecognized client, deferred media phase, or incremental-fragment scope is
+unrecognized client, deferred media phase, partial database coverage, or
+incremental-fragment scope is
 audited successfully but still reports `fullRestorationVerified: false`.
 
 ## Boundary of the evidence
@@ -144,7 +146,7 @@ every recorded local file. It does not prove that an undiscovered WeChat table
 was absent, that a private field's semantics were interpreted correctly, or
 that a synthetically exercised nested tag graph covers every real-world
 merged-message or Finder variant, or that remote-only history exists locally.
-Those claims still require one real pinned-version corpus with zero unhandled
+Those claims still require one real compatible-version corpus with zero unhandled
 message tables, zero observed logical-type gaps, and an explicit state for
 every media reference. Likewise, the audit does not authorize public
 distribution, authenticated active reads, or actions.

@@ -17,7 +17,8 @@ complete source inventories are compared. The command then requires:
 
 - the current baseline fingerprint to equal the previous snapshot's source
   fingerprint;
-- identical pinned client-build evidence across the chain;
+- signed WeChat 4.1+ compatibility at both endpoints; exact build equality is
+  reported but an ordinary compatible client update does not break the chain;
 - reported deletions to exactly equal the source sets absent from the current
   inventory;
 - for an incremental acquisition, reported changed source sets to exactly
@@ -44,7 +45,8 @@ the exact pinned WeChat 4.1.12 build were independently audited:
 - no reconciliation-only or deleted set was reported or independently found;
 - all 9 copied databases remained in the expected encrypted WCDB/SQLCipher
   family; and
-- client-build and baseline-fingerprint continuity passed.
+- the client build was unchanged in this observed run and baseline-fingerprint
+  continuity passed.
 
 This proves real change-proportional passive acquisition and exact manifest
 classification. It does not prove which messages changed, decoded message

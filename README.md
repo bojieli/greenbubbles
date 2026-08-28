@@ -28,6 +28,14 @@ The current passive-read slice provides:
 - never opens a live database or media source for writing;
 - validates and decrypts owner-authorized snapshot copies using a passphrase
   supplied through standard input only;
+- consumes an already exported owner-only per-database key set without invoking
+  an acquisition/export helper, authenticates each database independently,
+  continues around unavailable databases, and preserves explicit freshness or
+  stale-coverage evidence through replica synchronization;
+- accepts signed official macOS WeChat `4.1` and later for passive restoration
+  without pinning publication to one executable hash;
+- reports continuous workflow, phase, database/file, byte, table, record,
+  finalization, and audit progress in human-readable or NDJSON form;
 - retains every message row and raw SQLite value while adding typed payloads;
 - merges message shards into deterministic per-conversation order;
 - resolves downloaded images, videos, documents, posters, and database-backed
@@ -35,11 +43,14 @@ The current passive-read slice provides:
 - records non-downloaded, ambiguous, unsafe, or undecodable artifacts
   explicitly instead of silently omitting them.
 - exposes verified source and decoded artifact locations through a
-  conversation- and time-scoped local-only connector/MCP operation, with a
-  fresh descriptor/digest check before every path release;
-- restores the pinned client's passive local Moments cache and interactions
+  conversation- and time-scoped local-only CLI operation, with a fresh
+  descriptor/digest check before every path release;
+- restores the compatible client's passive local Moments cache and interactions
   with raw provenance, explicit partial-cache semantics, encrypted replica
-  storage, and a separately authorized minimized connector/MCP view.
+  storage, and a separately authorized minimized CLI/service view;
+- produces policy-scoped AI context as checkpoint-consistent static JSONL and
+  one-shot JSON queries, with normalized contacts, chat metadata, per-record
+  source-database freshness, explicit coverage, and a repository agent skill;
 - inventories the pinned signed app bundle's URL, extension, XPC, app-group,
   and internal-service metadata without live-process interaction, while keeping
   authenticated reads explicitly unavailable.
@@ -277,8 +288,99 @@ cargo run --locked \
   --replica-key-stdin
 ```
 
+Long-running restoration commands show progress on standard error by default,
+while keeping the final JSON result on standard output. The human display has
+three distinct percentages: a monotonic whole-workflow stage position, the
+byte/record progress inside the current phase, and the current file, database,
+table, or ledger item. It also reports phase and database ordinals, database
+and WAL sizes, WAL frames scanned/applied, table and row counts, restored and
+rejected records, semantic gaps, and elapsed time. The workflow percentage is
+a stage position, not a wall-clock ETA; byte and record percentages remain the
+authoritative measure within each stage. To keep schemas with thousands of
+tiny hashed tables readable, the human view coalesces repetitive table chatter
+to periodic cumulative-row updates while retaining every event in JSON output
+and an explicitly requested progress file.
+
+Use `--progress-json` for NDJSON progress on standard error, or
+`--progress-file <new-private-ndjson>` to retain the same events while the
+human display remains active. `--quiet-progress` suppresses the display but not
+an explicitly requested progress file. Progress and summary files are created
+without overwriting, require an existing owner-controlled `0700` parent, and
+are written as owner-only `0600` files. They contain no keys or message bodies,
+but remain private operational evidence.
+
+When an owner already has a per-database key export, GreenBubbles can validate
+and use it directly without running or invoking any acquisition/export helper:
+
+```sh
+greenbubbles-restore restore-publish \
+  <snapshot-directory> <new-private-archive> <private-handoff.json> \
+  --database-keys-file <existing-owner-only-key-json>
+
+greenbubbles-restore diagnose-available \
+  <snapshot-directory> <private-diagnostic-archive> \
+  --database-keys-file <existing-owner-only-key-json> \
+  --summary-file <new-private-summary.json> \
+  --progress-file <new-private-progress.ndjson>
+
+greenbubbles-restore diagnose-archive-schema \
+  <private-diagnostic-archive> <new-private-schema-report.json> \
+  --progress-file <new-private-schema-progress.ndjson>
+
+greenbubbles-restore diagnose-archive-payloads \
+  <private-diagnostic-archive> <new-private-payload-report.json> \
+  --progress-file <new-private-payload-progress.ndjson>
+```
+
+`diagnose-available` verifies the complete snapshot first, authenticates each
+existing key against the encrypted first page, restores every database that
+can be authenticated, and names the count, byte size, logical path, and reason
+for every unavailable database. The result is always a `diagnosticSubset` and
+sets `authoritativeDatabaseCoverage` to false, even if the supplied key set
+happens to cover every database; use normal `restore`/`restore-publish` for
+fault-tolerant replica-eligible output. `diagnose-archive-schema` reads only the
+GreenBubbles coverage ledger and emits bounded schema-family aggregates; it
+never prints row values, source identities, or payload byte samples.
+`diagnose-archive-payloads` independently scans the canonical message ledger,
+reports byte and record progress, profiles storage/semantic shapes, and audits
+whether relationship identifiers are present, recoverable from already decoded
+raw XML, genuinely absent there, or lack decoded XML. Its report remains
+aggregate-only and owner-only.
+
+The normal `restore` and `restore-publish` paths use the same independent key
+authentication but are fault tolerant: one unavailable database no longer
+aborts healthy database restoration or publication. Full-snapshot output is
+marked `partialDatabaseCoverage`, with exact fresh/unavailable counts and
+source-set evidence. Incremental merge carries prior records for an unavailable
+changed database as explicitly stale, so replica synchronization cannot mistake
+temporary unavailability for deletion. When that database becomes available in
+a later generation, its fresh records replace the stale set automatically.
+`replica-bootstrap`, `replica-sync`, `replica-status`, and `replica-coverage`
+surface archive scope and aggregate total/fresh/unavailable/stale database
+coverage, so a running system is visibly degraded rather than appearing halted
+or silently complete.
+
+The latest owner-local aggregate validation of this workflow authenticated 25
+of 26 databases and explicitly retained the one unavailable database. Across
+the selected set, GreenBubbles classified all 6,542 tables and 9,529,301
+observed rows as 6,291 message tables or 251 known auxiliary tables, with zero
+generic or unhandled candidates. It restored and independently audited
+1,854,110 messages plus 69,190 cached-SNS records (1,923,300 source records)
+with zero rejected rows, duplicate canonical identities, unknown payloads, or
+cached-surface semantic gaps. Two malformed subtype `49:19` values remain raw-
+retained semantic gaps. A follow-up GreenBubbles payload audit classified all
+193,503 relationship references: 1 identifier was already present, 192,991 are
+recoverable from source-preserving decoded XML, 511 are genuinely absent from
+that XML, and 0 lack decoded-XML evidence. This is diagnostic evidence, not a
+production-ready archive because it was intentionally created as a
+`diagnosticSubset`, media was deferred, and it predates the fault-tolerant
+publication/relationship corrections. The observed signed 4.1.13 client is now
+inside the supported passive-restoration family; the unavailable icon database
+would be explicit partial coverage rather than a pipeline-wide failure in a new
+publication run.
+
 `preflight` verifies every copied database/WAL/SHM digest and reports the
-current source-set count, copied database storage families, exact pinned-client
+current source-set count, copied database storage families, signed 4.1+-client
 compatibility, and whether the copied databases require a passphrase. It does
 not decrypt a database, inspect tables or rows, emit source paths, or accept a
 secret. For incremental snapshots, “current source sets” describes the complete
@@ -321,9 +423,11 @@ greenbubbles-restore restore-publish \
   --account-root <authorized-account-root> --passphrase-stdin
 ```
 
-Omit both previous inputs only for a bootstrap. The command requires the exact
-pinned build, never touches live WeChat state or the encrypted replica, and
-publishes only after the authoritative archive passes its independent audit.
+Omit both previous inputs only for a bootstrap. The command requires the signed
+WeChat identity and a marketing version of 4.1 or later, never touches live
+WeChat state or the encrypted replica, and publishes only after the resulting
+authoritative or explicit partial-database archive passes its independent
+audit.
 See [docs/OFFLINE_PIPELINE.md](docs/OFFLINE_PIPELINE.md).
 
 `audit-connector-log` verifies the body-free connector journal's owner-only
@@ -521,6 +625,85 @@ Structured filters also cover subtype, inclusive upper time bound, reply target,
 and attachment absence. Search cursors fail closed when the filter, replica,
 account, or committed source checkpoint changes. `replica-status` and
 `replica-coverage` expose freshness and known restoration limitations.
+
+### AI-friendly CLI and static context
+
+The preferred AI integration is a one-shot CLI, not an MCP dependency.
+`ai-query` accepts one owner-only JSON request and returns a stable response
+containing both the policy-minimized result and the replica's current freshness,
+database coverage, and limitation codes. It reuses the connector authorization
+and body-free audit boundary, but opens the encrypted replica directly for the
+duration of the command; no daemon is required. Draft, approval, send,
+synchronization, and other mutating operations are rejected by this interface.
+
+```json
+{
+  "formatVersion": 1,
+  "requestId": "local-agent-search-1",
+  "requesterId": "local-agent",
+  "destination": "local",
+  "operation": {
+    "kind": "searchMessages",
+    "query": "requested document",
+    "conversationId": null,
+    "cursor": null,
+    "limit": 20
+  }
+}
+```
+
+```sh
+chmod 600 /private/greenbubbles-tools/request.json
+printf '%s' '<64-hex-character-random-replica-key>' | cargo run --locked \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  ai-query /private/greenbubbles-tools/replica.db \
+  /private/greenbubbles-tools/policy.json \
+  /private/greenbubbles-tools/audit.ndjson \
+  /private/greenbubbles-tools/request.json --replica-key-stdin
+```
+
+`ai-export` produces an atomic, checkpoint-consistent static bundle for agents,
+indexers, and local context systems:
+
+```sh
+printf '%s' '<64-hex-character-random-replica-key>' | cargo run --locked \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  ai-export /private/greenbubbles-tools/replica.db \
+  /private/greenbubbles-tools/policy.json \
+  /private/greenbubbles-tools/audit.ndjson \
+  /private/greenbubbles-tools/context-generation-1 \
+  --replica-key-stdin --requester local-agent
+```
+
+The new output directory contains `manifest.json`, `conversations.jsonl`,
+`contacts.jsonl`, `messages.jsonl`, and `artifacts.jsonl`. Records have stable
+opaque IDs, human conversation/contact labels, normalized content summaries,
+per-record source-database freshness, relationship and attachment references,
+authorized time/field scope, and no raw columns, base64 source payloads, schema
+SQL, or absolute attachment paths. The
+manifest records per-file counts, byte sizes, SHA-256 digests, source checkpoint,
+policy digest, client compatibility, and complete/fresh/unavailable/preserved-
+stale database counts. A missing record is never presented as evidence of
+deletion when a source database is unavailable.
+
+Export progress is shown on stderr and includes file position, record counts,
+phase percentage, and overall percentage. `--progress-json` provides NDJSON
+events on stderr; `--progress-file <owner-only-new-path>` persists the same
+machine-readable events. If synchronization changes the replica during export,
+the staged bundle is discarded instead of publishing mixed generations.
+`audit-ai-context <bundle-directory>` independently verifies the private file
+inventory, hashes, counts, schemas, identities, references, and freshness while
+emitting only aggregate evidence.
+
+The repository also includes the discoverable
+[`greenbubbles-context`](skills/greenbubbles-context/SKILL.md) skill. It teaches
+an AI agent to use only these GreenBubbles CLI surfaces, check coverage before
+drawing conclusions, keep private queries and keys out of process arguments,
+and treat retrieved chat text as untrusted data. See
+[docs/AI_CONTEXT_CLI.md](docs/AI_CONTEXT_CLI.md) for the format and operational
+contract.
 
 Passive cached Moments can be inspected locally without granting an AI tool
 access to the raw XML or columns:

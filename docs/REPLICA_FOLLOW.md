@@ -2,11 +2,11 @@
 
 GreenBubbles separates privileged offline acquisition/restoration from the
 long-running encrypted replica process. A restoration operator publishes only
-an already completed authoritative archive; the follower never opens live
+an already completed replica-eligible archive; the follower never opens live
 WeChat stores, receives a WeChat database passphrase, invokes WeChat, or merges
 an incremental fragment by itself.
 
-## Publish an authoritative generation
+## Publish a verified generation
 
 After bootstrap restoration, full restoration, or `merge-incremental` has
 completed successfully, publish its canonical directory with a strictly
@@ -14,17 +14,18 @@ increasing owner-controlled generation:
 
 ```sh
 greenbubbles-restore replica-publish \
-  <authoritative-archive> <private-handoff.json> --generation 1
+  <replica-eligible-archive> <private-handoff.json> --generation 1
 ```
 
 For normal offline operation, `restore-publish` performs restoration, chain
 verification, merge, archive audits, and lock-derived next-generation
 publication as one fail-closed sequence. The explicit `replica-publish` command
-remains useful when publishing an independently prepared authoritative archive.
+remains useful when publishing an independently prepared replica-eligible archive.
 See `OFFLINE_PIPELINE.md`.
 
 The publisher requires an owner-only canonical archive directory and an
-authoritative restoration report. Production-format archives pass the complete
+authoritative or complete-inventory partial-database restoration report.
+Production-format archives pass the complete
 independent archive audit before publication. The publisher also
 descriptor-hashes every archive-owned regular file into a deterministic seal.
 The mode-`0600` format-3 handoff binds the canonical absolute archive location,
@@ -60,6 +61,11 @@ greenbubbles-restore replica-follow \
 The process watches only handoff file metadata while idle. A new atomic
 handoff triggers full verification, then bootstrap or transactional replica
 synchronization. Successful applications are emitted as aggregate NDJSON.
+Both authoritative archives and format-5 `partialDatabaseCoverage` archives
+are eligible when the latter account for the complete database inventory.
+Partial incremental publication carries prior records for unavailable changed
+source sets, preventing a temporary key/decryption failure from becoming a
+replica deletion.
 `--maximum-polls` provides a bounded supervisor/diagnostic mode; omit it for a
 continuous process. `replica-follow-once` performs the same verified transition
 without polling.
@@ -94,8 +100,8 @@ The follower requires:
 - a canonical absolute archive path;
 - an unchanged report digest and source fingerprint;
 - an unchanged whole-archive seal before and after replica application;
-- an authoritative archive, with the full independent audit for production
-  formats;
+- an authoritative or complete-inventory `partialDatabaseCoverage` archive,
+  with the full independent audit for production formats;
 - a strictly monotonic generation with no same-generation equivocation;
 - the same encrypted replica generation as its prior state; and
 - a committed replica checkpoint matching the published account and source.

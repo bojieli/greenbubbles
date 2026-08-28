@@ -1,5 +1,10 @@
 # MCP adapter
 
+This is a retained compatibility adapter, not the primary GreenBubbles agent
+interface and not a target for new development. New agent workflows should use
+the repository `greenbubbles-context` skill with `ai-query` and `ai-export` as
+documented in `AI_CONTEXT_CLI.md`; those commands require no MCP host or daemon.
+
 The MCP adapter is a thin stdio-to-Unix-socket process. It never opens the
 encrypted replica and never receives either encryption key.
 

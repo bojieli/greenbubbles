@@ -111,12 +111,22 @@ Each run produces counts that can be checked without printing message content:
 
 `report.json` also carries signed-client compatibility evidence and a
 component-by-component completion verdict. For current format-2 snapshots, the
-top-level `fullRestorationAchieved` flag is true only when the client exactly
-matches the pinned supported profile and row accounting, canonical identity
+top-level `fullRestorationAchieved` flag is true only when the client is a
+signed compatible WeChat 4.1+ build and row accounting, canonical identity
 uniqueness, semantic decoding, directions, entities, relationships, artifact
 verification, and artifact decoding all pass. Retaining raw bytes is necessary
 for losslessness but does not by itself satisfy production compatibility,
 semantic completeness, or playable-media completeness.
+
+Archive report format 5 separately records database freshness. Every source set
+inside the restoration boundary is classified as freshly restored or
+unavailable; cumulative publication may additionally mark unavailable sets
+whose prior canonical records were preserved as stale. An unavailable database
+therefore prevents a full-restoration claim but does not abort export,
+publication, or synchronization. Replica mutation accepts
+`partialDatabaseCoverage` only when the complete database inventory is
+accounted for, and incremental merge retains stale records until a later fresh
+generation replaces them.
 
 `coverage.json` format 3 contains the complete schema ledger in `allTables`.
 Each table carries a SHA-256 fingerprint derived from its ordered
@@ -162,7 +172,8 @@ successful result exposes aggregate evidence only.
 
 This audit is required before a real archive can serve as Phase 1 completion
 evidence or enter a replica. Its `fullRestorationVerified` field remains false
-unless the archive is authoritative, media-resolved, pinned-build compatible,
+unless the archive has authoritative database coverage, is media-resolved,
+4.1+-client compatible,
 and already satisfies every strict completion component. See
 `docs/ARCHIVE_AUDIT.md`.
 
@@ -248,10 +259,12 @@ Bootstrap and integrity-scan inputs are authoritative full source inventories.
 An incremental input is a fragment even though its manifest fingerprints the
 complete source tree, so its `fullRestorationAchieved` flag is forced false and
 it cannot directly replace or reconcile a replica. `merge-incremental` binds it
-to the prior authoritative fingerprint, replaces records by source-set
-identity, and recalculates global integrity before producing a new
-`authoritative` archive. This distinction prevents partial source selection
-from weakening the row equation or silently deleting history.
+to the prior replica-eligible fingerprint, replaces records only for source
+sets that restored successfully, preserves prior records for selected but
+unavailable sets, and recalculates global integrity before producing a new
+`authoritative` or `partialDatabaseCoverage` archive. This distinction prevents
+partial source selection or transient database failure from weakening the row
+equation or silently deleting history.
 
 Cached records and their table coverage follow the same source-set replacement
 rule. Untouched SNS sets are retained, selected sets are replaced, deleted sets

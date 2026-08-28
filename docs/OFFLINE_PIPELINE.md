@@ -13,12 +13,12 @@ standard input:
 
 ```sh
 greenbubbles-restore restore-publish \
-  <bootstrap-snapshot> <new-authoritative-archive> <private-handoff.json> \
+  <bootstrap-snapshot> <new-publication-archive> <private-handoff.json> \
   --account-root <authorized-account-root> --passphrase-stdin
 ```
 
-The command requires format-3 acquisition evidence and the exact pinned signed
-client build. It prepares the immutable snapshot, restores it, independently
+The command requires format-3 acquisition evidence and a signed official
+WeChat 4.1-or-later client. It prepares the immutable snapshot, restores it, independently
 audits every archive ledger and recorded local artifact, and only then publishes
 the bootstrap as generation 1 under the handoff lock. An existing handoff is
 rejected. The output archive must not already exist.
@@ -30,20 +30,25 @@ baseline:
 
 ```sh
 greenbubbles-restore restore-publish \
-  <next-snapshot> <new-authoritative-archive> <private-handoff.json> \
+  <next-snapshot> <new-publication-archive> <private-handoff.json> \
   --previous-snapshot <previous-snapshot> \
-  --previous-archive <previous-authoritative-archive> \
+  --previous-archive <previous-publication-archive> \
   --account-root <authorized-account-root> --passphrase-stdin
 ```
 
 Before decrypting the next snapshot, the operator independently verifies the
-complete acquisition transition, unchanged pinned build, exact changed,
+complete acquisition transition, signed 4.1+ compatibility at both endpoints
+(while reporting exact fingerprint changes), exact changed,
 reconciliation, and deleted source-set classifications, the previous archive,
 and its baseline fingerprint. An incremental snapshot is restored into an
 owner-only temporary fragment, independently audited, merged by source identity
-into a new atomic authoritative archive, and audited again. A full integrity
-scan is restored directly as a new authoritative archive after the same chain
-and previous-archive checks.
+into a new atomic publication archive, and audited again. If a changed database
+is unavailable, the merge retains that source set's prior records, marks them
+stale, and publishes `partialDatabaseCoverage` instead of aborting or treating
+them as deletions. A full integrity scan follows the same cumulative merge when
+it has partial database coverage. Complete input produces an authoritative
+archive; a later successful generation replaces stale sets and can recover
+authoritative coverage.
 
 The publication generation is derived and incremented while holding the stable
 handoff lock. The same compare-and-swap verifies that the supplied previous
@@ -51,7 +56,7 @@ archive is still the exact current sealed handoff, so concurrent restorers from
 one baseline cannot publish a stale branch. Operators do not choose a
 generation. Failed validation never changes the handoff, and incremental
 fragment staging is automatically removed. A failure after an output directory
-has been created can leave an unpublished partial or authoritative output at
+has been created can leave an unpublished partial-database or authoritative output at
 that explicitly new path; inspect or remove that quarantined directory before
 retrying with a new output path.
 

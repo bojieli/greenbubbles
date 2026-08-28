@@ -1,0 +1,3 @@
+interface:
+  display_name: "GreenBubbles Context"
+  short_description: "Query authorized local WeChat context"

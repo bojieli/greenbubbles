@@ -96,16 +96,19 @@ not reduce a real private-data or account-safety event by itself.
 
 ## Client update or supported-build revocation
 
-1. Treat any non-exact build/signature fingerprint as unsupported; do not add a
-   version by marketing number alone.
-2. Re-run only passive signed-bundle and redacted discovery checks first.
-3. Keep full-restoration, active-read, and action capabilities false until the
-   new build separately passes its applicable gates.
-4. If the currently pinned build must be revoked, land a reviewed change that
-   removes its production-compatible profile from both Swift acquisition/static
-   inspection and Rust restoration compatibility boundaries. Add tests proving
-   that the old fingerprint now fails closed. The cross-language pinned-profile
-   CI check must pass so a one-sided update or revocation cannot ship.
+1. Passive restoration accepts the signed official WeChat identity at marketing
+   version 4.1 or later; retain the exact build and hashes as audit evidence and
+   reject malformed versions, identity/team drift, invalid signatures, or loss
+   of Hardened Runtime.
+2. Re-run passive signed-bundle, redacted discovery, schema profiling, and
+   observed-type coverage checks after an update. Version-family acceptance
+   never converts an unhandled schema into supported data.
+3. Keep full-restoration false for schema/type/media gaps. Active-read and
+   action capabilities retain their separate adapter-specific gates.
+4. The debugger-based acquisition helper remains exact-build-bound. If either
+   the 4.1+ passive family or a pinned acquisition-helper build must be revoked,
+   land a reviewed compatibility change and tests proving the revoked boundary
+   fails closed.
 5. Do not delete old private archives merely because support is revoked. Label
    their build evidence accurately and follow the private retention decision.
 

@@ -1,8 +1,9 @@
 # Encrypted canonical replica
 
-The canonical replica is the serving surface for future synchronization,
-retrieval, local API, and MCP operations. WeChat databases remain acquisition
-inputs; consumers never receive raw SQL access to either source or replica.
+The canonical replica is the serving surface for synchronization, one-shot CLI
+retrieval, static AI-context export, and the optional local API. WeChat
+databases remain acquisition inputs; consumers never receive raw SQL access to
+either source or replica.
 
 ## Encryption and account isolation
 
@@ -182,26 +183,35 @@ manifest/path material and is not itself a publishable benchmark report; only
 reviewed aggregate durations may be combined with offline publication and
 follower checkpoint deltas in a controlled real-data run.
 
-Incremental restoration fragments are deliberately not accepted directly by
+Incremental restoration fragments and diagnostic subsets are deliberately not accepted directly by
 `replica-bootstrap` or `replica-sync`. `merge-incremental` first binds the
 fragment to the exact prior source fingerprint, removes prior records only from
-selected or deleted source sets, and combines it with untouched canonical
-state. It then recomputes conversation-wide ordering, cross-shard relationship
-resolution, referenced artifacts, schema/type coverage, integrity counts, and
-the row equation before marking the result authoritative.
+successfully restored or deleted source sets, and combines it with untouched
+canonical state. A selected database that is temporarily unavailable retains
+its prior records as an explicit stale source set. The merge then recomputes
+conversation-wide ordering, cross-shard relationship resolution, referenced
+artifacts, schema/type coverage, integrity counts, and the row equation before
+marking the result authoritative or `partialDatabaseCoverage`.
 
 The merge is staged in an owner-only sibling directory, syncs its files, and is
 renamed into place only after validation. Connector-owned materialized and
 decoded media needed by the merged history is copied into the new archive and
 verified against its recorded SHA-256, so deleting the input fragment cannot
-silently break artifact locations. Only the resulting authoritative archive can
-advance the encrypted replica checkpoint.
+silently break artifact locations. The resulting independently audited
+authoritative or complete-inventory partial-database archive can advance the
+encrypted replica checkpoint; arbitrary subsets cannot.
 
-## Continuous authoritative handoff
+Bootstrap, synchronization, status, and coverage responses expose archive
+scope plus authoritative, total, fresh, unavailable, and preserved-stale
+database counts. The detailed private archive report retains each unavailable
+source set's logical path, storage family, database/WAL sizes, and reason, while
+ordinary replica status remains aggregate-only.
+
+## Continuous verified handoff
 
 `replica-publish` and `replica-follow` provide the long-running operator path
 between the isolated offline restoration process and the encrypted replica.
-The publisher atomically binds an authoritative archive's canonical path,
+The publisher atomically binds a replica-eligible archive's canonical path,
 source fingerprint, exact report digest, and monotonically increasing
 generation. Format 3 additionally records the private publication timestamp; a
 deterministic seal binds every archive-owned file path, size, and content digest
@@ -219,10 +229,10 @@ the exact original/deterministic locations and archive seal. See
 `ARCHIVE_RETENTION.md`.
 
 `restore-publish` is the upstream offline transaction for format-3 snapshots.
-It pins the client build, proves non-bootstrap acquisition continuity against
-both the retained prior snapshot and authoritative archive, audits a restored
-incremental fragment, merges it by source identity, audits the resulting
-authoritative archive, and derives the next generation under the publication
+It validates the signed 4.1+ client family, proves non-bootstrap acquisition
+continuity against both the retained prior snapshot and replica-eligible
+archive, audits a restored incremental fragment, merges it by source identity,
+audits the resulting authoritative or partial-database archive, and derives the next generation under the publication
 lock only when the supplied predecessor remains the exact current sealed
 handoff. Concurrent stale branches fail closed. It has no live-store or
 replica-key access. See `OFFLINE_PIPELINE.md`.
