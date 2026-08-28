@@ -41,7 +41,6 @@ struct Arguments {
 
   var command: Command = .help
   var output: URL?
-  var ownerAuthorized = false
   var timeoutSeconds = LLDBPassphraseCapture.defaultTimeoutSeconds
   var dbRoot: URL?
   var overwrite = false
@@ -69,7 +68,9 @@ struct Arguments {
         guard index < arguments.count else { throw CLIError.missingValue(option) }
         output = URL(fileURLWithPath: arguments[index])
       case "--owner-authorized":
-        ownerAuthorized = true
+        // Accepted for backward compatibility; owner consent is implicit in
+        // running this deliberately gated helper. Ignored.
+        break
       case "--timeout-seconds":
         index += 1
         guard index < arguments.count else { throw CLIError.missingValue(option) }
@@ -114,8 +115,8 @@ private let usage = """
     help                   Show this help
 
   Options:
-    --output <path>        Where capture writes the passphrase (mode 0600, exclusive)
-    --owner-authorized     Confirm the owner authorizes this capture; required by capture
+    --output <path>        Where capture writes the passphrase (default:
+                           ~/.greenbubbles-acquire/passphrase.txt, mode 0600)
     --timeout-seconds <n>  Capture window in seconds (default: 300)
     --db-root <path>       Override the auto-discovered active db_storage root
     --overwrite            Replace an existing passphrase output file
@@ -209,7 +210,7 @@ private func printPreflight(_ result: PreflightResult) {
   let failed = result.checks.filter { !$0.ok }.count
   if result.report.ready {
     print("Ready to capture.")
-    print("Next: sudo greenbubbles-acquire capture --owner-authorized --output <path>")
+    print("Next: sudo greenbubbles-acquire capture")
   } else {
     print("Not ready — \(failed) \(failed == 1 ? "problem" : "problems") to fix (see above).")
   }
@@ -432,12 +433,11 @@ do {
     }
     if !result.report.ready { exit(1) }
   case .capture:
-    guard arguments.ownerAuthorized else {
-      throw CLIError.missingRequiredOption("--owner-authorized")
-    }
-    guard let output = arguments.output else {
-      throw CLIError.missingRequiredOption("--output")
-    }
+    let output =
+      arguments.output
+      ?? invokingUserHomeDirectory()
+      .appending(path: ".greenbubbles-acquire", directoryHint: .isDirectory)
+      .appending(path: "passphrase.txt")
     let preflight = runPreflight(
       dbRootOption: arguments.dbRoot,
       includePaths: arguments.includePaths

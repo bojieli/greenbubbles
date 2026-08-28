@@ -74,9 +74,9 @@ preference order:
    lawfully obtained a plaintext export, but it still validates the pinned
    schema and reports incomplete coverage rather than guessing.
 3. An owner-authorized active passphrase capture through the separate
-   `greenbubbles-acquire` executable, explicitly gated by the
-   `--owner-authorized` flag, a manual owner-run re-sign of the client, and
-   SQLCipher4 page-1 HMAC proof of correctness. The capture mechanism
+   `greenbubbles-acquire` executable, gated by a manual owner-run re-sign of
+   the client and SQLCipher4 page-1 HMAC proof of correctness. The capture
+   mechanism
    breakpoints a system library symbol, so it is build-agnostic and performs
    no client version, hash, or signature gating. See
    [PASSPHRASE_ACQUISITION.md](PASSPHRASE_ACQUISITION.md). The passive

@@ -84,12 +84,16 @@ cat <passphrase-file> | greenbubbles-restore restore \
 
 ```sh
 greenbubbles-acquire preflight
-greenbubbles-acquire capture --output <path> --owner-authorized \
-  [--timeout-seconds 300] [--db-root <path>] [--overwrite]
+greenbubbles-acquire capture [--output <path>] [--timeout-seconds 300] \
+  [--db-root <path>] [--overwrite]
 greenbubbles-acquire verify --passphrase-stdin [--db-root <path>]
 ```
 
-- `preflight` emits an aggregate JSON readiness report and exits non-zero when
+`capture` with no options writes the passphrase to
+`~/.greenbubbles-acquire/passphrase.txt` (file mode `0600`, parent `0700`).
+
+- `preflight` prints a human-readable checklist (or JSON with `--json`) and
+  exits non-zero when
   blocked: WeChat process presence, hardening status, `lldb` availability, root
   privileges, and the discovered salt count. The active account's database root
   is discovered automatically (the account whose databases were most recently
@@ -97,10 +101,9 @@ greenbubbles-acquire verify --passphrase-stdin [--db-root <path>]
   reported for information only and never gate the capture. When the client
   still needs re-signing, the report prints the exact command for the owner to
   run manually; the tool never runs it.
-- `capture` refuses to run without the explicit `--owner-authorized` flag,
-  re-runs the preflight checks and fails closed, then waits for the owner's
-  logout/re-login up to the timeout. On capture it derives and HMAC-verifies
-  before writing anything.
+- `capture` re-runs the preflight checks and fails closed, then waits for the
+  owner's logout/re-login up to the timeout (default 300 seconds). On capture
+  it derives and HMAC-verifies before writing anything.
 - `verify` re-derives and re-verifies a stored passphrase read from standard
   input, without any process attachment. Databases WeChat creates after the
   capture are covered by this re-derivation; a new capture is not needed for

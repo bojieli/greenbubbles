@@ -10,9 +10,8 @@ database snapshots, and an offline restoration engine. That pipeline does
 Separately, and only under explicit owner authorization, the
 `greenbubbles-acquire` helper can capture the owner's own database passphrase
 by attaching `lldb` to the owner's own running WeChat client during a
-logout/re-login. It is gated by an explicit `--owner-authorized` flag and a
-manual owner-run re-sign of the client, works with any WeChat build (it
-breakpoints a system library symbol, not the client binary), and it proves
+logout/re-login. It requires a manual owner-run re-sign of the client, works
+with any WeChat build (it breakpoints a system library symbol, not the client binary), and it proves
 correctness against every database's SQLCipher4 page-1 HMAC. It exists because
 the owner reversed the project's previous blanket prohibition on
 debugger-based acquisition on 2026-08-27. See
@@ -69,7 +68,7 @@ Separately from that passive slice, one explicitly gated active helper exists:
 owner-authorized passphrase capture (`greenbubbles-acquire`), validated live on
 2026-08-27 against the owner's own account on the pinned build (26/26
 databases HMAC-verified). It requires root, a manual owner-run client re-sign,
-and the `--owner-authorized` flag, is build-agnostic (it breakpoints a system
+is build-agnostic (it breakpoints a system
 library symbol rather than the client binary), and discovers the active
 account's database root automatically. See
 [docs/PASSPHRASE_ACQUISITION.md](docs/PASSPHRASE_ACQUISITION.md).
@@ -115,8 +114,7 @@ swift run greenbubbles inventory
 swift run greenbubbles snapshot
 swift run greenbubbles-public-article /private/owner-only-request.json
 swift run greenbubbles-acquire preflight
-swift run greenbubbles-acquire capture --output <owner-only-passphrase-file> \
-  --owner-authorized
+swift run greenbubbles-acquire capture
 swift run greenbubbles-acquire verify --passphrase-stdin
 swift scripts/check-pinned-build-profile.swift
 swift scripts/check-distribution-inventory.swift
@@ -142,10 +140,10 @@ pinned build hashes remain allowed.
 separate from the passive pipeline. `preflight` reports hardening, process,
 privilege, and salt-inventory readiness, auto-discovers the active account's
 database root, and prints the exact manual re-sign command when required;
-`capture` refuses without
-`--owner-authorized`, waits for an owner logout/re-login, and writes the
-passphrase only to the owner-specified `--output` file (mode `0600`, parent
-`0700`, no silent overwrite without `--overwrite`); `verify` re-checks a stored
+`capture` waits for an owner logout/re-login and writes
+the passphrase to `~/.greenbubbles-acquire/passphrase.txt` by default
+(file mode `0600`, parent `0700`; `--output` overrides, no silent overwrite
+without `--overwrite`); `verify` re-checks a stored
 passphrase from standard input against every database's page-1 HMAC. The
 passphrase never appears on the command line, in JSON reports, or in logs. See
 [docs/PASSPHRASE_ACQUISITION.md](docs/PASSPHRASE_ACQUISITION.md).
@@ -890,8 +888,8 @@ database belongs to the local user. The connector must enforce per-conversation
 consent and data minimization before any model integration is enabled.
 
 The `greenbubbles-acquire` capture helper must only ever be used against the
-owner's own WeChat account on the owner's own device, with the explicit
-`--owner-authorized` flag, after the owner has personally performed any
+owner's own WeChat account on the owner's own device, after the owner has
+personally performed any
 required client re-signing. Using it against any other account, device, or
 person is outside the scope of this project and of any authorization recorded
 here.
