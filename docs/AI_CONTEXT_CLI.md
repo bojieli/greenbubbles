@@ -204,6 +204,18 @@ error and does not abort unrelated messages or attachments. An agent that needs
 the actual local file must make an authorized local `getArtifact` query; remote
 destinations never receive a path.
 
+Static export resolves attachment metadata as one internal batch, not as one
+connector request per attachment. Authorization comes exclusively from the
+attachment references already returned by policy-authorized message pages. A
+single read-only SQLCipher transaction loads requested canonical artifacts in
+stable ID order through bounded query batches and loads the bound restoration
+report once. One reusable descriptor/digest verifier checks every available
+file, while missing, malformed, or changed individual artifacts become typed
+records in `artifacts.jsonl`. Replica identity, checkpoint, or report failures
+still fail the export. The connector journal records one aggregate
+`exportArtifacts` event, and the existing start/end checkpoint comparison
+discards the staged bundle if synchronization raced the batch.
+
 ## Progress and partial coverage
 
 `ai-export`, `audit-ai-context`, `ai-memory-export`, and `audit-ai-memory` emit
@@ -212,7 +224,10 @@ NDJSON, and `--progress-file` creates an owner-only durable event log. Events
 expose source and current-file sizes, source records, processed
 conversation/message counts, emitted or verified chunk/document counts and
 bytes, file position, elapsed time, phase percentage, and end-to-end
-percentage. Stdout remains machine-readable final JSON. Keep progress logs
+percentage. Large attachment sets emit exact cumulative milestones every 1,000
+records plus the final count, avoiding hundreds of thousands of flushed
+progress lines while preserving deterministic totals. Stdout remains
+machine-readable final JSON. Keep progress logs
 outside audited bundle directories so the exact private inventory is not
 changed by the act of auditing it.
 

@@ -733,6 +733,14 @@ not inferred from names, peers, or group ownership. Existing v1 bundles remain
 readable. A missing record is never presented as evidence of
 deletion when a source database is unavailable.
 
+Attachment metadata export uses one checkpoint-consistent, read-only SQLCipher
+snapshot with bounded, deterministic ID batches and one restoration-report
+load. Authorization is inherited from the already policy-filtered message
+references; each available file is descriptor/digest verified, individual
+failures remain typed in `artifacts.jsonl`, and the connector journal receives
+one aggregate `exportArtifacts` event instead of one durable event per
+attachment.
+
 Export and audit progress is shown on stderr and includes source/current-file
 sizes, record counts, processed conversations/messages, file position, phase
 percentage, and overall percentage. `--progress-json` provides NDJSON events on

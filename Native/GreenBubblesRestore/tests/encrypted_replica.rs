@@ -1243,6 +1243,7 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     fs::create_dir(&private).unwrap();
     fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
     let archive = build_archive(&private, "archive", "account-a", "source-a");
+    expand_archive_artifacts(&archive, 300);
     bind_synthetic_account_holder(&archive);
     let replica = private.join("replica.db");
     let key = ReplicaKey::from_bytes(KEY_BYTES);
@@ -1411,7 +1412,7 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     assert_eq!(manifest.enabled_conversation_count, 1);
     assert_eq!(manifest.exported_contact_count, 1);
     assert_eq!(manifest.exported_message_count, 1);
-    assert_eq!(manifest.exported_artifact_count, 1);
+    assert_eq!(manifest.exported_artifact_count, 300);
     assert_eq!(manifest.artifact_resolution_error_count, 0);
     assert_eq!(file_mode(&output), 0o700);
     for name in [
@@ -1447,6 +1448,20 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
         self_contact["conversationProfiles"][0]["displayName"],
         "You"
     );
+    let connector_events = fs::read_to_string(&audit)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let artifact_export_events = connector_events
+        .iter()
+        .filter(|event| event["operation"] == "exportArtifacts")
+        .collect::<Vec<_>>();
+    assert_eq!(artifact_export_events.len(), 1);
+    assert_eq!(artifact_export_events[0]["returnedItemCount"], 300);
+    assert!(!connector_events
+        .iter()
+        .any(|event| event["operation"] == "getArtifact"));
 
     let events = progress.0.lock().unwrap();
     assert_eq!(events.first().unwrap().state, ProgressState::Planned);
@@ -1481,7 +1496,7 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     assert_eq!(bundle_audit.conversation_count, 1);
     assert_eq!(bundle_audit.contact_count, 1);
     assert_eq!(bundle_audit.message_count, 1);
-    assert_eq!(bundle_audit.artifact_count, 1);
+    assert_eq!(bundle_audit.artifact_count, 300);
     let context_audit_events = context_audit_progress.0.lock().unwrap();
     assert_complete_monotonic_progress(&context_audit_events, ProgressPhase::ContextAudit);
     assert_eq!(
@@ -1795,6 +1810,40 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
         .limitation_codes
         .contains(&"malformedContextMessageOmitted".to_string()));
     assert!(!limited_memory.content_complete);
+
+    let connection = keyed_connection(&replica);
+    connection
+        .execute(
+            "UPDATE artifact SET record_json = ?1 WHERE artifact_id = 'artifact-0001'",
+            [b"{".as_slice()],
+        )
+        .unwrap();
+    drop(connection);
+    let degraded_output = private.join("ai-context-artifact-error");
+    let degraded = export_ai_context(
+        &replica,
+        &key,
+        &policy,
+        &audit,
+        &degraded_output,
+        "synthetic-agent",
+        ConnectorDestination::Local,
+        &NoProgress,
+    )
+    .unwrap();
+    assert_eq!(degraded.exported_artifact_count, 300);
+    assert_eq!(degraded.artifact_resolution_error_count, 1);
+    let artifact_error = fs::read_to_string(degraded_output.join("artifacts.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|artifact| artifact["artifactId"] == "artifact-0001")
+        .unwrap();
+    assert_eq!(artifact_error["error"]["code"], "integrityFailure");
+    assert!(artifact_error["detail"].is_null());
+    let degraded_audit = audit_ai_context(&degraded_output).unwrap();
+    assert_eq!(degraded_audit.artifact_resolution_error_count, 1);
+    assert!(!degraded_audit.content_complete);
 
     let mut tampered = OpenOptions::new()
         .append(true)
@@ -3368,6 +3417,43 @@ fn build_archive(parent: &Path, name: &str, account: &str, fingerprint: &str) ->
     write_ndjson(&archive.join("artifacts.ndjson"), &[artifact]);
     write_ndjson(&archive.join("messages.ndjson"), &[message]);
     archive
+}
+
+fn expand_archive_artifacts(archive: &Path, count: usize) {
+    assert!(count > 0);
+    let template = read_ndjson::<CanonicalArtifact>(&archive.join("artifacts.ndjson"))
+        .into_iter()
+        .next()
+        .unwrap();
+    let artifacts = (0..count)
+        .map(|index| {
+            let mut artifact = template.clone();
+            artifact.artifact_id = format!("artifact-{index:04}");
+            artifact
+        })
+        .collect::<Vec<_>>();
+    overwrite_ndjson(&archive.join("artifacts.ndjson"), &artifacts);
+
+    let mut messages = read_ndjson::<CanonicalMessage>(&archive.join("messages.ndjson"));
+    messages[0].artifact_references = artifacts
+        .iter()
+        .map(|artifact| MessageArtifactReference {
+            artifact_id: artifact.artifact_id.clone(),
+            role: ArtifactRole::Original,
+            preferred: true,
+        })
+        .collect();
+    overwrite_ndjson(&archive.join("messages.ndjson"), &messages);
+
+    let report_path = archive.join("report.json");
+    let mut report: RestorationReport =
+        serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    report.integrity.unique_artifact_count = count as u64;
+    report.integrity.downloaded_artifact_count = count as u64;
+    report.integrity.decoded_artifact_count = count as u64;
+    report.integrity.artifact_reference_count = count as u64;
+    report.completion = RestorationCompletion::evaluate(&report.integrity);
+    overwrite_json(&report_path, &report);
 }
 
 fn add_cached_surfaces_to_archive(archive: &Path) {

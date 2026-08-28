@@ -11,13 +11,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::archive::{ensure_private_directory, ensure_private_regular_file};
-use crate::audit::verify_recorded_artifact_files;
+use crate::audit::{verify_recorded_artifact_files, RecordedArtifactFileVerifier};
 use crate::replica::{
     get_replica_artifact, get_replica_changes, get_replica_conversation, get_replica_message,
     get_replica_participant, replica_conversation_references_artifact_in_range, replica_coverage,
     replica_restoration_report, replica_status, search_replica_cached_moments,
-    search_replica_messages, ReplicaCachedMomentFilter, ReplicaCachedSurfaceAvailability,
-    ReplicaCoverageView, ReplicaMessageFilter, ReplicaStatus,
+    search_replica_messages, stream_replica_artifact_snapshot, ReplicaArtifactSnapshotItem,
+    ReplicaCachedMomentFilter, ReplicaCachedSurfaceAvailability, ReplicaCoverageView,
+    ReplicaMessageFilter, ReplicaStatus,
 };
 use crate::tools::{
     entity_source_database_freshness, load_tool_policy, minimize_cached_moment, minimize_message,
@@ -311,6 +312,13 @@ pub struct ConnectorArtifactView {
     pub source: Option<ConnectorArtifactFile>,
     pub decoded: Option<ConnectorArtifactFile>,
     pub verification_detail: String,
+}
+
+pub(crate) struct ConnectorArtifactExportSummary {
+    pub checkpoint_revision: String,
+    pub requested_count: u64,
+    pub resolved_count: u64,
+    pub error_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1606,6 +1614,179 @@ impl<'a> ConnectorService<'a> {
             None,
         )?;
         Ok(result)
+    }
+
+    pub(crate) fn export_authorized_artifacts(
+        &self,
+        request: &ConnectorRequest,
+        artifact_conversations: &BTreeMap<String, BTreeSet<String>>,
+        mut visit: impl FnMut(
+            &str,
+            &BTreeSet<String>,
+            Result<ConnectorArtifactView, ConnectorErrorBody>,
+        ) -> Result<(), RestoreError>,
+    ) -> Result<ConnectorArtifactExportSummary, RestoreError> {
+        self.validate_request(request)
+            .map_err(connector_error_as_restore_error)?;
+        for conversation_ids in artifact_conversations.values() {
+            if conversation_ids.is_empty()
+                || conversation_ids.iter().any(|conversation_id| {
+                    !self
+                        .policy
+                        .conversation_scopes
+                        .get(conversation_id)
+                        .is_some_and(|scope| {
+                            scope
+                                .capabilities
+                                .contains(&ToolCapability::ReadRecentMessages)
+                                && scope
+                                    .message_fields
+                                    .contains(&ToolMessageField::Attachments)
+                                && (request.destination == ConnectorDestination::Local
+                                    || scope.allow_remote_model)
+                        })
+                })
+            {
+                return Err(RestoreError::Integrity(
+                    "AI artifact batch is not derived from authorized message references"
+                        .to_string(),
+                ));
+            }
+        }
+
+        if request.destination != ConnectorDestination::Local {
+            for (artifact_id, conversation_ids) in artifact_conversations {
+                visit(
+                    artifact_id,
+                    conversation_ids,
+                    Err(unauthorized(
+                        "artifact paths are restricted to the local destination",
+                    )),
+                )?;
+            }
+            self.audit(
+                request,
+                "exportArtifacts",
+                None,
+                ConnectorAuditOutcome::Denied,
+                0,
+                0,
+                0,
+                None,
+                None,
+            )
+            .map_err(connector_error_as_restore_error)?;
+            let checkpoint_revision = replica_status(&self.replica_path, self.key)?
+                .checkpoint_revision
+                .ok_or_else(|| {
+                    RestoreError::Integrity(
+                        "connector replica has no current checkpoint revision".to_string(),
+                    )
+                })?;
+            return Ok(ConnectorArtifactExportSummary {
+                checkpoint_revision,
+                requested_count: artifact_conversations.len() as u64,
+                resolved_count: 0,
+                error_count: artifact_conversations.len() as u64,
+            });
+        }
+
+        let artifact_ids = artifact_conversations
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut verifier: Option<RecordedArtifactFileVerifier> = None;
+        let mut verifier_initialization_failed = false;
+        let mut resolved_count = 0_u64;
+        let mut error_count = 0_u64;
+        let mut released_body_byte_count = 0_usize;
+        let snapshot = stream_replica_artifact_snapshot(
+            &self.replica_path,
+            self.key,
+            &artifact_ids,
+            |artifact_id, item, report| {
+                let result = match item {
+                    ReplicaArtifactSnapshotItem::Available(artifact) => {
+                        if verifier.is_none() && !verifier_initialization_failed {
+                            let opened = Path::new(&report.artifacts_path)
+                                .parent()
+                                .ok_or_else(|| {
+                                    RestoreError::UnsafePath(report.artifacts_path.clone())
+                                })
+                                .and_then(RecordedArtifactFileVerifier::open);
+                            match opened {
+                                Ok(opened) => verifier = Some(opened),
+                                Err(_) => verifier_initialization_failed = true,
+                            }
+                        }
+                        if let Some(verifier) = verifier.as_mut() {
+                            verifier
+                                .verify(&artifact)
+                                .and_then(|()| connector_artifact_view(*artifact))
+                                .map_err(integrity_error)
+                        } else {
+                            Err(integrity_error(RestoreError::Integrity(
+                                "artifact archive root is unavailable for verification".to_string(),
+                            )))
+                        }
+                    }
+                    ReplicaArtifactSnapshotItem::Missing => {
+                        Err(not_found("artifact was not found"))
+                    }
+                    ReplicaArtifactSnapshotItem::Invalid => {
+                        Err(integrity_error(RestoreError::Integrity(
+                            "artifact record failed canonical verification".to_string(),
+                        )))
+                    }
+                };
+                match &result {
+                    Ok(value) => {
+                        resolved_count = resolved_count.saturating_add(1);
+                        released_body_byte_count = released_body_byte_count.saturating_add(
+                            serde_json::to_vec(value).map_err(RestoreError::from)?.len(),
+                        );
+                    }
+                    Err(_) => error_count = error_count.saturating_add(1),
+                }
+                let conversation_ids =
+                    artifact_conversations.get(artifact_id).ok_or_else(|| {
+                        RestoreError::Integrity(
+                            "artifact snapshot returned an unrequested identity".to_string(),
+                        )
+                    })?;
+                visit(artifact_id, conversation_ids, result)
+            },
+        )?;
+        if snapshot.requested_count != artifact_conversations.len() as u64
+            || snapshot
+                .available_count
+                .saturating_add(snapshot.missing_count)
+                .saturating_add(snapshot.invalid_count)
+                != snapshot.requested_count
+            || resolved_count.saturating_add(error_count) != snapshot.requested_count
+        {
+            return Err(RestoreError::Integrity(
+                "artifact batch accounting is inconsistent".to_string(),
+            ));
+        }
+        self.audit(
+            request,
+            "exportArtifacts",
+            None,
+            ConnectorAuditOutcome::Completed,
+            usize::try_from(resolved_count).unwrap_or(usize::MAX),
+            released_body_byte_count,
+            0,
+            None,
+            None,
+        )
+        .map_err(connector_error_as_restore_error)?;
+        Ok(ConnectorArtifactExportSummary {
+            checkpoint_revision: snapshot.checkpoint_revision,
+            requested_count: snapshot.requested_count,
+            resolved_count,
+            error_count,
+        })
     }
 
     fn changes(
@@ -3126,6 +3307,13 @@ fn integrity_error(error: RestoreError) -> ConnectorErrorBody {
         message: error.to_string(),
         retryable: false,
     }
+}
+
+fn connector_error_as_restore_error(error: ConnectorErrorBody) -> RestoreError {
+    RestoreError::Integrity(format!(
+        "connector artifact export failed ({:?}): {}",
+        error.code, error.message
+    ))
 }
 
 #[cfg(test)]

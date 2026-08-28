@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::ffi::OsStringExt;
@@ -2668,6 +2668,168 @@ pub fn get_replica_artifact(
     artifact_id: &str,
 ) -> Result<Option<CanonicalArtifact>, RestoreError> {
     get_replica_record(replica_path, key, "artifact", "artifact_id", artifact_id)
+}
+
+const REPLICA_ARTIFACT_READ_BATCH_SIZE: usize = 256;
+
+pub(crate) enum ReplicaArtifactSnapshotItem {
+    Available(Box<CanonicalArtifact>),
+    Missing,
+    Invalid,
+}
+
+pub(crate) struct ReplicaArtifactSnapshotReport {
+    pub checkpoint_revision: String,
+    pub requested_count: u64,
+    pub available_count: u64,
+    pub missing_count: u64,
+    pub invalid_count: u64,
+}
+
+/// Streams a deterministic set of artifacts from one checkpoint-consistent,
+/// read-only SQLCipher transaction.
+///
+/// Each bounded SQL batch is materialized only long enough to restore the
+/// caller's requested order. Missing or malformed individual records are
+/// reported as typed items so a damaged attachment cannot hide healthy ones.
+/// Replica identity, checkpoint, or restoration-report failures remain fatal.
+pub(crate) fn stream_replica_artifact_snapshot(
+    replica_path: &Path,
+    key: &ReplicaKey,
+    artifact_ids: &BTreeSet<String>,
+    mut visit: impl FnMut(
+        &str,
+        ReplicaArtifactSnapshotItem,
+        &RestorationReport,
+    ) -> Result<(), RestoreError>,
+) -> Result<ReplicaArtifactSnapshotReport, RestoreError> {
+    verify_private_replica_files(replica_path)?;
+    let (mut connection, _) = open_existing_replica_read_only(replica_path, key)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+    let connection = &*transaction;
+    let (account_id, source_fingerprint, checkpoint_revision) =
+        current_replica_checkpoint(connection)?;
+    let report_bytes: Vec<u8> = connection.query_row(
+        "SELECT report_json FROM coverage_state WHERE account_id = ?1",
+        [&account_id],
+        |row| row.get(0),
+    )?;
+    let report: RestorationReport = serde_json::from_slice(&report_bytes)?;
+    if report.account_id != account_id || report.source_fingerprint != source_fingerprint {
+        return Err(RestoreError::Integrity(
+            "replica artifact snapshot disagrees with its restoration report".to_string(),
+        ));
+    }
+
+    let identifiers = artifact_ids.iter().collect::<Vec<_>>();
+    let mut available_count = 0_u64;
+    let mut missing_count = 0_u64;
+    let mut invalid_count = 0_u64;
+    for chunk in identifiers.chunks(REPLICA_ARTIFACT_READ_BATCH_SIZE) {
+        let placeholders = (2..=chunk.len() + 1)
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            "SELECT artifact_id, kind, role, availability, source_sha256,
+                    decoded_sha256, record_sha256, record_json
+             FROM artifact
+             WHERE account_id = ?1 AND artifact_id IN ({placeholders})
+             ORDER BY artifact_id"
+        );
+        let mut outcomes = BTreeMap::new();
+        let mut batch_query_failed = false;
+        match connection.prepare(&query) {
+            Ok(mut statement) => {
+                let mut parameters: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+                parameters.push(&account_id);
+                parameters.extend(
+                    chunk
+                        .iter()
+                        .map(|identifier| *identifier as &dyn rusqlite::ToSql),
+                );
+                match statement.query(rusqlite::params_from_iter(parameters)) {
+                    Ok(mut rows) => loop {
+                        let row = match rows.next() {
+                            Ok(Some(row)) => row,
+                            Ok(None) => break,
+                            Err(_) => {
+                                batch_query_failed = true;
+                                break;
+                            }
+                        };
+                        let Ok(identifier) = row.get::<_, String>(0) else {
+                            batch_query_failed = true;
+                            continue;
+                        };
+                        let decoded = (|| -> Result<CanonicalArtifact, RestoreError> {
+                            let kind: String = row.get(1)?;
+                            let role: String = row.get(2)?;
+                            let availability: String = row.get(3)?;
+                            let source_sha: Option<String> = row.get(4)?;
+                            let decoded_sha: Option<String> = row.get(5)?;
+                            let digest: String = row.get(6)?;
+                            let bytes: Vec<u8> = row.get(7)?;
+                            let artifact: CanonicalArtifact =
+                                verify_stored_record(&bytes, &digest)?;
+                            if artifact.artifact_id != identifier
+                                || kind != json_enum(&artifact.kind)?
+                                || role != json_enum(&artifact.role)?
+                                || availability != json_enum(&artifact.availability)?
+                                || source_sha != artifact.source_sha256
+                                || decoded_sha != artifact.decoded_sha256
+                            {
+                                return Err(RestoreError::Integrity(
+                                    "replica artifact projection differs from its canonical record"
+                                        .to_string(),
+                                ));
+                            }
+                            Ok(artifact)
+                        })();
+                        let outcome = decoded
+                            .map_or(ReplicaArtifactSnapshotItem::Invalid, |artifact| {
+                                ReplicaArtifactSnapshotItem::Available(Box::new(artifact))
+                            });
+                        if outcomes.insert(identifier, outcome).is_some() {
+                            batch_query_failed = true;
+                        }
+                    },
+                    Err(_) => batch_query_failed = true,
+                }
+            }
+            Err(_) => batch_query_failed = true,
+        }
+
+        for identifier in chunk {
+            let outcome = outcomes.remove(*identifier).unwrap_or({
+                if batch_query_failed {
+                    ReplicaArtifactSnapshotItem::Invalid
+                } else {
+                    ReplicaArtifactSnapshotItem::Missing
+                }
+            });
+            match outcome {
+                ReplicaArtifactSnapshotItem::Available(_) => {
+                    available_count = available_count.saturating_add(1)
+                }
+                ReplicaArtifactSnapshotItem::Missing => {
+                    missing_count = missing_count.saturating_add(1)
+                }
+                ReplicaArtifactSnapshotItem::Invalid => {
+                    invalid_count = invalid_count.saturating_add(1)
+                }
+            }
+            visit(identifier, outcome, &report)?;
+        }
+    }
+    transaction.rollback()?;
+    Ok(ReplicaArtifactSnapshotReport {
+        checkpoint_revision,
+        requested_count: artifact_ids.len() as u64,
+        available_count,
+        missing_count,
+        invalid_count,
+    })
 }
 
 pub fn replica_restoration_report(

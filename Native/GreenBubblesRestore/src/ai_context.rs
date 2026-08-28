@@ -37,6 +37,7 @@ const AI_QUERY_FORMAT_VERSION: u32 = 1;
 const AI_CONTEXT_FORMAT_VERSION: u32 = 2;
 const MAX_AI_QUERY_BYTES: u64 = 1024 * 1024;
 const EXPORT_PAGE_SIZE: usize = 1_000;
+const EXPORT_PROGRESS_RECORD_INTERVAL: u64 = 1_000;
 const PHASE_RESOLUTION: u64 = 1_000_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -916,52 +917,78 @@ pub fn export_ai_context(
 
     let artifact_count = artifact_conversations.len() as u64;
     let mut artifact_error_count = 0_u64;
-    for (index, (artifact_id, conversation_ids)) in artifact_conversations.into_iter().enumerate() {
-        let conversation_ids = conversation_ids.into_iter().collect::<Vec<_>>();
-        let response = reader.raw_call(ConnectorOperation::GetArtifact {
-            conversation_id: conversation_ids[0].clone(),
-            artifact_id: artifact_id.clone(),
-        });
-        let (detail, error) = match response.result {
-            Some(ConnectorResult::Artifact(artifact)) if response.ok => {
-                (Some(sanitize_artifact(artifact)), None)
+    let mut processed_artifact_count = 0_u64;
+    observe_export(
+        progress,
+        ProgressState::Advanced,
+        "exportArtifacts",
+        0,
+        artifact_count,
+        900_000,
+        Some(4),
+        4,
+        started,
+    );
+    let artifact_summary = reader.export_artifacts(
+        &artifact_conversations,
+        |artifact_id, conversation_ids, result| {
+            let (detail, error) = match result {
+                Ok(artifact) => (Some(sanitize_artifact(artifact)), None),
+                Err(error) => {
+                    artifact_error_count = artifact_error_count.saturating_add(1);
+                    limitation_codes.insert("artifactResolutionUnavailable".to_string());
+                    (
+                        None,
+                        Some(AiContextArtifactError {
+                            code: error.code,
+                            message: safe_query_error_message(error.code).to_string(),
+                            retryable: error.retryable,
+                        }),
+                    )
+                }
+            };
+            artifact_writer.write(&AiContextArtifact {
+                format_version: AI_CONTEXT_FORMAT_VERSION,
+                artifact_id: artifact_id.to_string(),
+                conversation_ids: conversation_ids.iter().cloned().collect(),
+                detail,
+                error,
+            })?;
+            processed_artifact_count = processed_artifact_count.saturating_add(1);
+            if processed_artifact_count == artifact_count
+                || processed_artifact_count.is_multiple_of(EXPORT_PROGRESS_RECORD_INTERVAL)
+            {
+                observe_export(
+                    progress,
+                    ProgressState::Advanced,
+                    "exportArtifacts",
+                    processed_artifact_count,
+                    artifact_count,
+                    900_000_u64.saturating_add(progress_fraction(
+                        processed_artifact_count,
+                        artifact_count,
+                        90_000,
+                    )),
+                    Some(4),
+                    4,
+                    started,
+                );
             }
-            _ => {
-                artifact_error_count = artifact_error_count.saturating_add(1);
-                limitation_codes.insert("artifactResolutionUnavailable".to_string());
-                let error = response.error.unwrap_or(ConnectorErrorBody {
-                    code: ConnectorErrorCode::IntegrityFailure,
-                    message: "artifact resolution returned no result".to_string(),
-                    retryable: false,
-                });
-                (
-                    None,
-                    Some(AiContextArtifactError {
-                        code: error.code,
-                        message: safe_query_error_message(error.code).to_string(),
-                        retryable: error.retryable,
-                    }),
-                )
-            }
-        };
-        artifact_writer.write(&AiContextArtifact {
-            format_version: AI_CONTEXT_FORMAT_VERSION,
-            artifact_id,
-            conversation_ids,
-            detail,
-            error,
-        })?;
-        observe_export(
-            progress,
-            ProgressState::Advanced,
-            "exportArtifacts",
-            index as u64 + 1,
-            artifact_count,
-            900_000_u64.saturating_add(progress_fraction(index as u64 + 1, artifact_count, 90_000)),
-            Some(4),
-            4,
-            started,
-        );
+            Ok(())
+        },
+    )?;
+    if artifact_summary.checkpoint_revision != start_health.checkpoint_revision
+        || artifact_summary.requested_count != artifact_count
+        || artifact_summary
+            .resolved_count
+            .saturating_add(artifact_summary.error_count)
+            != artifact_count
+        || artifact_summary.error_count != artifact_error_count
+        || processed_artifact_count != artifact_count
+    {
+        return Err(RestoreError::Integrity(
+            "AI artifact export changed checkpoint or lost batch accounting".to_string(),
+        ));
     }
 
     let files = vec![
@@ -2048,15 +2075,47 @@ impl<'a, 'b> AiConnectorReader<'a, 'b> {
         }
     }
 
-    fn raw_call(&mut self, operation: ConnectorOperation) -> crate::connector::ConnectorResponse {
+    fn next_request(&mut self, operation: ConnectorOperation) -> ConnectorRequest {
         self.sequence = self.sequence.saturating_add(1);
-        self.service.handle(ConnectorRequest {
+        ConnectorRequest {
             api_version: CONNECTOR_API_VERSION.to_string(),
             request_id: format!("ai-export-{}", self.sequence),
             requester_id: self.requester_id.to_string(),
             destination: self.destination,
             operation,
-        })
+        }
+    }
+
+    fn raw_call(&mut self, operation: ConnectorOperation) -> crate::connector::ConnectorResponse {
+        let request = self.next_request(operation);
+        self.service.handle(request)
+    }
+
+    fn export_artifacts(
+        &mut self,
+        artifact_conversations: &BTreeMap<String, BTreeSet<String>>,
+        visit: impl FnMut(
+            &str,
+            &BTreeSet<String>,
+            Result<ConnectorArtifactView, ConnectorErrorBody>,
+        ) -> Result<(), RestoreError>,
+    ) -> Result<crate::connector::ConnectorArtifactExportSummary, RestoreError> {
+        let (conversation_id, artifact_id) = artifact_conversations
+            .iter()
+            .next()
+            .and_then(|(artifact_id, conversations)| {
+                conversations
+                    .iter()
+                    .next()
+                    .map(|conversation_id| (conversation_id.clone(), artifact_id.clone()))
+            })
+            .unwrap_or_default();
+        let request = self.next_request(ConnectorOperation::GetArtifact {
+            conversation_id,
+            artifact_id,
+        });
+        self.service
+            .export_authorized_artifacts(&request, artifact_conversations, visit)
     }
 
     fn call(&mut self, operation: ConnectorOperation) -> Result<ConnectorResult, RestoreError> {
