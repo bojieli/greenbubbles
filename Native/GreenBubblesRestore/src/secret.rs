@@ -1,6 +1,6 @@
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Read};
 
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::RestoreError;
 
@@ -9,6 +9,9 @@ pub struct DatabasePassphrase([u8; 32]);
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct ReplicaKey([u8; 32]);
+
+// A hexadecimal secret followed by CRLF is the largest accepted input line.
+const MAXIMUM_SECRET_LINE_BYTES: usize = 66;
 
 impl DatabasePassphrase {
     pub fn from_bytes(value: [u8; 32]) -> Self {
@@ -39,9 +42,23 @@ impl ReplicaKey {
 }
 
 fn read_32_byte_secret(invalid: fn() -> RestoreError) -> Result<[u8; 32], RestoreError> {
-    let mut input = String::new();
-    io::stdin().lock().read_line(&mut input)?;
-    let trimmed = input.trim();
+    let mut input = Zeroizing::new(Vec::with_capacity(MAXIMUM_SECRET_LINE_BYTES + 1));
+    io::stdin()
+        .lock()
+        .take((MAXIMUM_SECRET_LINE_BYTES + 1) as u64)
+        .read_until(b'\n', &mut input)?;
+    decode_32_byte_secret_line(&input, invalid)
+}
+
+fn decode_32_byte_secret_line(
+    input: &[u8],
+    invalid: fn() -> RestoreError,
+) -> Result<[u8; 32], RestoreError> {
+    if input.len() > MAXIMUM_SECRET_LINE_BYTES {
+        return Err(invalid());
+    }
+    let text = std::str::from_utf8(input).map_err(|_| invalid())?;
+    let trimmed = text.trim();
     let mut decoded = if trimmed.len() == 64 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
         hex::decode(trimmed).map_err(|_| invalid())?
     } else {
@@ -49,13 +66,11 @@ fn read_32_byte_secret(invalid: fn() -> RestoreError) -> Result<[u8; 32], Restor
     };
     if decoded.len() != 32 {
         decoded.zeroize();
-        input.zeroize();
         return Err(invalid());
     }
     let mut value = [0u8; 32];
     value.copy_from_slice(&decoded);
     decoded.zeroize();
-    input.zeroize();
     Ok(value)
 }
 
@@ -65,4 +80,38 @@ fn invalid_database_passphrase() -> RestoreError {
 
 fn invalid_replica_key() -> RestoreError {
     RestoreError::InvalidReplicaKey
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_bounded_raw_and_hex_secrets() {
+        assert_eq!(
+            decode_32_byte_secret_line(b"12345678901234567890123456789012\n", invalid_replica_key)
+                .unwrap(),
+            *b"12345678901234567890123456789012"
+        );
+        let encoded = format!("{}\r\n", "31".repeat(32));
+        assert_eq!(
+            decode_32_byte_secret_line(encoded.as_bytes(), invalid_replica_key).unwrap(),
+            [0x31; 32]
+        );
+    }
+
+    #[test]
+    fn rejects_an_oversized_or_non_utf8_secret_line() {
+        assert!(matches!(
+            decode_32_byte_secret_line(
+                &vec![b'1'; MAXIMUM_SECRET_LINE_BYTES + 1],
+                invalid_replica_key
+            ),
+            Err(RestoreError::InvalidReplicaKey)
+        ));
+        assert!(matches!(
+            decode_32_byte_secret_line(&[0xff; 32], invalid_database_passphrase),
+            Err(RestoreError::InvalidPassphrase)
+        ));
+    }
 }
