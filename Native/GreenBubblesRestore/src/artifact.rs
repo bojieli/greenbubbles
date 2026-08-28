@@ -966,11 +966,26 @@ fn build_file_index(account_root: &Path) -> Result<MediaFileIndex, RestoreError>
     ];
     for root in roots.iter().filter(|root| root.is_dir()) {
         for entry in WalkDir::new(root).follow_links(false) {
-            let entry = entry.map_err(|_| {
-                RestoreError::Integrity(
-                    "the authorized media tree could not be fully enumerated".to_string(),
-                )
-            })?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    // WeChat mutates this tree while it runs: a candidate that
+                    // vanishes between directory read and stat is simply
+                    // absent, the same outcome as if it had been deleted
+                    // before the walk began. Anything else (permissions,
+                    // loops, I/O failure) still fails closed.
+                    let vanished = error
+                        .io_error()
+                        .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+                        || error.path().is_some_and(|path| !path.exists());
+                    if vanished {
+                        continue;
+                    }
+                    return Err(RestoreError::Integrity(
+                        "the authorized media tree could not be fully enumerated".to_string(),
+                    ));
+                }
+            };
             if !entry.file_type().is_file() && !entry.file_type().is_symlink() {
                 continue;
             }
