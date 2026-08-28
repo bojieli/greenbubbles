@@ -150,7 +150,7 @@ struct RejectionAudit {
 struct ArtifactAudit {
     count: u64,
     identifiers: HashSet<String>,
-    roles: HashMap<String, crate::ArtifactRole>,
+    roles: HashMap<String, BTreeSet<crate::ArtifactRole>>,
     external_paths: BTreeSet<PathBuf>,
     connector_paths: BTreeSet<PathBuf>,
     downloaded: u64,
@@ -1296,9 +1296,13 @@ fn audit_artifacts(
                 "artifact ledger contains a duplicate or empty identity",
             ));
         }
-        result
-            .roles
-            .insert(artifact.artifact_id.clone(), artifact.role);
+        let mut roles = artifact.roles.clone();
+        if roles.is_empty() {
+            // Archives written before per-artifact role sets record a single
+            // role; treat it as the complete set.
+            roles.insert(artifact.role);
+        }
+        result.roles.insert(artifact.artifact_id.clone(), roles);
         result.count += 1;
         if artifact
             .source_md5
@@ -2035,7 +2039,14 @@ fn verify_message_artifacts(
         ));
     }
     for (identifier, role) in &messages.artifact_references {
-        if artifacts.roles.get(identifier) != Some(role) {
+        // Artifact identity is content-based, so one artifact can serve
+        // several roles across messages; every referenced role must be one
+        // the artifact ledger records for that identity.
+        if !artifacts
+            .roles
+            .get(identifier)
+            .is_some_and(|roles| roles.contains(role))
+        {
             return Err(integrity(
                 "message artifact role disagrees with the artifact ledger",
             ));
@@ -3003,5 +3014,103 @@ mod tests {
         assert!(!fragment.non_empty_message_corpus_observed);
         assert!(!fragment.media_reference_corpus_observed);
         assert!(!fragment.verified_local_media_observed);
+    }
+
+    #[test]
+    fn message_artifact_roles_accept_every_recorded_role() {
+        // Artifact identity is content-based, so one artifact can serve
+        // several roles across messages; every recorded role must verify.
+        let mut messages = MessageAudit {
+            count: 1,
+            ..MessageAudit::default()
+        };
+        messages.artifact_ids.insert("artifact-a".to_string());
+        messages.artifact_references = vec![
+            ("artifact-a".to_string(), crate::ArtifactRole::Original),
+            (
+                "artifact-a".to_string(),
+                crate::ArtifactRole::StickerPayload,
+            ),
+            ("artifact-a".to_string(), crate::ArtifactRole::FilePayload),
+        ];
+        let mut artifacts = ArtifactAudit::default();
+        artifacts.identifiers.insert("artifact-a".to_string());
+        artifacts.roles.insert(
+            "artifact-a".to_string(),
+            BTreeSet::from([
+                crate::ArtifactRole::Original,
+                crate::ArtifactRole::StickerPayload,
+                crate::ArtifactRole::FilePayload,
+            ]),
+        );
+
+        assert!(verify_message_artifacts(&messages, &artifacts).is_ok());
+    }
+
+    #[test]
+    fn message_artifact_roles_reject_unrecorded_role() {
+        let mut messages = MessageAudit {
+            count: 1,
+            ..MessageAudit::default()
+        };
+        messages.artifact_ids.insert("artifact-a".to_string());
+        messages.artifact_references =
+            vec![("artifact-a".to_string(), crate::ArtifactRole::VideoPoster)];
+        let mut artifacts = ArtifactAudit::default();
+        artifacts.identifiers.insert("artifact-a".to_string());
+        artifacts.roles.insert(
+            "artifact-a".to_string(),
+            BTreeSet::from([crate::ArtifactRole::Original]),
+        );
+
+        assert!(verify_message_artifacts(&messages, &artifacts).is_err());
+    }
+
+    #[test]
+    fn message_artifact_roles_reject_unlinked_identifier() {
+        let mut messages = MessageAudit {
+            count: 1,
+            ..MessageAudit::default()
+        };
+        messages.artifact_ids.insert("artifact-a".to_string());
+        messages.artifact_references =
+            vec![("artifact-a".to_string(), crate::ArtifactRole::Original)];
+        let mut artifacts = ArtifactAudit::default();
+        artifacts.identifiers.insert("artifact-a".to_string());
+        artifacts.roles.insert(
+            "artifact-a".to_string(),
+            BTreeSet::from([crate::ArtifactRole::Original]),
+        );
+        messages.artifact_ids.clear();
+
+        assert!(verify_message_artifacts(&messages, &artifacts).is_err());
+    }
+
+    #[test]
+    fn artifact_role_sets_fall_back_to_the_single_role_field() {
+        // Archives written before per-artifact role sets must still audit.
+        let legacy = r#"{
+            "artifactId": "artifact-a",
+            "kind": "image",
+            "role": "stickerPayload",
+            "availability": "notDownloaded",
+            "decodeState": "notRequired"
+        }"#;
+        let artifact: crate::model::CanonicalArtifact = serde_json::from_str(legacy).unwrap();
+        assert!(artifact.roles.is_empty());
+        let mut roles = artifact.roles;
+        roles.insert(artifact.role);
+        assert!(roles.contains(&crate::ArtifactRole::StickerPayload));
+
+        let current = r#"{
+            "artifactId": "artifact-a",
+            "kind": "image",
+            "role": "stickerPayload",
+            "roles": ["stickerPayload", "filePayload"],
+            "availability": "notDownloaded",
+            "decodeState": "notRequired"
+        }"#;
+        let artifact: crate::model::CanonicalArtifact = serde_json::from_str(current).unwrap();
+        assert_eq!(artifact.roles.len(), 2);
     }
 }

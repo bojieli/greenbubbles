@@ -153,6 +153,7 @@ impl ArtifactResolver {
                     artifact_id: artifact_id.clone(),
                     kind,
                     role: default_role,
+                    roles: BTreeSet::from([default_role]),
                     availability: ArtifactAvailability::MetadataMissing,
                     source_md5: None,
                     source_local_path: None,
@@ -248,6 +249,7 @@ impl ArtifactResolver {
                     artifact_id: artifact_id.clone(),
                     kind,
                     role: default_role,
+                    roles: BTreeSet::from([default_role]),
                     availability,
                     source_md5: md5,
                     source_local_path: None,
@@ -285,6 +287,7 @@ impl ArtifactResolver {
                         .map(|value| value.source_table_name.clone()),
                     source_resource_row_id: resource.map(|value| value.source_row_id),
                 });
+            self.note_reference_role(&artifact_id, default_role);
             return Ok(vec![MessageArtifactReference {
                 artifact_id,
                 role: default_role,
@@ -305,6 +308,7 @@ impl ArtifactResolver {
                 .find(|resource| resource_matches_path(resource, &path))
                 .or_else(|| (resources.len() == 1).then(|| &resources[0]));
             let artifact_id = self.verify_path(&path, kind, role, source_md5, resource)?;
+            self.note_reference_role(&artifact_id, role);
             references.push(MessageArtifactReference {
                 artifact_id,
                 role,
@@ -389,6 +393,7 @@ impl ArtifactResolver {
                     artifact_id: artifact_id.clone(),
                     kind: ArtifactKind::Voice,
                     role: ArtifactRole::VoicePayload,
+                    roles: BTreeSet::from([ArtifactRole::VoicePayload]),
                     availability: ArtifactAvailability::NotDownloaded,
                     source_md5: None,
                     source_local_path: None,
@@ -416,6 +421,7 @@ impl ArtifactResolver {
                     source_resource_table_name: None,
                     source_resource_row_id: None,
                 });
+            self.note_reference_role(&artifact_id, ArtifactRole::VoicePayload);
             return Ok(vec![MessageArtifactReference {
                 artifact_id,
                 role: ArtifactRole::VoicePayload,
@@ -453,6 +459,7 @@ impl ArtifactResolver {
                 artifact_id: artifact_id.clone(),
                 kind: ArtifactKind::Voice,
                 role: ArtifactRole::VoicePayload,
+                roles: BTreeSet::from([ArtifactRole::VoicePayload]),
                 availability: if ambiguous {
                     ArtifactAvailability::Ambiguous
                 } else {
@@ -513,6 +520,7 @@ impl ArtifactResolver {
             self.artifacts
                 .entry(artifact_id.clone())
                 .or_insert(artifact);
+            self.note_reference_role(&artifact_id, ArtifactRole::VoicePayload);
             result.push(MessageArtifactReference {
                 artifact_id,
                 role: ArtifactRole::VoicePayload,
@@ -654,6 +662,7 @@ impl ArtifactResolver {
             artifact_id: artifact_id.clone(),
             kind,
             role,
+            roles: BTreeSet::from([role]),
             availability: ArtifactAvailability::Downloaded,
             source_md5,
             source_local_path: Some(canonical.display().to_string()),
@@ -683,7 +692,27 @@ impl ArtifactResolver {
         if let Some(data) = image_data.as_deref() {
             self.decode_image(data, &artifact_id, &mut artifact)?;
         }
-        self.artifacts.insert(artifact_id.clone(), artifact);
+        match self.artifacts.get_mut(&artifact_id) {
+            Some(existing) => {
+                // The same physical file is being verified again under another
+                // role (its identity is content-based, so the id matches).
+                // Keep the first entry's provenance, union the roles, and
+                // retain any decode state the new pass does not improve on.
+                existing.roles.insert(role);
+                if existing.decoded_local_path.is_none() {
+                    existing.decoded_local_path = artifact.decoded_local_path;
+                    existing.decoded_byte_count = artifact.decoded_byte_count;
+                    existing.decoded_sha256 = artifact.decoded_sha256;
+                    existing.decoded_format = artifact.decoded_format;
+                }
+                if matches!(existing.decode_state, ArtifactDecodeState::NotRequired) {
+                    existing.decode_state = artifact.decode_state;
+                }
+            }
+            None => {
+                self.artifacts.insert(artifact_id.clone(), artifact);
+            }
+        }
         self.verified_file_cache
             .insert(cache_key, artifact_id.clone());
         Ok(artifact_id)
@@ -778,6 +807,7 @@ impl ArtifactResolver {
                 artifact_id: artifact_id.clone(),
                 kind,
                 role,
+                roles: BTreeSet::from([role]),
                 availability,
                 source_md5,
                 source_local_path: None,
@@ -803,7 +833,17 @@ impl ArtifactResolver {
                 source_resource_table_name: resource.map(|value| value.source_table_name.clone()),
                 source_resource_row_id: resource.map(|value| value.source_row_id),
             });
+        self.note_reference_role(&artifact_id, role);
         artifact_id
+    }
+
+    /// Records that a referencing message uses this artifact in the given
+    /// role. Artifact identity is content-based, so one physical file can
+    /// legitimately serve several roles across messages.
+    fn note_reference_role(&mut self, artifact_id: &str, role: ArtifactRole) {
+        if let Some(artifact) = self.artifacts.get_mut(artifact_id) {
+            artifact.roles.insert(role);
+        }
     }
 }
 

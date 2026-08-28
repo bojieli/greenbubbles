@@ -176,6 +176,15 @@ pub struct CanonicalArtifact {
     pub artifact_id: String,
     pub kind: ArtifactKind,
     pub role: ArtifactRole,
+    /// Every role this artifact serves across all referencing messages.
+    /// Artifact identity is content-based, so one physical file can
+    /// legitimately appear as an original image in one message, a sticker
+    /// payload in another, and so on. The single `role` field remains the
+    /// primary (first-recorded) role for consumers. Archives written before
+    /// this field existed deserialize with an empty set, which consumers must
+    /// treat as exactly `role`.
+    #[serde(default)]
+    pub roles: BTreeSet<ArtifactRole>,
     pub availability: ArtifactAvailability,
     pub source_md5: Option<String>,
     pub source_local_path: Option<String>,

@@ -3056,6 +3056,7 @@ fn build_archive(parent: &Path, name: &str, account: &str, fingerprint: &str) ->
         artifact_id: "artifact-a".to_string(),
         kind: ArtifactKind::Image,
         role: ArtifactRole::Original,
+        roles: BTreeSet::from([ArtifactRole::Original]),
         availability: ArtifactAvailability::Downloaded,
         source_md5: None,
         source_local_path: Some(source_path.display().to_string()),

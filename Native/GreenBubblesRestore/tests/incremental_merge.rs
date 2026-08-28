@@ -583,6 +583,7 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
         artifact_id: "artifact-a".to_string(),
         kind: ArtifactKind::Voice,
         role: ArtifactRole::VoicePayload,
+        roles: BTreeSet::from([ArtifactRole::VoicePayload]),
         availability: ArtifactAvailability::MaterializedFromDatabase,
         source_md5: None,
         source_local_path: None,
