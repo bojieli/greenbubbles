@@ -2,8 +2,8 @@
 
 The original tool kernel is a deterministic authorization boundary over a
 private restoration archive. The replica-backed versioned service now uses the
-same policy principles through the owner-only Unix socket and MCP surfaces
-documented in `CONNECTOR_API.md` and `MCP.md`.
+same policy principles through the one-shot CLI and owner-only Unix socket
+documented in `AI_CONTEXT_CLI.md` and `CONNECTOR_API.md`.
 
 ## Policy dimensions
 
@@ -66,7 +66,7 @@ The key-gated `audit-connector-state` command further verifies all immutable
 draft files against the encrypted replica, current policy, and completed
 request/review events. It reports stale and expired counts without releasing
 draft or recipient data, and fails if a gated action stage appears. It is a
-local maintenance command, not an MCP/Unix tool available to an AI caller.
+local maintenance command, not a Unix connector operation available to an AI caller.
 
 Connector drafts bind the body to account/conversation and human-readable
 recipient evidence, optional reply target, attachment digests, connector/API
@@ -77,5 +77,5 @@ approval or execution operation exists before the Phase 4 gate.
 The Rust library also contains the pure validation types documented in
 `ACTION_SAFETY_CONTRACT.md`. They let tests exercise future gate, adapter,
 approval-binding, idempotency, rate, kill-switch, and lifecycle invariants, but
-they are not registered as connector, CLI, Unix, or MCP operations. They have no
+they are not registered as connector, CLI, or Unix operations. They have no
 approval issuer or action adapter and do not change this tool boundary.

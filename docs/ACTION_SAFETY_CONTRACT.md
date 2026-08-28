@@ -5,7 +5,7 @@ evidence that a future ordinary-contact adapter would have to supply. It exists
 so fail-closed invariants can be reviewed and tested before an adapter is
 selected. It does not open Phase 4 and does not satisfy any live-action gate.
 
-The contract has no connector operation, Unix/MCP tool, client or network call,
+The contract has no connector operation, CLI/Unix action tool, client or network call,
 approval issuer, secret, outbox, or function that reserves or attempts an
 action. Current capability responses continue to report text, reply, and file
 sending as unavailable.

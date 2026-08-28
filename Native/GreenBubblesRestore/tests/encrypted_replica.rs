@@ -451,57 +451,6 @@ fn serves_scoped_replica_reads_and_complete_non_executing_drafts() {
         .unwrap();
     assert!(resumed.status.success());
 
-    let mut mcp = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
-        .arg("connector-mcp")
-        .arg(&consumer_socket)
-        .args([
-            "--requester",
-            "synthetic-mcp-host",
-            "--destination",
-            "local",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let requests = concat!(
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n",
-        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n",
-        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"greenbubbles_status\",\"arguments\":{}}}\n",
-        "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"greenbubbles_get_artifact\",\"arguments\":{\"conversationId\":\"conversation-a\",\"artifactId\":\"artifact-a\"}}}\n"
-    );
-    mcp.stdin
-        .take()
-        .unwrap()
-        .write_all(requests.as_bytes())
-        .unwrap();
-    let mcp_output = mcp.wait_with_output().unwrap();
-    assert!(
-        mcp_output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&mcp_output.stderr)
-    );
-    let mcp_responses = String::from_utf8(mcp_output.stdout)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(mcp_responses.len(), 4);
-    assert!(mcp_responses[1]["result"]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|tool| tool["name"] == "greenbubbles_get_changes"));
-    assert_eq!(mcp_responses[2]["result"]["structuredContent"]["ok"], true);
-    assert_eq!(
-        mcp_responses[3]["result"]["structuredContent"]["result"]["kind"],
-        "artifact"
-    );
-    assert_eq!(
-        mcp_responses[3]["result"]["structuredContent"]["result"]["value"]["artifactId"],
-        "artifact-a"
-    );
     stop_connector_process(&mut connector, &consumer_socket);
 
     let replacement = private.join("replacement-replica.db");

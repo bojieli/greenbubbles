@@ -208,8 +208,7 @@ turning this repository into one of them.
 
 Decision: provide stable, machine-readable, agent-neutral surfaces. A one-shot
 CLI and JSON/JSONL are the primary agent interface; a local API may support
-long-running synchronization independently, but MCP is not a product dependency
-or current integration target. A repository skill teaches modern agent hosts to
+long-running synchronization independently. A repository skill teaches modern agent hosts to
 use the same CLI without creating another protocol or trust boundary. OpenClaw
 is an integration target, not the owner of the data model or process lifecycle.
 Codex, Claude, scripts, search interfaces, and personal-memory projects should
@@ -827,7 +826,7 @@ refresh()
 ```
 
 - [x] Keep JSON/JSONL schemas stable and versioned so scripts and downstream
-  memory systems do not require MCP or a particular agent host.
+  memory systems do not require a particular agent host.
 - [x] Make `capabilities()` report read, draft, text-send, reply, and file-send
   support independently, including a machine-readable reason when unavailable.
 - [x] Build a local authorization service with account, conversation, field,
@@ -851,7 +850,7 @@ refresh()
   bundle/checkpoint/policy binding.
 - [x] Package a discoverable `greenbubbles-context` skill that calls only the
   GreenBubbles CLI, treats source text as untrusted, requires coverage-aware
-  conclusions, and neither acquires keys nor uses raw SQL or MCP.
+  conclusions, and neither acquires keys nor uses raw SQL.
 - [x] Provide a native macOS SwiftUI history browser for verified static bundles
   with visible byte/record/percentage import, private atomic SQLite/FTS indexing,
   coverage-aware conversation/contact/search/timeline views, relationship
@@ -901,7 +900,7 @@ A key-gated connector-state audit also recomputes every stored draft identity,
 checks bounded owner-only files, separates current from stale/expired drafts,
 requires one completed request event per draft, resolves completed reviews, and
 rejects any gated lifecycle stage. Its report is aggregate-only and the command
-is deliberately absent from agent-facing connector/MCP operations.
+is deliberately absent from agent-facing connector operations.
 
 Exit gate: GreenBubbles is independently useful to people, scripts, OpenClaw,
 Codex, Claude, and downstream memory engines, and hostile source content cannot
@@ -954,8 +953,8 @@ An adapter-independent offline safety contract now models the exact gate,
 build, adapter, account, conversation, capability, immutable approval,
 idempotency, kill-switch, rate-window, and lifecycle evidence a future action
 boundary must check. It cannot mint or consume approvals, reserve an attempt,
-invoke a client/network adapter, or expose an action through CLI, Unix API, or
-MCP. Its synthetic fail-closed tests therefore strengthen the design without
+invoke a client/network adapter, or expose an action through the CLI or Unix
+API. Its synthetic fail-closed tests therefore strengthen the design without
 completing any Phase 4 checkbox or substituting for adapter-bound concurrency,
 restart, disposable-account, live-result, and legal/supportability evidence.
 See `docs/ACTION_SAFETY_CONTRACT.md`.
@@ -1067,8 +1066,7 @@ coverage metadata, private file modes, path/raw-field suppression, write
 rejection, and progress completion. The runnable change consumer separately
 bootstraps, persists an owner-only cursor/state, builds an escaped Markdown
 memory projection, resumes, and fails closed across replica replacement until
-explicit rebootstrap. An older MCP compatibility adapter remains isolated for
-existing users, but is not the target interface for new development. See
+explicit rebootstrap. See
 `docs/AI_CONTEXT_CLI.md`, `docs/DOWNSTREAM_CONSUMER.md`, and
 `docs/SOURCE_CONNECTOR_CONTRACT.md`.
 

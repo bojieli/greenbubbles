@@ -41,7 +41,7 @@ use greenbubbles_restore::{
         ConversationToolScope, LocalToolService, ToolCapability, ToolDataDestination,
         ToolMessageField,
     },
-    transport::{load_connector_request, run_mcp_adapter, send_unix_request, serve_unix},
+    transport::{load_connector_request, send_unix_request, serve_unix},
     DatabaseKeySet, DatabasePassphrase, DatabaseUnlockMaterial, ProgressEvent, ProgressObserver,
     ProgressPhase, ProgressState, ProgressUnit, ReplicaKey, RestorationOptions,
 };
@@ -801,14 +801,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let response = send_unix_request(&socket, &request)?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
-        "connector-mcp" => {
-            let socket = required_path(arguments.next(), "Unix socket path")?;
-            let remaining = arguments.collect::<Vec<_>>();
-            let requester = required_option(&remaining, "--requester")?;
-            let destination =
-                parse_connector_destination(option_string(&remaining, "--destination")?)?;
-            run_mcp_adapter(&socket, &requester, destination)?;
-        }
         "tool-policy" => {
             let archive = required_path(arguments.next(), "archive directory")?;
             let policy_path = required_path(arguments.next(), "tool policy path")?;
@@ -1009,7 +1001,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore audit-ai-memory <AI-memory-output-directory>\n",
                     "  greenbubbles-restore connector-serve <replica-path> <policy-file> <audit-log> <draft-directory> <socket-path> --replica-key-stdin\n",
                     "  greenbubbles-restore connector-call <socket-path> <private-request-json>\n",
-                    "  greenbubbles-restore connector-mcp <socket-path> --requester <id> [--destination local|remote]\n",
                     "  greenbubbles-restore tool-policy <archive> <policy-file> ([<conversation-id>...] | --all-conversations) [--capabilities list,read,search,draft] [--fields sender,created-at,direction,type,content,attachments,relationships] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--enable-cached-moments --cached-fields author,created-at,type,content,title,description,url,media-count,like-count,comment-count] [--cached-not-before-unix <seconds>] [--cached-not-after-unix <seconds>] [--allow-cached-remote-model] [--max-results <n>] [--max-summary-bytes <n>] [--max-draft-bytes <n>]\n",
                     "  greenbubbles-restore tool-list <archive> <policy-file> <audit-log> --requester <id> [--destination local|remote]\n",
                     "  greenbubbles-restore tool-recent <archive> <policy-file> <audit-log> <conversation-id> --requester <id> [--limit <n>] [--destination local|remote]\n",

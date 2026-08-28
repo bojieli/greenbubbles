@@ -3,7 +3,7 @@
 GreenBubbles includes a native, read-only macOS history browser for audited AI
 context bundles. The browser is the human-facing counterpart to the CLI and
 repository skill: it visualizes the same normalized, policy-scoped records and
-does not open WeChat databases, acquire database keys, run an MCP server, or
+does not open WeChat databases, acquire database keys, run an agent server, or
 send messages.
 
 ## Technology decision

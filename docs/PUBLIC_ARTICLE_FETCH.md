@@ -2,8 +2,8 @@
 
 GreenBubbles can parse one ordinary public WeChat article URL through the
 separate `greenbubbles-public-article` executable. This optional Phase 5A helper
-is not part of restoration, the encrypted replica service, the Unix connector,
-or MCP.
+is not part of restoration, the encrypted replica service, or the Unix
+connector.
 
 That process boundary is intentional. The executable has no dependency on
 `GreenBubblesCore`, no WeChat database passphrase, no replica key, no policy or

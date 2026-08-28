@@ -664,7 +664,7 @@ account, or committed source checkpoint changes. `replica-status` and
 
 ### AI-friendly CLI and static context
 
-The preferred AI integration is a one-shot CLI, not an MCP dependency.
+The preferred AI integration is the one-shot CLI plus the repository skill.
 `ai-query` accepts one owner-only JSON request and returns a stable response
 containing both the policy-minimized result and the replica's current freshness,
 database coverage, and limitation codes. It reuses the connector authorization

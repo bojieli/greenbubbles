@@ -296,8 +296,8 @@ checkpoint-consistent pagination. Its cursor binds the filter, account, random
 replica generation, source fingerprint, and checkpoint revision. The response
 distinguishes `unavailable`, `availableEmpty`, and `available`; it also reports
 the exact observation time and `partialLocalCache` label. The raw canonical CLI
-surface remains local/private. Connector and MCP consumers receive a separately
-authorized minimized view instead.
+surface remains local/private. Policy-scoped AI and connector consumers receive
+a separately authorized minimized view instead.
 
 `replica-status` exposes the schema/cipher, opaque account and source
 fingerprints, exact client-build compatibility state and mismatched fields,

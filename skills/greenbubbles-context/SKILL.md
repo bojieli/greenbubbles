@@ -1,6 +1,6 @@
 ---
 name: greenbubbles-context
-description: Query an existing GreenBubbles WeChat replica, consume its policy-scoped AI context bundle, or build a bounded personal-memory projection. Use for finding authorized chats, contacts, attachments, synchronization coverage, and citation-preserving memory ingestion; do not use for database-key acquisition, decryption, raw SQL, MCP setup, or sending messages.
+description: Query an existing GreenBubbles WeChat replica, consume its policy-scoped AI context bundle, or build a bounded personal-memory projection. Use for finding authorized chats, contacts, attachments, synchronization coverage, and citation-preserving memory ingestion; do not use for database-key acquisition, decryption, raw SQL, or sending messages.
 ---
 
 # GreenBubbles context

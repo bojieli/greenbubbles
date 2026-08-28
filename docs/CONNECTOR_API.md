@@ -1,7 +1,7 @@
 # Versioned local connector API
 
 GreenBubbles serves the encrypted canonical replica through one deterministic
-policy boundary. CLI scripts, the owner-only Unix socket, and MCP use the same
+policy boundary. CLI scripts and the owner-only Unix socket use the same
 `greenbubbles.connector.v1` request and response types. The service has no
 WeChat database passphrase, source snapshot root, active-read adapter, or write
 adapter; those privileges cannot be reached by changing request content.
@@ -20,7 +20,7 @@ printf '%s\n' "$REPLICA_KEY" |
 `REPLICA_KEY` is illustrative shell state, not a recommended persistent key
 store. The key must be a distinct high-entropy 32-byte secret and is consumed
 from standard input before the server begins accepting requests. It never
-appears in a process argument, request, MCP process, response, or audit event.
+appears in a process argument, request, response, or audit event.
 The socket parent directory must already be owner-only. GreenBubbles refuses to
 replace an existing socket path and creates the socket with mode `0600`.
 
@@ -149,8 +149,8 @@ Remote release remains denied unless
 The server never accepts SQL, source paths, replica paths, arbitrary internal
 function names, or destination changes from message content. A remote-model
 request fails unless that exact conversation explicitly permits remote release.
-The remote/local destination is an envelope property or an MCP startup choice,
-not a value inferred by a model from retrieved messages.
+The remote/local destination is an explicit request-envelope property, not a
+value inferred by a model from retrieved messages.
 
 `getChanges` releases only events already carrying an authorized conversation
 identity. Participant, artifact, and checkpoint events without such an identity

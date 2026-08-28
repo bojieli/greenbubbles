@@ -6,7 +6,7 @@ help exits without opening private inputs or reading a key.
 ## Live query
 
 `ai-query` performs one policy-scoped read directly against the encrypted local
-replica. It does not require a daemon or MCP server:
+replica. It does not require a daemon:
 
 ```text
 greenbubbles-restore ai-query \

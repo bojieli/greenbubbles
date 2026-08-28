@@ -1,8 +1,8 @@
 # AI context CLI and static bundle
 
 GreenBubbles' primary agent surface is the `greenbubbles-restore` command-line
-program. It serves source-faithful WeChat context without requiring an MCP host,
-a long-running connector process, direct SQL, or access to restoration secrets.
+program. It serves source-faithful WeChat context without requiring a
+long-running connector process, direct SQL, or access to restoration secrets.
 The repository skill in `skills/greenbubbles-context` gives an agent the concise
 operating instructions for this surface.
 
