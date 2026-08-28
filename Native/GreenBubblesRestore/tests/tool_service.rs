@@ -347,10 +347,17 @@ fn enforces_scopes_minimizes_context_and_creates_drafts_only() {
     let unavailable_list = service
         .list_enabled_conversations(ToolDataDestination::LocalModel)
         .unwrap();
-    assert!(unavailable_list.conversations.is_empty());
+    assert_eq!(unavailable_list.conversations.len(), 1);
+    assert_eq!(
+        unavailable_list.conversations[0].kind,
+        ConversationKind::Unresolved
+    );
     assert!(unavailable_list
         .limitation_codes
         .contains(&"archiveConversationLedgerUnavailable".to_string()));
+    assert!(unavailable_list
+        .limitation_codes
+        .contains(&"unavailableConversationMetadataSynthesized".to_string()));
     fs::rename(&unavailable_conversation_ledger, &conversation_ledger).unwrap();
     fs::set_permissions(&conversation_ledger, fs::Permissions::from_mode(0o644)).unwrap();
     assert!(service

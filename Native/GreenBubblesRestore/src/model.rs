@@ -183,7 +183,7 @@ pub struct CanonicalArtifact {
     /// primary (first-recorded) role for consumers. Archives written before
     /// this field existed deserialize with an empty set, which consumers must
     /// treat as exactly `role`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub roles: BTreeSet<ArtifactRole>,
     pub availability: ArtifactAvailability,
     pub source_md5: Option<String>,

@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
@@ -306,18 +306,19 @@ pub fn restore_catalog_with_progress(
                 .unavailable_tables
                 .contains(&(database.source_set_id.clone(), table.clone()))
             {
-                let classification_reason =
-                    "table schema or row count was unavailable and the table was omitted";
+                let (role, classification_reason) = classify_unavailable_table(table);
                 *integrity
                     .table_role_counts
-                    .entry("unhandledMessageCandidate".to_string())
+                    .entry(table_role_name(role).to_string())
                     .or_default() += 1;
                 *integrity
                     .table_classification_reason_counts
                     .entry(classification_reason.to_string())
                     .or_default() += 1;
-                integrity.message_candidate_gap_count =
-                    integrity.message_candidate_gap_count.saturating_add(1);
+                if role == TableCoverageRole::UnhandledMessageCandidate {
+                    integrity.message_candidate_gap_count =
+                        integrity.message_candidate_gap_count.saturating_add(1);
+                }
                 all_table_coverage.push(TableSchemaCoverage {
                     source_set_id: database.source_set_id.clone(),
                     source_logical_path: database.logical_path.clone(),
@@ -326,7 +327,7 @@ pub fn restore_catalog_with_progress(
                     columns: Vec::new(),
                     source_row_count: None,
                     schema_fingerprint: None,
-                    role: TableCoverageRole::UnhandledMessageCandidate,
+                    role,
                     classification_reason: classification_reason.to_string(),
                     availability: crate::TableCoverageAvailability::Unavailable,
                     limitation_code: Some("unavailableSourceTableOmitted".to_string()),
@@ -346,8 +347,19 @@ pub fn restore_catalog_with_progress(
                     integrity.observed_table_row_count = integrity
                         .observed_table_row_count
                         .saturating_sub(planned_rows);
-                    integrity.message_candidate_gap_count =
-                        integrity.message_candidate_gap_count.saturating_add(1);
+                    let (role, classification_reason) = classify_unavailable_table(table);
+                    *integrity
+                        .table_role_counts
+                        .entry(table_role_name(role).to_string())
+                        .or_default() += 1;
+                    *integrity
+                        .table_classification_reason_counts
+                        .entry(classification_reason.to_string())
+                        .or_default() += 1;
+                    if role == TableCoverageRole::UnhandledMessageCandidate {
+                        integrity.message_candidate_gap_count =
+                            integrity.message_candidate_gap_count.saturating_add(1);
+                    }
                     overall_processed_rows = overall_processed_rows.saturating_add(planned_rows);
                     all_table_coverage.push(TableSchemaCoverage {
                         source_set_id: database.source_set_id.clone(),
@@ -357,10 +369,8 @@ pub fn restore_catalog_with_progress(
                         columns: Vec::new(),
                         source_row_count: None,
                         schema_fingerprint: None,
-                        role: TableCoverageRole::UnhandledMessageCandidate,
-                        classification_reason:
-                            "table became unavailable during restoration and was omitted"
-                                .to_string(),
+                        role,
+                        classification_reason: classification_reason.to_string(),
                         availability: crate::TableCoverageAvailability::Unavailable,
                         limitation_code: Some("unavailableSourceTableOmitted".to_string()),
                     });
@@ -1369,11 +1379,51 @@ fn omit_runtime_table(
     integrity.message_candidate_gap_count = integrity.message_candidate_gap_count.saturating_add(1);
     *overall_processed_rows = overall_processed_rows.saturating_add(planned_rows);
     if let Some(coverage) = coverage {
+        // This path runs only after schema inspection identified a supported
+        // message table, but before any row ledger was admitted. Once the
+        // table can no longer be opened it must not remain in the complete
+        // message-table set: doing so would make the deliberately degraded
+        // archive disagree with its own coverage ledger during audit.
+        if coverage.role == TableCoverageRole::Message {
+            integrity.message_table_count = integrity.message_table_count.saturating_sub(1);
+            decrement_integrity_count(&mut integrity.table_role_counts, "message");
+            decrement_integrity_count(
+                &mut integrity.table_classification_reason_counts,
+                &coverage.classification_reason,
+            );
+            if let Some(schema_fingerprint) = coverage.schema_fingerprint.as_deref() {
+                decrement_integrity_count(&mut integrity.message_schema_counts, schema_fingerprint);
+            }
+            coverage.role = TableCoverageRole::UnhandledMessageCandidate;
+            *integrity
+                .table_role_counts
+                .entry("unhandledMessageCandidate".to_string())
+                .or_default() += 1;
+            *integrity
+                .table_classification_reason_counts
+                .entry(
+                    "message table became unavailable during restoration and was omitted"
+                        .to_string(),
+                )
+                .or_default() += 1;
+        }
         coverage.source_row_count = None;
         coverage.availability = crate::TableCoverageAvailability::Unavailable;
         coverage.limitation_code = Some("unavailableSourceTableOmitted".to_string());
         coverage.classification_reason =
             "message table became unavailable during restoration and was omitted".to_string();
+    }
+}
+
+fn decrement_integrity_count(counts: &mut BTreeMap<String, u64>, key: &str) {
+    match counts.get(key).copied() {
+        Some(0 | 1) => {
+            counts.remove(key);
+        }
+        Some(count) => {
+            counts.insert(key.to_string(), count - 1);
+        }
+        None => {}
     }
 }
 
@@ -3027,6 +3077,22 @@ fn classify_table(name: &str, columns: &[String]) -> (TableCoverageRole, &'stati
     )
 }
 
+fn classify_unavailable_table(name: &str) -> (TableCoverageRole, &'static str) {
+    if classify_table(name, &[]).0 == TableCoverageRole::KnownAuxiliary {
+        return (
+            TableCoverageRole::KnownAuxiliary,
+            "recognized auxiliary table was unavailable and omitted",
+        );
+    }
+    // Without a readable schema, absence of a message signature is not
+    // evidence that the table contained no messages. Conservatively expose a
+    // candidate gap unless its name independently proves an auxiliary role.
+    (
+        TableCoverageRole::UnhandledMessageCandidate,
+        "table schema or row count was unavailable and the table was omitted",
+    )
+}
+
 fn is_known_auxiliary_table(name: &str, columns: &[String]) -> bool {
     let lower = name.to_ascii_lowercase();
     let key_value_metadata = matches!(lower.as_str(), "buff" | "config" | "imgtableinfo")
@@ -3290,6 +3356,74 @@ fn write_report_with_exact_archive_size(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_unavailable_message_table_becomes_an_auditable_candidate_gap() {
+        let original_reason =
+            "matched the supported message-table name or column signature".to_string();
+        let schema_fingerprint = "a".repeat(64);
+        let mut integrity = RestorationIntegrity {
+            message_table_count: 1,
+            message_candidate_gap_count: 0,
+            observed_table_row_count: 17,
+            table_role_counts: BTreeMap::from([("message".to_string(), 1)]),
+            table_classification_reason_counts: BTreeMap::from([(original_reason.clone(), 1)]),
+            message_schema_counts: BTreeMap::from([(schema_fingerprint.clone(), 1)]),
+            ..Default::default()
+        };
+        let mut coverage = TableSchemaCoverage {
+            source_set_id: "source-set".to_string(),
+            source_logical_path: "message.db".to_string(),
+            source_table_id: "table-id".to_string(),
+            source_table_name: "Msg_deadbeef".to_string(),
+            columns: vec!["type".to_string(), "content".to_string()],
+            source_row_count: Some(17),
+            schema_fingerprint: Some(schema_fingerprint),
+            role: TableCoverageRole::Message,
+            classification_reason: original_reason,
+            availability: crate::TableCoverageAvailability::Complete,
+            limitation_code: None,
+        };
+        let mut processed_rows = 3;
+
+        omit_runtime_table(&mut integrity, Some(&mut coverage), 17, &mut processed_rows);
+
+        assert_eq!(integrity.message_table_count, 0);
+        assert_eq!(integrity.message_candidate_gap_count, 1);
+        assert_eq!(integrity.observed_table_row_count, 0);
+        assert_eq!(processed_rows, 20);
+        assert!(integrity.message_schema_counts.is_empty());
+        assert_eq!(
+            integrity.table_role_counts,
+            BTreeMap::from([("unhandledMessageCandidate".to_string(), 1)])
+        );
+        assert_eq!(coverage.role, TableCoverageRole::UnhandledMessageCandidate);
+        assert_eq!(
+            coverage.availability,
+            crate::TableCoverageAvailability::Unavailable
+        );
+        assert_eq!(
+            coverage.limitation_code.as_deref(),
+            Some("unavailableSourceTableOmitted")
+        );
+        assert_eq!(coverage.source_row_count, None);
+    }
+
+    #[test]
+    fn unavailable_table_classification_is_precise_and_conservative() {
+        assert_eq!(
+            classify_unavailable_table("SessionTable").0,
+            TableCoverageRole::KnownAuxiliary
+        );
+        assert_eq!(
+            classify_unavailable_table("Msg_deadbeef").0,
+            TableCoverageRole::UnhandledMessageCandidate
+        );
+        assert_eq!(
+            classify_unavailable_table("unrecognized_table").0,
+            TableCoverageRole::UnhandledMessageCandidate
+        );
+    }
 
     #[test]
     fn compressed_staging_payload_round_trip_is_lossless() {

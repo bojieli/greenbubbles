@@ -602,9 +602,7 @@ fn verify_coverage(
                 .schema_fingerprint
                 .as_deref()
                 .is_none_or(|value| !is_lower_hex(value, 64)))
-            || (unavailable
-                && (table.role != TableCoverageRole::UnhandledMessageCandidate
-                    || table.limitation_code.as_deref().is_none_or(str::is_empty)))
+            || (unavailable && table.limitation_code.as_deref().is_none_or(str::is_empty))
         {
             return Err(integrity(
                 "coverage table lacks a complete schema fingerprint",
@@ -3098,6 +3096,9 @@ mod tests {
         }"#;
         let artifact: crate::model::CanonicalArtifact = serde_json::from_str(legacy).unwrap();
         assert!(artifact.roles.is_empty());
+        assert!(!serde_json::to_string(&artifact)
+            .unwrap()
+            .contains("\"roles\""));
         let mut roles = artifact.roles;
         roles.insert(artifact.role);
         assert!(roles.contains(&crate::ArtifactRole::StickerPayload));

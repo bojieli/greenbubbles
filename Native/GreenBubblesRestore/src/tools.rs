@@ -184,6 +184,10 @@ pub struct MinimizedMessage {
     pub artifact_references: Vec<ToolArtifactReference>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub relationships: Vec<ToolRelationshipReference>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub omitted_artifact_reference_count: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub omitted_relationship_reference_count: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -334,14 +338,19 @@ pub fn create_all_conversations_tool_policy_with_cached_moments(
     maximum_draft_bytes: usize,
 ) -> Result<ToolAuthorizationPolicy, RestoreError> {
     let report = load_report(archive_directory)?;
-    let conversation_ids = load_conversation_ids(archive_directory, &report.account_id)?;
+    let conversation_ids = load_conversation_ids(
+        archive_directory,
+        &report.account_id,
+        report.integrity.conversation_count,
+    )?;
     let conversation_scopes = conversation_ids
         .into_iter()
         .map(|conversation_id| (conversation_id, conversation_scope.clone()))
         .collect();
-    create_tool_policy_with_cached_moments(
-        archive_directory,
+    validate_tool_scopes(&conversation_scopes, cached_moments_scope.as_ref())?;
+    write_tool_policy(
         policy_path,
+        report,
         conversation_scopes,
         cached_moments_scope,
         maximum_result_count,
@@ -362,7 +371,11 @@ pub fn create_tool_policy_with_cached_moments(
 ) -> Result<ToolAuthorizationPolicy, RestoreError> {
     validate_tool_scopes(&conversation_scopes, cached_moments_scope.as_ref())?;
     let report = load_report(archive_directory)?;
-    let known = load_conversation_ids(archive_directory, &report.account_id)?;
+    let known = load_conversation_ids(
+        archive_directory,
+        &report.account_id,
+        report.integrity.conversation_count,
+    )?;
     if let Some(unknown) = conversation_scopes
         .keys()
         .find(|identifier| !known.contains(*identifier))
@@ -371,6 +384,27 @@ pub fn create_tool_policy_with_cached_moments(
             "conversation is not present in the archive: {unknown}"
         )));
     }
+    write_tool_policy(
+        policy_path,
+        report,
+        conversation_scopes,
+        cached_moments_scope,
+        maximum_result_count,
+        maximum_message_summary_bytes,
+        maximum_draft_bytes,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_tool_policy(
+    policy_path: &Path,
+    report: crate::RestorationReport,
+    conversation_scopes: BTreeMap<String, ConversationToolScope>,
+    cached_moments_scope: Option<CachedMomentsToolScope>,
+    maximum_result_count: usize,
+    maximum_message_summary_bytes: usize,
+    maximum_draft_bytes: usize,
+) -> Result<ToolAuthorizationPolicy, RestoreError> {
     let policy = ToolAuthorizationPolicy {
         format_version: 3,
         account_id: report.account_id,
@@ -503,6 +537,30 @@ impl LocalToolService {
         }
         if omitted_conversation_count > 0 {
             limitation_codes.insert("malformedArchiveConversationOmitted".to_string());
+        }
+        for (conversation_id, scope) in &self.policy.conversation_scopes {
+            if seen.contains(conversation_id)
+                || !scope
+                    .capabilities
+                    .contains(&ToolCapability::ListConversations)
+                || (destination == ToolDataDestination::RemoteModel && !scope.allow_remote_model)
+            {
+                continue;
+            }
+            // The owner-created, account-bound policy still proves this
+            // scope even when optional conversation metadata is unavailable.
+            // Preserve access without inventing participants or labels.
+            conversations.push(ToolConversationView {
+                conversation_id: conversation_id.clone(),
+                kind: ConversationKind::Unresolved,
+                participant_count: 0,
+                entity_decode_state: EntityDecodeState::Failed,
+                capabilities: scope.capabilities.clone(),
+                message_fields: scope.message_fields.clone(),
+                not_before_unix: scope.not_before_unix,
+                not_after_unix: scope.not_after_unix,
+            });
+            limitation_codes.insert("unavailableConversationMetadataSynthesized".to_string());
         }
         conversations.sort_by(|left, right| left.conversation_id.cmp(&right.conversation_id));
         self.append_audit(
@@ -989,6 +1047,64 @@ pub(crate) fn minimize_message(
         } else {
             (None, None, None)
         };
+    let mut omitted_artifact_reference_count = 0_u64;
+    let mut seen_artifact_ids = BTreeSet::new();
+    let artifact_references = if fields.contains(&ToolMessageField::Attachments) {
+        message
+            .artifact_references
+            .into_iter()
+            .filter_map(|reference| {
+                if reference.artifact_id.is_empty()
+                    || !seen_artifact_ids.insert(reference.artifact_id.clone())
+                {
+                    omitted_artifact_reference_count =
+                        omitted_artifact_reference_count.saturating_add(1);
+                    return None;
+                }
+                Some(ToolArtifactReference {
+                    artifact_id: reference.artifact_id,
+                    role: reference.role,
+                    preferred: reference.preferred,
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let mut omitted_relationship_reference_count = 0_u64;
+    let relationships = if fields.contains(&ToolMessageField::Relationships) {
+        message
+            .relationships
+            .into_iter()
+            .filter_map(|relationship| {
+                let had_empty_target = relationship
+                    .target_canonical_id
+                    .as_deref()
+                    .is_some_and(str::is_empty);
+                let target = relationship
+                    .target_canonical_id
+                    .filter(|identifier| !identifier.is_empty());
+                if had_empty_target {
+                    omitted_relationship_reference_count =
+                        omitted_relationship_reference_count.saturating_add(1);
+                }
+                if relationship.resolved && target.is_none() {
+                    if !had_empty_target {
+                        omitted_relationship_reference_count =
+                            omitted_relationship_reference_count.saturating_add(1);
+                    }
+                    return None;
+                }
+                Some(ToolRelationshipReference {
+                    kind: relationship.kind,
+                    target_canonical_id: target,
+                    resolved: relationship.resolved,
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     MinimizedMessage {
         canonical_id: message.canonical_id,
         conversation_id: message.conversation_id,
@@ -1022,33 +1138,15 @@ pub(crate) fn minimize_message(
         payload_kind,
         payload_summary,
         payload_summary_truncated,
-        artifact_references: if fields.contains(&ToolMessageField::Attachments) {
-            message
-                .artifact_references
-                .into_iter()
-                .map(|reference| ToolArtifactReference {
-                    artifact_id: reference.artifact_id,
-                    role: reference.role,
-                    preferred: reference.preferred,
-                })
-                .collect()
-        } else {
-            Vec::new()
-        },
-        relationships: if fields.contains(&ToolMessageField::Relationships) {
-            message
-                .relationships
-                .into_iter()
-                .map(|relationship| ToolRelationshipReference {
-                    kind: relationship.kind,
-                    target_canonical_id: relationship.target_canonical_id,
-                    resolved: relationship.resolved,
-                })
-                .collect()
-        } else {
-            Vec::new()
-        },
+        artifact_references,
+        relationships,
+        omitted_artifact_reference_count,
+        omitted_relationship_reference_count,
     }
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 pub(crate) fn minimize_cached_moment(

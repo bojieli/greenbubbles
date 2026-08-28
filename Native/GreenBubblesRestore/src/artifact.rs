@@ -57,6 +57,9 @@ pub struct ArtifactResolver {
     voice_by_local: HashMap<i64, Vec<VoiceLocator>>,
     voice_by_server: HashMap<i64, Vec<VoiceLocator>>,
     file_index: MediaFileIndex,
+    resource_index_incomplete: bool,
+    voice_index_incomplete: bool,
+    file_index_incomplete: bool,
     v2_image_key: Option<[u8; 16]>,
     artifacts: BTreeMap<String, CanonicalArtifact>,
     verified_file_cache: HashMap<String, String>,
@@ -88,23 +91,22 @@ impl ArtifactResolver {
             None => None,
         };
 
-        let (resource_by_local, resource_by_server) = if defer_media {
-            (HashMap::new(), HashMap::new())
+        let (resource_by_local, resource_by_server, resource_index_incomplete) = if defer_media {
+            (HashMap::new(), HashMap::new(), false)
         } else {
-            load_resource_index(catalog)?
+            load_resource_index(catalog)
         };
-        let (voice_by_local, voice_by_server) = if defer_media {
-            (HashMap::new(), HashMap::new())
+        let (voice_by_local, voice_by_server, voice_index_incomplete) = if defer_media {
+            (HashMap::new(), HashMap::new(), false)
         } else {
-            load_voice_index(catalog)?
+            load_voice_index(catalog)
         };
-        let file_index = if defer_media {
-            MediaFileIndex::default()
+        let (file_index, file_index_incomplete) = if defer_media {
+            (MediaFileIndex::default(), false)
         } else {
             account_root
                 .as_deref()
                 .map(build_file_index)
-                .transpose()?
                 .unwrap_or_default()
         };
         let v2_image_key = if defer_media {
@@ -126,6 +128,9 @@ impl ArtifactResolver {
             voice_by_local,
             voice_by_server,
             file_index,
+            resource_index_incomplete,
+            voice_index_incomplete,
+            file_index_incomplete,
             v2_image_key,
             artifacts: BTreeMap::new(),
             verified_file_cache: HashMap::new(),
@@ -227,8 +232,12 @@ impl ArtifactResolver {
         }
 
         if candidates.is_empty() {
+            let metadata_index_gap =
+                self.resource_index_incomplete && md5s.is_empty() && title.is_none();
             let availability = if self.account_root.is_none() {
                 ArtifactAvailability::AccountRootUnavailable
+            } else if metadata_index_gap || self.file_index_incomplete {
+                ArtifactAvailability::MetadataMissing
             } else if md5s.is_empty() && title.is_none() {
                 ArtifactAvailability::MetadataMissing
             } else {
@@ -273,8 +282,16 @@ impl ArtifactResolver {
                                 .to_string()
                         }
                         ArtifactAvailability::MetadataMissing => {
-                            "message has a media type but no local resource key was decoded"
-                                .to_string()
+                            if metadata_index_gap {
+                                "one or more optional resource metadata tables were unavailable; the message was retained without a local resource key"
+                                    .to_string()
+                            } else if self.file_index_incomplete {
+                                "the optional media-file inventory was incomplete; the message was retained without claiming that the artifact is absent"
+                                    .to_string()
+                            } else {
+                                "message has a media type but no local resource key was decoded"
+                                    .to_string()
+                            }
                         }
                         _ => "resource metadata exists but no matching local file was found"
                             .to_string(),
@@ -307,7 +324,24 @@ impl ArtifactResolver {
                 .iter()
                 .find(|resource| resource_matches_path(resource, &path))
                 .or_else(|| (resources.len() == 1).then(|| &resources[0]));
-            let artifact_id = self.verify_path(&path, kind, role, source_md5, resource)?;
+            let artifact_id = match self.verify_path(
+                &path,
+                kind,
+                role,
+                source_md5.clone(),
+                resource,
+            ) {
+                Ok(artifact_id) => artifact_id,
+                Err(_) => self.record_unavailable_path(
+                    &path,
+                    kind,
+                    role,
+                    ArtifactAvailability::Corrupt,
+                    source_md5,
+                    resource,
+                    "media candidate could not be read and was omitted without rejecting its message",
+                ),
+            };
             self.note_reference_role(&artifact_id, role);
             references.push(MessageArtifactReference {
                 artifact_id,
@@ -387,6 +421,11 @@ impl ArtifactResolver {
         if locators.is_empty() {
             let identity = format!("missing:{}:voice", message.canonical_id);
             let artifact_id = opaque_id(identity.as_bytes());
+            let availability = if self.voice_index_incomplete {
+                ArtifactAvailability::MetadataMissing
+            } else {
+                ArtifactAvailability::NotDownloaded
+            };
             self.artifacts
                 .entry(artifact_id.clone())
                 .or_insert(CanonicalArtifact {
@@ -394,7 +433,7 @@ impl ArtifactResolver {
                     kind: ArtifactKind::Voice,
                     role: ArtifactRole::VoicePayload,
                     roles: BTreeSet::from([ArtifactRole::VoicePayload]),
-                    availability: ArtifactAvailability::NotDownloaded,
+                    availability,
                     source_md5: None,
                     source_local_path: None,
                     account_relative_path: None,
@@ -411,10 +450,13 @@ impl ArtifactResolver {
                     decoded_sha256: None,
                     decoded_format: None,
                     decode_state: ArtifactDecodeState::NotRequired,
-                    verification_detail: Some(
+                    verification_detail: Some(if self.voice_index_incomplete {
+                        "one or more optional VoiceInfo tables were unavailable; the message was retained without a voice payload"
+                            .to_string()
+                    } else {
                         "no matching VoiceInfo payload was present in the authorized snapshot"
-                            .to_string(),
-                    ),
+                            .to_string()
+                    }),
                     source_resource_set_id: None,
                     source_resource_logical_path: None,
                     source_resource_table_id: None,
@@ -432,17 +474,59 @@ impl ArtifactResolver {
         let ambiguous = locators.len() > 1;
         let mut result = Vec::new();
         for locator in locators {
-            let connection = Connection::open_with_flags(
+            let connection = match Connection::open_with_flags(
                 &locator.database_path,
                 OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )?;
-            connection.execute_batch("PRAGMA query_only = ON")?;
+            ) {
+                Ok(connection) => connection,
+                Err(_) => {
+                    let artifact_id = self.record_unavailable_voice(
+                        message,
+                        &locator,
+                        "voice payload database became unavailable; the message was retained",
+                    );
+                    result.push(MessageArtifactReference {
+                        artifact_id,
+                        role: ArtifactRole::VoicePayload,
+                        preferred: false,
+                    });
+                    continue;
+                }
+            };
+            if connection.execute_batch("PRAGMA query_only = ON").is_err() {
+                let artifact_id = self.record_unavailable_voice(
+                    message,
+                    &locator,
+                    "voice payload database could not enter read-only mode; the message was retained",
+                );
+                result.push(MessageArtifactReference {
+                    artifact_id,
+                    role: ArtifactRole::VoicePayload,
+                    preferred: false,
+                });
+                continue;
+            }
             let sql = format!(
                 "SELECT {} FROM VoiceInfo WHERE rowid = ?1",
                 quote_identifier(&locator.voice_column)
             );
             let data: Vec<u8> =
-                connection.query_row(&sql, [locator.source_row_id], |row| row.get(0))?;
+                match connection.query_row(&sql, [locator.source_row_id], |row| row.get(0)) {
+                    Ok(data) => data,
+                    Err(_) => {
+                        let artifact_id = self.record_unavailable_voice(
+                        message,
+                        &locator,
+                        "voice payload row was unavailable or malformed; the message was retained",
+                    );
+                        result.push(MessageArtifactReference {
+                            artifact_id,
+                            role: ArtifactRole::VoicePayload,
+                            preferred: false,
+                        });
+                        continue;
+                    }
+                };
             let sha256 = hex::encode(Sha256::digest(&data));
             let identity = format!(
                 "voice:{}:{}:{}",
@@ -531,6 +615,52 @@ impl ArtifactResolver {
             first.preferred = true;
         }
         Ok(result)
+    }
+
+    fn record_unavailable_voice(
+        &mut self,
+        message: &CanonicalMessage,
+        locator: &VoiceLocator,
+        reason: &str,
+    ) -> String {
+        let identity = format!(
+            "corrupt:voice:{}:{}:{}",
+            message.canonical_id, locator.source_set_id, locator.source_row_id
+        );
+        let artifact_id = opaque_id(identity.as_bytes());
+        self.artifacts
+            .entry(artifact_id.clone())
+            .or_insert(CanonicalArtifact {
+                artifact_id: artifact_id.clone(),
+                kind: ArtifactKind::Voice,
+                role: ArtifactRole::VoicePayload,
+                roles: BTreeSet::from([ArtifactRole::VoicePayload]),
+                availability: ArtifactAvailability::Corrupt,
+                source_md5: None,
+                source_local_path: None,
+                account_relative_path: None,
+                source_byte_count: None,
+                source_device_id: None,
+                source_file_id: None,
+                source_modified_seconds: None,
+                source_modified_nanoseconds: None,
+                source_sha256: None,
+                detected_format: None,
+                materialized_local_path: None,
+                decoded_local_path: None,
+                decoded_byte_count: None,
+                decoded_sha256: None,
+                decoded_format: None,
+                decode_state: ArtifactDecodeState::Failed,
+                verification_detail: Some(reason.to_string()),
+                source_resource_set_id: Some(locator.source_set_id.clone()),
+                source_resource_logical_path: Some(locator.source_logical_path.clone()),
+                source_resource_table_id: Some(locator.source_table_id.clone()),
+                source_resource_table_name: Some(locator.source_table_name.clone()),
+                source_resource_row_id: Some(locator.source_row_id),
+            });
+        self.note_reference_role(&artifact_id, ArtifactRole::VoicePayload);
+        artifact_id
     }
 
     fn verify_path(
@@ -847,11 +977,10 @@ impl ArtifactResolver {
     }
 }
 
-fn load_resource_index(
-    catalog: &PreparedCatalog,
-) -> Result<(ResourceIndex, ResourceIndex), RestoreError> {
+fn load_resource_index(catalog: &PreparedCatalog) -> (ResourceIndex, ResourceIndex, bool) {
     let mut by_local: HashMap<i64, Vec<ResourceRecord>> = HashMap::new();
     let mut by_server: HashMap<i64, Vec<ResourceRecord>> = HashMap::new();
+    let mut incomplete = false;
     for database in &catalog.databases {
         let Some(table) = database
             .tables
@@ -860,13 +989,26 @@ fn load_resource_index(
         else {
             continue;
         };
-        let connection = readonly_connection(database)?;
-        let columns = table_columns(&connection, table)?;
+        let connection = match readonly_connection(database) {
+            Ok(connection) => connection,
+            Err(_) => {
+                incomplete = true;
+                continue;
+            }
+        };
+        let columns = match table_columns(&connection, table) {
+            Ok(columns) => columns,
+            Err(_) => {
+                incomplete = true;
+                continue;
+            }
+        };
         let packed_index = find_column(
             &columns,
             &["packed_info", "packed_info_data", "message_packed_info"],
         );
         let Some(packed_index) = packed_index else {
+            incomplete = true;
             continue;
         };
         let local_index = find_column(&columns, &["local_id", "message_local_id"]);
@@ -875,9 +1017,29 @@ fn load_resource_index(
             &["svr_id", "server_id", "message_svr_id", "message_server_id"],
         );
         let sql = format!("SELECT rowid, * FROM {}", quote_identifier(table));
-        let mut statement = connection.prepare(&sql)?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
+        let mut statement = match connection.prepare(&sql) {
+            Ok(statement) => statement,
+            Err(_) => {
+                incomplete = true;
+                continue;
+            }
+        };
+        let mut rows = match statement.query([]) {
+            Ok(rows) => rows,
+            Err(_) => {
+                incomplete = true;
+                continue;
+            }
+        };
+        loop {
+            let row = match rows.next() {
+                Ok(Some(row)) => row,
+                Ok(None) => break,
+                Err(_) => {
+                    incomplete = true;
+                    break;
+                }
+            };
             let packed_info = get_bytes(row.get_ref(packed_index + 1).ok());
             if packed_info.is_empty() {
                 continue;
@@ -900,12 +1062,13 @@ fn load_resource_index(
             }
         }
     }
-    Ok((by_local, by_server))
+    (by_local, by_server, incomplete)
 }
 
-fn load_voice_index(catalog: &PreparedCatalog) -> Result<(VoiceIndex, VoiceIndex), RestoreError> {
+fn load_voice_index(catalog: &PreparedCatalog) -> (VoiceIndex, VoiceIndex, bool) {
     let mut by_local: HashMap<i64, Vec<VoiceLocator>> = HashMap::new();
     let mut by_server: HashMap<i64, Vec<VoiceLocator>> = HashMap::new();
+    let mut incomplete = false;
     for database in &catalog.databases {
         let Some(table) = database
             .tables
@@ -914,9 +1077,22 @@ fn load_voice_index(catalog: &PreparedCatalog) -> Result<(VoiceIndex, VoiceIndex
         else {
             continue;
         };
-        let connection = readonly_connection(database)?;
-        let columns = table_columns(&connection, table)?;
+        let connection = match readonly_connection(database) {
+            Ok(connection) => connection,
+            Err(_) => {
+                incomplete = true;
+                continue;
+            }
+        };
+        let columns = match table_columns(&connection, table) {
+            Ok(columns) => columns,
+            Err(_) => {
+                incomplete = true;
+                continue;
+            }
+        };
         let Some(voice_index) = find_column(&columns, &["voice_data", "voice_buf", "data"]) else {
+            incomplete = true;
             continue;
         };
         let local_index = find_column(&columns, &["local_id", "message_local_id"]);
@@ -929,12 +1105,33 @@ fn load_voice_index(catalog: &PreparedCatalog) -> Result<(VoiceIndex, VoiceIndex
             .flatten()
             .collect::<Vec<_>>();
         if selected.is_empty() {
+            incomplete = true;
             continue;
         }
         let sql = format!("SELECT rowid, * FROM {}", quote_identifier(table));
-        let mut statement = connection.prepare(&sql)?;
-        let mut rows = statement.query([])?;
-        while let Some(row) = rows.next()? {
+        let mut statement = match connection.prepare(&sql) {
+            Ok(statement) => statement,
+            Err(_) => {
+                incomplete = true;
+                continue;
+            }
+        };
+        let mut rows = match statement.query([]) {
+            Ok(rows) => rows,
+            Err(_) => {
+                incomplete = true;
+                continue;
+            }
+        };
+        loop {
+            let row = match rows.next() {
+                Ok(Some(row)) => row,
+                Ok(None) => break,
+                Err(_) => {
+                    incomplete = true;
+                    break;
+                }
+            };
             let locator = VoiceLocator {
                 database_path: database.path.clone(),
                 source_set_id: database.source_set_id.clone(),
@@ -954,11 +1151,12 @@ fn load_voice_index(catalog: &PreparedCatalog) -> Result<(VoiceIndex, VoiceIndex
             }
         }
     }
-    Ok((by_local, by_server))
+    (by_local, by_server, incomplete)
 }
 
-fn build_file_index(account_root: &Path) -> Result<MediaFileIndex, RestoreError> {
+fn build_file_index(account_root: &Path) -> (MediaFileIndex, bool) {
     let mut result = MediaFileIndex::default();
+    let mut incomplete = false;
     let roots = [
         account_root.join("msg"),
         account_root.join("business/emoticon"),
@@ -972,8 +1170,7 @@ fn build_file_index(account_root: &Path) -> Result<MediaFileIndex, RestoreError>
                     // WeChat mutates this tree while it runs: a candidate that
                     // vanishes between directory read and stat is simply
                     // absent, the same outcome as if it had been deleted
-                    // before the walk began. Anything else (permissions,
-                    // loops, I/O failure) still fails closed.
+                    // before the walk began.
                     let vanished = error
                         .io_error()
                         .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
@@ -981,9 +1178,11 @@ fn build_file_index(account_root: &Path) -> Result<MediaFileIndex, RestoreError>
                     if vanished {
                         continue;
                     }
-                    return Err(RestoreError::Integrity(
-                        "the authorized media tree could not be fully enumerated".to_string(),
-                    ));
+                    // Media discovery is a data surface, not an authorization
+                    // boundary. Preserve every candidate already observed and
+                    // let unresolved messages retain typed artifact gaps.
+                    incomplete = true;
+                    continue;
                 }
             };
             if !entry.file_type().is_file() && !entry.file_type().is_symlink() {
@@ -1009,7 +1208,7 @@ fn build_file_index(account_root: &Path) -> Result<MediaFileIndex, RestoreError>
         paths.sort();
         paths.dedup();
     }
-    Ok(result)
+    (result, incomplete)
 }
 
 fn validate_account_binding(

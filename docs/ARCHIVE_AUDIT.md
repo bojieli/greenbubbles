@@ -71,7 +71,12 @@ The auditor fails closed unless all of these checks pass:
   relationship target exists in the same conversation, every resolved,
   absent-target, missing-identifier, ambiguous, and pending relationship state
   reproduces its integrity counter, and every message artifact ID and role
-  agrees with the artifact ledger; every known media-bearing logical type has
+  agrees with the artifact ledger — because artifact identity is
+  content-based, an artifact may serve several roles across messages, so each
+  referenced role must be one the ledger records for that identity (the
+  ledger's primary `role` remains the first-recorded role, and archives
+  written before per-artifact role sets are audited with that single role as
+  the complete set); every known media-bearing logical type has
   artifact references and exactly one preferred variant;
 - every artifact availability state has one coherent evidence shape:
   downloaded sources carry the complete external-file identity, database

@@ -57,7 +57,11 @@ pub fn create_conversation_policy(
         ));
     }
     let report = load_report(archive_directory)?;
-    let known = load_conversation_ids(archive_directory, &report.account_id)?;
+    let known = load_conversation_ids(
+        archive_directory,
+        &report.account_id,
+        report.integrity.conversation_count,
+    )?;
     if let Some(unknown) = enabled_conversation_ids
         .iter()
         .find(|identifier| !known.contains(*identifier))
@@ -208,6 +212,7 @@ pub(crate) fn load_policy(policy_path: &Path) -> Result<ConversationReadPolicy, 
 pub(crate) fn load_conversation_ids(
     archive_directory: &Path,
     account_id: &str,
+    expected_conversation_count: u64,
 ) -> Result<BTreeSet<String>, RestoreError> {
     if account_id.is_empty() {
         return Err(RestoreError::Integrity(
@@ -228,6 +233,9 @@ pub(crate) fn load_conversation_ids(
                 result.insert(conversation.conversation_id);
             }
         }
+    }
+    if u64::try_from(result.len()).ok() == Some(expected_conversation_count) {
+        return Ok(result);
     }
     // A damaged/missing conversation record must not prevent policy creation
     // when a healthy, account-bound message still identifies that conversation.

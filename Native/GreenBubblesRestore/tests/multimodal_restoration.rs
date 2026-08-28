@@ -741,6 +741,73 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
         .to_string()
         .contains("does not match the snapshot source scope"));
 
+    // Optional media metadata is a degradable data surface. Losing either
+    // table after catalog planning must not reject otherwise healthy messages
+    // or the rest of the artifact inventory.
+    let prepared_resource_db = &catalog
+        .databases
+        .iter()
+        .find(|database| database.source_set_id == "set-resource")
+        .unwrap()
+        .path;
+    let prepared_voice_db = &catalog
+        .databases
+        .iter()
+        .find(|database| database.source_set_id == "set-media")
+        .unwrap()
+        .path;
+    let prepared_contact_db = &catalog
+        .databases
+        .iter()
+        .find(|database| database.source_set_id == "set-contact")
+        .unwrap()
+        .path;
+    let prepared_session_db = &catalog
+        .databases
+        .iter()
+        .find(|database| database.source_set_id == "set-session")
+        .unwrap()
+        .path;
+    Connection::open(prepared_resource_db)
+        .unwrap()
+        .execute_batch("DROP TABLE MessageResourceInfo")
+        .unwrap();
+    Connection::open(prepared_voice_db)
+        .unwrap()
+        .execute_batch("DROP TABLE VoiceInfo")
+        .unwrap();
+    Connection::open(prepared_contact_db)
+        .unwrap()
+        .execute_batch("DROP TABLE contact; DROP TABLE chat_room")
+        .unwrap();
+    Connection::open(prepared_session_db)
+        .unwrap()
+        .execute_batch("DROP TABLE SessionTable")
+        .unwrap();
+    let degraded_output = fixture.path().join("degraded-media-metadata");
+    let degraded_report = restore_catalog(
+        &catalog,
+        &RestorationOptions {
+            output_directory: degraded_output.clone(),
+            account_root: Some(account),
+            defer_media: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(degraded_report.integrity.restored_row_count, 9);
+    assert_eq!(ndjson(degraded_output.join("messages.ndjson")).len(), 9);
+    assert!(degraded_report.integrity.missing_local_profile_count > 0);
+    assert!(
+        degraded_report.integrity.missing_artifact_count >= 3,
+        "unexpected missing artifact count: {}",
+        degraded_report.integrity.missing_artifact_count
+    );
+    assert!(ndjson(degraded_output.join("artifacts.ndjson"))
+        .iter()
+        .filter_map(|artifact| artifact["verificationDetail"].as_str())
+        .any(|detail| detail.contains("optional VoiceInfo tables were unavailable")));
+    assert!(audit_archive(&degraded_output).is_ok());
+
     fs::write(&video_path, b"substituted-after-restoration").unwrap();
     assert!(audit_archive(&output)
         .unwrap_err()

@@ -115,10 +115,16 @@ pub fn restore_entities(
     }
 
     for database in &catalog.databases {
-        let connection = readonly_connection(database)?;
+        let connection = match readonly_connection(database) {
+            Ok(connection) => connection,
+            Err(_) => continue,
+        };
         for table in &database.tables {
             if table.eq_ignore_ascii_case("SessionTable") {
-                let columns = table_columns(&connection, table)?;
+                let columns = match table_columns(&connection, table) {
+                    Ok(columns) => columns,
+                    Err(_) => continue,
+                };
                 let Some(username_index) = find_column(
                     &columns,
                     &["username", "user_name", "talker", "conversation_id"],
@@ -166,12 +172,18 @@ pub fn restore_entities(
     }
 
     for database in &catalog.databases {
-        let connection = readonly_connection(database)?;
+        let connection = match readonly_connection(database) {
+            Ok(connection) => connection,
+            Err(_) => continue,
+        };
         for table in &database.tables {
             if !table.eq_ignore_ascii_case("chat_room") {
                 continue;
             }
-            let columns = table_columns(&connection, table)?;
+            let columns = match table_columns(&connection, table) {
+                Ok(columns) => columns,
+                Err(_) => continue,
+            };
             let Some(username_index) = find_column(&columns, &["username", "user_name"]) else {
                 continue;
             };
@@ -273,12 +285,18 @@ pub fn restore_entities(
     }
 
     for database in &catalog.databases {
-        let connection = readonly_connection(database)?;
+        let connection = match readonly_connection(database) {
+            Ok(connection) => connection,
+            Err(_) => continue,
+        };
         for table in &database.tables {
             if !table.eq_ignore_ascii_case("contact") {
                 continue;
             }
-            let columns = table_columns(&connection, table)?;
+            let columns = match table_columns(&connection, table) {
+                Ok(columns) => columns,
+                Err(_) => continue,
+            };
             let Some(username_index) = find_column(&columns, &["username", "user_name"]) else {
                 continue;
             };
@@ -532,10 +550,22 @@ fn for_each_row(
         "SELECT rowid, * FROM {} ORDER BY rowid",
         quote_identifier(table)
     );
-    let mut statement = connection.prepare(&sql)?;
-    let mut rows = statement.query([])?;
-    while let Some(row) = rows.next()? {
-        operation(row)?;
+    let mut statement = match connection.prepare(&sql) {
+        Ok(statement) => statement,
+        Err(_) => return Ok(()),
+    };
+    let mut rows = match statement.query([]) {
+        Ok(rows) => rows,
+        Err(_) => return Ok(()),
+    };
+    loop {
+        let row = match rows.next() {
+            Ok(Some(row)) => row,
+            Ok(None) | Err(_) => break,
+        };
+        // Entity tables enrich message-derived seeds. A malformed profile or
+        // group row cannot make those canonical message identities unusable.
+        let _ = operation(row);
     }
     Ok(())
 }

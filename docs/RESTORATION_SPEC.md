@@ -42,6 +42,17 @@ identical immutable snapshot without the flag produces a `resolved` archive
 with the same source fingerprint and verified artifact paths/digests; the
 encrypted replica treats that as a new restoration revision.
 
+Media resolution is also fault-isolated in resolved mode. If an optional
+`MessageResourceInfo` or `VoiceInfo` table becomes unreadable, healthy message
+tables still restore and media-bearing messages retain `metadataMissing`
+artifact evidence. If one candidate file or voice row cannot be read, that
+candidate is represented as `corrupt` while other candidates and messages
+continue. Account-root binding and path containment are unchanged security
+boundaries; degraded media handling never releases an unverified path or file.
+Session, contact, and group tables are enrichment surfaces under the same
+rule: message-derived conversation and participant seeds remain publishable
+when an enrichment table or row is unreadable.
+
 ## Canonical message envelope
 
 Every message includes these source-preserving fields even if its typed decoder
