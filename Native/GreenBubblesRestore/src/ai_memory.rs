@@ -33,6 +33,8 @@ For QMD, create a private collection and index it:
 
 ```sh
 qmd collection add /absolute/path/to/this-directory/documents --name greenbubbles-memory
+qmd update
+qmd search -c greenbubbles-memory --json "search terms"
 qmd embed -c greenbubbles-memory
 qmd query -c greenbubbles-memory --json "your question"
 ```
@@ -44,7 +46,7 @@ retrieved text. Rebuild into a new generation when the source bundle changes.
 
 Every line of `memories.jsonl` contains a bounded `messages` array made only of
 `role` and `content`, plus flat `metadata`. It can be passed to current Mem0
-APIs without treating the  source corpus as one enormous chat:
+APIs without treating the source corpus as one enormous chat:
 
 ```python
 import json
@@ -58,8 +60,13 @@ with open("memories.jsonl", encoding="utf-8") as source:
             chunk["messages"],
             user_id=chunk["metadata"]["accountId"],
             metadata=chunk["metadata"],
+            infer=False,
         )
 ```
+
+The example deliberately uses `infer=False` for a raw local ingestion smoke
+test. Mem0's default `infer=True` performs model-backed fact extraction and
+should only use a local or policy-approved remote model.
 
 The `user`/`assistant` roles are transport mappings only: the account holder is
 mapped to `user`, and other chat participants are mapped to `assistant`. The
@@ -140,6 +147,7 @@ pub struct AiMemoryManifest {
     pub markdown_document_set_sha256: String,
     pub source_omitted_conversation_count: u64,
     pub source_omitted_message_count: u64,
+    pub source_artifact_resolution_error_count: u64,
     pub projection_omitted_conversation_count: u64,
     pub projection_omitted_message_count: u64,
     pub projection_truncated_message_count: u64,
@@ -171,6 +179,7 @@ pub struct AiMemoryAuditReport {
     pub markdown_document_count: u64,
     pub source_omitted_conversation_count: u64,
     pub source_omitted_message_count: u64,
+    pub source_artifact_resolution_error_count: u64,
     pub projection_omitted_conversation_count: u64,
     pub projection_omitted_message_count: u64,
     pub projection_truncated_message_count: u64,
@@ -342,6 +351,7 @@ struct MemoryProjector<'a> {
     document_writer: HashedNdjsonWriter,
     document_directories: BTreeSet<PathBuf>,
     projected_conversation_ids: BTreeSet<String>,
+    seen_message_ids: BTreeSet<String>,
     projected_message_count: u64,
     chunk_count: u64,
     document_byte_count: u64,
@@ -376,6 +386,7 @@ impl<'a> MemoryProjector<'a> {
             )?,
             document_directories: BTreeSet::new(),
             projected_conversation_ids: BTreeSet::new(),
+            seen_message_ids: BTreeSet::new(),
             projected_message_count: 0,
             chunk_count: 0,
             document_byte_count: 0,
@@ -395,6 +406,13 @@ impl<'a> MemoryProjector<'a> {
             || message.message.conversation_id.is_empty()
         {
             self.omit_message("invalidContextMessageOmitted");
+            return Ok(());
+        }
+        if !self
+            .seen_message_ids
+            .insert(message.message.canonical_id.clone())
+        {
+            self.omit_message("duplicateContextMessageOmitted");
             return Ok(());
         }
         let conversation = self
@@ -861,12 +879,14 @@ pub fn export_ai_memory(
     let readme = write_private_bytes(staging.path(), "README.md", README_CONTENT.as_bytes())?;
     let projection_id = projection_id(&source, options)?;
     let content_complete = source.context.source_coverage_complete
+        && source.limitation_codes.is_empty()
         && source.omitted_conversation_count == 0
         && source.omitted_message_count == 0
         && source.artifact_resolution_error_count == 0
         && projection_omitted_conversation_count == 0
         && projection.omitted_message_count == 0
-        && projection.truncated_message_count == 0;
+        && projection.truncated_message_count == 0
+        && projection.limitation_codes.is_empty();
     let manifest = AiMemoryManifest {
         format_version: AI_MEMORY_FORMAT_VERSION,
         schema: AI_MEMORY_SCHEMA.to_string(),
@@ -893,6 +913,7 @@ pub fn export_ai_memory(
         markdown_document_set_sha256: projection.documents.sha256.clone(),
         source_omitted_conversation_count: source.omitted_conversation_count,
         source_omitted_message_count: source.omitted_message_count,
+        source_artifact_resolution_error_count: source.artifact_resolution_error_count,
         projection_omitted_conversation_count,
         projection_omitted_message_count: projection.omitted_message_count,
         projection_truncated_message_count: projection.truncated_message_count,
@@ -999,9 +1020,20 @@ pub fn audit_ai_memory(memory_directory: &Path) -> Result<AiMemoryAuditReport, R
     let mut message_ids = BTreeSet::new();
     let mut message_count = 0_u64;
     let mut observed_truncated_message_count = 0_u64;
+    let mut next_chunk_sequence = BTreeMap::<String, u64>::new();
+    let mut expected_documents = BTreeMap::<String, (String, u64, String)>::new();
     audit_memory_ndjson(memory_directory, files["memories"], |line| {
         let chunk: AiMemoryChunk = serde_json::from_slice(line)?;
         validate_memory_chunk(&manifest, &chunk)?;
+        let expected_sequence = next_chunk_sequence
+            .entry(chunk.conversation_id.clone())
+            .or_default();
+        if chunk.chunk_sequence != *expected_sequence {
+            return Err(RestoreError::Integrity(
+                "AI memory chunk sequences are not contiguous by conversation".to_string(),
+            ));
+        }
+        *expected_sequence = expected_sequence.saturating_add(1);
         if !memory_ids.insert(chunk.memory_id.clone()) {
             return Err(RestoreError::Integrity(
                 "AI memory chunks repeat a memory identity".to_string(),
@@ -1019,6 +1051,15 @@ pub fn audit_ai_memory(memory_directory: &Path) -> Result<AiMemoryAuditReport, R
                     observed_truncated_message_count.saturating_add(1);
             }
         }
+        let markdown = render_markdown(&chunk)?;
+        expected_documents.insert(
+            chunk.memory_id.clone(),
+            (
+                chunk.conversation_id.clone(),
+                u64::try_from(markdown.len()).unwrap_or(u64::MAX),
+                hex::encode(Sha256::digest(markdown.as_bytes())),
+            ),
+        );
         message_count = message_count.saturating_add(chunk.message_count as u64);
         Ok(())
     })?;
@@ -1027,6 +1068,22 @@ pub fn audit_ai_memory(memory_directory: &Path) -> Result<AiMemoryAuditReport, R
         return Err(RestoreError::Integrity(
             "AI memory chunks and Markdown documents do not cover the same identities".to_string(),
         ));
+    }
+    for (memory_id, evidence) in &document_evidence {
+        let Some((conversation_id, byte_count, sha256)) = expected_documents.get(memory_id) else {
+            return Err(RestoreError::Integrity(
+                "AI memory Markdown document has no source chunk".to_string(),
+            ));
+        };
+        if &evidence.conversation_id != conversation_id
+            || evidence.byte_count != *byte_count
+            || &evidence.sha256 != sha256
+        {
+            return Err(RestoreError::Integrity(
+                "AI memory Markdown document is not the canonical rendering of its chunk"
+                    .to_string(),
+            ));
+        }
     }
     verify_markdown_documents(memory_directory, &document_evidence)?;
 
@@ -1038,6 +1095,10 @@ pub fn audit_ai_memory(memory_directory: &Path) -> Result<AiMemoryAuditReport, R
         || manifest.markdown_document_count != files["markdownDocumentInventory"].record_count
         || manifest.markdown_document_set_sha256 != files["markdownDocumentInventory"].sha256
         || manifest.projection_truncated_message_count != observed_truncated_message_count
+        || manifest.source_message_record_count
+            != manifest
+                .projected_message_count
+                .saturating_add(manifest.projection_omitted_message_count)
     {
         return Err(RestoreError::Integrity(
             "AI memory manifest aggregate counts do not match its records".to_string(),
@@ -1062,6 +1123,7 @@ pub fn audit_ai_memory(memory_directory: &Path) -> Result<AiMemoryAuditReport, R
         markdown_document_count: document_evidence.len() as u64,
         source_omitted_conversation_count: manifest.source_omitted_conversation_count,
         source_omitted_message_count: manifest.source_omitted_message_count,
+        source_artifact_resolution_error_count: manifest.source_artifact_resolution_error_count,
         projection_omitted_conversation_count: manifest.projection_omitted_conversation_count,
         projection_omitted_message_count: manifest.projection_omitted_message_count,
         projection_truncated_message_count: manifest.projection_truncated_message_count,
@@ -1077,6 +1139,14 @@ fn validate_memory_manifest(manifest: &AiMemoryManifest) -> Result<(), RestoreEr
     options.validate()?;
     let expected_projection_id = projection_id_for_bundle(&manifest.source_bundle_id, options)?;
     let limitations = manifest.limitation_codes.iter().collect::<BTreeSet<_>>();
+    let expected_content_complete = manifest.source_coverage_complete
+        && manifest.source_omitted_conversation_count == 0
+        && manifest.source_omitted_message_count == 0
+        && manifest.source_artifact_resolution_error_count == 0
+        && manifest.projection_omitted_conversation_count == 0
+        && manifest.projection_omitted_message_count == 0
+        && manifest.projection_truncated_message_count == 0
+        && manifest.limitation_codes.is_empty();
     if manifest.format_version != AI_MEMORY_FORMAT_VERSION
         || manifest.schema != AI_MEMORY_SCHEMA
         || manifest.projection_id != expected_projection_id
@@ -1089,10 +1159,12 @@ fn validate_memory_manifest(manifest: &AiMemoryManifest) -> Result<(), RestoreEr
         || manifest.account_id.is_empty()
         || manifest.source_fingerprint.is_empty()
         || manifest.checkpoint_revision.is_empty()
+        || manifest.checkpoint_revision.parse::<u128>().is_err()
         || !valid_sha256(&manifest.policy_sha256)
         || manifest.content_trust != "untrustedSourceData"
         || !manifest.qmd_compatible
         || !manifest.mem0_message_batch_compatible
+        || manifest.content_complete != expected_content_complete
         || limitations.len() != manifest.limitation_codes.len()
         || !manifest
             .limitation_codes
@@ -1250,6 +1322,7 @@ fn verify_plain_file(directory: &Path, evidence: &AiMemoryFile) -> Result<(), Re
     if evidence.record_count != 1
         || evidence.byte_count != bytes.len() as u64
         || evidence.sha256 != hex::encode(Sha256::digest(&bytes))
+        || bytes != README_CONTENT.as_bytes()
     {
         return Err(RestoreError::Integrity(
             "AI memory plain file evidence does not match its manifest".to_string(),

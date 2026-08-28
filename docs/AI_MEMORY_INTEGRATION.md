@@ -60,6 +60,8 @@ directory:
 ```sh
 qmd collection add /absolute/path/to/memory-generation/documents \
   --name greenbubbles-memory
+qmd update
+qmd search -c greenbubbles-memory --json "discussed plans"
 qmd embed -c greenbubbles-memory
 qmd query -c greenbubbles-memory --json "What plans were discussed?"
 ```
@@ -88,8 +90,15 @@ with open("memories.jsonl", encoding="utf-8") as source:
             chunk["messages"],
             user_id=chunk["metadata"]["accountId"],
             metadata=chunk["metadata"],
+            infer=False,
         )
 ```
+
+`qmd search` is the inexpensive lexical smoke test and requires no model
+download. Run `qmd embed` only when semantic retrieval is desired. Mem0's
+default `infer=True` calls an LLM and consolidates facts; the example uses
+`infer=False` for a raw local ingestion smoke test. Enable inference
+deliberately with a configured local or policy-approved remote model.
 
 The account holder maps to `user`; another chat participant maps to
 `assistant`. This is a transport mapping, not a claim that the participant is
