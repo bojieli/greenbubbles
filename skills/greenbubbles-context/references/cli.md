@@ -113,6 +113,12 @@ and freshness without printing content. Preserve the opaque IDs and checkpoint
 identity in downstream indexes so later change events can update or invalidate
 the correct records.
 
+For a large bundle, pass `--progress-file <new-owner-only-events.ndjson>` to
+`audit-ai-context`. It records source/file bytes and records, processed
+conversation/message counts, elapsed time, and monotonic phase/overall
+percentages without message content or identities. Keep the progress file
+outside the bundle so its exact inventory is unchanged.
+
 The default destination is `local`. A `remoteModel` export requires explicit
 remote permission in every included scope and cannot release artifact paths.
 Do not change the destination merely to work around a denial.
@@ -125,7 +131,9 @@ chunks for memory and retrieval frameworks:
 ```text
 greenbubbles-restore ai-memory-export \
   <AI-context-bundle-directory> <new-output-directory> \
-  [--max-messages-per-chunk <n>] [--max-text-bytes-per-chunk <n>]
+  [--max-messages-per-chunk <n>] [--max-text-bytes-per-chunk <n>] \
+  [--progress-file <new-owner-only-events.ndjson>] \
+  [--progress-json | --quiet-progress]
 ```
 
 Defaults are 64 messages and 49,152 UTF-8 text bytes. The output includes
@@ -135,6 +143,10 @@ path/digest evidence, and a checkpoint-bound manifest. The command needs no
 replica key because it only consumes the already policy-minimized bundle.
 Run `greenbubbles-restore audit-ai-memory <output-directory>` after copying and
 before indexing; it verifies every chunk and document without printing content.
+The audit accepts the same progress options. Projection/audit events expose the
+current file, source bytes/records, processed messages, emitted or verified
+chunks/documents/bytes, elapsed time, and phase/overall percentages. Put the
+durable progress file beside—not inside—the input or output generation.
 
 Check source and projection omission/truncation counts and `limitationCodes`
 before summarizing. Preserve memory IDs and `greenbubbles:message:<id>`

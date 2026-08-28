@@ -1071,6 +1071,14 @@ explicit rebootstrap. See
 `docs/AI_CONTEXT_CLI.md`, `docs/DOWNSTREAM_CONSUMER.md`, and
 `docs/SOURCE_CONNECTOR_CONTRACT.md`.
 
+The bounded `ai-memory-export` derivative additionally produces
+checkpoint-bound Mem0-style JSON batches and QMD-compatible Markdown with
+canonical message citations and an independent aggregate audit. Context audit,
+memory projection, and memory audit expose privacy-safe source/file byte and
+record totals, processed conversation/message counts, emitted or verified
+chunk/document counts, elapsed time, phase percentage, and end-to-end
+percentage through human, JSON-stderr, and owner-only durable progress modes.
+
 ## Technical architecture
 
 ```text

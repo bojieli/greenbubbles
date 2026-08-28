@@ -19,7 +19,9 @@ gap without changing or weakening the canonical bundle.
 greenbubbles-restore ai-memory-export \
   <audited-context-bundle> <new-memory-generation> \
   [--max-messages-per-chunk 64] \
-  [--max-text-bytes-per-chunk 49152]
+  [--max-text-bytes-per-chunk 49152] \
+  [--progress-file <owner-only-new-events.ndjson>] \
+  [--progress-json | --quiet-progress]
 ```
 
 The command performs no model call and invents no personal facts. It groups
@@ -42,12 +44,23 @@ The output path must be new and its parent must be owner-only. Files use mode
 After copying and before indexing, run the aggregate-only verifier:
 
 ```text
-greenbubbles-restore audit-ai-memory <memory-generation>
+greenbubbles-restore audit-ai-memory <memory-generation> \
+  [--progress-file <owner-only-new-events.ndjson>] \
+  [--progress-json | --quiet-progress]
 ```
 
 It checks the exact owner-only inventory, projection/source identity, file and
 document hashes, bounded chunk schemas, canonical citations, and aggregate
 counts without printing private content or identifiers.
+
+Both operations show human progress on standard error by default. Progress
+includes source bytes and records, the current canonical file/group, file and
+phase percentages, processed conversation/message counts, emitted or verified
+chunk/document counts and bytes, elapsed time, and end-to-end percentage.
+`--progress-json` emits the privacy-safe events as NDJSON; `--progress-file`
+persists the same events to a create-new owner-only file even with
+`--quiet-progress`. Keep the progress file outside the input and output bundle
+directories so their exact inventories remain independently auditable.
 
 ## QMD-compatible workflow
 
