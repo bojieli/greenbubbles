@@ -11,7 +11,6 @@ enum CLIError: Error, CustomStringConvertible {
   case missingRequiredOption(String)
   case invalidInteger(option: String, value: String)
   case noDatabaseRootDiscovered
-  case multipleDatabaseRoots
   case verificationFailed(String)
 
   var description: String {
@@ -26,8 +25,6 @@ enum CLIError: Error, CustomStringConvertible {
       return "Expected a positive integer for \(option), got: \(value)"
     case .noDatabaseRootDiscovered:
       return "No WeChat database root was discovered; pass --db-root to select one"
-    case .multipleDatabaseRoots:
-      return "Multiple WeChat accounts were discovered; pass --db-root to select one"
     case .verificationFailed(let reason):
       return "Passphrase verification failed: \(reason)"
     }
@@ -114,7 +111,7 @@ private let usage = """
     --output <path>        Where capture writes the passphrase (mode 0600, exclusive)
     --owner-authorized     Confirm the owner authorizes this capture; required by capture
     --timeout-seconds <n>  Capture window in seconds (default: 300)
-    --db-root <path>       Use this db_storage root instead of the discovered one
+    --db-root <path>       Override the auto-discovered active db_storage root
     --overwrite            Replace an existing passphrase output file
     --passphrase-stdin     Read the 32-byte passphrase from standard input
     --include-paths        Include sensitive filesystem paths in local output
@@ -123,6 +120,9 @@ private let usage = """
   Capture requires root, lldb, a running WeChat, and an owner re-signed client
   without Hardened Runtime. When re-signing is required, preflight reports the
   exact command for the owner to run manually; this tool never automates it.
+  The capture mechanism breakpoints a system library function, so it works
+  with any WeChat build; the active account's database root is discovered
+  automatically.
   """
 
 private struct PreflightReport: Encodable {
@@ -138,8 +138,8 @@ private struct PreflightReport: Encodable {
   let clientReSigned: Bool
   let clientMarketingVersion: String?
   let clientBuildVersion: String?
-  let clientFingerprintMatchesPin: Bool?
   let databaseRoot: PathReference?
+  let databaseRootAutoDiscovered: Bool
   let databaseCount: Int?
   let distinctSaltCount: Int?
 }
@@ -176,7 +176,39 @@ private func resolveDatabaseRoot(_ option: URL?) throws -> URL {
   let roots = WeChatAccountDiscovery().databaseRoots()
   if roots.count == 1 { return roots[0] }
   if roots.isEmpty { throw CLIError.noDatabaseRootDiscovered }
-  throw CLIError.multipleDatabaseRoots
+  // Several accounts are present: the running client is logged into exactly
+  // one, and that account's databases are the ones being written to.
+  guard
+    let active = roots.max(by: { latestDatabaseModification($0) < latestDatabaseModification($1) })
+  else {
+    throw CLIError.noDatabaseRootDiscovered
+  }
+  return active
+}
+
+private func latestDatabaseModification(_ root: URL) -> Date {
+  var latest = Date.distantPast
+  guard
+    let enumerator = FileManager.default.enumerator(
+      at: root,
+      includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+      options: [.skipsHiddenFiles]
+    )
+  else { return latest }
+  for case let url as URL in enumerator {
+    guard url.pathExtension == "db", !url.lastPathComponent.hasSuffix("-wal"),
+      !url.lastPathComponent.hasSuffix("-shm")
+    else { continue }
+    guard
+      let values = try? url.resourceValues(forKeys: [
+        .contentModificationDateKey, .isRegularFileKey,
+      ]),
+      values.isRegularFile == true,
+      let modified = values.contentModificationDate
+    else { continue }
+    if modified > latest { latest = modified }
+  }
+  return latest
 }
 
 private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightReport {
@@ -193,54 +225,20 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
     blockers.append("capture requires root privileges for lldb attach; re-run with sudo")
   }
 
+  // The capture mechanism breakpoints a system CommonCrypto symbol, so it is
+  // build-agnostic: client version and signing state are reported for the
+  // owner's information only and never gate the capture.
   var clientInstalled = false
   var clientReSigned = false
   var clientMarketingVersion: String?
   var clientBuildVersion: String?
-  var clientFingerprintMatchesPin: Bool? = nil
   let buildInspector = WeChatClientBuildInspector()
   if let application = buildInspector.defaultApplicationURL() {
     clientInstalled = true
-    do {
-      let build = try buildInspector.inspect(application: application)
+    if let build = try? buildInspector.inspect(application: application) {
       clientMarketingVersion = build.marketingVersion
       clientBuildVersion = build.buildVersion
-      let pinned = WeChatIntegrationSurfaceInspector.pinnedWeChat4113
-      if build.hardenedRuntime, build.signatureValid {
-        // Still fully signed: the complete fingerprint must match the pin.
-        clientFingerprintMatchesPin = build == pinned
-        if build == pinned {
-          blockers.append(
-            "WeChat still has Hardened Runtime; lldb attach will fail until the owner re-signs the app and restarts WeChat"
-          )
-          remediation = resignRemediation
-        } else {
-          blockers.append(
-            "the installed WeChat build does not match the pinned 4.1.13 fingerprint; capture is disabled for unpinned builds"
-          )
-        }
-      } else if build.hardenedRuntime {
-        blockers.append(
-          "WeChat still has Hardened Runtime; lldb attach will fail until the owner re-signs the app and restarts WeChat"
-        )
-        remediation = resignRemediation
-      } else {
-        // Owner re-signed: ad-hoc signing legitimately changes the executable
-        // and code-directory hashes, so only the plist metadata is compared.
-        clientReSigned = true
-        let plistMatches =
-          build.bundleIdentifier == pinned.bundleIdentifier
-          && build.marketingVersion == pinned.marketingVersion
-          && build.buildVersion == pinned.buildVersion
-          && build.teamIdentifier == pinned.teamIdentifier
-        if !plistMatches {
-          blockers.append(
-            "the re-signed WeChat version metadata does not match the pinned 4.1.13 profile; capture is disabled for unpinned builds"
-          )
-        }
-      }
-    } catch {
-      blockers.append("the WeChat build could not be inspected: \(error)")
+      clientReSigned = !build.hardenedRuntime
     }
   } else {
     blockers.append("no WeChat installation was found")
@@ -291,8 +289,8 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
     clientReSigned: clientReSigned,
     clientMarketingVersion: clientMarketingVersion,
     clientBuildVersion: clientBuildVersion,
-    clientFingerprintMatchesPin: clientFingerprintMatchesPin,
     databaseRoot: databaseRootReference,
+    databaseRootAutoDiscovered: dbRootOption == nil,
     databaseCount: databaseCount,
     distinctSaltCount: distinctSaltCount
   )

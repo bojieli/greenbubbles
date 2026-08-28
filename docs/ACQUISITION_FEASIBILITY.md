@@ -75,8 +75,10 @@ preference order:
    schema and reports incomplete coverage rather than guessing.
 3. An owner-authorized active passphrase capture through the separate
    `greenbubbles-acquire` executable, explicitly gated by the
-   `--owner-authorized` flag, a manual owner-run re-sign of the client, a
-   pinned-build check, and SQLCipher4 page-1 HMAC proof of correctness. See
+   `--owner-authorized` flag, a manual owner-run re-sign of the client, and
+   SQLCipher4 page-1 HMAC proof of correctness. The capture mechanism
+   breakpoints a system library symbol, so it is build-agnostic and performs
+   no client version, hash, or signature gating. See
    [PASSPHRASE_ACQUISITION.md](PASSPHRASE_ACQUISITION.md). The passive
    pipeline itself — discovery, snapshot, restore, replica, connector — never
    invokes this path and retains its non-invasive guarantees unchanged.
@@ -98,8 +100,11 @@ by the owner on 2026-08-27, after the LLDB-based mechanism was validated live
 on the owner's own machine and account (26/26 databases HMAC-verified on the
 pinned 4.1.12 build). It is strictly bounded: it attaches a debugger once to
 read one register-pointed value, requires manual owner re-signing that the
-tool never automates, fails closed on any unpinned build, and writes the
-passphrase only to an owner-specified permission-locked file. GreenBubbles
+tool never automates, and writes the passphrase only to an owner-specified
+permission-locked file. On 2026-08-28 the owner removed the helper's
+pinned-build gate as well: the breakpoint targets a system library symbol, so
+the mechanism works with any WeChat build, and the helper discovers the active
+account's database root automatically. GreenBubbles
 still performs no memory scanning, injection, reusable session-credential
 export, security-control bypass beyond the owner's own explicit re-sign, or
 anti-detection work. Static evidence that an internal workflow exists does not

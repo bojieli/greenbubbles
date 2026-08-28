@@ -15,10 +15,13 @@ plaintext/passphrase input is available; it is not a general capability.
 
 ## Mechanism
 
-The pinned WeChat macOS build (marketing version `4.1.13`, build `269579`)
-derives each database's encryption key from a stable 32-byte account passphrase
-at login time by calling the exported system CommonCrypto symbol
-`CCKeyDerivationPBKDF`. `greenbubbles-acquire capture`:
+The WeChat macOS client derives each database's encryption key from a stable
+32-byte account passphrase at login time by calling the exported system
+CommonCrypto symbol `CCKeyDerivationPBKDF`. Because the breakpoint targets a
+system library symbol rather than the client binary, the mechanism is
+build-agnostic: `greenbubbles-acquire` performs no version, hash, or signature
+gating and works with any WeChat build (validated on 4.1.12 and 4.1.13).
+`greenbubbles-acquire capture`:
 
 1. Attaches `lldb` to the already running WeChat process and sets a breakpoint
    on `CCKeyDerivationPBKDF`, conditioned on the password-length argument being
@@ -60,10 +63,13 @@ greenbubbles-acquire verify --passphrase-stdin [--db-root <path>]
 ```
 
 - `preflight` emits an aggregate JSON readiness report and exits non-zero when
-  blocked: pinned-build fingerprint, WeChat process presence, hardening status,
-  `lldb` availability, root privileges, and the discovered salt count. When the
-  client still needs re-signing, the report prints the exact command for the
-  owner to run manually; the tool never runs it.
+  blocked: WeChat process presence, hardening status, `lldb` availability, root
+  privileges, and the discovered salt count. The active account's database root
+  is discovered automatically (the account whose databases were most recently
+  written; `--db-root` overrides). Client version and signing state are
+  reported for information only and never gate the capture. When the client
+  still needs re-signing, the report prints the exact command for the owner to
+  run manually; the tool never runs it.
 - `capture` refuses to run without the explicit `--owner-authorized` flag,
   re-runs the preflight checks and fails closed, then waits for the owner's
   logout/re-login up to the timeout. On capture it derives and HMAC-verifies
