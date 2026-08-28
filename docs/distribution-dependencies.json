@@ -236,6 +236,19 @@
         "resolvedVersion" : "1.9.0",
         "source" : "registry+https://github.com/rust-lang/crates.io-index",
         "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "MIT",
+        "name" : "zstd",
+        "optional" : false,
+        "requirement" : "^0.13",
+        "resolvedVersion" : "0.13.3",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
       }
     ],
     "gitPackages" : [
@@ -284,6 +297,11 @@
         "licenseMetadata" : "MIT",
         "name" : "silk-rs",
         "version" : "0.2.0"
+      },
+      {
+        "licenseMetadata" : "MIT/Apache-2.0",
+        "name" : "zstd-sys",
+        "version" : "2.0.16+zstd.1.5.7"
       }
     ],
     "package" : {

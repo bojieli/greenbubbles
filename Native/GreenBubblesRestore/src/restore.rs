@@ -1,12 +1,17 @@
 use std::collections::{BTreeSet, HashMap};
+use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
+use std::mem::MaybeUninit;
+use std::ops::Deref;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use base64::Engine;
 use rusqlite::{types::ValueRef, Connection, OpenFlags, OptionalExtension, Row};
 use sha2::{Digest, Sha256};
+use walkdir::WalkDir;
 
 use crate::cached::restore_cached_surfaces_with_progress;
 use crate::entities::{restore_entities, EntitySeeds};
@@ -18,15 +23,140 @@ use crate::{
     ProgressObserver, ProgressPhase, ProgressState, ProgressUnit, RawSQLiteValue, RejectedRow,
     RelationshipResolutionState, RestorationCompletion, RestorationCoverage,
     RestorationDatabaseCoverage, RestorationIntegrity, RestorationReport,
-    RestorationUnavailableDatabase, RestoreError, SemanticDecodeState, SnapshotFileRole,
-    TableCoverageRole, TableSchemaCoverage, TypedPayload,
+    RestorationStorageEvidence, RestorationUnavailableDatabase, RestoreError, SemanticDecodeState,
+    SnapshotFileRole, TableCoverageRole, TableSchemaCoverage, TypedPayload,
 };
+
+const STAGING_COMPRESSION_LEVEL: i32 = 1;
+const ARCHIVE_SOURCE_BYTE_MULTIPLIER: u64 = 16;
+const ARCHIVE_MESSAGE_RECORD_OVERHEAD: u64 = 4 * 1024;
+const ARCHIVE_OTHER_RECORD_OVERHEAD: u64 = 512;
+const ARCHIVE_FIXED_OVERHEAD: u64 = 16 * 1024 * 1024;
+const STAGING_SOURCE_BYTE_MULTIPLIER: u64 = 4;
+const STAGING_MESSAGE_RECORD_OVERHEAD: u64 = 1024;
+const STAGING_FIXED_OVERHEAD: u64 = 8 * 1024 * 1024;
+const MINIMUM_FREE_SPACE_RESERVE: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct RestorationOptions {
     pub output_directory: PathBuf,
     pub account_root: Option<PathBuf>,
     pub defer_media: bool,
+}
+
+struct ResolvedAccountBinding {
+    account_id: String,
+    self_source_identifier: Option<String>,
+    self_participant_id: Option<String>,
+    evidence: Option<crate::AccountHolderBindingEvidence>,
+}
+
+#[derive(Debug, Clone)]
+struct RestorationStoragePlan {
+    source_byte_count: u64,
+    message_record_count: u64,
+    observed_table_record_count: u64,
+    estimated_archive_byte_count: u64,
+    estimated_staging_byte_count: u64,
+    estimated_peak_byte_count: u64,
+    reserve_byte_count: u64,
+    required_free_byte_count: u64,
+    available_free_byte_count_at_start: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct StagingStorageStats {
+    uncompressed_payload_byte_count: u64,
+    compressed_payload_byte_count: u64,
+    peak_file_byte_count: u64,
+}
+
+struct RestorationStaging {
+    _directory: tempfile::TempDir,
+    path: PathBuf,
+    connection: Connection,
+}
+
+impl RestorationStaging {
+    fn create(output_directory: &Path) -> Result<Self, RestoreError> {
+        let directory = tempfile::Builder::new()
+            .prefix(".staging-")
+            .tempdir_in(output_directory)?;
+        create_owner_only_directory(directory.path())?;
+        let path = directory.path().join("messages.sqlite");
+        let connection = Connection::open(&path)?;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        connection.execute_batch(
+            "PRAGMA journal_mode = OFF;
+             PRAGMA synchronous = OFF;
+             CREATE TABLE staged_message(
+               canonical_id TEXT PRIMARY KEY NOT NULL,
+               conversation_id TEXT NOT NULL,
+               sort_sequence INTEGER,
+               server_id INTEGER,
+               created_at INTEGER,
+               local_id INTEGER,
+               source_logical_path TEXT NOT NULL,
+               source_table_id TEXT NOT NULL,
+               source_row_id INTEGER NOT NULL,
+               message_json_zstd BLOB NOT NULL
+             );
+             CREATE INDEX staged_by_order ON staged_message(
+               conversation_id, sort_sequence, server_id, created_at, local_id,
+               source_logical_path, source_table_id, source_row_id
+             );
+             CREATE INDEX staged_by_server ON staged_message(conversation_id, server_id);
+             CREATE INDEX staged_by_local ON staged_message(conversation_id, local_id);",
+        )?;
+        Ok(Self {
+            _directory: directory,
+            path,
+            connection,
+        })
+    }
+
+    fn file_byte_count(&self) -> Result<u64, RestoreError> {
+        Ok(fs::metadata(&self.path)?.len())
+    }
+}
+
+impl Deref for RestorationStaging {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connection
+    }
+}
+
+struct ByteCountingWriter<W> {
+    inner: W,
+    byte_count: u64,
+}
+
+impl<W> ByteCountingWriter<W> {
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            byte_count: 0,
+        }
+    }
+
+    fn byte_count(&self) -> u64 {
+        self.byte_count
+    }
+}
+
+impl<W: Write> Write for ByteCountingWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buffer)?;
+        self.byte_count = self.byte_count.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 pub fn restore_catalog(
@@ -42,6 +172,12 @@ pub fn restore_catalog_with_progress(
     progress: &dyn ProgressObserver,
 ) -> Result<RestorationReport, RestoreError> {
     let progress_plan = plan_restoration(catalog, progress)?;
+    let storage_plan = preflight_restoration_storage(
+        catalog,
+        &progress_plan,
+        &options.output_directory,
+        progress,
+    )?;
     create_owner_only_directory(&options.output_directory)?;
     let output_directory = fs::canonicalize(&options.output_directory)?;
     let messages_path = output_directory.join("messages.ndjson");
@@ -50,54 +186,16 @@ pub fn restore_catalog_with_progress(
     let coverage_path = output_directory.join("coverage.json");
     let report_path = output_directory.join("report.json");
     let mut rejections = owner_only_writer(&rejections_path)?;
-    let staging_directory = tempfile::Builder::new()
-        .prefix(".staging-")
-        .tempdir_in(&output_directory)?;
-    create_owner_only_directory(staging_directory.path())?;
-    let staging_path = staging_directory.path().join("messages.sqlite");
-    let staging = Connection::open(&staging_path)?;
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&staging_path, fs::Permissions::from_mode(0o600))?;
-    staging.execute_batch(
-        "PRAGMA journal_mode = OFF;
-         PRAGMA synchronous = OFF;
-         CREATE TABLE staged_message(
-           canonical_id TEXT PRIMARY KEY NOT NULL,
-           conversation_id TEXT NOT NULL,
-           sort_sequence INTEGER,
-           server_id INTEGER,
-           created_at INTEGER,
-           local_id INTEGER,
-           source_logical_path TEXT NOT NULL,
-           source_table_id TEXT NOT NULL,
-           source_row_id INTEGER NOT NULL,
-           message_json BLOB NOT NULL
-         );
-         CREATE INDEX staged_by_order ON staged_message(
-           conversation_id, sort_sequence, server_id, created_at, local_id,
-           source_logical_path, source_table_id, source_row_id
-         );
-         CREATE INDEX staged_by_server ON staged_message(conversation_id, server_id);
-         CREATE INDEX staged_by_local ON staged_message(conversation_id, local_id);",
-    )?;
+    let staging = RestorationStaging::create(&output_directory)?;
+    let mut staging_storage = StagingStorageStats::default();
     let mut artifact_resolver = ArtifactResolver::new(
         catalog,
         options.account_root.as_deref(),
         &output_directory,
         options.defer_media,
     )?;
-    let account_id = options
-        .account_root
-        .as_deref()
-        .and_then(|path| fs::canonicalize(path).ok())
-        .map(|path| opaque_id(path.to_string_lossy().as_bytes()))
-        .unwrap_or_else(|| opaque_id(catalog.manifest.source_fingerprint.as_bytes()));
-    let self_username = options
-        .account_root
-        .as_deref()
-        .and_then(Path::file_name)
-        .and_then(|value| value.to_str())
-        .map(wx_media::extract_wxid);
+    let account_binding = resolve_account_binding(catalog, options.account_root.as_deref())?;
+    let account_id = account_binding.account_id.clone();
     let mut integrity = RestorationIntegrity {
         database_count: catalog.databases.len() as u64,
         observed_table_row_count: progress_plan.total_observed_table_rows,
@@ -218,10 +316,15 @@ pub fn restore_catalog_with_progress(
                     account_id: &account_id,
                     conversation: &conversation,
                     names: &names,
-                    self_username: self_username.as_deref(),
+                    self_source_identifier: account_binding.self_source_identifier.as_deref(),
                 };
                 match restore_row(row, &columns, &context) {
                     Ok(mut message) => {
+                        if message.direction_evidence
+                            == DirectionEvidence::SenderAccountConflictWithExplicitSourceColumn
+                        {
+                            integrity.direction_conflict_count += 1;
+                        }
                         message.artifact_references =
                             artifact_resolver.resolve_message(&message)?;
                         entity_seeds.observe_message(&message);
@@ -259,12 +362,26 @@ pub fn restore_catalog_with_progress(
                                 .entry(reason)
                                 .or_default() += 1;
                         }
+                        // The canonical NDJSON can be much larger than the
+                        // source databases because it also preserves raw
+                        // columns and typed projections. Compress only this
+                        // private, ephemeral ordering spool so a restoration
+                        // does not require enough free space for two complete
+                        // uncompressed archive copies at once. The published
+                        // message ledger remains ordinary lossless NDJSON.
                         let json = serde_json::to_vec(&message)?;
+                        let compressed_json = compress_staging_payload(&json)?;
+                        staging_storage.uncompressed_payload_byte_count = staging_storage
+                            .uncompressed_payload_byte_count
+                            .saturating_add(json.len() as u64);
+                        staging_storage.compressed_payload_byte_count = staging_storage
+                            .compressed_payload_byte_count
+                            .saturating_add(compressed_json.len() as u64);
                         let inserted = staging.execute(
                             "INSERT OR IGNORE INTO staged_message(
                                canonical_id, conversation_id, sort_sequence, server_id,
                                created_at, local_id, source_logical_path, source_table_id,
-                               source_row_id, message_json
+                               source_row_id, message_json_zstd
                              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                             rusqlite::params![
                                 message.canonical_id,
@@ -276,7 +393,7 @@ pub fn restore_catalog_with_progress(
                                 message.source_logical_path,
                                 message.source_table_id,
                                 message.source_row_id,
-                                json,
+                                compressed_json,
                             ],
                         )?;
                         if inserted != 1 {
@@ -312,6 +429,14 @@ pub fn restore_catalog_with_progress(
                     event.restored_record_count = Some(integrity.restored_row_count);
                     event.rejected_record_count = Some(integrity.rejected_row_count);
                     event.semantic_gap_count = Some(integrity.semantic_gap_count);
+                    attach_staging_storage(
+                        &mut event,
+                        &storage_plan,
+                        &mut staging_storage,
+                        &staging,
+                        &output_directory,
+                        overall_processed_rows,
+                    )?;
                     progress.observe(event);
                     next_report = table_processed_rows.saturating_add(report_increment);
                 }
@@ -333,6 +458,14 @@ pub fn restore_catalog_with_progress(
             table_finished.rejected_record_count = Some(integrity.rejected_row_count);
             table_finished.semantic_gap_count = Some(integrity.semantic_gap_count);
             table_finished.elapsed_milliseconds = Some(elapsed_milliseconds(table_started));
+            attach_staging_storage(
+                &mut table_finished,
+                &storage_plan,
+                &mut staging_storage,
+                &staging,
+                &output_directory,
+                overall_processed_rows,
+            )?;
             progress.observe(table_finished);
         }
         let mut database_finished = restoration_database_event(
@@ -353,6 +486,14 @@ pub fn restore_catalog_with_progress(
         database_finished.rejected_record_count = Some(integrity.rejected_row_count);
         database_finished.semantic_gap_count = Some(integrity.semantic_gap_count);
         database_finished.elapsed_milliseconds = Some(elapsed_milliseconds(database_started));
+        attach_staging_storage(
+            &mut database_finished,
+            &storage_plan,
+            &mut staging_storage,
+            &staging,
+            &output_directory,
+            overall_processed_rows,
+        )?;
         progress.observe(database_finished);
     }
     rejections.flush()?;
@@ -380,7 +521,7 @@ pub fn restore_catalog_with_progress(
     let finalization_total = record_work
         .saturating_add(cached_surface_work)
         .saturating_add(fixed_stage_work.saturating_mul(3));
-    progress.observe(archive_finalization_event(
+    let mut finalization_started = archive_finalization_event(
         ProgressState::Started,
         "orderLinkAndWriteArchive",
         ProgressUnit::Items,
@@ -391,8 +532,18 @@ pub fn restore_catalog_with_progress(
         catalog,
         &progress_plan,
         &integrity,
-    ));
-    progress.observe(archive_finalization_event(
+    );
+    let published_before_messages = archive_file_byte_count(&output_directory)?;
+    attach_finalization_storage(
+        &mut finalization_started,
+        &storage_plan,
+        &mut staging_storage,
+        &staging,
+        &output_directory,
+        published_before_messages,
+    )?;
+    progress.observe(finalization_started);
+    let mut message_finalization_started = archive_finalization_event(
         ProgressState::Started,
         "sortAndWriteMessages",
         ProgressUnit::Records,
@@ -403,9 +554,18 @@ pub fn restore_catalog_with_progress(
         catalog,
         &progress_plan,
         &integrity,
-    ));
+    );
+    attach_finalization_storage(
+        &mut message_finalization_started,
+        &storage_plan,
+        &mut staging_storage,
+        &staging,
+        &output_directory,
+        published_before_messages,
+    )?;
+    progress.observe(message_finalization_started);
 
-    let mut messages = owner_only_writer(&messages_path)?;
+    let mut messages = ByteCountingWriter::new(owner_only_writer(&messages_path)?);
     let mut ordered = staging.prepare(
         "WITH conversation_basis AS (
            SELECT conversation_id,
@@ -418,7 +578,7 @@ pub fn restore_catalog_with_progress(
              END AS basis
            FROM staged_message GROUP BY conversation_id
          )
-         SELECT message_json, conversation_basis.basis
+         SELECT message_json_zstd, conversation_basis.basis
          FROM staged_message
          JOIN conversation_basis USING(conversation_id)
          ORDER BY staged_message.conversation_id,
@@ -443,8 +603,9 @@ pub fn restore_catalog_with_progress(
     let mut finalized_messages = 0_u64;
     let mut message_progress = ProgressThrottle::new(integrity.restored_row_count);
     while let Some(row) = rows.next()? {
-        let bytes: Vec<u8> = row.get(0)?;
+        let compressed_bytes: Vec<u8> = row.get(0)?;
         let basis: i64 = row.get(1)?;
+        let bytes = decompress_staging_payload(&compressed_bytes)?;
         let mut message: CanonicalMessage = serde_json::from_slice(&bytes)?;
         if previous_conversation.as_deref() == Some(&message.conversation_id) {
             conversation_ordinal += 1;
@@ -507,7 +668,7 @@ pub fn restore_catalog_with_progress(
         messages.write_all(b"\n")?;
         finalized_messages = finalized_messages.saturating_add(1);
         if message_progress.should_emit(finalized_messages) {
-            progress.observe(archive_finalization_event(
+            let mut event = archive_finalization_event(
                 ProgressState::Advanced,
                 "sortAndWriteMessages",
                 ProgressUnit::Records,
@@ -518,11 +679,20 @@ pub fn restore_catalog_with_progress(
                 catalog,
                 &progress_plan,
                 &integrity,
-            ));
+            );
+            attach_finalization_storage(
+                &mut event,
+                &storage_plan,
+                &mut staging_storage,
+                &staging,
+                &output_directory,
+                published_before_messages.saturating_add(messages.byte_count()),
+            )?;
+            progress.observe(event);
         }
     }
     messages.flush()?;
-    progress.observe(archive_finalization_event(
+    let mut messages_finished = archive_finalization_event(
         ProgressState::Completed,
         "sortAndWriteMessages",
         ProgressUnit::Records,
@@ -533,10 +703,20 @@ pub fn restore_catalog_with_progress(
         catalog,
         &progress_plan,
         &integrity,
-    ));
+    );
+    let published_after_messages = archive_file_byte_count(&output_directory)?;
+    attach_finalization_storage(
+        &mut messages_finished,
+        &storage_plan,
+        &mut staging_storage,
+        &staging,
+        &output_directory,
+        published_after_messages,
+    )?;
+    progress.observe(messages_finished);
 
-    let mut artifacts = owner_only_writer(&artifacts_path)?;
-    progress.observe(archive_finalization_event(
+    let mut artifacts = ByteCountingWriter::new(owner_only_writer(&artifacts_path)?);
+    let mut artifacts_started = archive_finalization_event(
         ProgressState::Started,
         "writeArtifactIndex",
         ProgressUnit::Records,
@@ -547,7 +727,16 @@ pub fn restore_catalog_with_progress(
         catalog,
         &progress_plan,
         &integrity,
-    ));
+    );
+    attach_finalization_storage(
+        &mut artifacts_started,
+        &storage_plan,
+        &mut staging_storage,
+        &staging,
+        &output_directory,
+        published_after_messages,
+    )?;
+    progress.observe(artifacts_started);
     let mut finalized_artifacts = 0_u64;
     let mut artifact_progress = ProgressThrottle::new(artifact_total);
     for artifact in artifact_resolver.artifacts() {
@@ -590,7 +779,7 @@ pub fn restore_catalog_with_progress(
         artifacts.write_all(b"\n")?;
         finalized_artifacts = finalized_artifacts.saturating_add(1);
         if artifact_progress.should_emit(finalized_artifacts) {
-            progress.observe(archive_finalization_event(
+            let mut event = archive_finalization_event(
                 ProgressState::Advanced,
                 "writeArtifactIndex",
                 ProgressUnit::Records,
@@ -601,12 +790,21 @@ pub fn restore_catalog_with_progress(
                 catalog,
                 &progress_plan,
                 &integrity,
-            ));
+            );
+            attach_finalization_storage(
+                &mut event,
+                &storage_plan,
+                &mut staging_storage,
+                &staging,
+                &output_directory,
+                published_after_messages.saturating_add(artifacts.byte_count()),
+            )?;
+            progress.observe(event);
         }
     }
     artifacts.flush()?;
     let finalized_records = finalized_messages.saturating_add(finalized_artifacts);
-    progress.observe(archive_finalization_event(
+    let mut artifacts_finished = archive_finalization_event(
         ProgressState::Completed,
         "writeArtifactIndex",
         ProgressUnit::Records,
@@ -617,9 +815,19 @@ pub fn restore_catalog_with_progress(
         catalog,
         &progress_plan,
         &integrity,
-    ));
+    );
+    let published_after_artifacts = archive_file_byte_count(&output_directory)?;
+    attach_finalization_storage(
+        &mut artifacts_finished,
+        &storage_plan,
+        &mut staging_storage,
+        &staging,
+        &output_directory,
+        published_after_artifacts,
+    )?;
+    progress.observe(artifacts_finished);
 
-    progress.observe(archive_finalization_event(
+    let mut entities_started = archive_finalization_event(
         ProgressState::Started,
         "restoreEntityIndexes",
         ProgressUnit::Items,
@@ -630,7 +838,16 @@ pub fn restore_catalog_with_progress(
         catalog,
         &progress_plan,
         &integrity,
-    ));
+    );
+    attach_finalization_storage(
+        &mut entities_started,
+        &storage_plan,
+        &mut staging_storage,
+        &staging,
+        &output_directory,
+        published_after_artifacts,
+    )?;
+    progress.observe(entities_started);
     let entity_result = restore_entities(catalog, &account_id, entity_seeds, &output_directory)?;
     integrity.conversation_count = entity_result.conversation_count;
     integrity.participant_count = entity_result.participant_count;
@@ -639,7 +856,7 @@ pub fn restore_catalog_with_progress(
     integrity.entity_decode_gap_count = entity_result.decode_gap_count;
     integrity.missing_local_profile_count = entity_result.missing_local_profile_count;
     integrity.unresolved_conversation_count = entity_result.unresolved_conversation_count;
-    progress.observe(archive_finalization_event(
+    let mut entities_finished = archive_finalization_event(
         ProgressState::Completed,
         "restoreEntityIndexes",
         ProgressUnit::Items,
@@ -650,7 +867,17 @@ pub fn restore_catalog_with_progress(
         catalog,
         &progress_plan,
         &integrity,
-    ));
+    );
+    let published_after_entities = archive_file_byte_count(&output_directory)?;
+    attach_finalization_storage(
+        &mut entities_finished,
+        &storage_plan,
+        &mut staging_storage,
+        &staging,
+        &output_directory,
+        published_after_entities,
+    )?;
+    progress.observe(entities_finished);
     let cached_phase_start = finalized_records.saturating_add(fixed_stage_work);
     let cached_surfaces = restore_cached_surfaces_with_progress(
         catalog,
@@ -666,6 +893,10 @@ pub fn restore_catalog_with_progress(
     integrity.cached_moment_interaction_count = cached_surfaces.coverage.interaction_count;
     integrity.cached_surface_semantic_gap_count = cached_surfaces.coverage.semantic_gap_count;
     let cached_phase_end = cached_phase_start.saturating_add(cached_surface_work);
+    let published_after_cached_surfaces = archive_file_byte_count(&output_directory)?;
+    let cached_remaining =
+        storage_plan.remaining_finalization_requirement(cached_phase_end, finalization_total);
+    storage_plan.ensure_remaining_space(&output_directory, cached_remaining)?;
 
     table_coverage.sort_by(|left, right| {
         (
@@ -712,7 +943,7 @@ pub fn restore_catalog_with_progress(
         unknown_payload_reason_counts: integrity.unknown_payload_reason_counts.clone(),
         semantic_gap_reason_counts: integrity.semantic_gap_reason_counts.clone(),
     };
-    progress.observe(archive_finalization_event(
+    let mut coverage_started = archive_finalization_event(
         ProgressState::Started,
         "writeCoverageMetadata",
         ProgressUnit::Items,
@@ -723,9 +954,18 @@ pub fn restore_catalog_with_progress(
         catalog,
         &progress_plan,
         &integrity,
-    ));
+    );
+    attach_finalization_storage(
+        &mut coverage_started,
+        &storage_plan,
+        &mut staging_storage,
+        &staging,
+        &output_directory,
+        published_after_cached_surfaces,
+    )?;
+    progress.observe(coverage_started);
     write_owner_only_json(&coverage_path, &coverage)?;
-    progress.observe(archive_finalization_event(
+    let mut coverage_finished = archive_finalization_event(
         ProgressState::Completed,
         "writeCoverageMetadata",
         ProgressUnit::Items,
@@ -736,7 +976,17 @@ pub fn restore_catalog_with_progress(
         catalog,
         &progress_plan,
         &integrity,
-    ));
+    );
+    let published_after_coverage = archive_file_byte_count(&output_directory)?;
+    attach_finalization_storage(
+        &mut coverage_finished,
+        &storage_plan,
+        &mut staging_storage,
+        &staging,
+        &output_directory,
+        published_after_coverage,
+    )?;
+    progress.observe(coverage_finished);
 
     let client_build_compatibility = catalog.manifest.client_build_compatibility();
     let database_coverage = restoration_database_coverage(catalog);
@@ -767,7 +1017,7 @@ pub fn restore_catalog_with_progress(
         } else {
             crate::RestorationArchiveScope::Authoritative
         };
-    progress.observe(archive_finalization_event(
+    let mut report_started = archive_finalization_event(
         ProgressState::Started,
         "writeArchiveReport",
         ProgressUnit::Items,
@@ -778,10 +1028,26 @@ pub fn restore_catalog_with_progress(
         catalog,
         &progress_plan,
         &integrity,
-    ));
-    let report = RestorationReport {
-        format_version: 5,
+    );
+    attach_finalization_storage(
+        &mut report_started,
+        &storage_plan,
+        &mut staging_storage,
+        &staging,
+        &output_directory,
+        published_after_coverage,
+    )?;
+    progress.observe(report_started);
+    let mut report = RestorationReport {
+        format_version: if account_binding.self_participant_id.is_some() {
+            6
+        } else {
+            5
+        },
         account_id,
+        self_participant_id: account_binding.self_participant_id,
+        account_binding_evidence: account_binding.evidence,
+        storage: Some(storage_plan.evidence(staging_storage, 0)),
         source_fingerprint: catalog.manifest.source_fingerprint.clone(),
         client_build_compatibility,
         acquisition: catalog.manifest.acquisition.clone(),
@@ -807,8 +1073,9 @@ pub fn restore_catalog_with_progress(
         integrity,
         completion,
     };
-    write_owner_only_json(&report_path, &report)?;
-    progress.observe(archive_finalization_event(
+    let actual_archive_byte_count =
+        write_report_with_exact_archive_size(&report_path, &mut report, published_after_coverage)?;
+    let mut report_finished = archive_finalization_event(
         ProgressState::Completed,
         "writeArchiveReport",
         ProgressUnit::Items,
@@ -819,7 +1086,16 @@ pub fn restore_catalog_with_progress(
         catalog,
         &progress_plan,
         &report.integrity,
-    ));
+    );
+    attach_finalization_storage(
+        &mut report_finished,
+        &storage_plan,
+        &mut staging_storage,
+        &staging,
+        &output_directory,
+        actual_archive_byte_count,
+    )?;
+    progress.observe(report_finished);
     let mut final_event = ProgressEvent::new(
         ProgressPhase::ArchiveFinalization,
         ProgressState::Completed,
@@ -837,6 +1113,14 @@ pub fn restore_catalog_with_progress(
     final_event.rejected_record_count = Some(report.integrity.rejected_row_count);
     final_event.semantic_gap_count = Some(report.integrity.semantic_gap_count);
     final_event.elapsed_milliseconds = Some(elapsed_milliseconds(finalization_clock));
+    attach_finalization_storage(
+        &mut final_event,
+        &storage_plan,
+        &mut staging_storage,
+        &staging,
+        &output_directory,
+        actual_archive_byte_count,
+    )?;
     progress.observe(final_event);
     Ok(report)
 }
@@ -934,6 +1218,318 @@ struct RestorationProgressPlan {
     total_message_rows: u64,
     total_observed_table_rows: u64,
     total_cached_surface_rows: u64,
+}
+
+impl RestorationStoragePlan {
+    fn estimate(catalog: &PreparedCatalog, plan: &RestorationProgressPlan) -> Self {
+        let source_byte_count = catalog.databases.iter().fold(0_u64, |total, database| {
+            total
+                .saturating_add(database.database_byte_count)
+                .saturating_add(database.write_ahead_log_byte_count)
+        });
+        let other_record_count = plan
+            .total_observed_table_rows
+            .saturating_sub(plan.total_message_rows);
+        let estimated_archive_byte_count = source_byte_count
+            .saturating_mul(ARCHIVE_SOURCE_BYTE_MULTIPLIER)
+            .saturating_add(
+                plan.total_message_rows
+                    .saturating_mul(ARCHIVE_MESSAGE_RECORD_OVERHEAD),
+            )
+            .saturating_add(other_record_count.saturating_mul(ARCHIVE_OTHER_RECORD_OVERHEAD))
+            .saturating_add(ARCHIVE_FIXED_OVERHEAD);
+        let estimated_staging_byte_count = source_byte_count
+            .saturating_mul(STAGING_SOURCE_BYTE_MULTIPLIER)
+            .saturating_add(
+                plan.total_message_rows
+                    .saturating_mul(STAGING_MESSAGE_RECORD_OVERHEAD),
+            )
+            .saturating_add(STAGING_FIXED_OVERHEAD);
+        let estimated_peak_byte_count =
+            estimated_archive_byte_count.saturating_add(estimated_staging_byte_count);
+        let reserve_byte_count = estimated_peak_byte_count
+            .div_ceil(10)
+            .max(MINIMUM_FREE_SPACE_RESERVE);
+        let required_free_byte_count = estimated_peak_byte_count.saturating_add(reserve_byte_count);
+        Self {
+            source_byte_count,
+            message_record_count: plan.total_message_rows,
+            observed_table_record_count: plan.total_observed_table_rows,
+            estimated_archive_byte_count,
+            estimated_staging_byte_count,
+            estimated_peak_byte_count,
+            reserve_byte_count,
+            required_free_byte_count,
+            available_free_byte_count_at_start: 0,
+        }
+    }
+
+    fn remaining_staging_requirement(&self, completed_records: u64) -> u64 {
+        let remaining_records = self
+            .message_record_count
+            .saturating_sub(completed_records.min(self.message_record_count));
+        let remaining_staging = if self.message_record_count == 0 {
+            0
+        } else {
+            u64::try_from(
+                self.estimated_staging_byte_count as u128 * remaining_records as u128
+                    / self.message_record_count as u128,
+            )
+            .unwrap_or(u64::MAX)
+        };
+        self.estimated_archive_byte_count
+            .saturating_add(remaining_staging)
+    }
+
+    fn remaining_finalization_requirement(&self, phase_completed: u64, phase_total: u64) -> u64 {
+        if phase_total == 0 {
+            return 0;
+        }
+        let remaining = phase_total.saturating_sub(phase_completed.min(phase_total));
+        u64::try_from(
+            self.estimated_archive_byte_count as u128 * remaining as u128 / phase_total as u128,
+        )
+        .unwrap_or(u64::MAX)
+    }
+
+    fn ensure_remaining_space(
+        &self,
+        output_path: &Path,
+        remaining_work_byte_count: u64,
+    ) -> Result<(u64, u64), RestoreError> {
+        let available = available_free_bytes(output_path)?;
+        let required = if remaining_work_byte_count == 0 {
+            0
+        } else {
+            remaining_work_byte_count.saturating_add(self.reserve_byte_count)
+        };
+        if available < required {
+            return Err(RestoreError::InsufficientDiskSpace {
+                available_byte_count: available,
+                required_free_byte_count: required,
+                estimated_peak_byte_count: self.estimated_peak_byte_count,
+            });
+        }
+        Ok((available, required))
+    }
+
+    fn evidence(
+        &self,
+        staging: StagingStorageStats,
+        actual_archive_byte_count: u64,
+    ) -> RestorationStorageEvidence {
+        RestorationStorageEvidence {
+            format_version: 1,
+            source_byte_count: self.source_byte_count,
+            message_record_count: self.message_record_count,
+            observed_table_record_count: self.observed_table_record_count,
+            estimated_archive_byte_count: self.estimated_archive_byte_count,
+            estimated_staging_byte_count: self.estimated_staging_byte_count,
+            estimated_peak_byte_count: self.estimated_peak_byte_count,
+            required_free_byte_count: self.required_free_byte_count,
+            available_free_byte_count_at_start: self.available_free_byte_count_at_start,
+            peak_staging_file_byte_count: staging.peak_file_byte_count,
+            staged_uncompressed_byte_count: staging.uncompressed_payload_byte_count,
+            staged_compressed_byte_count: staging.compressed_payload_byte_count,
+            actual_archive_byte_count,
+        }
+    }
+}
+
+fn preflight_restoration_storage(
+    catalog: &PreparedCatalog,
+    plan: &RestorationProgressPlan,
+    output_path: &Path,
+    progress: &dyn ProgressObserver,
+) -> Result<RestorationStoragePlan, RestoreError> {
+    let mut storage = RestorationStoragePlan::estimate(catalog, plan);
+    let available = available_free_bytes(output_path)?;
+    storage.available_free_byte_count_at_start = available;
+    let mut event = ProgressEvent::new(
+        ProgressPhase::RecordPlanning,
+        ProgressState::Planned,
+        "preflightRestorationStorage",
+        ProgressUnit::Bytes,
+        available.min(storage.required_free_byte_count),
+        storage.required_free_byte_count,
+        plan.total_message_rows,
+        plan.total_message_rows,
+    );
+    attach_storage_plan(
+        &mut event,
+        &storage,
+        available,
+        storage.required_free_byte_count,
+    );
+    event.database_count = Some(catalog.databases.len());
+    event.table_count = Some(plan.total_table_count);
+    event.message_table_count = Some(plan.total_message_table_count);
+    event.source_record_count = Some(plan.total_message_rows);
+    progress.observe(event);
+    if available < storage.required_free_byte_count {
+        return Err(RestoreError::InsufficientDiskSpace {
+            available_byte_count: available,
+            required_free_byte_count: storage.required_free_byte_count,
+            estimated_peak_byte_count: storage.estimated_peak_byte_count,
+        });
+    }
+    let mut completed = ProgressEvent::new(
+        ProgressPhase::RecordPlanning,
+        ProgressState::Completed,
+        "preflightRestorationStorage",
+        ProgressUnit::Bytes,
+        storage.required_free_byte_count,
+        storage.required_free_byte_count,
+        plan.total_message_rows,
+        plan.total_message_rows,
+    );
+    attach_storage_plan(
+        &mut completed,
+        &storage,
+        available,
+        storage.required_free_byte_count,
+    );
+    completed.database_count = Some(catalog.databases.len());
+    completed.table_count = Some(plan.total_table_count);
+    completed.message_table_count = Some(plan.total_message_table_count);
+    completed.source_record_count = Some(plan.total_message_rows);
+    progress.observe(completed);
+    Ok(storage)
+}
+
+fn attach_storage_plan(
+    event: &mut ProgressEvent,
+    storage: &RestorationStoragePlan,
+    available_free_byte_count: u64,
+    required_free_byte_count: u64,
+) {
+    event.source_byte_count = Some(storage.source_byte_count);
+    event.estimated_archive_byte_count = Some(storage.estimated_archive_byte_count);
+    event.estimated_staging_byte_count = Some(storage.estimated_staging_byte_count);
+    event.estimated_peak_byte_count = Some(storage.estimated_peak_byte_count);
+    event.required_free_byte_count = Some(required_free_byte_count);
+    event.available_free_byte_count = Some(available_free_byte_count);
+}
+
+fn attach_staging_storage(
+    event: &mut ProgressEvent,
+    storage: &RestorationStoragePlan,
+    stats: &mut StagingStorageStats,
+    staging: &RestorationStaging,
+    output_path: &Path,
+    completed_records: u64,
+) -> Result<(), RestoreError> {
+    let staging_bytes = staging.file_byte_count()?;
+    stats.peak_file_byte_count = stats.peak_file_byte_count.max(staging_bytes);
+    let (available, required) = storage.ensure_remaining_space(
+        output_path,
+        storage.remaining_staging_requirement(completed_records),
+    )?;
+    attach_storage_plan(event, storage, available, required);
+    event.staging_file_byte_count = Some(staging_bytes);
+    event.staged_uncompressed_byte_count = Some(stats.uncompressed_payload_byte_count);
+    event.staged_compressed_byte_count = Some(stats.compressed_payload_byte_count);
+    Ok(())
+}
+
+fn attach_finalization_storage(
+    event: &mut ProgressEvent,
+    storage: &RestorationStoragePlan,
+    stats: &mut StagingStorageStats,
+    staging: &RestorationStaging,
+    output_path: &Path,
+    published_archive_byte_count: u64,
+) -> Result<(), RestoreError> {
+    let staging_bytes = staging.file_byte_count()?;
+    stats.peak_file_byte_count = stats.peak_file_byte_count.max(staging_bytes);
+    let remaining =
+        storage.remaining_finalization_requirement(event.phase_completed, event.phase_total);
+    let (available, required) = storage.ensure_remaining_space(output_path, remaining)?;
+    attach_storage_plan(event, storage, available, required);
+    event.staging_file_byte_count = Some(staging_bytes);
+    event.staged_uncompressed_byte_count = Some(stats.uncompressed_payload_byte_count);
+    event.staged_compressed_byte_count = Some(stats.compressed_payload_byte_count);
+    event.published_archive_byte_count = Some(published_archive_byte_count);
+    Ok(())
+}
+
+fn available_free_bytes(path: &Path) -> Result<u64, RestoreError> {
+    let probe_path = nearest_existing_ancestor(path)?;
+    let path_bytes = probe_path.as_os_str().as_bytes();
+    let c_path = CString::new(path_bytes).map_err(|_| {
+        RestoreError::Integrity("restoration output path contains a NUL byte".to_string())
+    })?;
+    let mut statistics = MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `c_path` is NUL-terminated and `statistics` points to writable,
+    // correctly aligned storage that is read only after statvfs succeeds.
+    if unsafe { libc::statvfs(c_path.as_ptr(), statistics.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: the successful statvfs call initialized the complete structure.
+    let statistics = unsafe { statistics.assume_init() };
+    let bytes = u128::from(statistics.f_bavail).saturating_mul(u128::from(statistics.f_frsize));
+    Ok(u64::try_from(bytes).unwrap_or(u64::MAX))
+}
+
+fn nearest_existing_ancestor(path: &Path) -> Result<PathBuf, RestoreError> {
+    let mut candidate = if path.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        path.to_path_buf()
+    };
+    while fs::symlink_metadata(&candidate).is_err() {
+        if !candidate.pop() {
+            candidate = PathBuf::from(".");
+            break;
+        }
+    }
+    Ok(fs::canonicalize(candidate)?)
+}
+
+fn compress_staging_payload(payload: &[u8]) -> Result<Vec<u8>, RestoreError> {
+    Ok(zstd::stream::encode_all(
+        payload,
+        STAGING_COMPRESSION_LEVEL,
+    )?)
+}
+
+fn decompress_staging_payload(payload: &[u8]) -> Result<Vec<u8>, RestoreError> {
+    Ok(zstd::stream::decode_all(payload)?)
+}
+
+fn archive_file_byte_count(output_path: &Path) -> Result<u64, RestoreError> {
+    let mut total = 0_u64;
+    let entries = WalkDir::new(output_path)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            !(entry.depth() == 1
+                && entry.file_type().is_dir()
+                && entry.file_name().as_bytes().starts_with(b".staging-"))
+        });
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            RestoreError::Io(
+                error
+                    .into_io_error()
+                    .unwrap_or_else(|| std::io::Error::other("could not inspect archive size")),
+            )
+        })?;
+        if entry.file_type().is_symlink() {
+            return Err(RestoreError::Integrity(
+                "restoration output contains a symbolic link".to_string(),
+            ));
+        }
+        if entry.file_type().is_file() {
+            let metadata = entry.metadata().map_err(|error| {
+                RestoreError::Io(error.into_io_error().unwrap_or_else(|| {
+                    std::io::Error::other("could not inspect archive file size")
+                }))
+            })?;
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    Ok(total)
 }
 
 struct DatabaseProgressPlan {
@@ -1220,7 +1816,7 @@ struct RowRestorationContext<'a> {
     account_id: &'a str,
     conversation: &'a str,
     names: &'a HashMap<i64, String>,
-    self_username: Option<&'a str>,
+    self_source_identifier: Option<&'a str>,
 }
 
 fn resolve_row_conversation(
@@ -1345,6 +1941,7 @@ fn restore_row(
     let row_conversation_id = scoped_opaque_id(context.account_id, row_conversation.as_bytes());
     let fallback_sender = sender_row_id
         .and_then(|value| context.names.get(&value))
+        .filter(|value| !value.is_empty())
         .cloned()
         .or_else(|| {
             field(&["sender", "sender_name", "from_user", "from_username"])
@@ -1438,6 +2035,18 @@ fn restore_row(
             }
         };
 
+    if decoded_sender.as_deref().is_none_or(str::is_empty)
+        && logical_type == Some(49)
+        && sub_type == Some(62)
+    {
+        decoded_sender = typed_payload_raw_xml(&typed_payload).and_then(|raw_xml| {
+            crate::nested_xml::unique_identifier_element_text(raw_xml, "fromusername")
+        });
+    }
+    // An empty source sender is absence, not an identity. Normalize once so
+    // direction, the opaque sender ID, and source-preserving evidence cannot
+    // disagree about whether the row has a sender.
+    let decoded_sender = decoded_sender.filter(|value| !value.is_empty());
     let identity = format!("{}:{}:{source_row_id}", context.set_id, context.table_id);
     let relationships = extract_relationships(
         logical_type,
@@ -1449,8 +2058,7 @@ fn restore_row(
     let (direction, direction_evidence) = infer_direction(
         explicit_sender_flag,
         decoded_sender.as_deref(),
-        &row_conversation,
-        context.self_username,
+        context.self_source_identifier,
     );
     Ok(CanonicalMessage {
         canonical_id: opaque_id(identity.as_bytes()),
@@ -1669,7 +2277,7 @@ fn extract_relationships(
     }]
 }
 
-fn typed_payload_raw_xml(payload: &TypedPayload) -> Option<&str> {
+pub(crate) fn typed_payload_raw_xml(payload: &TypedPayload) -> Option<&str> {
     let TypedPayload::Decoded(value) = payload else {
         return None;
     };
@@ -1684,55 +2292,131 @@ fn typed_payload_raw_xml(payload: &TypedPayload) -> Option<&str> {
 fn infer_direction(
     explicit_sender_flag: Option<i64>,
     sender: Option<&str>,
-    conversation: &str,
-    self_username: Option<&str>,
+    self_source_identifier: Option<&str>,
 ) -> (MessageDirection, DirectionEvidence) {
-    if let Some(flag) = explicit_sender_flag {
-        return if flag == 0 {
+    let explicit_direction = explicit_sender_flag.map(|flag| {
+        if flag == 0 {
+            MessageDirection::Incoming
+        } else {
+            MessageDirection::Outgoing
+        }
+    });
+    if let (Some(sender), Some(account)) = (
+        sender.filter(|value| !value.is_empty()),
+        self_source_identifier.filter(|value| !value.is_empty()),
+    ) {
+        let (direction, evidence) = if sender == account {
             (
-                MessageDirection::Incoming,
-                DirectionEvidence::ExplicitSourceColumn,
+                MessageDirection::Outgoing,
+                DirectionEvidence::SenderMatchesAccount,
             )
         } else {
             (
-                MessageDirection::Outgoing,
-                DirectionEvidence::ExplicitSourceColumn,
+                MessageDirection::Incoming,
+                DirectionEvidence::SenderDiffersFromAccount,
             )
         };
+        return if explicit_direction.is_some_and(|explicit| explicit != direction) {
+            (
+                direction,
+                DirectionEvidence::SenderAccountConflictWithExplicitSourceColumn,
+            )
+        } else {
+            (direction, evidence)
+        };
     }
-    let Some(sender) = sender.filter(|value| !value.is_empty()) else {
-        return (MessageDirection::Unknown, DirectionEvidence::Unresolved);
-    };
-    if conversation.ends_with("@chatroom") {
-        if let Some(account) = self_username.filter(|value| !value.is_empty()) {
-            return if sender == account {
-                (
-                    MessageDirection::Outgoing,
-                    DirectionEvidence::SenderMatchesAccount,
-                )
-            } else {
-                (
-                    MessageDirection::Incoming,
-                    DirectionEvidence::SenderDiffersFromAccount,
-                )
-            };
+    explicit_direction.map_or(
+        (MessageDirection::Unknown, DirectionEvidence::Unresolved),
+        |direction| (direction, DirectionEvidence::ExplicitSourceColumn),
+    )
+}
+
+fn resolve_account_binding(
+    catalog: &PreparedCatalog,
+    account_root: Option<&Path>,
+) -> Result<ResolvedAccountBinding, RestoreError> {
+    if let Some(binding) = &catalog.manifest.account_binding {
+        if let Some(root) = account_root {
+            let canonical = fs::canonicalize(root)?;
+            let observed_account_id = opaque_id(canonical.to_string_lossy().as_bytes());
+            if observed_account_id != binding.account_id {
+                return Err(RestoreError::Integrity(
+                    "media account root belongs to a different snapshot account".to_string(),
+                ));
+            }
         }
-        return (MessageDirection::Unknown, DirectionEvidence::Unresolved);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&binding.self_source_identifier_base64)
+            .map_err(|_| RestoreError::Manifest("invalid account-holder binding".to_string()))?;
+        let self_source_identifier = String::from_utf8(decoded)
+            .map_err(|_| RestoreError::Manifest("invalid account-holder binding".to_string()))?;
+        let self_participant_id =
+            scoped_opaque_id(&binding.account_id, self_source_identifier.as_bytes());
+        return Ok(ResolvedAccountBinding {
+            account_id: binding.account_id.clone(),
+            self_source_identifier: Some(self_source_identifier),
+            self_participant_id: Some(self_participant_id),
+            evidence: Some(crate::AccountHolderBindingEvidence::SnapshotManifest),
+        });
     }
-    if conversation.starts_with("unresolved:") {
-        return (MessageDirection::Unknown, DirectionEvidence::Unresolved);
+
+    if let Some(root) = account_root {
+        let canonical = fs::canonicalize(root)?;
+        let account_id = opaque_id(canonical.to_string_lossy().as_bytes());
+        let self_source_identifier = legacy_account_root_self_identifier(&canonical);
+        let self_participant_id = self_source_identifier
+            .as_ref()
+            .map(|value| scoped_opaque_id(&account_id, value.as_bytes()));
+        let evidence = legacy_account_binding_evidence(self_participant_id.as_deref());
+        return Ok(ResolvedAccountBinding {
+            account_id,
+            self_source_identifier,
+            self_participant_id,
+            evidence,
+        });
     }
-    if sender == conversation {
-        (
-            MessageDirection::Incoming,
-            DirectionEvidence::SenderMatchesConversation,
-        )
+
+    Ok(ResolvedAccountBinding {
+        account_id: opaque_id(catalog.manifest.source_fingerprint.as_bytes()),
+        self_source_identifier: None,
+        self_participant_id: None,
+        evidence: None,
+    })
+}
+
+fn legacy_account_root_self_identifier(account_root: &Path) -> Option<String> {
+    let directory_name = account_root.file_name()?.to_str()?;
+    let conservative = wx_media::extract_wxid(directory_name);
+    if conservative != directory_name {
+        return Some(conservative);
+    }
+    let Some((candidate, suffix)) = directory_name.rsplit_once('_') else {
+        return (!conservative.is_empty()).then_some(conservative);
+    };
+    let safe_suffix = suffix.len() == 4
+        && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        && !candidate.is_empty();
+    if !safe_suffix || directory_name.starts_with("wxid_") {
+        return (!conservative.is_empty()).then_some(conservative);
+    }
+    let Some(parent) = account_root.parent() else {
+        return (!conservative.is_empty()).then_some(conservative);
+    };
+    let login_candidate = parent.join("all_users").join("login").join(candidate);
+    let independently_confirmed = fs::symlink_metadata(login_candidate)
+        .ok()
+        .is_some_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    Some(if independently_confirmed {
+        candidate.to_string()
     } else {
-        (
-            MessageDirection::Outgoing,
-            DirectionEvidence::SenderDiffersFromConversation,
-        )
-    }
+        conservative
+    })
+}
+
+fn legacy_account_binding_evidence(
+    self_participant_id: Option<&str>,
+) -> Option<crate::AccountHolderBindingEvidence> {
+    self_participant_id.map(|_| crate::AccountHolderBindingEvidence::LegacyAccountRoot)
 }
 
 pub(crate) fn extract_tagged_i64(raw: &[u8], tags: &[&str]) -> Option<i64> {
@@ -2224,9 +2908,197 @@ fn write_owner_only_json(path: &Path, value: &impl serde::Serialize) -> Result<(
     Ok(())
 }
 
+fn write_report_with_exact_archive_size(
+    path: &Path,
+    report: &mut RestorationReport,
+    archive_byte_count_before_report: u64,
+) -> Result<u64, RestoreError> {
+    for _ in 0..8 {
+        let bytes = serde_json::to_vec_pretty(&report)?;
+        let exact_archive_byte_count = archive_byte_count_before_report
+            .saturating_add(bytes.len() as u64)
+            .saturating_add(1);
+        let storage = report.storage.as_mut().ok_or_else(|| {
+            RestoreError::Integrity("restoration report lost storage evidence".to_string())
+        })?;
+        if storage.actual_archive_byte_count == exact_archive_byte_count {
+            let mut writer = owner_only_writer(path)?;
+            writer.write_all(&bytes)?;
+            writer.write_all(b"\n")?;
+            writer.flush()?;
+            return Ok(exact_archive_byte_count);
+        }
+        storage.actual_archive_byte_count = exact_archive_byte_count;
+    }
+    Err(RestoreError::Integrity(
+        "restoration report size did not converge".to_string(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compressed_staging_payload_round_trip_is_lossless() {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "text": "多语言 transcript with embedded \\u{0} bytes",
+            "binary": base64::engine::general_purpose::STANDARD.encode((0_u8..=255).collect::<Vec<_>>()),
+            "nested": [1, 2, 3, 4],
+        }))
+        .unwrap();
+        let compressed = compress_staging_payload(&payload).unwrap();
+        let restored = decompress_staging_payload(&compressed).unwrap();
+        assert_eq!(restored, payload);
+    }
+
+    #[test]
+    fn large_synthetic_spool_is_compressed_measured_and_ephemeral() {
+        let fixture = tempfile::tempdir().unwrap();
+        let output = fixture.path().join("archive");
+        fs::create_dir(&output).unwrap();
+        let retained_archive_file = output.join("messages.ndjson");
+        fs::write(&retained_archive_file, b"retained archive sentinel").unwrap();
+        let staging_directory;
+        let mut uncompressed_byte_count = 0_u64;
+        let mut compressed_byte_count = 0_u64;
+        let staging_file_byte_count;
+        {
+            let staging = RestorationStaging::create(&output).unwrap();
+            staging_directory = staging.path.parent().unwrap().to_path_buf();
+            let repeated = "synthetic repetitive source evidence ".repeat(256);
+            for ordinal in 0..2_000_i64 {
+                let payload = serde_json::to_vec(&serde_json::json!({
+                    "ordinal": ordinal,
+                    "sourceEvidence": repeated,
+                }))
+                .unwrap();
+                let compressed = compress_staging_payload(&payload).unwrap();
+                uncompressed_byte_count =
+                    uncompressed_byte_count.saturating_add(payload.len() as u64);
+                compressed_byte_count =
+                    compressed_byte_count.saturating_add(compressed.len() as u64);
+                staging
+                    .execute(
+                        "INSERT INTO staged_message(
+                           canonical_id, conversation_id, sort_sequence, server_id,
+                           created_at, local_id, source_logical_path, source_table_id,
+                           source_row_id, message_json_zstd
+                         ) VALUES (?1, 'conversation', ?2, ?2, ?2, ?2, 'message.db',
+                                   'table', ?2, ?3)",
+                        rusqlite::params![format!("message-{ordinal}"), ordinal, compressed],
+                    )
+                    .unwrap();
+            }
+            staging_file_byte_count = staging.file_byte_count().unwrap();
+            assert!(compressed_byte_count.saturating_mul(10) < uncompressed_byte_count);
+            assert!(staging_file_byte_count < uncompressed_byte_count);
+
+            let mut statement = staging
+                .prepare(
+                    "SELECT source_row_id, message_json_zstd
+                     FROM staged_message ORDER BY source_row_id",
+                )
+                .unwrap();
+            let mut rows = statement.query([]).unwrap();
+            let mut observed = 0_i64;
+            while let Some(row) = rows.next().unwrap() {
+                let ordinal: i64 = row.get(0).unwrap();
+                let compressed: Vec<u8> = row.get(1).unwrap();
+                let payload = decompress_staging_payload(&compressed).unwrap();
+                let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+                assert_eq!(value["ordinal"], ordinal);
+                assert_eq!(value["sourceEvidence"], repeated);
+                observed += 1;
+            }
+            assert_eq!(observed, 2_000);
+        }
+        assert!(!staging_directory.exists());
+        assert_eq!(
+            fs::read(&retained_archive_file).unwrap(),
+            b"retained archive sentinel"
+        );
+        assert!(staging_file_byte_count > 0);
+    }
+
+    #[test]
+    fn disk_guard_fails_before_creating_the_output_directory() {
+        let fixture = tempfile::tempdir().unwrap();
+        let output = fixture.path().join("not-created");
+        let storage = RestorationStoragePlan {
+            source_byte_count: 1,
+            message_record_count: 1,
+            observed_table_record_count: 1,
+            estimated_archive_byte_count: u64::MAX,
+            estimated_staging_byte_count: u64::MAX,
+            estimated_peak_byte_count: u64::MAX,
+            reserve_byte_count: 1,
+            required_free_byte_count: u64::MAX,
+            available_free_byte_count_at_start: 0,
+        };
+        assert!(matches!(
+            storage.ensure_remaining_space(&output, u64::MAX),
+            Err(RestoreError::InsufficientDiskSpace { .. })
+        ));
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn bound_account_holder_deterministically_controls_message_direction() {
+        assert_eq!(
+            infer_direction(None, Some("wxid_self"), Some("wxid_self")),
+            (
+                MessageDirection::Outgoing,
+                DirectionEvidence::SenderMatchesAccount
+            )
+        );
+        assert_eq!(
+            infer_direction(None, Some("wxid_other"), Some("wxid_self")),
+            (
+                MessageDirection::Incoming,
+                DirectionEvidence::SenderDiffersFromAccount
+            )
+        );
+        assert_eq!(
+            infer_direction(Some(1), None, Some("wxid_self")),
+            (
+                MessageDirection::Outgoing,
+                DirectionEvidence::ExplicitSourceColumn
+            )
+        );
+        assert_eq!(
+            infer_direction(Some(0), Some("wxid_self"), Some("wxid_self")),
+            (
+                MessageDirection::Outgoing,
+                DirectionEvidence::SenderAccountConflictWithExplicitSourceColumn
+            )
+        );
+    }
+
+    #[test]
+    fn legacy_account_root_alias_requires_independent_login_confirmation() {
+        let fixture = tempfile::tempdir().unwrap();
+        let account = fixture.path().join("legacyuser_1662");
+        fs::create_dir(&account).unwrap();
+        assert_eq!(
+            legacy_account_root_self_identifier(&account).as_deref(),
+            Some("legacyuser_1662")
+        );
+        fs::create_dir_all(fixture.path().join("all_users/login/legacyuser")).unwrap();
+        assert_eq!(
+            legacy_account_root_self_identifier(&account).as_deref(),
+            Some("legacyuser")
+        );
+    }
+
+    #[test]
+    fn legacy_binding_evidence_requires_a_derived_account_holder() {
+        assert_eq!(legacy_account_binding_evidence(None), None);
+        assert_eq!(
+            legacy_account_binding_evidence(Some("opaque-self-participant")),
+            Some(crate::AccountHolderBindingEvidence::LegacyAccountRoot)
+        );
+    }
 
     #[test]
     fn bizchat_entity_tables_are_auxiliary_not_message_candidates() {

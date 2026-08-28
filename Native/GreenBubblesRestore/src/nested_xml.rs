@@ -251,6 +251,63 @@ pub(crate) fn xml_has_element_or_attribute(raw_xml: &str, requested_name: &str) 
     has_tag_shaped_name(raw_xml, requested_name)
 }
 
+/// Extract one unambiguous, bounded source identifier from simple XML
+/// elements. Some observed Pat payloads repeat the field: either one element
+/// is blank or both carry the same value. Direction evidence is accepted only
+/// when all nonempty scalar occurrences agree on exactly one identifier.
+pub(crate) fn unique_identifier_element_text(
+    raw_xml: &str,
+    requested_name: &str,
+) -> Option<String> {
+    let candidate = xml_document_candidate(raw_xml)?;
+    if candidate.len() > MAX_XML_BYTES {
+        return None;
+    }
+    // Identity evidence must not be derived from a value whose bytes were
+    // silently changed. The declaration repair removes only misplaced XML
+    // processing instructions; unlike the general semantic projection, this
+    // path deliberately does not strip invalid characters before parsing.
+    let repaired = repair_misplaced_xml_declarations(candidate);
+    let parsed = Document::parse_with_options(
+        repaired.as_ref(),
+        ParsingOptions {
+            allow_dtd: false,
+            nodes_limit: MAX_XML_NODES,
+            entity_resolver: None,
+        },
+    )
+    .ok()?;
+    let matches = parsed.descendants().filter(|node| {
+        node.is_element() && node.tag_name().name().eq_ignore_ascii_case(requested_name)
+    });
+    let mut values = std::collections::BTreeSet::new();
+    for element in matches {
+        if element.children().any(|child| child.is_element()) {
+            return None;
+        }
+        let mut text_nodes = element.children().filter(|child| child.is_text());
+        let value = text_nodes
+            .next()
+            .and_then(|node| node.text())
+            .unwrap_or("")
+            .trim();
+        if text_nodes.next().is_some() {
+            return None;
+        }
+        if value.is_empty() {
+            continue;
+        }
+        if value.len() > 1_024 || value.chars().any(char::is_control) {
+            return None;
+        }
+        values.insert(value);
+        if values.len() > 1 {
+            return None;
+        }
+    }
+    values.pop_first().map(str::to_string)
+}
+
 fn has_tag_shaped_name(xml: &str, requested_name: &str) -> bool {
     let lower = xml.to_ascii_lowercase();
     let needle = format!("<{}", requested_name.to_ascii_lowercase());
@@ -887,6 +944,66 @@ mod tests {
         // stripped as if it were a structural processing instruction.
         let repaired = repair_misplaced_xml_declarations(xml);
         assert_eq!(repaired.as_ref(), xml);
+    }
+
+    #[test]
+    fn extracts_only_one_simple_bounded_xml_identifier() {
+        assert_eq!(
+            unique_identifier_element_text(
+                "<sysmsg><pat><fromusername>  wxid_sender  </fromusername></pat></sysmsg>",
+                "fromusername",
+            )
+            .as_deref(),
+            Some("wxid_sender")
+        );
+        assert_eq!(
+            unique_identifier_element_text(
+                "<sysmsg><pat><FROMUSERNAME>wxid_sender</FROMUSERNAME></pat></sysmsg>",
+                "fromusername",
+            )
+            .as_deref(),
+            Some("wxid_sender")
+        );
+        assert!(unique_identifier_element_text(
+            "<sysmsg><pat><fromusername></fromusername></pat></sysmsg>",
+            "fromusername",
+        )
+        .is_none());
+        assert_eq!(
+            unique_identifier_element_text(
+                "<sysmsg><pat><fromusername></fromusername><fromusername>wxid_sender</fromusername></pat></sysmsg>",
+                "fromusername",
+            )
+            .as_deref(),
+            Some("wxid_sender")
+        );
+        assert_eq!(
+            unique_identifier_element_text(
+                "<sysmsg><pat><fromusername>wxid_sender</fromusername><fromusername>wxid_sender</fromusername></pat></sysmsg>",
+                "fromusername",
+            )
+            .as_deref(),
+            Some("wxid_sender")
+        );
+        assert!(unique_identifier_element_text(
+            "<sysmsg><pat><fromusername>wxid_one</fromusername><fromusername>wxid_two</fromusername></pat></sysmsg>",
+            "fromusername",
+        )
+        .is_none());
+        assert!(unique_identifier_element_text(
+            "<sysmsg><pat><fromusername><username>wxid_sender</username></fromusername></pat></sysmsg>",
+            "fromusername",
+        )
+        .is_none());
+
+        let oversized = "x".repeat(1_025);
+        let xml = format!("<sysmsg><pat><fromusername>{oversized}</fromusername></pat></sysmsg>");
+        assert!(unique_identifier_element_text(&xml, "fromusername").is_none());
+        assert!(unique_identifier_element_text(
+            "<sysmsg><pat><fromusername>wxid_\u{b}sender</fromusername></pat></sysmsg>",
+            "fromusername",
+        )
+        .is_none());
     }
 
     #[test]

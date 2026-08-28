@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -8,6 +9,7 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use walkdir::WalkDir;
 
 use crate::archive::{ensure_private_directory, ensure_private_regular_file};
 use crate::schema::schema_profile_fingerprint;
@@ -15,11 +17,12 @@ use crate::{
     ArtifactAvailability, ArtifactDecodeState, ArtifactKind, CachedSurfaceCoverage,
     CachedSurfaceTableRole, CanonicalArtifact, CanonicalCachedMoment,
     CanonicalCachedMomentInteraction, CanonicalConversation, CanonicalMessage,
-    CanonicalParticipant, ConversationKind, ConversationMembershipRole, EntityDecodeState,
-    LocalProfileState, NoProgress, ProgressEvent, ProgressObserver, ProgressPhase, ProgressState,
-    ProgressUnit, RawSQLiteValue, RejectedRow, RelationshipResolutionState,
-    RestorationArchiveScope, RestorationCompletion, RestorationCoverage, RestorationMediaPhase,
-    RestorationReport, RestoreError, SemanticDecodeState, TableCoverageRole, TypedPayload,
+    CanonicalParticipant, ConversationKind, ConversationMembershipRole, DirectionEvidence,
+    EntityDecodeState, LocalProfileState, MessageDirection, NoProgress, ProgressEvent,
+    ProgressObserver, ProgressPhase, ProgressState, ProgressUnit, RawSQLiteValue, RejectedRow,
+    RelationshipResolutionState, RestorationArchiveScope, RestorationCompletion,
+    RestorationCoverage, RestorationMediaPhase, RestorationReport, RestoreError,
+    SemanticDecodeState, TableCoverageRole, TypedPayload,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +67,8 @@ pub struct ArchiveAuditReport {
     pub artifact_decode_gap_count: u64,
     pub entity_decode_gap_count: u64,
     pub unresolved_relationship_count: u64,
+    pub account_holder_bound: bool,
+    pub direction_conflict_count: u64,
     pub completion_evidence: AuditedRestorationCompletionEvidence,
 }
 
@@ -128,6 +133,7 @@ struct MessageAudit {
     unknown_payload_reason_counts: BTreeMap<String, u64>,
     semantic_gap_reason_counts: BTreeMap<String, u64>,
     direction_counts: BTreeMap<String, u64>,
+    direction_conflict_count: u64,
     ordering_basis_counts: BTreeMap<String, u64>,
 }
 
@@ -182,7 +188,7 @@ pub fn audit_archive_with_progress(
     let report: RestorationReport = read_json(&report_path)?;
     let coverage: RestorationCoverage = read_json(&coverage_path)?;
 
-    if !matches!(report.format_version, 3..=5) || !matches!(coverage.format_version, 2..=4) {
+    if !matches!(report.format_version, 3..=6) || !matches!(coverage.format_version, 2..=4) {
         return Err(integrity(
             "archive or coverage format is not supported by this auditor",
         ));
@@ -191,6 +197,7 @@ pub fn audit_archive_with_progress(
     verify_database_record_coverage(&report, &coverage)?;
     verify_report_paths(&archive_root, &report)?;
     verify_coverage(&coverage, &report)?;
+    verify_account_holder_binding(&report)?;
 
     let conversations = read_unique_ndjson::<CanonicalConversation, _, _>(
         &archive_root.join("conversations.ndjson"),
@@ -246,6 +253,7 @@ pub fn audit_archive_with_progress(
             "cached-surface record counts do not match report",
         ));
     }
+    verify_storage_evidence(&archive_root, &report)?;
 
     let audited_completion = verify_completion(&report)?;
     let full_restoration_verified = report.completion.full_restoration_achieved
@@ -321,6 +329,8 @@ pub fn audit_archive_with_progress(
         artifact_decode_gap_count: report.integrity.artifact_decode_gap_count,
         entity_decode_gap_count: report.integrity.entity_decode_gap_count,
         unresolved_relationship_count: report.integrity.unresolved_relationship_count,
+        account_holder_bound: report.self_participant_id.is_some(),
+        direction_conflict_count: messages.direction_conflict_count,
         completion_evidence,
     };
     progress.finish(&result);
@@ -466,6 +476,73 @@ fn verify_report_paths(root: &Path, report: &RestorationReport) -> Result<(), Re
         let recorded = recorded
             .ok_or_else(|| integrity("cached-surface path triplet is incomplete in report"))?;
         verify_recorded_archive_path(root, recorded, name)?;
+    }
+    Ok(())
+}
+
+fn verify_storage_evidence(root: &Path, report: &RestorationReport) -> Result<(), RestoreError> {
+    let Some(storage) = &report.storage else {
+        return Ok(());
+    };
+    if storage.format_version != 1
+        || storage.message_record_count != report.integrity.source_row_count
+        || storage.observed_table_record_count != report.integrity.observed_table_row_count
+        || storage.estimated_peak_byte_count
+            != storage
+                .estimated_archive_byte_count
+                .saturating_add(storage.estimated_staging_byte_count)
+        || storage.required_free_byte_count < storage.estimated_peak_byte_count
+        || storage.available_free_byte_count_at_start < storage.required_free_byte_count
+        || storage.peak_staging_file_byte_count == 0
+        || (storage.message_record_count > 0
+            && (storage.staged_uncompressed_byte_count == 0
+                || storage.staged_compressed_byte_count == 0))
+    {
+        return Err(integrity(
+            "restoration storage evidence is incomplete or inconsistent",
+        ));
+    }
+
+    let mut actual_archive_byte_count = 0_u64;
+    for entry in WalkDir::new(root).follow_links(false) {
+        let entry = entry.map_err(|error| {
+            RestoreError::Io(
+                error
+                    .into_io_error()
+                    .unwrap_or_else(|| std::io::Error::other("could not inspect archive size")),
+            )
+        })?;
+        if entry.file_type().is_symlink() {
+            return Err(integrity(
+                "a completed restoration archive contains a symbolic link",
+            ));
+        }
+        if entry.depth() == 1
+            && entry.file_type().is_dir()
+            && entry.file_name().as_bytes().starts_with(b".staging-")
+        {
+            return Err(integrity(
+                "a completed restoration archive retains an ordering spool",
+            ));
+        }
+        if entry.file_type().is_file() {
+            ensure_private_regular_file(entry.path())?;
+            actual_archive_byte_count = actual_archive_byte_count.saturating_add(
+                entry
+                    .metadata()
+                    .map_err(|error| {
+                        RestoreError::Io(error.into_io_error().unwrap_or_else(|| {
+                            std::io::Error::other("could not inspect archive file size")
+                        }))
+                    })?
+                    .len(),
+            );
+        }
+    }
+    if storage.actual_archive_byte_count != actual_archive_byte_count {
+        return Err(integrity(
+            "restoration archive byte count does not match storage evidence",
+        ));
     }
     Ok(())
 }
@@ -691,6 +768,7 @@ fn audit_messages(
                 message.source_table_id.as_str(),
             ))
             .ok_or_else(|| integrity("message provenance is absent from table coverage"))?;
+        audit_message_direction(&message, report, &source_table.columns, &mut result)?;
         let raw_column_names = message
             .raw_columns
             .keys()
@@ -944,6 +1022,135 @@ fn audit_messages(
         }
     }
     Ok(result)
+}
+
+fn verify_account_holder_binding(report: &RestorationReport) -> Result<(), RestoreError> {
+    if report.format_version >= 6 {
+        if report
+            .self_participant_id
+            .as_deref()
+            .is_none_or(|identifier| !is_lower_hex(identifier, 64))
+            || report.account_binding_evidence.is_none()
+        {
+            return Err(integrity(
+                "archive format 6 lacks a valid account-holder binding",
+            ));
+        }
+    } else if report.self_participant_id.is_some() || report.account_binding_evidence.is_some() {
+        return Err(integrity(
+            "legacy archive unexpectedly contains account-holder binding evidence",
+        ));
+    }
+    Ok(())
+}
+
+fn audit_message_direction(
+    message: &CanonicalMessage,
+    report: &RestorationReport,
+    source_columns: &[String],
+    result: &mut MessageAudit,
+) -> Result<(), RestoreError> {
+    if report.format_version < 6 {
+        return Ok(());
+    }
+    let self_participant_id = report
+        .self_participant_id
+        .as_deref()
+        .ok_or_else(|| integrity("account-holder identity disappeared during audit"))?;
+    if message.logical_type == Some(49) && message.sub_type == Some(62) {
+        if let Some(expected_sender) = crate::restore::typed_payload_raw_xml(&message.typed_payload)
+            .and_then(|raw_xml| {
+                crate::nested_xml::unique_identifier_element_text(raw_xml, "fromusername")
+            })
+        {
+            let observed_sender = message
+                .sender_source_identifier_base64
+                .as_deref()
+                .and_then(|value| base64::engine::general_purpose::STANDARD.decode(value).ok())
+                .and_then(|bytes| String::from_utf8(bytes).ok());
+            if observed_sender.as_deref() != Some(expected_sender.as_str()) {
+                return Err(integrity(
+                    "Pat message sender disagrees with its source XML",
+                ));
+            }
+        }
+    }
+    let explicit = explicit_direction(&message.raw_columns, source_columns);
+    match message.sender_id.as_deref() {
+        Some(sender) => {
+            let expected = if sender == self_participant_id {
+                MessageDirection::Outgoing
+            } else {
+                MessageDirection::Incoming
+            };
+            if message.direction != expected {
+                return Err(integrity(
+                    "message direction disagrees with the bound account holder",
+                ));
+            }
+            let conflict = explicit.is_some_and(|direction| direction != expected);
+            let expected_evidence = if conflict {
+                DirectionEvidence::SenderAccountConflictWithExplicitSourceColumn
+            } else if expected == MessageDirection::Outgoing {
+                DirectionEvidence::SenderMatchesAccount
+            } else {
+                DirectionEvidence::SenderDiffersFromAccount
+            };
+            if message.direction_evidence != expected_evidence {
+                return Err(integrity(
+                    "message direction evidence disagrees with its source columns",
+                ));
+            }
+            if conflict {
+                result.direction_conflict_count += 1;
+            }
+        }
+        None => match explicit {
+            Some(direction)
+                if message.direction == direction
+                    && message.direction_evidence == DirectionEvidence::ExplicitSourceColumn => {}
+            None if message.direction == MessageDirection::Unknown
+                && message.direction_evidence == DirectionEvidence::Unresolved => {}
+            _ => {
+                return Err(integrity(
+                    "sender-less message direction lacks consistent source evidence",
+                ))
+            }
+        },
+    }
+    Ok(())
+}
+
+fn explicit_direction(
+    values: &BTreeMap<String, RawSQLiteValue>,
+    source_columns: &[String],
+) -> Option<MessageDirection> {
+    const NAMES: [&str; 4] = ["is_sender", "is_sender_", "is_send", "is_sent_by_self"];
+    let name = source_columns.iter().find(|name| {
+        NAMES
+            .iter()
+            .any(|candidate| name.eq_ignore_ascii_case(candidate))
+    })?;
+    raw_i64(values.get(name)?).map(|value| {
+        if value == 0 {
+            MessageDirection::Incoming
+        } else {
+            MessageDirection::Outgoing
+        }
+    })
+}
+
+fn raw_i64(value: &RawSQLiteValue) -> Option<i64> {
+    match value {
+        RawSQLiteValue::Integer(value) => Some(*value),
+        RawSQLiteValue::Real(value) => Some(*value as i64),
+        RawSQLiteValue::TextBase64(value) => base64::engine::general_purpose::STANDARD
+            .decode(value)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .and_then(|value| value.parse().ok()),
+        RawSQLiteValue::Null | RawSQLiteValue::BlobBase64(_) => None,
+    }
 }
 
 fn audit_rejections(
@@ -1841,6 +2048,7 @@ fn verify_integrity_counts(
         || unknown_payload_count != integrity_report.unknown_payload_count
         || semantic_gap_count != integrity_report.semantic_gap_count
         || messages.direction_counts != integrity_report.direction_counts
+        || messages.direction_conflict_count != integrity_report.direction_conflict_count
         || messages.ordering_basis_counts != integrity_report.ordering_basis_counts
         || messages.artifact_reference_count != integrity_report.artifact_reference_count
         || messages.relationship_reference_count != integrity_report.relationship_reference_count
@@ -2618,6 +2826,9 @@ fn validate_scoped_identifier(
                 .map_err(|_| {
                     integrity("archive contains a malformed source-preserving base64 field")
                 })?;
+            if bytes.is_empty() {
+                return Err(integrity(format!("{kind} source identifier is empty")));
+            }
             let mut hasher = Sha256::new();
             hasher.update(account_id.as_bytes());
             hasher.update([0]);

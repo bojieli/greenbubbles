@@ -693,6 +693,9 @@ fn build_archive(
     let report = RestorationReport {
         format_version: 2,
         account_id: ACCOUNT_ID.to_string(),
+        self_participant_id: None,
+        account_binding_evidence: None,
+        storage: None,
         source_fingerprint: fingerprint.to_string(),
         client_build_compatibility: Default::default(),
         acquisition: None,

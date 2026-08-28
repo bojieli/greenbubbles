@@ -72,6 +72,7 @@ fn restores_cached_moments_and_interactions_without_claiming_cache_completeness(
         snapshot_id: "00000000-0000-4000-8000-000000000099".to_string(),
         created_at: "2026-08-27T03:04:05Z".to_string(),
         source_fingerprint: "cached-surface-fixture".to_string(),
+        account_binding: None,
         client_build: None,
         acquisition: None,
         entries: vec![SnapshotEntry {

@@ -250,7 +250,8 @@ func buildInventory() throws -> [String: Any] {
     ]
   }.sorted { "\($0["name"]!)" < "\($1["name"]!)" }
 
-  let nativePackages = try ["libsqlite3-sys", "silk-rs"].map { expectedName -> [String: Any] in
+  let nativePackages = try ["libsqlite3-sys", "silk-rs", "zstd-sys"].map {
+    expectedName -> [String: Any] in
     guard let package = packages.first(where: { ($0["name"] as? String) == expectedName }) else {
       throw InventoryError.missingField("resolved native package \(expectedName)")
     }

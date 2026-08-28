@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{RestoreError, SnapshotAcquisitionMode};
+use crate::{RestoreError, SnapshotAccountBinding, SnapshotAcquisitionMode};
 
 const MAX_PRIVATE_REPORT_BYTES: u64 = 64 * 1_024 * 1_024;
 const MAX_SAMPLE_ARRAY_BYTES: u64 = 16 * 1_024 * 1_024;
@@ -119,6 +119,8 @@ struct SnapshotCommandReportInput {
 struct SnapshotManifestBindingInput {
     manifest_format_version: u32,
     source_fingerprint: String,
+    #[serde(default)]
+    account_binding: Option<SnapshotAccountBinding>,
     acquisition: Option<SnapshotAcquisitionBindingInput>,
 }
 
@@ -195,8 +197,17 @@ pub fn compose_latency_evidence_sample(
             "latency evidence requires complete snapshot acquisition evidence".to_string(),
         )
     })?;
+    let manifest_binding_valid = match snapshot.manifest.manifest_format_version {
+        3 => snapshot.manifest.account_binding.is_none(),
+        4 => snapshot
+            .manifest
+            .account_binding
+            .as_ref()
+            .is_some_and(|binding| binding.validate().is_ok()),
+        _ => false,
+    };
     if snapshot.format_version != 2
-        || snapshot.manifest.manifest_format_version != 3
+        || !manifest_binding_valid
         || snapshot.database_set_count == 0
         || snapshot.automatically_cleaned_up
         || snapshot
@@ -205,7 +216,8 @@ pub fn compose_latency_evidence_sample(
             .is_none_or(str::is_empty)
     {
         return Err(RestoreError::Integrity(
-            "latency evidence requires a preserved format-2 snapshot report".to_string(),
+            "latency evidence requires a preserved format-2 report for a valid format-3 or format-4 snapshot"
+                .to_string(),
         ));
     }
     if offline.format_version != 2
@@ -617,6 +629,15 @@ mod tests {
         for private in ["private-source", "/private/snapshot", "/private/archive"] {
             assert!(!serialized.contains(private));
         }
+
+        let mut legacy_snapshot = snapshot_json();
+        legacy_snapshot["manifest"]["manifestFormatVersion"] = serde_json::json!(3);
+        legacy_snapshot["manifest"]
+            .as_object_mut()
+            .unwrap()
+            .remove("accountBinding");
+        overwrite_private_json(&snapshot, &legacy_snapshot);
+        assert!(compose_latency_evidence_sample(&snapshot, &offline, &follower, &handoff).is_ok());
     }
 
     #[test]
@@ -647,6 +668,14 @@ mod tests {
         let mut cleaned_snapshot = snapshot_json();
         cleaned_snapshot["automaticallyCleanedUp"] = serde_json::json!(true);
         overwrite_private_json(&snapshot, &cleaned_snapshot);
+        assert!(compose_latency_evidence_sample(&snapshot, &offline, &follower, &handoff).is_err());
+
+        let mut unbound_snapshot = snapshot_json();
+        unbound_snapshot["manifest"]
+            .as_object_mut()
+            .unwrap()
+            .remove("accountBinding");
+        overwrite_private_json(&snapshot, &unbound_snapshot);
         assert!(compose_latency_evidence_sample(&snapshot, &offline, &follower, &handoff).is_err());
     }
 
@@ -765,8 +794,14 @@ mod tests {
             "formatVersion": 2,
             "databaseSetCount": 3,
             "manifest": {
-                "manifestFormatVersion": 3,
+                "manifestFormatVersion": 4,
                 "sourceFingerprint": "private-source",
+                "accountBinding": {
+                    "formatVersion": 1,
+                    "accountID": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "selfSourceIdentifierBase64": "d3hpZF9zZWxm",
+                    "evidence": "selectedAccountDirectory"
+                },
                 "acquisition": { "mode": "incremental" },
                 "privatePath": "/private/snapshot"
             },

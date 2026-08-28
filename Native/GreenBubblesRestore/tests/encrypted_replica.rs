@@ -31,13 +31,15 @@ use greenbubbles_restore::{
     transport::{send_unix_request, serve_unix_once},
 };
 use greenbubbles_restore::{
-    ArtifactAvailability, ArtifactDecodeState, ArtifactKind, ArtifactRole, CanonicalArtifact,
+    AccountHolderBindingEvidence, ArtifactAvailability, ArtifactDecodeState, ArtifactKind,
+    ArtifactRole, CachedMomentInteractionKind, CachedSurfaceCompleteness, CachedSurfaceCoverage,
+    CanonicalArtifact, CanonicalCachedMoment, CanonicalCachedMomentInteraction,
     CanonicalConversation, CanonicalMessage, CanonicalParticipant, ClientBuildCompatibilityState,
     ConversationKind, DirectionEvidence, EntityDecodeState, LocalProfileState,
     MessageArtifactReference, MessageDirection, MessageOrderingBasis, NoProgress, ProgressEvent,
-    ProgressObserver, ProgressState, ReplicaKey, RestorationCompletion, RestorationCoverage,
-    RestorationIntegrity, RestorationReport, SemanticDecodeState, SnapshotAcquisitionEvidence,
-    SnapshotAcquisitionMode, TypedPayload,
+    ProgressObserver, ProgressState, RawSQLiteValue, ReplicaKey, RestorationCompletion,
+    RestorationCoverage, RestorationIntegrity, RestorationReport, SemanticDecodeState,
+    SnapshotAcquisitionEvidence, SnapshotAcquisitionMode, TypedPayload,
 };
 use rusqlite::Connection;
 use serde::Serialize;
@@ -545,6 +547,7 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     fs::create_dir(&private).unwrap();
     fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
     let archive = build_archive(&private, "archive", "account-a", "source-a");
+    bind_synthetic_account_holder(&archive);
     let replica = private.join("replica.db");
     let key = ReplicaKey::from_bytes(KEY_BYTES);
     bootstrap_replica(&archive, &replica, &key).unwrap();
@@ -615,6 +618,58 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
         page.messages[0].source_database_freshness,
         ToolSourceDatabaseFreshness::Fresh
     );
+    assert_eq!(
+        page.messages[0].sender_id.as_deref(),
+        Some("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+    );
+    assert_eq!(page.messages[0].direction, Some(MessageDirection::Outgoing));
+
+    let contact_response = query_ai_context(
+        &replica,
+        &key,
+        &policy,
+        &audit,
+        AiQueryRequest {
+            format_version: 1,
+            request_id: "resolve-self-contact".to_string(),
+            requester_id: "synthetic-agent".to_string(),
+            destination: ConnectorDestination::Local,
+            operation: ConnectorOperation::ResolveContact {
+                participant_id: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                    .to_string(),
+            },
+        },
+    )
+    .unwrap();
+    let AiQueryResult::Contact(contact) = contact_response.result.unwrap() else {
+        panic!("unexpected AI contact result")
+    };
+    assert_eq!(contact.display_name, "You");
+
+    let conversation_response = query_ai_context(
+        &replica,
+        &key,
+        &policy,
+        &audit,
+        AiQueryRequest {
+            format_version: 1,
+            request_id: "resolve-self-conversation".to_string(),
+            requester_id: "synthetic-agent".to_string(),
+            destination: ConnectorDestination::Local,
+            operation: ConnectorOperation::ResolveConversation {
+                conversation_id: "conversation-a".to_string(),
+            },
+        },
+    )
+    .unwrap();
+    let AiQueryResult::Conversation(conversation) = conversation_response.result.unwrap() else {
+        panic!("unexpected AI conversation result")
+    };
+    assert!(conversation.human_label.contains("You"));
+    assert!(conversation
+        .participants
+        .iter()
+        .any(|participant| participant.display_name == "You"));
 
     let rejected = query_ai_context(
         &replica,
@@ -651,6 +706,12 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     )
     .unwrap();
     assert!(manifest.export_complete);
+    assert_eq!(manifest.format_version, 2);
+    assert_eq!(manifest.schema, "greenbubbles.ai-context.v2");
+    assert_eq!(
+        manifest.context.self_participant_id.as_deref(),
+        Some("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+    );
     assert_eq!(manifest.enabled_conversation_count, 1);
     assert_eq!(manifest.exported_contact_count, 1);
     assert_eq!(manifest.exported_message_count, 1);
@@ -669,6 +730,8 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     let messages = fs::read_to_string(output.join("messages.jsonl")).unwrap();
     assert!(messages.contains(PRIVATE_TEXT));
     assert!(messages.contains("\"sourceDatabaseFreshness\":\"fresh\""));
+    assert!(messages.contains("\"senderDisplayName\":\"You\""));
+    assert!(messages.contains("\"direction\":\"outgoing\""));
     assert!(!messages.contains("rawColumns"));
     assert!(!messages.contains("sourceLogicalPath"));
     assert!(!messages.contains("contentBase64"));
@@ -676,6 +739,18 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     assert!(artifacts.contains("msg/image.jpg"));
     assert!(!artifacts.contains(private.to_string_lossy().as_ref()));
     assert!(!artifacts.contains("absolutePath"));
+    let conversations = fs::read_to_string(output.join("conversations.jsonl")).unwrap();
+    assert!(conversations.contains("\"groupOwnerParticipantId\""));
+    assert!(!conversations.contains("\"ownerParticipantId\""));
+    assert!(conversations.contains("\"displayName\":\"You\""));
+    let contacts = fs::read_to_string(output.join("contacts.jsonl")).unwrap();
+    let self_contact: serde_json::Value =
+        serde_json::from_str(contacts.lines().next().unwrap()).unwrap();
+    assert_eq!(self_contact["displayName"], "You");
+    assert_eq!(
+        self_contact["conversationProfiles"][0]["displayName"],
+        "You"
+    );
 
     let events = progress.0.lock().unwrap();
     assert_eq!(events.first().unwrap().state, ProgressState::Planned);
@@ -806,6 +881,90 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     assert!(!audit_contents.contains("must not be accepted"));
 }
 
+#[test]
+fn replica_rejects_account_holder_identity_changes() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private-account-holder-change");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive = build_archive(&private, "archive", "account-a", "source-a");
+    bind_synthetic_account_holder(&archive);
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+    bootstrap_replica(&archive, &replica, &key).unwrap();
+
+    let changed = clone_archive(&archive, &private, "archive-changed-self", "source-b");
+    let report_path = changed.join("report.json");
+    let mut report: RestorationReport =
+        serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    report.self_participant_id = Some("e".repeat(64));
+    fs::write(&report_path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+
+    assert!(synchronize_replica(&changed, &replica, &key)
+        .unwrap_err()
+        .to_string()
+        .contains("different account holder"));
+    assert_eq!(
+        replica_status(&replica, &key)
+            .unwrap()
+            .self_participant_id
+            .as_deref(),
+        Some("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+    );
+
+    let unbound = clone_archive(&archive, &private, "archive-unbound", "source-c");
+    let report_path = unbound.join("report.json");
+    let mut report: RestorationReport =
+        serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    report.self_participant_id = None;
+    report.account_binding_evidence = None;
+    fs::write(&report_path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    assert!(synchronize_replica(&unbound, &replica, &key)
+        .unwrap_err()
+        .to_string()
+        .contains("different account holder"));
+}
+
+#[test]
+fn replica_adds_a_missing_account_holder_only_through_synchronization() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private-account-holder-upgrade");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive = build_archive(&private, "archive", "account-a", "source-a");
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+    bootstrap_replica(&archive, &replica, &key).unwrap();
+
+    let bound = clone_archive(&archive, &private, "archive-bound", "source-a");
+    bind_synthetic_account_holder(&bound);
+    let self_participant_id = "f".repeat(64);
+
+    assert!(bootstrap_replica(&bound, &replica, &key)
+        .unwrap_err()
+        .to_string()
+        .contains("use synchronization"));
+    let synchronized = synchronize_replica(&bound, &replica, &key).unwrap();
+    assert!(!synchronized.idempotent);
+    assert_eq!(
+        synchronized.self_participant_id.as_deref(),
+        Some(self_participant_id.as_str())
+    );
+    assert_eq!(
+        replica_status(&replica, &key)
+            .unwrap()
+            .self_participant_id
+            .as_deref(),
+        Some(self_participant_id.as_str())
+    );
+    assert!(
+        synchronize_replica(&bound, &replica, &key)
+            .unwrap()
+            .idempotent
+    );
+    assert!(audit_replica(&replica, &key).is_ok());
+}
+
 fn spawn_connector_process(
     replica: &Path,
     policy: &Path,
@@ -882,7 +1041,7 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
     let first = bootstrap_replica(&archive, &replica, &key).unwrap();
     assert!(first.encrypted_at_rest);
     assert!(!first.idempotent);
-    assert_eq!(first.schema_version, 4);
+    assert_eq!(first.schema_version, 5);
     assert_eq!(first.conversation_count, 1);
     assert_eq!(first.participant_count, 1);
     assert_eq!(first.message_count, 1);
@@ -1215,7 +1374,7 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
 
     downgrade_to_schema_1(&replica);
     let migrated = replica_status(&replica, &key).unwrap();
-    assert_eq!(migrated.schema_version, 4);
+    assert_eq!(migrated.schema_version, 5);
     let migrated_audit = audit_replica(&replica, &key).unwrap();
     assert_eq!(migrated_audit.message_count, 1);
     assert_eq!(migrated_audit.change_count, 1);
@@ -1321,7 +1480,7 @@ fn rejects_tampered_migration_identity_before_creating_a_recovery_backup() {
         .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
         .unwrap();
     drop(connection);
-    assert_eq!(replica_status(&replica, &key).unwrap().schema_version, 4);
+    assert_eq!(replica_status(&replica, &key).unwrap().schema_version, 5);
     assert!(audit_replica(&replica, &key).is_ok());
     assert_eq!(migration_backup_count(&private), backup_count + 1);
 }
@@ -1337,7 +1496,7 @@ fn audits_pre_migration_backup_without_mutation_or_private_output() {
     let key = ReplicaKey::from_bytes(KEY_BYTES);
     bootstrap_replica(&archive, &replica, &key).unwrap();
     downgrade_to_schema_1(&replica);
-    assert_eq!(replica_status(&replica, &key).unwrap().schema_version, 4);
+    assert_eq!(replica_status(&replica, &key).unwrap().schema_version, 5);
 
     let backup = migration_backup_path(&private, 1);
     let before = fs::read(&backup).unwrap();
@@ -1489,27 +1648,33 @@ fn refuses_migration_when_the_recovery_backup_fails_its_content_audit() {
         .execute("UPDATE message SET search_text = ?1", [PRIVATE_TEXT])
         .unwrap();
     drop(connection);
-    assert_eq!(replica_status(&replica, &key).unwrap().schema_version, 4);
+    assert_eq!(replica_status(&replica, &key).unwrap().schema_version, 5);
     assert_eq!(migration_backup_count(&private), backup_count + 1);
 }
 
 #[test]
 fn audits_every_supported_pre_migration_schema_generation() {
-    for version in [2, 3] {
+    for version in [2, 3, 4] {
         let fixture = tempfile::tempdir().unwrap();
         let private = fixture.path().join(format!("private-schema-{version}"));
         fs::create_dir(&private).unwrap();
         fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
         let archive = build_archive(&private, "archive", "account-a", "source-a");
+        if version == 4 {
+            add_cached_surfaces_to_archive(&archive);
+        }
         let replica = private.join("replica.db");
         let key = ReplicaKey::from_bytes(KEY_BYTES);
         bootstrap_replica(&archive, &replica, &key).unwrap();
         match version {
             2 => downgrade_to_schema_2(&replica),
             3 => downgrade_to_schema_3(&replica),
+            4 => downgrade_to_schema_4(&replica),
             _ => unreachable!(),
         }
-        assert_eq!(replica_status(&replica, &key).unwrap().schema_version, 4);
+        let migrated = replica_status(&replica, &key).unwrap();
+        assert_eq!(migrated.schema_version, 5);
+        assert_eq!(migrated.self_participant_id, None);
         let backup = migration_backup_path(&private, version);
         let report = audit_replica_backup(&backup, &key).unwrap();
         assert_eq!(report.schema_version, version);
@@ -1518,11 +1683,30 @@ fn audits_every_supported_pre_migration_schema_generation() {
         assert!(report.change_stream_verified);
         assert!(report.transient_state_empty);
         assert_eq!(report.message_count, 1);
+        if version == 4 {
+            let connection = keyed_connection(&backup);
+            connection
+                .execute("UPDATE cached_moment SET author_id = 'corrupt'", [])
+                .unwrap();
+            drop(connection);
+            assert!(audit_replica_backup(&backup, &key).is_err());
+            let connection = keyed_connection(&backup);
+            connection
+                .execute("UPDATE cached_moment SET author_id = NULL", [])
+                .unwrap();
+            drop(connection);
+            assert!(audit_replica_backup(&backup, &key).is_ok());
+        }
         let candidate = private.join(format!("recovered-schema-{version}.db"));
         let recovery = prepare_replica_recovery(&backup, &candidate, &key).unwrap();
         assert_eq!(recovery.source_schema_version, version);
-        assert_eq!(recovery.current_schema_version, 4);
-        assert!(audit_replica(&candidate, &key).is_ok());
+        assert_eq!(recovery.current_schema_version, 5);
+        let recovered_audit = audit_replica(&candidate, &key).unwrap();
+        assert_eq!(recovered_audit.cached_moment_count, u64::from(version == 4));
+        assert_eq!(
+            recovered_audit.cached_moment_interaction_count,
+            u64::from(version == 4)
+        );
     }
 }
 
@@ -1537,7 +1721,7 @@ fn prepares_a_verified_recovery_candidate_without_replacing_existing_state() {
     let key = ReplicaKey::from_bytes(KEY_BYTES);
     bootstrap_replica(&archive, &replica, &key).unwrap();
     downgrade_to_schema_1(&replica);
-    assert_eq!(replica_status(&replica, &key).unwrap().schema_version, 4);
+    assert_eq!(replica_status(&replica, &key).unwrap().schema_version, 5);
     let backup = migration_backup_path(&private, 1);
     let backup_before = fs::read(&backup).unwrap();
     let replica_before = fs::read(&replica).unwrap();
@@ -1548,7 +1732,7 @@ fn prepares_a_verified_recovery_candidate_without_replacing_existing_state() {
     assert!(report.privacy_safe_summary);
     assert!(report.source_backup_verified);
     assert_eq!(report.source_schema_version, 1);
-    assert_eq!(report.current_schema_version, 4);
+    assert_eq!(report.current_schema_version, 5);
     assert!(report.candidate_audit_verified);
     assert!(report.initialized);
     assert!(report.encrypted_at_rest);
@@ -1626,7 +1810,7 @@ fn prepares_a_verified_recovery_candidate_without_replacing_existing_state() {
     let output_json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(output_json["privacySafeSummary"], true);
     assert_eq!(output_json["sourceSchemaVersion"], 1);
-    assert_eq!(output_json["currentSchemaVersion"], 4);
+    assert_eq!(output_json["currentSchemaVersion"], 5);
     let output_text = String::from_utf8(output.stdout).unwrap();
     for private_value in [
         "account-a",
@@ -1647,6 +1831,7 @@ fn independently_audits_encrypted_replica_records_indexes_and_checkpoint() {
     fs::create_dir(&private).unwrap();
     fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
     let archive = build_archive(&private, "archive", "account-a", "source-a");
+    bind_synthetic_account_holder(&archive);
     let replica = private.join("replica.db");
     let key = ReplicaKey::from_bytes(KEY_BYTES);
     bootstrap_replica(&archive, &replica, &key).unwrap();
@@ -1675,6 +1860,74 @@ fn independently_audits_encrypted_replica_records_indexes_and_checkpoint() {
     ] {
         assert!(!output.contains(private_value));
     }
+
+    let original_report: RestorationReport =
+        serde_json::from_slice(&fs::read(archive.join("report.json")).unwrap()).unwrap();
+    let mut uppercase_report = original_report.clone();
+    uppercase_report.self_participant_id = Some("F".repeat(64));
+    let connection = keyed_connection(&replica);
+    connection
+        .execute(
+            "UPDATE replica_identity SET self_participant_id = ?1",
+            ["F".repeat(64)],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE coverage_state SET report_json = ?1",
+            [serde_json::to_vec(&uppercase_report).unwrap()],
+        )
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    assert!(audit_replica(&replica, &key).is_err());
+
+    let connection = keyed_connection(&replica);
+    connection
+        .execute(
+            "UPDATE replica_identity SET self_participant_id = ?1",
+            ["f".repeat(64)],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE coverage_state SET report_json = ?1",
+            [serde_json::to_vec(&original_report).unwrap()],
+        )
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    assert!(audit_replica(&replica, &key).is_ok());
+
+    let connection = keyed_connection(&replica);
+    connection
+        .execute(
+            "UPDATE replica_identity SET self_participant_id = ?1",
+            ["e".repeat(64)],
+        )
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    assert!(audit_replica(&replica, &key).is_err());
+    let connection = keyed_connection(&replica);
+    connection
+        .execute(
+            "UPDATE replica_identity SET self_participant_id = ?1",
+            ["f".repeat(64)],
+        )
+        .unwrap();
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    drop(connection);
+    assert!(audit_replica(&replica, &key).is_ok());
+
     let mut audit_process = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
         .arg("audit-replica")
         .arg(&replica)
@@ -2002,6 +2255,9 @@ fn build_archive(parent: &Path, name: &str, account: &str, fingerprint: &str) ->
     let report = RestorationReport {
         format_version: 2,
         account_id: account.to_string(),
+        self_participant_id: None,
+        account_binding_evidence: None,
+        storage: None,
         source_fingerprint: fingerprint.to_string(),
         client_build_compatibility: Default::default(),
         acquisition: None,
@@ -2134,6 +2390,95 @@ fn build_archive(parent: &Path, name: &str, account: &str, fingerprint: &str) ->
     archive
 }
 
+fn add_cached_surfaces_to_archive(archive: &Path) {
+    let observed_at = "2026-08-28T00:00:00Z";
+    let moment = CanonicalCachedMoment {
+        canonical_id: "cached-moment-a".to_string(),
+        account_id: "account-a".to_string(),
+        source_set_id: "cached-set-a".to_string(),
+        source_logical_path: "cached.db".to_string(),
+        source_table_id: "cached-table-a".to_string(),
+        source_table_name: "cached_moment_source".to_string(),
+        source_row_id: 1,
+        timeline_id: RawSQLiteValue::Integer(1),
+        author_id: None,
+        author_source_identifier_base64: None,
+        created_at_unix: Some(1_700_000_001),
+        content_type: Some(1),
+        content_description_base64: None,
+        title_base64: None,
+        description_base64: None,
+        content_url_base64: None,
+        media_count: 0,
+        like_count: 0,
+        comment_count: 0,
+        raw_content_base64: None,
+        raw_pack_info_base64: None,
+        raw_columns: BTreeMap::new(),
+        semantic_decode_state: SemanticDecodeState::Complete,
+        semantic_gap_reason: None,
+        cache_completeness: CachedSurfaceCompleteness::PartialLocalCache,
+        observed_at: observed_at.to_string(),
+    };
+    let interaction = CanonicalCachedMomentInteraction {
+        canonical_id: "cached-interaction-a".to_string(),
+        account_id: "account-a".to_string(),
+        source_set_id: "cached-set-a".to_string(),
+        source_logical_path: "cached.db".to_string(),
+        source_table_id: "cached-interaction-table-a".to_string(),
+        source_table_name: "cached_interaction_source".to_string(),
+        source_row_id: 2,
+        local_id: Some(2),
+        feed_id: RawSQLiteValue::Integer(1),
+        created_at_unix: Some(1_700_000_002),
+        kind: CachedMomentInteractionKind::Like,
+        raw_type: Some(2),
+        from_participant_id: None,
+        from_source_identifier_base64: None,
+        from_nickname_base64: None,
+        to_participant_id: None,
+        to_source_identifier_base64: None,
+        to_nickname_base64: None,
+        content_base64: None,
+        raw_columns: BTreeMap::new(),
+        cache_completeness: CachedSurfaceCompleteness::PartialLocalCache,
+        observed_at: observed_at.to_string(),
+    };
+    write_ndjson(&archive.join("cached-moments.ndjson"), &[moment]);
+    write_ndjson(
+        &archive.join("cached-moment-interactions.ndjson"),
+        &[interaction],
+    );
+    write_json(
+        &archive.join("cached-surfaces.json"),
+        &CachedSurfaceCoverage {
+            format_version: 1,
+            schema_profile_fingerprint: None,
+            observed_at: observed_at.to_string(),
+            cache_completeness: CachedSurfaceCompleteness::PartialLocalCache,
+            source_database_present: true,
+            moment_count: 1,
+            interaction_count: 1,
+            semantic_gap_count: 0,
+            tables: Vec::new(),
+        },
+    );
+    let report_path = archive.join("report.json");
+    let mut report: RestorationReport =
+        serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    report.cached_moments_path = Some(archive.join("cached-moments.ndjson").display().to_string());
+    report.cached_moment_interactions_path = Some(
+        archive
+            .join("cached-moment-interactions.ndjson")
+            .display()
+            .to_string(),
+    );
+    report.cached_surfaces_path = Some(archive.join("cached-surfaces.json").display().to_string());
+    report.integrity.cached_moment_count = 1;
+    report.integrity.cached_moment_interaction_count = 1;
+    overwrite_json(&report_path, &report);
+}
+
 fn downgrade_to_schema_1(path: &Path) {
     let connection = keyed_connection(path);
     connection
@@ -2157,6 +2502,7 @@ fn downgrade_to_schema_1(path: &Path) {
              DROP TABLE sync_run;
              DROP TABLE change_log;
              DROP TABLE message_fts;
+             ALTER TABLE replica_identity DROP COLUMN self_participant_id;
              DELETE FROM migration_history WHERE schema_version >= 2;
              UPDATE replica_schema SET schema_version = 1 WHERE singleton = 1;
              PRAGMA wal_checkpoint(TRUNCATE);",
@@ -2191,11 +2537,66 @@ fn downgrade_to_schema_3(path: &Path) {
              DROP TABLE cached_surface_state;
              DROP TABLE cached_moment_interaction;
              DROP TABLE cached_moment;
+             ALTER TABLE replica_identity DROP COLUMN self_participant_id;
              DELETE FROM migration_history WHERE schema_version >= 4;
              UPDATE replica_schema SET schema_version = 3 WHERE singleton = 1;
              PRAGMA wal_checkpoint(TRUNCATE);",
         )
         .unwrap();
+}
+
+fn downgrade_to_schema_4(path: &Path) {
+    let connection = keyed_connection(path);
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             ALTER TABLE replica_identity DROP COLUMN self_participant_id;
+             DELETE FROM migration_history WHERE schema_version >= 5;
+             UPDATE replica_schema SET schema_version = 4 WHERE singleton = 1;
+             PRAGMA wal_checkpoint(TRUNCATE);",
+        )
+        .unwrap();
+}
+
+fn bind_synthetic_account_holder(archive: &Path) {
+    let self_participant_id = "f".repeat(64);
+    let report_path = archive.join("report.json");
+    let mut report: RestorationReport =
+        serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    report.self_participant_id = Some(self_participant_id.clone());
+    report.account_binding_evidence = Some(AccountHolderBindingEvidence::SnapshotManifest);
+    fs::write(&report_path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+
+    let conversation_path = archive.join("conversations.ndjson");
+    let mut conversations = read_ndjson::<CanonicalConversation>(&conversation_path);
+    for conversation in &mut conversations {
+        for participant_id in &mut conversation.participant_ids {
+            if participant_id == "participant-a" {
+                *participant_id = self_participant_id.clone();
+            }
+        }
+    }
+    overwrite_ndjson(&conversation_path, &conversations);
+
+    let participant_path = archive.join("participants.ndjson");
+    let mut participants = read_ndjson::<CanonicalParticipant>(&participant_path);
+    for participant in &mut participants {
+        if participant.participant_id == "participant-a" {
+            participant.participant_id = self_participant_id.clone();
+        }
+    }
+    overwrite_ndjson(&participant_path, &participants);
+
+    let message_path = archive.join("messages.ndjson");
+    let mut messages = read_ndjson::<CanonicalMessage>(&message_path);
+    for message in &mut messages {
+        if message.sender_id.as_deref() == Some("participant-a") {
+            message.sender_id = Some(self_participant_id.clone());
+            message.direction = MessageDirection::Outgoing;
+            message.direction_evidence = DirectionEvidence::SenderMatchesAccount;
+        }
+    }
+    overwrite_ndjson(&message_path, &messages);
 }
 
 fn clone_archive(source: &Path, parent: &Path, name: &str, fingerprint: &str) -> PathBuf {
@@ -2258,6 +2659,10 @@ fn keyed_connection(path: &Path) -> Connection {
 
 fn write_json(path: &Path, value: &impl Serialize) {
     write_private(path, &serde_json::to_vec_pretty(value).unwrap());
+}
+
+fn overwrite_json(path: &Path, value: &impl Serialize) {
+    fs::write(path, serde_json::to_vec_pretty(value).unwrap()).unwrap();
 }
 
 fn write_ndjson<T: Serialize>(path: &Path, values: &[T]) {

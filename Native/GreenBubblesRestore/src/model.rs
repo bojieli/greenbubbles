@@ -52,10 +52,13 @@ pub enum MessageDirection {
 #[serde(rename_all = "camelCase")]
 pub enum DirectionEvidence {
     ExplicitSourceColumn,
+    /// Legacy direct-chat heuristic retained for archive decoding only.
     SenderMatchesConversation,
+    /// Legacy direct-chat heuristic retained for archive decoding only.
     SenderDiffersFromConversation,
     SenderMatchesAccount,
     SenderDiffersFromAccount,
+    SenderAccountConflictWithExplicitSourceColumn,
     #[default]
     Unresolved,
 }
@@ -471,6 +474,8 @@ pub struct RestorationIntegrity {
     pub ambiguous_relationship_count: u64,
     pub ordering_basis_counts: BTreeMap<String, u64>,
     pub direction_counts: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub direction_conflict_count: u64,
     pub conversation_count: u64,
     pub participant_count: u64,
     pub group_member_count: u64,
@@ -494,6 +499,12 @@ impl RestorationIntegrity {
 pub struct RestorationReport {
     pub format_version: u32,
     pub account_id: String,
+    #[serde(default)]
+    pub self_participant_id: Option<String>,
+    #[serde(default)]
+    pub account_binding_evidence: Option<AccountHolderBindingEvidence>,
+    #[serde(default)]
+    pub storage: Option<RestorationStorageEvidence>,
     pub source_fingerprint: String,
     #[serde(default)]
     pub client_build_compatibility: crate::ClientBuildCompatibilityEvidence,
@@ -520,6 +531,31 @@ pub struct RestorationReport {
     pub report_path: String,
     pub integrity: RestorationIntegrity,
     pub completion: RestorationCompletion,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestorationStorageEvidence {
+    pub format_version: u32,
+    pub source_byte_count: u64,
+    pub message_record_count: u64,
+    pub observed_table_record_count: u64,
+    pub estimated_archive_byte_count: u64,
+    pub estimated_staging_byte_count: u64,
+    pub estimated_peak_byte_count: u64,
+    pub required_free_byte_count: u64,
+    pub available_free_byte_count_at_start: u64,
+    pub peak_staging_file_byte_count: u64,
+    pub staged_uncompressed_byte_count: u64,
+    pub staged_compressed_byte_count: u64,
+    pub actual_archive_byte_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AccountHolderBindingEvidence {
+    SnapshotManifest,
+    LegacyAccountRoot,
 }
 
 impl RestorationReport {
@@ -712,7 +748,8 @@ impl RestorationCompletion {
             .get("unknown")
             .copied()
             .unwrap_or_default()
-            == 0;
+            == 0
+            && integrity.direction_conflict_count == 0;
         let entity_coverage_complete =
             integrity.entity_decode_gap_count == 0 && integrity.unresolved_conversation_count == 0;
         let relationship_coverage_complete = integrity.missing_relationship_identifier_count == 0
@@ -857,6 +894,9 @@ mod tests {
         let mut report = RestorationReport {
             format_version: 3,
             account_id: String::new(),
+            self_participant_id: None,
+            account_binding_evidence: None,
+            storage: None,
             source_fingerprint: String::new(),
             client_build_compatibility: Default::default(),
             acquisition: None,

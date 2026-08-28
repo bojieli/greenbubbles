@@ -61,6 +61,26 @@ pub struct ProgressEvent {
     pub file_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_byte_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_byte_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_archive_byte_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_staging_byte_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_peak_byte_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_free_byte_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_free_byte_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staging_file_byte_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staged_uncompressed_byte_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staged_compressed_byte_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub published_archive_byte_count: Option<u64>,
     #[serde(rename = "sourceSetID", skip_serializing_if = "Option::is_none")]
     pub source_set_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,7 +138,7 @@ impl ProgressEvent {
         phase_total: u64,
     ) -> Self {
         Self {
-            format_version: 2,
+            format_version: 3,
             privacy_safe: true,
             phase,
             state,
@@ -137,6 +157,16 @@ impl ProgressEvent {
             file_index: None,
             file_count: None,
             file_byte_count: None,
+            source_byte_count: None,
+            estimated_archive_byte_count: None,
+            estimated_staging_byte_count: None,
+            estimated_peak_byte_count: None,
+            required_free_byte_count: None,
+            available_free_byte_count: None,
+            staging_file_byte_count: None,
+            staged_uncompressed_byte_count: None,
+            staged_compressed_byte_count: None,
+            published_archive_byte_count: None,
             source_set_id: None,
             logical_path: None,
             storage_family: None,

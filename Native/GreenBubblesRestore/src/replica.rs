@@ -21,12 +21,13 @@ use crate::{
     RestorationCoverage, RestorationReport, RestoreError, TypedPayload,
 };
 
-const CURRENT_SCHEMA_VERSION: u32 = 4;
+const CURRENT_SCHEMA_VERSION: u32 = 5;
 const REPLICA_FORMAT_VERSION: u32 = 1;
 const MIGRATION_1_IDENTITY: &str = "canonical replica base schema";
 const MIGRATION_2_IDENTITY: &str = "checkpoints change stream and exact FTS";
 const MIGRATION_3_IDENTITY: &str = "encrypted reconciliation staging and resumable change stream";
 const MIGRATION_4_IDENTITY: &str = "passive cached moments interactions and coverage";
+const MIGRATION_5_IDENTITY: &str = "account holder identity binding";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +35,7 @@ pub struct ReplicaBootstrapReport {
     pub format_version: u32,
     pub schema_version: u32,
     pub account_id: String,
+    pub self_participant_id: Option<String>,
     pub source_fingerprint: String,
     pub cipher_version: String,
     pub encrypted_at_rest: bool,
@@ -62,6 +64,7 @@ pub struct ReplicaStatus {
     pub schema_version: u32,
     pub replica_id: String,
     pub account_id: Option<String>,
+    pub self_participant_id: Option<String>,
     pub current_source_fingerprint: Option<String>,
     pub checkpoint_revision: Option<String>,
     pub client_build_compatibility: Option<crate::ClientBuildCompatibilityEvidence>,
@@ -192,6 +195,7 @@ pub enum ReplicaHealthState {
 pub struct ReplicaSyncReport {
     pub format_version: u32,
     pub account_id: String,
+    pub self_participant_id: Option<String>,
     pub previous_source_fingerprint: String,
     pub current_source_fingerprint: String,
     pub idempotent: bool,
@@ -294,6 +298,7 @@ pub struct ReplicaConversationPage {
 #[serde(rename_all = "camelCase")]
 pub struct ReplicaCoverageView {
     pub account_id: String,
+    pub self_participant_id: Option<String>,
     pub source_fingerprint: String,
     pub archive_scope: crate::RestorationArchiveScope,
     pub database_coverage: Option<crate::RestorationDatabaseCoverage>,
@@ -425,21 +430,27 @@ pub fn bootstrap_replica(
         audit_archive(archive_directory)?;
     }
     let mut opened = open_replica(replica_path, key)?;
-    let existing_account: Option<String> = opened
+    let existing_identity: Option<(String, Option<String>)> = opened
         .connection
         .query_row(
-            "SELECT account_id FROM replica_identity WHERE singleton = 1",
+            "SELECT account_id, self_participant_id FROM replica_identity WHERE singleton = 1",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    if existing_account
-        .as_deref()
-        .is_some_and(|account| account != report.account_id)
+    if existing_identity
+        .as_ref()
+        .is_some_and(|(account, _)| account != &report.account_id)
     {
         return Err(RestoreError::Integrity(
             "replica belongs to a different account".to_string(),
         ));
+    }
+    if let Some((_, existing_self)) = existing_identity.as_ref() {
+        require_compatible_self_participant(
+            existing_self.as_deref(),
+            report.self_participant_id.as_deref(),
+        )?;
     }
     let existing_checkpoint: Option<String> = opened
         .connection
@@ -450,6 +461,14 @@ pub fn bootstrap_replica(
         )
         .optional()?;
     if existing_checkpoint.as_deref() == Some(&report.source_fingerprint) {
+        if existing_identity.as_ref().map(|identity| &identity.1)
+            != Some(&report.self_participant_id)
+        {
+            return Err(RestoreError::Integrity(
+                "an existing checkpoint cannot acquire a new account-holder binding through idempotent bootstrap; use synchronization"
+                    .to_string(),
+            ));
+        }
         return bootstrap_report(&opened, &report, true);
     }
     if existing_checkpoint.is_some() {
@@ -467,6 +486,7 @@ pub fn bootstrap_replica(
         format_version: REPLICA_FORMAT_VERSION,
         schema_version: CURRENT_SCHEMA_VERSION,
         account_id: report.account_id,
+        self_participant_id: report.self_participant_id,
         source_fingerprint: report.source_fingerprint,
         cipher_version: opened.cipher_version,
         encrypted_at_rest: true,
@@ -498,7 +518,7 @@ pub fn replica_status(
         .connection
         .query_row(
             "SELECT account_id, current_source_fingerprint, restoration_complete,
-                    updated_at_unix_nanoseconds
+                    updated_at_unix_nanoseconds, self_participant_id
              FROM replica_identity WHERE singleton = 1",
             [],
             |row| {
@@ -507,11 +527,12 @@ pub fn replica_status(
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<bool>>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             },
         )
         .optional()?;
-    let checkpoint = if let Some((account, _, _, _)) = identity.as_ref() {
+    let checkpoint = if let Some((account, _, _, _, _)) = identity.as_ref() {
         let encoded = opened
             .connection
             .query_row(
@@ -532,11 +553,18 @@ pub fn replica_status(
         None
     };
     let stored_state = match identity.as_ref() {
-        Some((account, _, _, _)) => load_coverage_state(&opened.connection, account)?,
+        Some((account, _, _, _, _)) => load_coverage_state(&opened.connection, account)?,
         None => None,
     };
     let stored_report = stored_state.as_ref().map(|value| &value.0);
     let stored_coverage = stored_state.as_ref().map(|value| &value.1);
+    if stored_report.is_some_and(|report| {
+        Some(&report.self_participant_id) != identity.as_ref().map(|value| &value.4)
+    }) {
+        return Err(RestoreError::Integrity(
+            "replica account-holder binding disagrees with its coverage state".to_string(),
+        ));
+    }
     let checkpoint_age_seconds = checkpoint
         .map(|timestamp| {
             unix_nanoseconds()
@@ -578,6 +606,7 @@ pub fn replica_status(
         schema_version: CURRENT_SCHEMA_VERSION,
         replica_id: replica_id(&opened.connection)?,
         account_id: identity.as_ref().map(|value| value.0.clone()),
+        self_participant_id: identity.as_ref().and_then(|value| value.4.clone()),
         current_source_fingerprint: identity.as_ref().and_then(|value| value.1.clone()),
         checkpoint_revision: identity.as_ref().map(|value| value.3.clone()),
         client_build_compatibility: stored_report
@@ -830,9 +859,10 @@ pub fn audit_replica_backup(
                 "replica backup identity is incomplete".to_string(),
             ));
         }
-        record_audit = audit_replica_records(connection, &identity.0, false)?;
+        let include_cached = version >= 4;
+        record_audit = audit_replica_records(connection, &identity.0, include_cached)?;
         verify_replica_message_links(connection, &identity.0, &record_audit)?;
-        verify_legacy_replica_coverage(connection, &identity, &record_audit)?;
+        verify_legacy_replica_coverage(connection, &identity, &record_audit, include_cached)?;
         if version >= 2 {
             verify_legacy_replica_checkpoint(connection, &identity, &record_audit)?;
             verify_replica_fts(connection, &identity.0, record_audit.message_count)?;
@@ -877,6 +907,12 @@ pub fn audit_replica_backup(
             let _ = replica_id(connection)?;
             content_count = content_count.saturating_add(table_count(connection, "sync_seen")?);
             transient_state_empty = true;
+        }
+        if version >= 4 {
+            content_count = content_count
+                .saturating_add(table_count(connection, "cached_moment")?)
+                .saturating_add(table_count(connection, "cached_moment_interaction")?)
+                .saturating_add(table_count(connection, "cached_surface_state")?);
         }
         if content_count != 0 {
             return Err(RestoreError::Integrity(
@@ -974,6 +1010,16 @@ pub fn prepare_replica_recovery(
                 "recovery candidate schema changed before migration".to_string(),
             ));
         }
+        let copied_cached_moment_count = if copied_version >= 4 {
+            table_count(&recovered, "cached_moment")?
+        } else {
+            0
+        };
+        let copied_cached_moment_interaction_count = if copied_version >= 4 {
+            table_count(&recovered, "cached_moment_interaction")?
+        } else {
+            0
+        };
         validate_replica_migration_ledger(&recovered, copied_version)?;
         apply_migrations(&mut recovered, copied_version)?;
         validate_replica_migration_ledger(&recovered, CURRENT_SCHEMA_VERSION)?;
@@ -994,8 +1040,9 @@ pub fn prepare_replica_recovery(
             || current_audit.artifact_count != source_audit.artifact_count
             || current_audit.relationship_count != source_audit.relationship_count
             || current_audit.message_artifact_count != source_audit.message_artifact_count
-            || current_audit.cached_moment_count != 0
-            || current_audit.cached_moment_interaction_count != 0
+            || current_audit.cached_moment_count != copied_cached_moment_count
+            || current_audit.cached_moment_interaction_count
+                != copied_cached_moment_interaction_count
         {
             return Err(RestoreError::Integrity(
                 "migrated recovery candidate differs from its source backup".to_string(),
@@ -1033,21 +1080,25 @@ pub fn synchronize_replica(
     let report = load_report(archive_directory)?;
     require_authoritative_archive(&report)?;
     let mut opened = open_replica(replica_path, key)?;
-    let identity: Option<(String, Option<String>)> = opened
+    let identity: Option<(String, Option<String>, Option<String>)> = opened
         .connection
         .query_row(
-            "SELECT account_id, current_source_fingerprint
+            "SELECT account_id, current_source_fingerprint, self_participant_id
              FROM replica_identity WHERE singleton = 1",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let Some((account_id, previous_fingerprint)) = identity else {
+    let Some((account_id, previous_fingerprint, existing_self_participant_id)) = identity else {
         return Err(RestoreError::Integrity(
             "replica must be bootstrapped before synchronization".to_string(),
         ));
     };
     require_account(&report.account_id, &account_id)?;
+    require_compatible_self_participant(
+        existing_self_participant_id.as_deref(),
+        report.self_participant_id.as_deref(),
+    )?;
     let previous_fingerprint = previous_fingerprint.ok_or_else(|| {
         RestoreError::Integrity("replica has no authoritative source checkpoint".to_string())
     })?;
@@ -1102,20 +1153,21 @@ pub fn replica_matches_authoritative_archive(
     require_authoritative_archive(&report)?;
     let incoming_coverage = load_archive_coverage(archive_directory)?;
     let opened = open_replica(replica_path, key)?;
-    let identity: Option<(String, Option<String>)> = opened
+    let identity: Option<(String, Option<String>, Option<String>)> = opened
         .connection
         .query_row(
-            "SELECT account_id, current_source_fingerprint
+            "SELECT account_id, current_source_fingerprint, self_participant_id
              FROM replica_identity WHERE singleton = 1",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let Some((account_id, source_fingerprint)) = identity else {
+    let Some((account_id, source_fingerprint, self_participant_id)) = identity else {
         return Ok(false);
     };
     if account_id != report.account_id
         || source_fingerprint.as_deref() != Some(report.source_fingerprint.as_str())
+        || self_participant_id != report.self_participant_id
     {
         return Ok(false);
     }
@@ -1873,6 +1925,7 @@ pub fn replica_coverage(
     require_account(&report.account_id, &account_id)?;
     Ok(ReplicaCoverageView {
         account_id,
+        self_participant_id: report.self_participant_id.clone(),
         source_fingerprint,
         archive_scope: report.archive_scope,
         database_coverage: report.database_coverage.clone(),
@@ -2542,10 +2595,29 @@ fn verify_replica_checkpoint_and_coverage(
     }
     let coverage: RestorationCoverage = serde_json::from_slice(&coverage_bytes)?;
     let report: RestorationReport = serde_json::from_slice(&report_bytes)?;
+    let stored_self_participant_id: Option<String> = connection.query_row(
+        "SELECT self_participant_id FROM replica_identity WHERE singleton = 1",
+        [],
+        |row| row.get(0),
+    )?;
+    let account_binding_valid = report
+        .self_participant_id
+        .as_deref()
+        .is_none_or(is_lower_sha256)
+        && (report.self_participant_id.is_some() == report.account_binding_evidence.is_some())
+        && if report.format_version >= 6 {
+            report.self_participant_id.is_some()
+        } else if report.format_version >= 3 {
+            report.self_participant_id.is_none()
+        } else {
+            true
+        };
     validate_restoration_coverage_schema(&coverage)?;
     let recomputed_completion = crate::RestorationCompletion::evaluate_report(&report);
     if coverage_source != identity.1
         || report.account_id != identity.0
+        || report.self_participant_id != stored_self_participant_id
+        || !account_binding_valid
         || report.source_fingerprint != identity.1
         || require_authoritative_archive(&report).is_err()
         || report.completion.full_restoration_achieved != identity.2
@@ -2585,7 +2657,11 @@ fn verify_replica_checkpoint_and_coverage(
         )?;
         let cached: crate::CachedSurfaceCoverage = serde_json::from_slice(&bytes)?;
         validate_cached_coverage_schema(&cached)?;
-        if account != identity.0 || observed_at != cached.observed_at {
+        if account != identity.0
+            || observed_at != cached.observed_at
+            || cached.moment_count != cached_moment_count
+            || cached.interaction_count != cached_moment_interaction_count
+        {
             return Err(RestoreError::Integrity(
                 "replica cached coverage projection is inconsistent".to_string(),
             ));
@@ -2602,6 +2678,7 @@ fn verify_legacy_replica_coverage(
     connection: &Connection,
     identity: &(String, String, bool, String, String),
     audit: &ReplicaRecordAudit,
+    include_cached: bool,
 ) -> Result<(), RestoreError> {
     if table_count(connection, "coverage_state")? != 1 {
         return Err(RestoreError::Integrity(
@@ -2631,6 +2708,8 @@ fn verify_legacy_replica_coverage(
         || report.integrity.conversation_count != audit.conversation_count
         || report.integrity.participant_count != audit.participant_count
         || report.integrity.unique_artifact_count != audit.artifact_count
+        || report.integrity.cached_moment_count != audit.cached_moment_count
+        || report.integrity.cached_moment_interaction_count != audit.cached_moment_interaction_count
         || (report.format_version >= 3
             && (report.integrity.relationship_reference_count != audit.relationships.len() as u64
                 || report.integrity.artifact_reference_count
@@ -2640,6 +2719,36 @@ fn verify_legacy_replica_coverage(
         return Err(RestoreError::Integrity(
             "replica backup coverage differs from its canonical state".to_string(),
         ));
+    }
+    if include_cached {
+        let cached_state_count = table_count(connection, "cached_surface_state")?;
+        if cached_state_count > 1 {
+            return Err(RestoreError::Integrity(
+                "replica backup cached coverage state is not singular".to_string(),
+            ));
+        }
+        if cached_state_count == 1 {
+            let (account, observed_at, bytes): (String, String, Vec<u8>) = connection.query_row(
+                "SELECT account_id, observed_at, coverage_json FROM cached_surface_state",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+            let cached: crate::CachedSurfaceCoverage = serde_json::from_slice(&bytes)?;
+            validate_cached_coverage_schema(&cached)?;
+            if account != identity.0
+                || observed_at != cached.observed_at
+                || cached.moment_count != audit.cached_moment_count
+                || cached.interaction_count != audit.cached_moment_interaction_count
+            {
+                return Err(RestoreError::Integrity(
+                    "replica backup cached coverage differs from canonical state".to_string(),
+                ));
+            }
+        } else if audit.cached_moment_count != 0 || audit.cached_moment_interaction_count != 0 {
+            return Err(RestoreError::Integrity(
+                "replica backup cached records have no coverage state".to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -2940,6 +3049,7 @@ fn validate_replica_migration_ledger(
         MIGRATION_2_IDENTITY,
         MIGRATION_3_IDENTITY,
         MIGRATION_4_IDENTITY,
+        MIGRATION_5_IDENTITY,
     ];
     let mut statement = connection.prepare(
         "SELECT schema_version, applied_at_unix_nanoseconds, migration_sha256
@@ -2986,6 +3096,7 @@ fn apply_migrations(connection: &mut Connection, from: u32) -> Result<(), Restor
             2 => migration_2(&transaction)?,
             3 => migration_3(&transaction)?,
             4 => migration_4(&transaction)?,
+            5 => migration_5(&transaction)?,
             _ => unreachable!("all replica migrations are enumerated"),
         }
         transaction.commit()?;
@@ -3271,6 +3382,15 @@ fn migration_4(transaction: &Transaction<'_>) -> Result<(), RestoreError> {
     Ok(())
 }
 
+fn migration_5(transaction: &Transaction<'_>) -> Result<(), RestoreError> {
+    transaction.execute_batch(
+        "ALTER TABLE replica_identity ADD COLUMN self_participant_id TEXT;
+         UPDATE replica_schema SET schema_version = 5 WHERE singleton = 1;",
+    )?;
+    record_migration(transaction, 5, MIGRATION_5_IDENTITY)?;
+    Ok(())
+}
+
 fn record_migration(
     transaction: &Transaction<'_>,
     version: u32,
@@ -3365,9 +3485,13 @@ fn import_archive_transactionally(
     transaction.execute(
         "INSERT INTO replica_identity(
            singleton, account_id, current_source_fingerprint, restoration_complete,
-           created_at_unix_nanoseconds, updated_at_unix_nanoseconds
-         ) VALUES (1, ?1, NULL, NULL, ?2, ?2)",
-        params![report.account_id, started.to_string()],
+           created_at_unix_nanoseconds, updated_at_unix_nanoseconds, self_participant_id
+         ) VALUES (1, ?1, NULL, NULL, ?2, ?2, ?3)",
+        params![
+            report.account_id,
+            started.to_string(),
+            report.self_participant_id
+        ],
     )?;
     let mut counts = ImportCounts::default();
 
@@ -3615,13 +3739,15 @@ fn import_archive_transactionally(
         "UPDATE replica_identity SET
            current_source_fingerprint = ?2,
            restoration_complete = ?3,
-           updated_at_unix_nanoseconds = ?4
+           updated_at_unix_nanoseconds = ?4,
+           self_participant_id = ?5
          WHERE account_id = ?1",
         params![
             report.account_id,
             report.source_fingerprint,
             report.completion.full_restoration_achieved,
             committed.to_string(),
+            report.self_participant_id,
         ],
     )?;
     transaction.commit()?;
@@ -4120,13 +4246,15 @@ fn reconcile_archive_transactionally(
         "UPDATE replica_identity SET
            current_source_fingerprint = ?2,
            restoration_complete = ?3,
-           updated_at_unix_nanoseconds = ?4
+           updated_at_unix_nanoseconds = ?4,
+           self_participant_id = ?5
          WHERE account_id = ?1",
         params![
             report.account_id,
             report.source_fingerprint,
             report.completion.full_restoration_achieved,
             committed.to_string(),
+            report.self_participant_id,
         ],
     )?;
     transaction.execute("DELETE FROM sync_seen", [])?;
@@ -4641,6 +4769,7 @@ fn sync_report(
     Ok(ReplicaSyncReport {
         format_version: REPLICA_FORMAT_VERSION,
         account_id: account_id.to_string(),
+        self_participant_id: report.self_participant_id.clone(),
         previous_source_fingerprint: previous_source_fingerprint.to_string(),
         current_source_fingerprint: report.source_fingerprint.clone(),
         idempotent,
@@ -4818,6 +4947,7 @@ fn bootstrap_report(
         format_version: REPLICA_FORMAT_VERSION,
         schema_version: CURRENT_SCHEMA_VERSION,
         account_id: report.account_id.clone(),
+        self_participant_id: report.self_participant_id.clone(),
         source_fingerprint: report.source_fingerprint.clone(),
         cipher_version: opened.cipher_version.clone(),
         encrypted_at_rest: true,
@@ -4909,6 +5039,20 @@ fn require_account(actual: &str, expected: &str) -> Result<(), RestoreError> {
     Ok(())
 }
 
+fn require_compatible_self_participant(
+    existing: Option<&str>,
+    incoming: Option<&str>,
+) -> Result<(), RestoreError> {
+    if existing.is_some_and(|value| Some(value) != incoming)
+        || (existing.is_some() && incoming.is_none())
+    {
+        return Err(RestoreError::Integrity(
+            "replica belongs to a different account holder".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn json_enum(value: &impl Serialize) -> Result<String, RestoreError> {
     let encoded = serde_json::to_string(value)?;
     Ok(encoded.trim_matches('"').to_string())
@@ -4936,6 +5080,13 @@ fn replica_id(connection: &Connection) -> Result<String, RestoreError> {
 
 fn sha256(value: &[u8]) -> String {
     hex::encode(Sha256::digest(value))
+}
+
+fn is_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn checked_i64(value: u64) -> Result<i64, RestoreError> {
@@ -5040,6 +5191,8 @@ fn archive_revision_digest(report: &RestorationReport, coverage: &RestorationCov
     sha256(
         &serde_json::to_vec(&(
             &report.source_fingerprint,
+            &report.self_participant_id,
+            &report.account_binding_evidence,
             &report.client_build_compatibility,
             &report.integrity,
             &report.completion,

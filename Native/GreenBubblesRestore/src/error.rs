@@ -37,6 +37,12 @@ pub enum RestoreError {
     Integrity(String),
     #[error("unsupported or incomplete message table {table}: {reason}")]
     UnsupportedTable { table: String, reason: String },
+    #[error("insufficient free space for restoration: {available_byte_count} bytes available, {required_free_byte_count} bytes required for an estimated {estimated_peak_byte_count}-byte peak")]
+    InsufficientDiskSpace {
+        available_byte_count: u64,
+        required_free_byte_count: u64,
+        estimated_peak_byte_count: u64,
+    },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]

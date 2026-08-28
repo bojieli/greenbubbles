@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs::{File, OpenOptions};
@@ -170,7 +172,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let payload_profiles =
                 profile_archive_payloads_with_progress(&output, &profile_progress)?;
             let summary = serde_json::json!({
-                "formatVersion": 3,
+                "formatVersion": 4,
                 "privacySafeSummary": true,
                 "archiveScope": report.archive_scope,
                 "databaseOffset": batch.offset,
@@ -202,6 +204,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "semanticGapReasonCounts": report.integrity.semantic_gap_reason_counts,
                 "conversationCount": report.integrity.conversation_count,
                 "participantCount": report.integrity.participant_count,
+                "accountHolderBound": report.self_participant_id.is_some(),
+                "directionCounts": report.integrity.direction_counts,
+                "directionConflictCount": report.integrity.direction_conflict_count,
                 "rowEquationHolds": report.completion.row_equation_holds,
                 "zeroRejectedRows": report.completion.zero_rejected_rows,
                 "semanticMessageCoverageComplete": report.completion.semantic_message_coverage_complete,
@@ -211,6 +216,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "auditCachedMomentInteractionCount": audit.cached_moment_interaction_count,
                 "auditRestoredRecordCount": audit.restored_record_count(),
                 "auditRejectionCount": audit.rejection_count,
+                "auditAccountHolderBound": audit.account_holder_bound,
+                "auditDirectionConflictCount": audit.direction_conflict_count,
+                "auditDirectionResolutionComplete": audit.completion_evidence.direction_resolution_complete,
                 "clientBuildProductionCompatible": audit.client_build_production_compatible
             });
             emit_json_result(&summary, &remaining)?;
@@ -248,7 +256,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let payload_profiles =
                 profile_archive_payloads_with_progress(&output, &profile_progress)?;
             let summary = serde_json::json!({
-                "formatVersion": 1,
+                "formatVersion": 2,
                 "privacySafeSummary": true,
                 "archiveScope": report.archive_scope,
                 "authoritativeDatabaseCoverage": false,
@@ -279,6 +287,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "semanticGapReasonCounts": report.integrity.semantic_gap_reason_counts,
                 "conversationCount": report.integrity.conversation_count,
                 "participantCount": report.integrity.participant_count,
+                "accountHolderBound": report.self_participant_id.is_some(),
+                "directionCounts": report.integrity.direction_counts,
+                "directionConflictCount": report.integrity.direction_conflict_count,
                 "rowEquationHolds": report.completion.row_equation_holds,
                 "zeroRejectedRows": report.completion.zero_rejected_rows,
                 "semanticMessageCoverageComplete": report.completion.semantic_message_coverage_complete,
@@ -288,6 +299,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "auditCachedMomentInteractionCount": audit.cached_moment_interaction_count,
                 "auditRestoredRecordCount": audit.restored_record_count(),
                 "auditRejectionCount": audit.rejection_count,
+                "auditAccountHolderBound": audit.account_holder_bound,
+                "auditDirectionConflictCount": audit.direction_conflict_count,
+                "auditDirectionResolutionComplete": audit.completion_evidence.direction_resolution_complete,
                 "clientBuildProductionCompatible": audit.client_build_production_compatible
             });
             emit_json_result(&summary, &remaining)?;
@@ -1321,6 +1335,40 @@ fn human_progress(event: &ProgressEvent) -> String {
     }
     if let Some(bytes) = event.file_byte_count {
         fields.push(format!("file size {}", format_bytes(bytes)));
+    }
+    if let Some(bytes) = event.source_byte_count {
+        fields.push(format!("source {}", format_bytes(bytes)));
+    }
+    if let Some(bytes) = event.estimated_archive_byte_count {
+        fields.push(format!("estimated archive {}", format_bytes(bytes)));
+    }
+    if let Some(bytes) = event.estimated_staging_byte_count {
+        fields.push(format!("estimated staging {}", format_bytes(bytes)));
+    }
+    if let Some(bytes) = event.estimated_peak_byte_count {
+        fields.push(format!("estimated peak {}", format_bytes(bytes)));
+    }
+    if let Some(bytes) = event.available_free_byte_count {
+        fields.push(format!("free {}", format_bytes(bytes)));
+    }
+    if let Some(bytes) = event.required_free_byte_count {
+        fields.push(format!("required free {}", format_bytes(bytes)));
+    }
+    if let Some(bytes) = event.staging_file_byte_count {
+        fields.push(format!("staging on disk {}", format_bytes(bytes)));
+    }
+    if let (Some(compressed), Some(uncompressed)) = (
+        event.staged_compressed_byte_count,
+        event.staged_uncompressed_byte_count,
+    ) {
+        fields.push(format!(
+            "staged payload {} compressed / {} source JSON",
+            format_bytes(compressed),
+            format_bytes(uncompressed)
+        ));
+    }
+    if let Some(bytes) = event.published_archive_byte_count {
+        fields.push(format!("archive written {}", format_bytes(bytes)));
     }
     if let Some(tables) = event.table_count {
         fields.push(format!("{tables} tables"));

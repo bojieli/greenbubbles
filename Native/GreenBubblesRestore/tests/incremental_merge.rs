@@ -357,6 +357,9 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
     let report = RestorationReport {
         format_version: 5,
         account_id: ACCOUNT.to_string(),
+        self_participant_id: None,
+        account_binding_evidence: None,
+        storage: None,
         source_fingerprint: source_fingerprint.to_string(),
         client_build_compatibility: Default::default(),
         acquisition: fragment.then(acquisition),

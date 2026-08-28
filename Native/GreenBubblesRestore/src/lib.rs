@@ -40,8 +40,9 @@ pub use database_keys::DatabaseKeySet;
 pub use error::RestoreError;
 pub use manifest::{
     ClientBuildCompatibilityEvidence, ClientBuildCompatibilityState, ClientBuildFingerprint,
-    SnapshotAcquisitionEvidence, SnapshotAcquisitionMode, SnapshotEntry, SnapshotFileRole,
-    SnapshotManifest, SnapshotSourceFileInventory, SnapshotSourceSetInventory,
+    SnapshotAccountBinding, SnapshotAccountBindingEvidence, SnapshotAcquisitionEvidence,
+    SnapshotAcquisitionMode, SnapshotEntry, SnapshotFileRole, SnapshotManifest,
+    SnapshotSourceFileInventory, SnapshotSourceSetInventory,
 };
 pub use model::*;
 pub use progress::{

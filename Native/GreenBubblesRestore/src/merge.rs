@@ -210,8 +210,15 @@ pub fn merge_incremental_archive(
     });
 
     let final_report = RestorationReport {
-        format_version: 5,
+        format_version: if fragment_report.self_participant_id.is_some() {
+            6
+        } else {
+            5
+        },
         account_id: fragment_report.account_id.clone(),
+        self_participant_id: fragment_report.self_participant_id.clone(),
+        account_binding_evidence: fragment_report.account_binding_evidence,
+        storage: None,
         source_fingerprint: fragment_report.source_fingerprint.clone(),
         client_build_compatibility: fragment_report.client_build_compatibility.clone(),
         acquisition: fragment_report.acquisition.clone(),
@@ -626,6 +633,13 @@ fn validate_merge_inputs(
     if previous.account_id != fragment.account_id {
         return Err(RestoreError::Integrity(
             "merge inputs belong to different accounts".to_string(),
+        ));
+    }
+    if previous.self_participant_id != fragment.self_participant_id
+        || previous.account_binding_evidence != fragment.account_binding_evidence
+    {
+        return Err(RestoreError::Integrity(
+            "merge inputs disagree about the account holder".to_string(),
         ));
     }
     let acquisition = fragment.acquisition.as_ref().ok_or_else(|| {
@@ -1342,6 +1356,11 @@ fn calculate_integrity(
             .direction_counts
             .entry(direction.to_string())
             .or_default() += 1;
+        if message.direction_evidence
+            == crate::DirectionEvidence::SenderAccountConflictWithExplicitSourceColumn
+        {
+            integrity.direction_conflict_count += 1;
+        }
         for relationship in &message.relationships {
             match relationship.resolution_state {
                 RelationshipResolutionState::Resolved => integrity.resolved_relationship_count += 1,

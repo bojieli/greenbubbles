@@ -77,7 +77,7 @@ fn restores_audits_merges_and_monotonically_publishes_offline_snapshots() {
         .collect::<Vec<_>>();
     assert!(!progress_events.is_empty());
     assert!(progress_events.iter().all(|event| {
-        event["formatVersion"] == 2
+        event["formatVersion"] == 3
             && event["privacySafe"] == true
             && event["workflowCompleted"].as_u64().is_some()
             && event["workflowTotal"].as_u64().is_some()
@@ -266,6 +266,7 @@ fn build_bootstrap_snapshot(parent: &Path, account_root: &Path) -> PathBuf {
         snapshot_id: "00000000-0000-4000-8000-000000000101".to_string(),
         created_at: "2026-08-27T00:00:00Z".to_string(),
         source_fingerprint: source_inventory_fingerprint(&source_sets),
+        account_binding: None,
         client_build: Some(pinned_client()),
         acquisition: Some(SnapshotAcquisitionEvidence {
             format_version: 2,
@@ -309,6 +310,7 @@ fn build_incremental_snapshot(
         snapshot_id: "00000000-0000-4000-8000-000000000102".to_string(),
         created_at: "2026-08-27T00:01:00Z".to_string(),
         source_fingerprint: source_inventory_fingerprint(&source_sets),
+        account_binding: None,
         client_build: Some(pinned_client()),
         acquisition: Some(SnapshotAcquisitionEvidence {
             format_version: 2,
@@ -378,6 +380,7 @@ fn build_integrity_snapshot(
         snapshot_id: "00000000-0000-4000-8000-000000000103".to_string(),
         created_at: "2026-08-27T00:02:00Z".to_string(),
         source_fingerprint: previous.source_fingerprint.clone(),
+        account_binding: None,
         client_build: Some(pinned_client()),
         acquisition: Some(SnapshotAcquisitionEvidence {
             format_version: 2,

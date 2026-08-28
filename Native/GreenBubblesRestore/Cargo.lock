@@ -488,6 +488,7 @@ dependencies = [
  "wx-decrypt",
  "wx-media",
  "zeroize",
+ "zstd",
 ]
 
 [[package]]

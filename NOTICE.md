@@ -12,11 +12,11 @@ GreenBubbles adds its own immutable snapshot, lossless restoration, integrity,
 policy, and AI-facing layers.
 
 The resolved native build statically compiles bundled SQLCipher carrying a
-Zetetic BSD-style license and bundled SILK C sources carrying a separate Skype
-Limited BSD-style notice and patent disclaimer. Cargo reports the `silk-rs`
-wrapper itself as MIT, which is not a complete description of its bundled C
-sources. A public binary would require the applicable source/binary notices and
-target-specific review.
+Zetetic BSD-style license, bundled SILK C sources carrying a separate Skype
+Limited BSD-style notice and patent disclaimer, and bundled Zstandard sources
+carrying Meta's BSD license. Cargo wrapper metadata is not a complete
+description of these bundled C sources. A public binary would require the
+applicable source/binary notices and target-specific review.
 
 Transitive Rust and Swift dependencies retain their respective licenses. Run
 `cargo metadata --manifest-path Native/GreenBubblesRestore/Cargo.toml` and

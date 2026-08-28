@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -16,10 +17,28 @@ pub struct SnapshotManifest {
     pub created_at: String,
     pub source_fingerprint: String,
     #[serde(default)]
+    pub account_binding: Option<SnapshotAccountBinding>,
+    #[serde(default)]
     pub client_build: Option<ClientBuildFingerprint>,
     #[serde(default)]
     pub acquisition: Option<SnapshotAcquisitionEvidence>,
     pub entries: Vec<SnapshotEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotAccountBinding {
+    pub format_version: u32,
+    #[serde(rename = "accountID", alias = "accountId")]
+    pub account_id: String,
+    pub self_source_identifier_base64: String,
+    pub evidence: SnapshotAccountBindingEvidence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SnapshotAccountBindingEvidence {
+    SelectedAccountDirectory,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,7 +195,7 @@ impl SnapshotManifest {
         let data = fs::read(&manifest_path)
             .map_err(|e| RestoreError::Manifest(format!("{}: {e}", manifest_path.display())))?;
         let manifest: Self = serde_json::from_slice(&data)?;
-        if !matches!(manifest.manifest_format_version, 1..=3) {
+        if !matches!(manifest.manifest_format_version, 1..=4) {
             return Err(RestoreError::Manifest(format!(
                 "unsupported format version {}",
                 manifest.manifest_format_version
@@ -196,6 +215,21 @@ impl SnapshotManifest {
             return Err(RestoreError::Manifest(
                 "format-3 snapshot requires acquisition evidence".to_string(),
             ));
+        }
+        if manifest.manifest_format_version < 4 && manifest.account_binding.is_some() {
+            return Err(RestoreError::Manifest(
+                "snapshot account binding requires format 4".to_string(),
+            ));
+        }
+        if manifest.manifest_format_version == 4
+            && (manifest.acquisition.is_none() || manifest.account_binding.is_none())
+        {
+            return Err(RestoreError::Manifest(
+                "format-4 snapshot requires acquisition and account-binding evidence".to_string(),
+            ));
+        }
+        if let Some(binding) = &manifest.account_binding {
+            binding.validate()?;
         }
         if let Some(build) = &manifest.client_build {
             build.validate()?;
@@ -464,11 +498,46 @@ impl SnapshotAcquisitionEvidence {
                 "selected source inventory was not copied completely".to_string(),
             ));
         }
-        if !source_inventory_fingerprint(&self.source_sets)
-            .eq_ignore_ascii_case(&manifest.source_fingerprint)
-        {
+        let expected_fingerprint = manifest.account_binding.as_ref().map_or_else(
+            || source_inventory_fingerprint(&self.source_sets),
+            |binding| source_inventory_fingerprint_with_account_binding(&self.source_sets, binding),
+        );
+        if !expected_fingerprint.eq_ignore_ascii_case(&manifest.source_fingerprint) {
             return Err(RestoreError::Manifest(
                 "source inventory fingerprint does not match manifest".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl SnapshotAccountBinding {
+    pub(crate) fn validate(&self) -> Result<(), RestoreError> {
+        let decoded_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&self.self_source_identifier_base64)
+            .ok();
+        let canonical_base64 = decoded_bytes.as_ref().is_some_and(|bytes| {
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+                == self.self_source_identifier_base64
+        });
+        let decoded = decoded_bytes
+            .as_ref()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok());
+        if self.format_version != 1
+            || !is_lower_hex(&self.account_id, 64)
+            || !canonical_base64
+            || decoded_bytes
+                .as_ref()
+                .is_none_or(|value| value.is_empty() || value.len() > 255)
+            || decoded.is_none_or(|value| {
+                matches!(value, "." | "..")
+                    || value.contains('/')
+                    || value.contains('\\')
+                    || value.chars().any(char::is_control)
+            })
+        {
+            return Err(RestoreError::Manifest(
+                "snapshot account binding is incomplete or malformed".to_string(),
             ));
         }
         Ok(())
@@ -548,6 +617,37 @@ fn validate_unique_sorted(values: &[String], label: &str) -> Result<(), RestoreE
 
 pub(crate) fn source_inventory_fingerprint(source_sets: &[SnapshotSourceSetInventory]) -> String {
     let mut hasher = Sha256::new();
+    update_source_inventory_fingerprint(&mut hasher, source_sets);
+    hex::encode(hasher.finalize())
+}
+
+pub(crate) fn source_inventory_fingerprint_with_account_binding(
+    source_sets: &[SnapshotSourceSetInventory],
+    binding: &SnapshotAccountBinding,
+) -> String {
+    let mut hasher = Sha256::new();
+    update_source_inventory_fingerprint(&mut hasher, source_sets);
+    hasher.update([0x1d]);
+    let evidence = match binding.evidence {
+        SnapshotAccountBindingEvidence::SelectedAccountDirectory => "selectedAccountDirectory",
+    };
+    for field in [
+        "accountBinding".to_string(),
+        binding.format_version.to_string(),
+        binding.account_id.clone(),
+        binding.self_source_identifier_base64.clone(),
+        evidence.to_string(),
+    ] {
+        hasher.update([0x1f]);
+        hasher.update(field.as_bytes());
+    }
+    hex::encode(hasher.finalize())
+}
+
+fn update_source_inventory_fingerprint(
+    hasher: &mut Sha256,
+    source_sets: &[SnapshotSourceSetInventory],
+) {
     for source_set in source_sets {
         hasher.update(source_set.source_set_id.as_bytes());
         hasher.update([0]);
@@ -577,7 +677,13 @@ pub(crate) fn source_inventory_fingerprint(source_sets: &[SnapshotSourceSetInven
         }
         hasher.update([0x1e]);
     }
-    hex::encode(hasher.finalize())
+}
+
+fn is_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 impl SnapshotEntry {
@@ -621,6 +727,7 @@ mod tests {
             snapshot_id: "synthetic-snapshot".to_string(),
             created_at: "2026-08-27T00:00:00Z".to_string(),
             source_fingerprint: "synthetic-source".to_string(),
+            account_binding: None,
             client_build: build,
             acquisition: None,
             entries: Vec::new(),
@@ -710,6 +817,40 @@ mod tests {
     }
 
     #[test]
+    fn account_binding_validation_rejects_noncanonical_or_unsafe_identifiers() {
+        let valid = SnapshotAccountBinding {
+            format_version: 1,
+            account_id: "a".repeat(64),
+            self_source_identifier_base64: "d3hpZF9maXh0dXJl".to_string(),
+            evidence: SnapshotAccountBindingEvidence::SelectedAccountDirectory,
+        };
+        assert!(valid.validate().is_ok());
+
+        for invalid in [
+            SnapshotAccountBinding {
+                account_id: "A".repeat(64),
+                ..valid.clone()
+            },
+            SnapshotAccountBinding {
+                self_source_identifier_base64: String::new(),
+                ..valid.clone()
+            },
+            SnapshotAccountBinding {
+                self_source_identifier_base64: base64::engine::general_purpose::STANDARD
+                    .encode("../account"),
+                ..valid.clone()
+            },
+            SnapshotAccountBinding {
+                self_source_identifier_base64: base64::engine::general_purpose::STANDARD
+                    .encode("a".repeat(256)),
+                ..valid.clone()
+            },
+        ] {
+            assert!(invalid.validate().is_err());
+        }
+    }
+
+    #[test]
     fn swift_manifest_acronyms_round_trip_and_legacy_spellings_load() {
         let fingerprint = SourceFileFingerprint {
             device_id: 1,
@@ -727,11 +868,26 @@ mod tests {
                 content_sha256: Some("a".repeat(64)),
             }],
         };
+        let binding = SnapshotAccountBinding {
+            format_version: 1,
+            account_id: "c".repeat(64),
+            self_source_identifier_base64: "d3hpZF9maXh0dXJl".to_string(),
+            evidence: SnapshotAccountBindingEvidence::SelectedAccountDirectory,
+        };
+        let expected_fingerprint = source_inventory_fingerprint_with_account_binding(
+            std::slice::from_ref(&source_set),
+            &binding,
+        );
+        assert_eq!(
+            expected_fingerprint,
+            "1806149d265dd50486f815d125e7f75b3938927fdf23578cd200c45f64cb308d"
+        );
         let swift = SnapshotManifest {
-            manifest_format_version: 3,
+            manifest_format_version: 4,
             snapshot_id: "snapshot".to_string(),
             created_at: "2026-08-27T00:00:00Z".to_string(),
-            source_fingerprint: "b".repeat(64),
+            source_fingerprint: expected_fingerprint,
+            account_binding: Some(binding),
             client_build: Some(supported_client_build()),
             acquisition: Some(SnapshotAcquisitionEvidence {
                 format_version: 2,
@@ -760,6 +916,11 @@ mod tests {
 
         let value = serde_json::to_value(&swift).unwrap();
         assert_eq!(value["snapshotID"], "snapshot");
+        assert_eq!(value["accountBinding"]["accountID"], "c".repeat(64));
+        assert_eq!(
+            value["accountBinding"]["selfSourceIdentifierBase64"],
+            "d3hpZF9maXh0dXJl"
+        );
         assert_eq!(
             value["clientBuild"]["executableSHA256"],
             SUPPORTED_EXECUTABLE_SHA256

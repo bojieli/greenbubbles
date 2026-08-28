@@ -6,10 +6,10 @@ use greenbubbles_restore::manifest::{
     PathReference, SnapshotEntry, SnapshotFileRole, SnapshotManifest, SourceFileFingerprint,
 };
 use greenbubbles_restore::{
-    prepare_catalog, prepare_catalog_with_progress, restore_catalog, restore_catalog_with_progress,
-    ClientBuildCompatibilityState, DatabaseKeySet, DatabasePassphrase, DatabaseUnlockMaterial,
-    ProgressEvent, ProgressObserver, ProgressPhase, ProgressState, RestorationArchiveScope,
-    RestorationOptions, StorageFamily,
+    audit::audit_archive, prepare_catalog, prepare_catalog_with_progress, restore_catalog,
+    restore_catalog_with_progress, ClientBuildCompatibilityState, DatabaseKeySet,
+    DatabasePassphrase, DatabaseUnlockMaterial, ProgressEvent, ProgressObserver, ProgressPhase,
+    ProgressState, RestorationArchiveScope, RestorationOptions, StorageFamily,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -55,6 +55,7 @@ fn decrypts_sqlcipher4_and_applies_committed_wal_frames() {
         snapshot_id: "00000000-0000-4000-8000-000000000002".to_string(),
         created_at: "2026-08-27T00:00:00Z".to_string(),
         source_fingerprint: "encrypted-fixture-fingerprint".to_string(),
+        account_binding: None,
         client_build: None,
         acquisition: None,
         entries: vec![
@@ -203,7 +204,7 @@ fn decrypts_sqlcipher4_and_applies_committed_wal_frames() {
     let direct_report = restore_catalog_with_progress(
         &direct_catalog,
         &RestorationOptions {
-            output_directory: direct_output,
+            output_directory: direct_output.clone(),
             account_root: None,
             defer_media: false,
         },
@@ -223,6 +224,37 @@ fn decrypts_sqlcipher4_and_applies_committed_wal_frames() {
     assert_eq!(database_coverage.restored_database_count, 1);
     assert_eq!(database_coverage.unavailable_database_count, 1);
     assert!(direct_report.replica_mutation_eligible());
+    let storage = direct_report.storage.as_ref().unwrap();
+    assert!(storage.source_byte_count > 0);
+    assert!(storage.estimated_archive_byte_count > storage.source_byte_count);
+    assert!(storage.estimated_staging_byte_count > 0);
+    assert_eq!(
+        storage.estimated_peak_byte_count,
+        storage
+            .estimated_archive_byte_count
+            .saturating_add(storage.estimated_staging_byte_count)
+    );
+    assert!(storage.available_free_byte_count_at_start >= storage.required_free_byte_count);
+    assert!(storage.peak_staging_file_byte_count > 0);
+    assert!(storage.staged_uncompressed_byte_count > 0);
+    assert!(storage.staged_compressed_byte_count > 0);
+    assert!(storage.actual_archive_byte_count > 0);
+    assert_eq!(
+        storage.actual_archive_byte_count,
+        directory_file_byte_count(&direct_output)
+    );
+    assert!(fs::read_dir(&direct_output).unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".staging-")
+    }));
+    assert!(
+        audit_archive(&direct_output)
+            .unwrap()
+            .report_matches_archive
+    );
     let events = progress.events.lock().unwrap();
     assert!(events.iter().any(|event| {
         event.phase == ProgressPhase::RecordPlanning
@@ -235,15 +267,58 @@ fn decrypts_sqlcipher4_and_applies_committed_wal_frames() {
             && event.restored_record_count.is_none()
     }));
     assert!(events.iter().any(|event| {
+        event.phase == ProgressPhase::RecordPlanning
+            && event.state == ProgressState::Completed
+            && event.operation == "preflightRestorationStorage"
+            && event.source_byte_count.is_some_and(|bytes| bytes > 0)
+            && event
+                .estimated_archive_byte_count
+                .is_some_and(|bytes| bytes > 0)
+            && event
+                .estimated_staging_byte_count
+                .is_some_and(|bytes| bytes > 0)
+            && event
+                .estimated_peak_byte_count
+                .is_some_and(|bytes| bytes > 0)
+            && event
+                .available_free_byte_count
+                .zip(event.required_free_byte_count)
+                .is_some_and(|(available, required)| available >= required)
+    }));
+    assert!(events.iter().any(|event| {
         event.phase == ProgressPhase::RecordRestoration
             && event.state == ProgressState::Completed
             && event.restored_record_count == Some(1)
+            && event.staging_file_byte_count.is_some_and(|bytes| bytes > 0)
+            && event
+                .staged_uncompressed_byte_count
+                .is_some_and(|bytes| bytes > 0)
+            && event
+                .staged_compressed_byte_count
+                .is_some_and(|bytes| bytes > 0)
     }));
     assert!(events.iter().any(|event| {
         event.phase == ProgressPhase::ArchiveFinalization
             && event.state == ProgressState::Completed
             && event.restored_record_count == Some(1)
+            && event
+                .published_archive_byte_count
+                .is_some_and(|bytes| bytes > 0)
     }));
+    drop(events);
+
+    let report_path = direct_output.join("report.json");
+    let mut tampered: serde_json::Value =
+        serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    let recorded = tampered["storage"]["actualArchiveByteCount"]
+        .as_u64()
+        .unwrap();
+    tampered["storage"]["actualArchiveByteCount"] = serde_json::json!(recorded.saturating_add(1));
+    fs::write(&report_path, serde_json::to_vec_pretty(&tampered).unwrap()).unwrap();
+    assert!(audit_archive(&direct_output)
+        .unwrap_err()
+        .to_string()
+        .contains("archive byte count"));
 
     drop(connection);
 }
@@ -284,4 +359,19 @@ fn entry(path: &std::path::Path, relative: &str, role: SnapshotFileRole) -> Snap
         },
         sha256: hex::encode(Sha256::digest(&bytes)),
     }
+}
+
+fn directory_file_byte_count(path: &std::path::Path) -> u64 {
+    fs::read_dir(path)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let metadata = entry.metadata().unwrap();
+            if metadata.is_dir() {
+                directory_file_byte_count(&entry.path())
+            } else {
+                metadata.len()
+            }
+        })
+        .sum()
 }

@@ -21,6 +21,7 @@ tempfile = "3"
 thiserror = "2"
 walkdir = "2"
 zeroize = { version = "1", features = ["derive"] }
+zstd = "0.13"
 wx-db = { git = "https://github.com/pandorafuture/wx-cli", rev = "2abe708f55bfe135539a385df856fdc58f97fc74" }
 wx-decrypt = { git = "https://github.com/pandorafuture/wx-cli", rev = "2abe708f55bfe135539a385df856fdc58f97fc74" }
 wx-media = { git = "https://github.com/pandorafuture/wx-cli", rev = "2abe708f55bfe135539a385df856fdc58f97fc74", features = ["audio"] }

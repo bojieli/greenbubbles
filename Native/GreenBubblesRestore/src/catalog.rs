@@ -1460,6 +1460,7 @@ mod tests {
             snapshot_id: "synthetic-preflight".to_string(),
             created_at: "2026-08-27T00:00:00Z".to_string(),
             source_fingerprint: "synthetic-source".to_string(),
+            account_binding: None,
             client_build: None,
             acquisition: None,
             entries,

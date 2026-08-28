@@ -13,6 +13,7 @@ pub struct AcquisitionChainAuditReport {
     pub format_version: u32,
     pub privacy_safe_summary: bool,
     pub chain_verified: bool,
+    pub account_binding_unchanged: bool,
     pub client_build_unchanged: bool,
     pub previous_client_build_production_compatible: bool,
     pub current_client_build_production_compatible: bool,
@@ -53,6 +54,12 @@ pub fn audit_acquisition_chain(
         .acquisition
         .as_ref()
         .ok_or_else(|| integrity("current snapshot has no acquisition evidence"))?;
+    let account_binding_unchanged = previous.account_binding == current.account_binding;
+    if !account_binding_unchanged {
+        return Err(integrity(
+            "current acquisition account binding does not match the supplied baseline",
+        ));
+    }
     if current_acquisition.mode == SnapshotAcquisitionMode::Bootstrap {
         return Err(integrity(
             "a bootstrap snapshot cannot be audited as a continuation",
@@ -130,9 +137,10 @@ pub fn audit_acquisition_chain(
     }
 
     Ok(AcquisitionChainAuditReport {
-        format_version: 2,
+        format_version: 3,
         privacy_safe_summary: true,
         chain_verified: true,
+        account_binding_unchanged,
         client_build_unchanged,
         previous_client_build_production_compatible: previous_compatibility.production_compatible,
         current_client_build_production_compatible: current_compatibility.production_compatible,
@@ -186,10 +194,11 @@ mod tests {
 
     use super::audit_acquisition_chain;
     use crate::manifest::{
-        source_inventory_fingerprint, supported_client_build, PathReference,
-        SnapshotAcquisitionEvidence, SnapshotAcquisitionMode, SnapshotEntry, SnapshotFileRole,
-        SnapshotManifest, SnapshotSourceFileInventory, SnapshotSourceSetInventory,
-        SourceFileFingerprint,
+        source_inventory_fingerprint, source_inventory_fingerprint_with_account_binding,
+        supported_client_build, PathReference, SnapshotAccountBinding,
+        SnapshotAccountBindingEvidence, SnapshotAcquisitionEvidence, SnapshotAcquisitionMode,
+        SnapshotEntry, SnapshotFileRole, SnapshotManifest, SnapshotSourceFileInventory,
+        SnapshotSourceSetInventory, SourceFileFingerprint,
     };
 
     #[test]
@@ -207,6 +216,7 @@ mod tests {
         );
         let report = audit_acquisition_chain(&previous, &current).unwrap();
         assert!(report.chain_verified);
+        assert!(report.account_binding_unchanged);
         assert_eq!(report.reported_changed_source_set_count, 1);
         assert_eq!(report.content_changed_source_set_count, 1);
 
@@ -237,6 +247,65 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("changed-set classification"));
+    }
+
+    #[test]
+    fn rejects_a_continuation_with_a_different_account_binding() {
+        let fixture = tempfile::tempdir().unwrap();
+        let previous = fixture.path().join("previous-bound");
+        let current = fixture.path().join("current-bound");
+        write_snapshot(&previous, None, b"previous", true);
+        let previous_manifest = bind_snapshot(
+            &previous,
+            SnapshotAccountBinding {
+                format_version: 1,
+                account_id: "a".repeat(64),
+                self_source_identifier_base64: "d3hpZF9maXh0dXJl".to_string(),
+                evidence: SnapshotAccountBindingEvidence::SelectedAccountDirectory,
+            },
+            None,
+        );
+        write_snapshot(
+            &current,
+            Some(previous_manifest.source_fingerprint.clone()),
+            b"current",
+            true,
+        );
+        bind_snapshot(
+            &current,
+            SnapshotAccountBinding {
+                format_version: 1,
+                account_id: "b".repeat(64),
+                self_source_identifier_base64: "d3hpZF9vdGhlcg==".to_string(),
+                evidence: SnapshotAccountBindingEvidence::SelectedAccountDirectory,
+            },
+            Some(previous_manifest.source_fingerprint),
+        );
+
+        assert!(audit_acquisition_chain(&previous, &current)
+            .unwrap_err()
+            .to_string()
+            .contains("account binding"));
+    }
+
+    fn bind_snapshot(
+        directory: &Path,
+        binding: SnapshotAccountBinding,
+        previous_fingerprint: Option<String>,
+    ) -> SnapshotManifest {
+        let mut manifest = SnapshotManifest::load(directory).unwrap();
+        manifest.manifest_format_version = 4;
+        manifest.account_binding = Some(binding.clone());
+        let acquisition = manifest.acquisition.as_mut().unwrap();
+        acquisition.previous_source_fingerprint = previous_fingerprint;
+        manifest.source_fingerprint =
+            source_inventory_fingerprint_with_account_binding(&acquisition.source_sets, &binding);
+        fs::write(
+            directory.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        manifest
     }
 
     fn write_snapshot(
@@ -281,6 +350,7 @@ mod tests {
             snapshot_id: "synthetic-snapshot".to_string(),
             created_at: "2026-08-27T00:00:00Z".to_string(),
             source_fingerprint: source_inventory_fingerprint(&source_sets),
+            account_binding: None,
             client_build: Some(supported_client_build()),
             acquisition: Some(SnapshotAcquisitionEvidence {
                 format_version: 2,

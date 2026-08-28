@@ -301,6 +301,7 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
         snapshot_id: "00000000-0000-4000-8000-000000000003".to_string(),
         created_at: "2026-08-27T00:00:00Z".to_string(),
         source_fingerprint: "multimodal-fixture-fingerprint".to_string(),
+        account_binding: None,
         client_build: None,
         acquisition: None,
         entries: vec![

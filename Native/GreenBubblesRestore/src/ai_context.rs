@@ -31,8 +31,10 @@ use crate::{
 };
 
 pub const AI_QUERY_SCHEMA: &str = "greenbubbles.ai-query.v1";
-pub const AI_CONTEXT_SCHEMA: &str = "greenbubbles.ai-context.v1";
-const AI_FORMAT_VERSION: u32 = 1;
+pub const AI_CONTEXT_SCHEMA: &str = "greenbubbles.ai-context.v2";
+pub const LEGACY_AI_CONTEXT_SCHEMA: &str = "greenbubbles.ai-context.v1";
+const AI_QUERY_FORMAT_VERSION: u32 = 1;
+const AI_CONTEXT_FORMAT_VERSION: u32 = 2;
 const MAX_AI_QUERY_BYTES: u64 = 1024 * 1024;
 const EXPORT_PAGE_SIZE: usize = 1_000;
 const PHASE_RESOLUTION: u64 = 1_000_000;
@@ -83,6 +85,8 @@ pub enum AiQueryResult {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AiContextHealth {
     pub account_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_participant_id: Option<String>,
     pub replica_id: String,
     pub source_fingerprint: String,
     pub checkpoint_revision: String,
@@ -151,7 +155,8 @@ pub struct AiContextConversation {
     pub kind: ConversationKind,
     pub participant_count: usize,
     pub participants: Vec<RecipientParticipantEvidence>,
-    pub owner_participant_id: Option<String>,
+    #[serde(rename = "groupOwnerParticipantId", alias = "ownerParticipantId")]
+    pub group_owner_participant_id: Option<String>,
     pub entity_decode_state: EntityDecodeState,
     pub source_database_freshness: ToolSourceDatabaseFreshness,
     pub capabilities: BTreeSet<ToolCapability>,
@@ -315,7 +320,7 @@ pub fn query_ai_context(
         .map(|result| sanitize_query_result(result, &context))
         .transpose()?;
     Ok(AiQueryResponse {
-        format_version: AI_FORMAT_VERSION,
+        format_version: AI_QUERY_FORMAT_VERSION,
         schema: AI_QUERY_SCHEMA.to_string(),
         api_version: connector_response.api_version,
         request_id: connector_response.request_id,
@@ -385,6 +390,7 @@ pub fn export_ai_context(
     let mut reader = AiConnectorReader::new(&service, requester_id, destination);
     let start_status = expect_status(reader.call(ConnectorOperation::Status)?)?;
     let start_health = context_health(&start_status.replica)?;
+    require_bound_account_holder(&start_health)?;
     let list = expect_conversations(reader.call(ConnectorOperation::ListConversations)?)?;
     let policy = load_tool_policy(policy_path)?;
     let policy_sha256 = hex::encode(Sha256::digest(fs::read(policy_path)?));
@@ -417,19 +423,20 @@ pub fn export_ai_context(
     let mut resolved_conversations = BTreeMap::<String, ResolvedConversation>::new();
     let mut contacts = BTreeMap::<String, ContactAccumulator>::new();
     for listed in &list.conversations {
-        let resolved = expect_resolved_conversation(reader.call(
+        let mut resolved = expect_resolved_conversation(reader.call(
             ConnectorOperation::ResolveConversation {
                 conversation_id: listed.conversation_id.clone(),
             },
         )?)?;
+        mark_self_participant(&mut resolved, &start_health);
         conversation_writer.write(&AiContextConversation {
-            format_version: AI_FORMAT_VERSION,
+            format_version: AI_CONTEXT_FORMAT_VERSION,
             conversation_id: resolved.conversation_id.clone(),
             human_label: resolved.human_label.clone(),
             kind: resolved.kind,
             participant_count: resolved.participant_count,
             participants: resolved.participants.clone(),
-            owner_participant_id: resolved.owner_participant_id.clone(),
+            group_owner_participant_id: resolved.owner_participant_id.clone(),
             entity_decode_state: resolved.entity_decode_state,
             source_database_freshness: resolved.source_database_freshness,
             capabilities: listed.capabilities.clone(),
@@ -510,10 +517,15 @@ pub fn export_ai_context(
                 ),
             ),
         };
+        let is_self = start_health.self_participant_id.as_deref() == Some(participant_id.as_str());
         contact_writer.write(&AiContextContact {
-            format_version: AI_FORMAT_VERSION,
+            format_version: AI_CONTEXT_FORMAT_VERSION,
             participant_id,
-            display_name,
+            display_name: if is_self {
+                "You".to_string()
+            } else {
+                display_name
+            },
             local_profile_available,
             source_database_freshness,
             enabled_conversation_ids,
@@ -571,12 +583,15 @@ pub fn export_ai_context(
                     "replica changed while the AI context bundle was being exported".to_string(),
                 ));
             }
-            for message in page.messages {
-                let sender_display_name = message
-                    .sender_id
-                    .as_deref()
-                    .and_then(|identifier| sender_names.get(identifier).copied())
-                    .map(str::to_string);
+            for mut message in page.messages {
+                normalize_message_identity(&mut message, &start_health);
+                let sender_display_name = message.sender_id.as_deref().and_then(|identifier| {
+                    if start_health.self_participant_id.as_deref() == Some(identifier) {
+                        Some("You".to_string())
+                    } else {
+                        sender_names.get(identifier).copied().map(str::to_string)
+                    }
+                });
                 for artifact in &message.artifact_references {
                     artifact_conversations
                         .entry(artifact.artifact_id.clone())
@@ -584,7 +599,7 @@ pub fn export_ai_context(
                         .insert(conversation.conversation_id.clone());
                 }
                 message_writer.write(&AiContextMessage {
-                    format_version: AI_FORMAT_VERSION,
+                    format_version: AI_CONTEXT_FORMAT_VERSION,
                     conversation_label: resolved.human_label.clone(),
                     sender_display_name,
                     message,
@@ -654,7 +669,7 @@ pub fn export_ai_context(
             }
         };
         artifact_writer.write(&AiContextArtifact {
-            format_version: AI_FORMAT_VERSION,
+            format_version: AI_CONTEXT_FORMAT_VERSION,
             artifact_id,
             conversation_ids,
             detail,
@@ -682,14 +697,16 @@ pub fn export_ai_context(
     let final_status = replica_status(replica_path, key)?;
     require_same_checkpoint(&start_status.replica, &final_status, "AI context export")?;
     let final_health = context_health(&final_status)?;
+    require_bound_account_holder(&final_health)?;
     let bundle_id = context_bundle_id(
+        AI_CONTEXT_FORMAT_VERSION,
         &final_health,
         &policy_sha256,
         destination,
         &policy.created_from_source_fingerprint,
     )?;
     let manifest = AiContextManifest {
-        format_version: AI_FORMAT_VERSION,
+        format_version: AI_CONTEXT_FORMAT_VERSION,
         schema: AI_CONTEXT_SCHEMA.to_string(),
         bundle_id,
         created_at_unix_nanoseconds: unix_nanoseconds()?,
@@ -788,50 +805,93 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
     let mut conversation_ids = BTreeSet::new();
     let mut required_contact_ids = BTreeSet::new();
     let conversation_file = files["conversations"];
-    audit_ndjson::<AiContextConversation, _>(
-        bundle_directory,
-        conversation_file,
-        |conversation| {
-            require_ai_format(conversation.format_version, "conversation")?;
-            require_nonempty(&conversation.conversation_id, "conversation ID")?;
-            require_nonempty(&conversation.human_label, "conversation label")?;
-            if !conversation_ids.insert(conversation.conversation_id.clone()) {
-                return Err(RestoreError::Integrity(
-                    "AI context conversations repeat an identity".to_string(),
-                ));
-            }
-            if conversation.participant_count != conversation.participants.len()
-                || conversation
-                    .not_before_unix
-                    .zip(conversation.not_after_unix)
-                    .is_some_and(|(start, end)| start > end)
+    audit_ndjson_values(bundle_directory, conversation_file, |value| {
+        let object = value.as_object().ok_or_else(|| {
+            RestoreError::Integrity("AI context conversation record is not an object".to_string())
+        })?;
+        let (required_owner_field, forbidden_owner_field) =
+            if manifest.format_version == AI_CONTEXT_FORMAT_VERSION {
+                ("groupOwnerParticipantId", "ownerParticipantId")
+            } else {
+                ("ownerParticipantId", "groupOwnerParticipantId")
+            };
+        if !object.contains_key(required_owner_field) || object.contains_key(forbidden_owner_field)
+        {
+            return Err(RestoreError::Integrity(
+                "AI context conversation uses the wrong group-owner field".to_string(),
+            ));
+        }
+        let conversation: AiContextConversation = serde_json::from_value(value)?;
+        require_ai_record_format(
+            conversation.format_version,
+            manifest.format_version,
+            "conversation",
+        )?;
+        require_nonempty(&conversation.conversation_id, "conversation ID")?;
+        require_nonempty(&conversation.human_label, "conversation label")?;
+        if !conversation_ids.insert(conversation.conversation_id.clone()) {
+            return Err(RestoreError::Integrity(
+                "AI context conversations repeat an identity".to_string(),
+            ));
+        }
+        if conversation.participant_count != conversation.participants.len()
+            || conversation
+                .not_before_unix
+                .zip(conversation.not_after_unix)
+                .is_some_and(|(start, end)| start > end)
+        {
+            return Err(RestoreError::Integrity(
+                "AI context conversation metadata is internally inconsistent".to_string(),
+            ));
+        }
+        let mut participants = BTreeSet::new();
+        for participant in &conversation.participants {
+            require_nonempty(&participant.participant_id, "participant ID")?;
+            require_nonempty(&participant.display_name, "participant display name")?;
+            require_nonempty(&participant.role, "participant role")?;
+            if manifest.format_version == AI_CONTEXT_FORMAT_VERSION
+                && manifest.context.self_participant_id.as_deref()
+                    == Some(participant.participant_id.as_str())
+                && participant.display_name != "You"
             {
                 return Err(RestoreError::Integrity(
-                    "AI context conversation metadata is internally inconsistent".to_string(),
+                    "AI context self participant is not labelled as You".to_string(),
                 ));
             }
-            let mut participants = BTreeSet::new();
-            for participant in &conversation.participants {
-                require_nonempty(&participant.participant_id, "participant ID")?;
-                require_nonempty(&participant.display_name, "participant display name")?;
-                require_nonempty(&participant.role, "participant role")?;
-                if !participants.insert(participant.participant_id.clone()) {
-                    return Err(RestoreError::Integrity(
-                        "AI context conversation repeats a participant".to_string(),
-                    ));
-                }
-                required_contact_ids.insert(participant.participant_id.clone());
+            if !participants.insert(participant.participant_id.clone()) {
+                return Err(RestoreError::Integrity(
+                    "AI context conversation repeats a participant".to_string(),
+                ));
             }
-            validate_entity_freshness(conversation.source_database_freshness, &manifest.context)
-        },
-    )?;
+            required_contact_ids.insert(participant.participant_id.clone());
+        }
+        if conversation
+            .group_owner_participant_id
+            .as_ref()
+            .is_some_and(|owner| !participants.contains(owner))
+        {
+            return Err(RestoreError::Integrity(
+                "AI context group owner is not a conversation participant".to_string(),
+            ));
+        }
+        validate_entity_freshness(conversation.source_database_freshness, &manifest.context)
+    })?;
 
     let mut contact_ids = BTreeSet::new();
     let contact_file = files["contacts"];
     audit_ndjson::<AiContextContact, _>(bundle_directory, contact_file, |contact| {
-        require_ai_format(contact.format_version, "contact")?;
+        require_ai_record_format(contact.format_version, manifest.format_version, "contact")?;
         require_nonempty(&contact.participant_id, "contact ID")?;
         require_nonempty(&contact.display_name, "contact display name")?;
+        if manifest.format_version == AI_CONTEXT_FORMAT_VERSION
+            && manifest.context.self_participant_id.as_deref()
+                == Some(contact.participant_id.as_str())
+            && contact.display_name != "You"
+        {
+            return Err(RestoreError::Integrity(
+                "AI context self contact is not labelled as You".to_string(),
+            ));
+        }
         if !contact_ids.insert(contact.participant_id.clone()) {
             return Err(RestoreError::Integrity(
                 "AI context contacts repeat an identity".to_string(),
@@ -855,6 +915,15 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
         for profile in &contact.conversation_profiles {
             require_nonempty(&profile.display_name, "contact profile display name")?;
             require_nonempty(&profile.role, "contact profile role")?;
+            if manifest.format_version == AI_CONTEXT_FORMAT_VERSION
+                && manifest.context.self_participant_id.as_deref()
+                    == Some(contact.participant_id.as_str())
+                && profile.display_name != "You"
+            {
+                return Err(RestoreError::Integrity(
+                    "AI context self contact profile is not labelled as You".to_string(),
+                ));
+            }
             if !conversation_ids.contains(&profile.conversation_id)
                 || !profiles.insert((profile.conversation_id.clone(), profile.role.clone()))
             {
@@ -875,7 +944,7 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
     let mut artifact_error_count = 0_u64;
     let artifact_file = files["artifacts"];
     audit_ndjson::<AiContextArtifact, _>(bundle_directory, artifact_file, |artifact| {
-        require_ai_format(artifact.format_version, "artifact")?;
+        require_ai_record_format(artifact.format_version, manifest.format_version, "artifact")?;
         require_nonempty(&artifact.artifact_id, "artifact ID")?;
         if !artifact_ids.insert(artifact.artifact_id.clone()) {
             return Err(RestoreError::Integrity(
@@ -919,7 +988,7 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
     let mut stale_message_count = 0_u64;
     let message_file = files["messages"];
     audit_ai_messages(bundle_directory, message_file, |message| {
-        require_ai_format(message.format_version, "message")?;
+        require_ai_record_format(message.format_version, manifest.format_version, "message")?;
         require_nonempty(&message.message.canonical_id, "message ID")?;
         require_nonempty(&message.message.conversation_id, "message conversation ID")?;
         require_nonempty(&message.conversation_label, "message conversation label")?;
@@ -942,6 +1011,43 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
             return Err(RestoreError::Integrity(
                 "AI context message references an absent contact".to_string(),
             ));
+        }
+        if manifest.format_version == AI_CONTEXT_FORMAT_VERSION {
+            let self_participant_id =
+                manifest
+                    .context
+                    .self_participant_id
+                    .as_deref()
+                    .ok_or_else(|| {
+                        RestoreError::Integrity(
+                            "AI context account-holder identity disappeared during audit"
+                                .to_string(),
+                        )
+                    })?;
+            if let Some(sender_id) = message.message.sender_id.as_deref() {
+                let expected = if sender_id == self_participant_id {
+                    crate::MessageDirection::Outgoing
+                } else {
+                    crate::MessageDirection::Incoming
+                };
+                if message
+                    .message
+                    .direction
+                    .is_some_and(|direction| direction != expected)
+                {
+                    return Err(RestoreError::Integrity(
+                        "AI context message direction disagrees with the bound account holder"
+                            .to_string(),
+                    ));
+                }
+                if sender_id == self_participant_id
+                    && message.sender_display_name.as_deref() != Some("You")
+                {
+                    return Err(RestoreError::Integrity(
+                        "AI context self-authored message is not labelled as You".to_string(),
+                    ));
+                }
+            }
         }
         match message.message.source_database_freshness {
             ToolSourceDatabaseFreshness::Fresh => {}
@@ -987,6 +1093,7 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
         ));
     }
     let expected_bundle_id = context_bundle_id(
+        manifest.format_version,
         &manifest.context,
         &manifest.policy_sha256,
         manifest.destination,
@@ -998,7 +1105,7 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
         ));
     }
     Ok(AiContextAuditReport {
-        format_version: AI_FORMAT_VERSION,
+        format_version: AI_CONTEXT_FORMAT_VERSION,
         privacy_safe_summary: true,
         schema: manifest.schema,
         export_complete: manifest.export_complete,
@@ -1020,8 +1127,23 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
 }
 
 fn validate_ai_manifest(manifest: &AiContextManifest) -> Result<(), RestoreError> {
-    require_ai_format(manifest.format_version, "manifest")?;
-    if manifest.schema != AI_CONTEXT_SCHEMA
+    require_supported_ai_context_format(manifest.format_version, "manifest")?;
+    let expected_schema = if manifest.format_version == AI_CONTEXT_FORMAT_VERSION {
+        AI_CONTEXT_SCHEMA
+    } else {
+        LEGACY_AI_CONTEXT_SCHEMA
+    };
+    let binding_is_valid = match manifest.format_version {
+        AI_CONTEXT_FORMAT_VERSION => manifest
+            .context
+            .self_participant_id
+            .as_deref()
+            .is_some_and(valid_sha256),
+        1 => manifest.context.self_participant_id.is_none(),
+        _ => false,
+    };
+    if manifest.schema != expected_schema
+        || !binding_is_valid
         || !manifest.export_complete
         || manifest.created_at_unix_nanoseconds == 0
         || !valid_sha256(&manifest.bundle_id)
@@ -1221,10 +1343,27 @@ fn read_bounded_file(path: &Path, maximum_bytes: u64) -> Result<Vec<u8>, Restore
     Ok(bytes)
 }
 
-fn require_ai_format(format_version: u32, kind: &str) -> Result<(), RestoreError> {
-    if format_version != AI_FORMAT_VERSION {
+fn require_supported_ai_context_format(
+    format_version: u32,
+    kind: &str,
+) -> Result<(), RestoreError> {
+    if !matches!(format_version, 1 | AI_CONTEXT_FORMAT_VERSION) {
         return Err(RestoreError::Integrity(format!(
             "AI context {kind} has an unsupported format version"
+        )));
+    }
+    Ok(())
+}
+
+fn require_ai_record_format(
+    format_version: u32,
+    manifest_format_version: u32,
+    kind: &str,
+) -> Result<(), RestoreError> {
+    require_supported_ai_context_format(format_version, kind)?;
+    if format_version != manifest_format_version {
+        return Err(RestoreError::Integrity(format!(
+            "AI context {kind} format version disagrees with its manifest"
         )));
     }
     Ok(())
@@ -1240,7 +1379,10 @@ fn require_nonempty(value: &str, kind: &str) -> Result<(), RestoreError> {
 }
 
 fn valid_sha256(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn sanitize_query_result(
@@ -1254,11 +1396,29 @@ fn sanitize_query_result(
         ConnectorResult::Changes(value) => AiQueryResult::Changes(value),
         ConnectorResult::CachedMoments(value) => AiQueryResult::CachedMoments(value),
         ConnectorResult::Conversations(value) => AiQueryResult::Conversations(value),
-        ConnectorResult::Messages(value) => AiQueryResult::Messages(value),
-        ConnectorResult::Message(value) => AiQueryResult::Message(value),
+        ConnectorResult::Messages(mut value) => {
+            for message in &mut value.messages {
+                normalize_message_identity(message, context);
+            }
+            AiQueryResult::Messages(value)
+        }
+        ConnectorResult::Message(mut value) => {
+            if let Some(message) = &mut value {
+                normalize_message_identity(message, context);
+            }
+            AiQueryResult::Message(value)
+        }
         ConnectorResult::Artifact(value) => AiQueryResult::Artifact(value),
-        ConnectorResult::Contact(value) => AiQueryResult::Contact(value),
-        ConnectorResult::Conversation(value) => AiQueryResult::Conversation(value),
+        ConnectorResult::Contact(mut value) => {
+            if context.self_participant_id.as_deref() == Some(value.participant_id.as_str()) {
+                value.display_name = "You".to_string();
+            }
+            AiQueryResult::Contact(value)
+        }
+        ConnectorResult::Conversation(mut value) => {
+            mark_self_participant(&mut value, context);
+            AiQueryResult::Conversation(value)
+        }
         ConnectorResult::Draft(_) | ConnectorResult::Preview(_) => {
             return Err(RestoreError::Integrity(
                 "AI query returned a write-capable result".to_string(),
@@ -1295,7 +1455,7 @@ fn safe_query_error_message(code: ConnectorErrorCode) -> &'static str {
 }
 
 fn validate_ai_query(request: &AiQueryRequest) -> Result<(), RestoreError> {
-    if request.format_version != AI_FORMAT_VERSION {
+    if request.format_version != AI_QUERY_FORMAT_VERSION {
         return Err(RestoreError::Integrity(format!(
             "unsupported AI query format version {}",
             request.format_version
@@ -1369,6 +1529,9 @@ fn context_health(status: &ReplicaStatus) -> Result<AiContextHealth, RestoreErro
     if status.restoration_complete != Some(true) {
         limitations.push("restorationIncomplete".to_string());
     }
+    if status.self_participant_id.is_none() {
+        limitations.push("accountHolderUnbound".to_string());
+    }
     limitations.sort();
     limitations.dedup();
     let source_coverage_complete = status.health == ReplicaHealthState::CurrentComplete
@@ -1387,6 +1550,7 @@ fn context_health(status: &ReplicaStatus) -> Result<AiContextHealth, RestoreErro
     };
     Ok(AiContextHealth {
         account_id,
+        self_participant_id: status.self_participant_id.clone(),
         replica_id: status.replica_id.clone(),
         source_fingerprint,
         checkpoint_revision,
@@ -1424,6 +1588,7 @@ fn require_same_checkpoint(
 ) -> Result<(), RestoreError> {
     if before.replica_id != after.replica_id
         || before.account_id != after.account_id
+        || before.self_participant_id != after.self_participant_id
         || before.current_source_fingerprint != after.current_source_fingerprint
         || before.checkpoint_revision != after.checkpoint_revision
     {
@@ -1548,23 +1713,106 @@ fn sanitize_artifact_file(file: ConnectorArtifactFile) -> AiContextArtifactFile 
 }
 
 fn context_bundle_id(
+    format_version: u32,
     health: &AiContextHealth,
     policy_sha256: &str,
     destination: ConnectorDestination,
     policy_source_fingerprint: &str,
 ) -> Result<String, RestoreError> {
-    let identity = serde_json::json!({
-        "formatVersion": AI_FORMAT_VERSION,
-        "schema": AI_CONTEXT_SCHEMA,
-        "accountId": health.account_id,
-        "replicaId": health.replica_id,
-        "sourceFingerprint": health.source_fingerprint,
-        "checkpointRevision": health.checkpoint_revision,
-        "policySHA256": policy_sha256,
-        "policySourceFingerprint": policy_source_fingerprint,
-        "destination": destination,
-    });
+    require_supported_ai_context_format(format_version, "bundle identity")?;
+    let identity = if format_version == AI_CONTEXT_FORMAT_VERSION {
+        serde_json::json!({
+            "formatVersion": AI_CONTEXT_FORMAT_VERSION,
+            "schema": AI_CONTEXT_SCHEMA,
+            "accountId": health.account_id,
+            "selfParticipantId": health.self_participant_id,
+            "replicaId": health.replica_id,
+            "sourceFingerprint": health.source_fingerprint,
+            "checkpointRevision": health.checkpoint_revision,
+            "policySHA256": policy_sha256,
+            "policySourceFingerprint": policy_source_fingerprint,
+            "destination": destination,
+        })
+    } else {
+        serde_json::json!({
+            "formatVersion": 1,
+            "schema": LEGACY_AI_CONTEXT_SCHEMA,
+            "accountId": health.account_id,
+            "replicaId": health.replica_id,
+            "sourceFingerprint": health.source_fingerprint,
+            "checkpointRevision": health.checkpoint_revision,
+            "policySHA256": policy_sha256,
+            "policySourceFingerprint": policy_source_fingerprint,
+            "destination": destination,
+        })
+    };
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(&identity)?)))
+}
+
+fn require_bound_account_holder(health: &AiContextHealth) -> Result<(), RestoreError> {
+    if health
+        .self_participant_id
+        .as_deref()
+        .is_none_or(|identifier| !valid_sha256(identifier))
+    {
+        return Err(RestoreError::Integrity(
+            "AI context export requires a replica with a verified account-holder binding"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn mark_self_participant(conversation: &mut ResolvedConversation, health: &AiContextHealth) {
+    let Some(self_participant_id) = health.self_participant_id.as_deref() else {
+        return;
+    };
+    let mut found = false;
+    for participant in &mut conversation.participants {
+        if participant.participant_id == self_participant_id {
+            participant.display_name = "You".to_string();
+            found = true;
+        }
+    }
+    if found {
+        conversation.participants.sort_by(|left, right| {
+            (&left.display_name, &left.participant_id)
+                .cmp(&(&right.display_name, &right.participant_id))
+        });
+        let names = conversation
+            .participants
+            .iter()
+            .map(|participant| participant.display_name.as_str())
+            .take(4)
+            .collect::<Vec<_>>();
+        conversation.human_label = if conversation.participants.len() > names.len() {
+            format!(
+                "{} +{}",
+                names.join(", "),
+                conversation.participants.len() - names.len()
+            )
+        } else {
+            names.join(", ")
+        };
+    }
+}
+
+fn normalize_message_identity(
+    message: &mut crate::tools::MinimizedMessage,
+    health: &AiContextHealth,
+) {
+    let (Some(sender_id), Some(direction), Some(self_participant_id)) = (
+        message.sender_id.as_deref(),
+        message.direction.as_mut(),
+        health.self_participant_id.as_deref(),
+    ) else {
+        return;
+    };
+    *direction = if sender_id == self_participant_id {
+        crate::MessageDirection::Outgoing
+    } else {
+        crate::MessageDirection::Incoming
+    };
 }
 
 struct NdjsonWriter {
