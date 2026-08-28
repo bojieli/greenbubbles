@@ -107,6 +107,11 @@ pub struct ReplicaStatus {
     pub artifact_decode_gap_count: Option<u64>,
     pub entity_decode_gap_count: Option<u64>,
     pub semantic_decode_coverage_ratio: Option<f64>,
+    /// Serving-time surfaces that could not be inspected. Identity, key, and
+    /// checkpoint failures still fail closed; damaged optional/domain tables
+    /// are isolated so healthy replica data remains available.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,6 +254,10 @@ pub struct ReplicaChangePage {
     pub account_id: String,
     pub items: Vec<ReplicaChange>,
     pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub omitted_item_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -303,6 +312,10 @@ pub struct ReplicaMessagePage {
 pub struct ReplicaConversationPage {
     pub account_id: String,
     pub items: Vec<CanonicalConversation>,
+    #[serde(default)]
+    pub omitted_item_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -317,6 +330,8 @@ pub struct ReplicaCoverageView {
     pub integrity: crate::RestorationIntegrity,
     pub completion: crate::RestorationCompletion,
     pub cached_surfaces: Option<crate::CachedSurfaceCoverage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -360,6 +375,10 @@ pub struct ReplicaCachedMomentPage {
     pub observed_at: Option<String>,
     pub items: Vec<crate::CanonicalCachedMoment>,
     pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub omitted_item_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
 }
 
 struct OpenedReplica {
@@ -579,6 +598,7 @@ pub fn replica_status(
     key: &ReplicaKey,
 ) -> Result<ReplicaStatus, RestoreError> {
     let opened = open_replica(replica_path, key)?;
+    let mut limitation_codes = BTreeSet::new();
     let identity = opened
         .connection
         .query_row(
@@ -597,6 +617,19 @@ pub fn replica_status(
             },
         )
         .optional()?;
+    if let Some((account_id, source_fingerprint, _, checkpoint_revision, _)) = identity.as_ref() {
+        let revision_is_valid = checkpoint_revision
+            .parse::<u128>()
+            .is_ok_and(|revision| revision > 0);
+        if account_id.is_empty()
+            || source_fingerprint.as_deref().is_none_or(str::is_empty)
+            || !revision_is_valid
+        {
+            return Err(RestoreError::Integrity(
+                "replica identity or checkpoint revision is invalid".to_string(),
+            ));
+        }
+    }
     let checkpoint = if let Some((account, _, _, _, _)) = identity.as_ref() {
         let encoded = opened
             .connection
@@ -623,26 +656,36 @@ pub fn replica_status(
     };
     let stored_report = stored_state.as_ref().map(|value| &value.0);
     let stored_coverage = stored_state.as_ref().map(|value| &value.1);
-    if stored_report.is_some_and(|report| {
-        Some(&report.self_participant_id) != identity.as_ref().map(|value| &value.4)
-    }) {
-        return Err(RestoreError::Integrity(
-            "replica account-holder binding disagrees with its coverage state".to_string(),
-        ));
+    if let Some(report) = stored_report {
+        let Some((account_id, source_fingerprint, _, _, self_participant_id)) = identity.as_ref()
+        else {
+            return Err(RestoreError::Integrity(
+                "uninitialized replica contains restoration coverage".to_string(),
+            ));
+        };
+        if report.account_id != *account_id
+            || source_fingerprint.as_deref() != Some(report.source_fingerprint.as_str())
+        {
+            return Err(RestoreError::Integrity(
+                "replica identity disagrees with its restoration coverage".to_string(),
+            ));
+        }
+        if report.self_participant_id != *self_participant_id {
+            return Err(RestoreError::Integrity(
+                "replica account-holder binding disagrees with its coverage state".to_string(),
+            ));
+        }
     }
-    let checkpoint_age_seconds = checkpoint
-        .map(|timestamp| {
-            unix_nanoseconds()
-                .map(|now| now.saturating_sub(timestamp) / 1_000_000_000)
-                .and_then(|seconds| {
-                    u64::try_from(seconds).map_err(|_| {
-                        RestoreError::Integrity(
-                            "checkpoint age exceeds supported range".to_string(),
-                        )
-                    })
-                })
-        })
-        .transpose()?;
+    let checkpoint_age_seconds = checkpoint.and_then(|timestamp| {
+        let value = unix_nanoseconds()
+            .ok()
+            .map(|now| now.saturating_sub(timestamp) / 1_000_000_000)
+            .and_then(|seconds| u64::try_from(seconds).ok());
+        if value.is_none() {
+            limitation_codes.insert("replicaCheckpointAgeUnavailable".to_string());
+        }
+        value
+    });
     let semantic_decode_coverage_ratio = stored_report.and_then(|report| {
         (report.integrity.restored_row_count > 0).then(|| {
             let covered = report
@@ -652,20 +695,66 @@ pub fn replica_status(
             covered as f64 / report.integrity.restored_row_count as f64
         })
     });
-    let health = match stored_report {
-        None => ReplicaHealthState::Uninitialized,
-        Some(report) if report.completion.full_restoration_achieved => {
+    let health = match (identity.as_ref(), stored_report) {
+        (None, _) => ReplicaHealthState::Uninitialized,
+        (Some(_), None) => ReplicaHealthState::CurrentWithCoverageGaps,
+        (_, Some(report)) if report.completion.full_restoration_achieved => {
             ReplicaHealthState::CurrentComplete
         }
-        Some(_) => ReplicaHealthState::CurrentWithCoverageGaps,
+        (_, Some(_)) => ReplicaHealthState::CurrentWithCoverageGaps,
     };
     let database_coverage = stored_report.map(database_coverage_summary);
     let sync_health =
-        load_sync_health(&opened.connection, identity.as_ref().map(|value| &value.0))?;
-    let integrity_scan_age_seconds = sync_health
-        .last_integrity_scan
-        .map(age_seconds)
-        .transpose()?;
+        match load_sync_health(&opened.connection, identity.as_ref().map(|value| &value.0)) {
+            Ok(value) => value,
+            Err(_) => {
+                limitation_codes.insert("replicaSynchronizationHistoryUnavailable".to_string());
+                SyncHealth::default()
+            }
+        };
+    let integrity_scan_age_seconds = sync_health.last_integrity_scan.and_then(|timestamp| {
+        let value = age_seconds(timestamp).ok();
+        if value.is_none() {
+            limitation_codes.insert("replicaIntegrityScanAgeUnavailable".to_string());
+        }
+        value
+    });
+    let conversation_count = best_effort_table_count(
+        &opened.connection,
+        "conversation",
+        "replicaConversationTableUnavailable",
+        &mut limitation_codes,
+    );
+    let participant_count = best_effort_table_count(
+        &opened.connection,
+        "participant",
+        "replicaParticipantTableUnavailable",
+        &mut limitation_codes,
+    );
+    let message_count = best_effort_table_count(
+        &opened.connection,
+        "message",
+        "replicaMessageTableUnavailable",
+        &mut limitation_codes,
+    );
+    let artifact_count = best_effort_table_count(
+        &opened.connection,
+        "artifact",
+        "replicaArtifactTableUnavailable",
+        &mut limitation_codes,
+    );
+    let cached_moment_count = best_effort_table_count(
+        &opened.connection,
+        "cached_moment",
+        "replicaCachedMomentTableUnavailable",
+        &mut limitation_codes,
+    );
+    let cached_moment_interaction_count = best_effort_table_count(
+        &opened.connection,
+        "cached_moment_interaction",
+        "replicaCachedMomentInteractionTableUnavailable",
+        &mut limitation_codes,
+    );
     Ok(ReplicaStatus {
         format_version: REPLICA_FORMAT_VERSION,
         schema_version: CURRENT_SCHEMA_VERSION,
@@ -689,15 +778,12 @@ pub fn replica_status(
         decoder_version: stored_coverage.map(|coverage| coverage.decoder_version.clone()),
         cipher_version: opened.cipher_version,
         encrypted_at_rest: true,
-        conversation_count: table_count(&opened.connection, "conversation")?,
-        participant_count: table_count(&opened.connection, "participant")?,
-        message_count: table_count(&opened.connection, "message")?,
-        artifact_count: table_count(&opened.connection, "artifact")?,
-        cached_moment_count: table_count(&opened.connection, "cached_moment")?,
-        cached_moment_interaction_count: table_count(
-            &opened.connection,
-            "cached_moment_interaction",
-        )?,
+        conversation_count,
+        participant_count,
+        message_count,
+        artifact_count,
+        cached_moment_count,
+        cached_moment_interaction_count,
         last_checkpoint_unix_nanoseconds: checkpoint,
         checkpoint_age_seconds,
         last_sync_kind: sync_health.last_kind,
@@ -719,6 +805,7 @@ pub fn replica_status(
         entity_decode_gap_count: stored_report
             .map(|report| report.integrity.entity_decode_gap_count),
         semantic_decode_coverage_ratio,
+        limitation_codes: limitation_codes.into_iter().collect(),
     })
 }
 
@@ -1314,6 +1401,11 @@ pub fn get_replica_changes(
             ),
             other => other.into(),
         })?;
+    if account_id.is_empty() {
+        return Err(RestoreError::Integrity(
+            "replica change stream has an empty account identity".to_string(),
+        ));
+    }
     let replica_id = replica_id(&opened.connection)?;
     let decoded = cursor.map(decode_change_cursor).transpose()?;
     if decoded.as_ref().is_some_and(|cursor| {
@@ -1327,20 +1419,32 @@ pub fn get_replica_changes(
     }
     let after = decoded.map(|cursor| cursor.after_sequence).unwrap_or(0);
     let limit = requested_limit.clamp(1, 1_000);
-    let query_limit = checked_usize_i64(limit)?;
-    let mut statement = opened.connection.prepare(
+    let scan_limit = limit.saturating_mul(8).saturating_add(1).min(8_001);
+    let query_limit = checked_usize_i64(scan_limit)?;
+    let mut statement = match opened.connection.prepare(
         "SELECT sequence, source_fingerprint, change_kind, entity_kind, entity_id,
                 conversation_id, record_sha256, observed_at_unix_nanoseconds
          FROM change_log
          WHERE account_id = ?1 AND sequence > ?2
          ORDER BY sequence LIMIT ?3",
-    )?;
-    let values = statement
-        .query_map(
-            params![account_id, checked_i64(after)?, query_limit],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
+    ) {
+        Ok(statement) => statement,
+        Err(_) => {
+            return Ok(ReplicaChangePage {
+                account_id,
+                items: Vec::new(),
+                next_cursor: None,
+                omitted_item_count: 0,
+                limitation_codes: vec!["replicaChangeTableUnavailable".to_string()],
+            });
+        }
+    };
+    let values = match statement.query_map(
+        params![account_id, checked_i64(after)?, query_limit],
+        |row| {
+            let sequence = row.get::<_, i64>(0)?;
+            let remainder = (|| {
+                Ok::<_, rusqlite::Error>((
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
@@ -1349,41 +1453,77 @@ pub fn get_replica_changes(
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, String>(7)?,
                 ))
-            },
-        )?
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut items = Vec::with_capacity(values.len());
-    for (sequence, source, kind, entity_kind, entity_id, conversation, digest, timestamp) in values
-    {
+            })();
+            Ok((sequence, remainder))
+        },
+    ) {
+        Ok(values) => values,
+        Err(_) => {
+            return Ok(ReplicaChangePage {
+                account_id,
+                items: Vec::new(),
+                next_cursor: None,
+                omitted_item_count: 0,
+                limitation_codes: vec!["replicaChangeTableUnavailable".to_string()],
+            });
+        }
+    };
+    let mut items = Vec::with_capacity(limit);
+    let mut omitted_item_count = 0_u64;
+    let mut last_scanned_sequence = None;
+    for value in values {
+        let (sequence, remainder) = match value {
+            Ok(value) => value,
+            Err(_) => {
+                omitted_item_count = omitted_item_count.saturating_add(1);
+                continue;
+            }
+        };
+        let Ok(sequence) = u64::try_from(sequence) else {
+            omitted_item_count = omitted_item_count.saturating_add(1);
+            continue;
+        };
+        last_scanned_sequence = Some(sequence);
+        let Ok((source, kind, entity_kind, entity_id, conversation, digest, timestamp)) = remainder
+        else {
+            omitted_item_count = omitted_item_count.saturating_add(1);
+            continue;
+        };
+        let Ok(observed_at_unix_nanoseconds) = timestamp.parse() else {
+            omitted_item_count = omitted_item_count.saturating_add(1);
+            continue;
+        };
         items.push(ReplicaChange {
-            sequence: u64::try_from(sequence).map_err(|_| {
-                RestoreError::Integrity(
-                    "change sequence is outside the supported range".to_string(),
-                )
-            })?,
+            sequence,
             source_fingerprint: source,
             change_kind: kind,
             entity_kind,
             entity_id,
             conversation_id: conversation,
             record_sha256: digest,
-            observed_at_unix_nanoseconds: timestamp
-                .parse()
-                .map_err(|_| RestoreError::Integrity("change timestamp is invalid".to_string()))?,
+            observed_at_unix_nanoseconds,
         });
+        if items.len() == limit {
+            break;
+        }
     }
-    let next_cursor = items.last().map(|change| {
+    let next_cursor = last_scanned_sequence.map(|after_sequence| {
         encode_change_cursor(&ReplicaChangeCursor {
             format_version: 1,
             account_id: account_id.clone(),
             replica_id,
-            after_sequence: change.sequence,
+            after_sequence,
         })
     });
     Ok(ReplicaChangePage {
         account_id,
         items,
         next_cursor,
+        omitted_item_count,
+        limitation_codes: (omitted_item_count > 0)
+            .then_some("malformedReplicaChangeOmitted".to_string())
+            .into_iter()
+            .collect(),
     })
 }
 
@@ -1441,7 +1581,45 @@ pub fn search_replica_messages(
     // advances across every inspected row.
     let scan_limit = limit.saturating_mul(8).saturating_add(1).min(8_001);
     let query_limit = checked_usize_i64(scan_limit)?;
-    let mut statement = opened.connection.prepare(
+    let reply_filter = if filter.reply_target_canonical_id.is_some() {
+        "EXISTS(
+           SELECT 1 FROM message_relationship AS r
+           WHERE r.account_id = m.account_id
+             AND r.source_canonical_id = m.canonical_id
+             AND r.target_canonical_id = :reply_target
+         )"
+    } else {
+        ":reply_target IS NULL"
+    };
+    let attachment_filter = if filter.has_attachment.is_some() {
+        "(
+           :has_attachment = 1 AND EXISTS(
+             SELECT 1 FROM message_artifact AS a
+             WHERE a.account_id = m.account_id AND a.canonical_id = m.canonical_id
+           )
+         ) OR (
+           :has_attachment = 0 AND NOT EXISTS(
+             SELECT 1 FROM message_artifact AS a
+             WHERE a.account_id = m.account_id AND a.canonical_id = m.canonical_id
+           )
+         )"
+    } else {
+        ":has_attachment IS NULL"
+    };
+    let full_text_filter = if filter.full_text_query.is_some() {
+        "EXISTS(
+           SELECT 1 FROM message_fts
+           WHERE message_fts.account_id = m.account_id
+             AND message_fts.canonical_id = m.canonical_id
+             AND message_fts MATCH :full_text
+         )"
+    } else {
+        ":full_text IS NULL"
+    };
+    // Optional indexes/link tables are referenced only when the caller asks
+    // for their filter. Losing FTS, relationship, or artifact links therefore
+    // cannot disable ordinary message pagination from the healthy base table.
+    let query = format!(
         "SELECT m.created_at_unix, m.conversation_id, m.conversation_ordinal,
                 m.canonical_id, m.record_json
          FROM message AS m
@@ -1453,29 +1631,9 @@ pub fn search_replica_messages(
            AND (:sub_type IS NULL OR m.sub_type = :sub_type)
            AND (:not_before IS NULL OR m.created_at_unix >= :not_before)
            AND (:not_after IS NULL OR m.created_at_unix <= :not_after)
-           AND (:reply_target IS NULL OR EXISTS(
-             SELECT 1 FROM message_relationship AS r
-             WHERE r.account_id = m.account_id
-               AND r.source_canonical_id = m.canonical_id
-               AND r.target_canonical_id = :reply_target
-           ))
-           AND (
-             :has_attachment IS NULL
-             OR (:has_attachment = 1 AND EXISTS(
-               SELECT 1 FROM message_artifact AS a
-               WHERE a.account_id = m.account_id AND a.canonical_id = m.canonical_id
-             ))
-             OR (:has_attachment = 0 AND NOT EXISTS(
-               SELECT 1 FROM message_artifact AS a
-               WHERE a.account_id = m.account_id AND a.canonical_id = m.canonical_id
-             ))
-           )
-           AND (:full_text IS NULL OR EXISTS(
-             SELECT 1 FROM message_fts
-             WHERE message_fts.account_id = m.account_id
-               AND message_fts.canonical_id = m.canonical_id
-               AND message_fts MATCH :full_text
-           ))
+           AND ({reply_filter})
+           AND ({attachment_filter})
+           AND ({full_text_filter})
            AND (
              :after_present = 0
              OR COALESCE(m.created_at_unix, -9223372036854775808) > :after_time
@@ -1497,9 +1655,23 @@ pub fn search_replica_messages(
            )
          ORDER BY COALESCE(m.created_at_unix, -9223372036854775808),
                   m.conversation_id, m.conversation_ordinal, m.canonical_id
-         LIMIT :limit",
-    )?;
-    let rows = statement.query_map(
+         LIMIT :limit"
+    );
+    let mut statement = match opened.connection.prepare(&query) {
+        Ok(statement) => statement,
+        Err(_) => {
+            return Ok(ReplicaMessagePage {
+                account_id,
+                source_fingerprint,
+                checkpoint_revision,
+                items: Vec::new(),
+                next_cursor: None,
+                omitted_item_count: 0,
+                limitation_codes: vec!["replicaMessageQueryUnavailable".to_string()],
+            });
+        }
+    };
+    let rows = match statement.query_map(
         named_params! {
             ":account": account_id,
             ":conversation": filter.conversation_id,
@@ -1528,7 +1700,20 @@ pub fn search_replica_messages(
                 row.get::<_, Vec<u8>>(4)?,
             ))
         },
-    )?;
+    ) {
+        Ok(rows) => rows,
+        Err(_) => {
+            return Ok(ReplicaMessagePage {
+                account_id,
+                source_fingerprint,
+                checkpoint_revision,
+                items: Vec::new(),
+                next_cursor: None,
+                omitted_item_count: 0,
+                limitation_codes: vec!["replicaMessageQueryUnavailable".to_string()],
+            });
+        }
+    };
     let mut items = Vec::new();
     let mut omitted_item_count = 0_u64;
     let mut last_scanned_identity = None;
@@ -1556,6 +1741,8 @@ pub fn search_replica_messages(
             continue;
         };
         if message.account_id != account_id
+            || message.canonical_id.is_empty()
+            || message.conversation_id.is_empty()
             || message.canonical_id != indexed_id
             || message.conversation_id != indexed_conversation_id
             || message.conversation_ordinal != indexed_ordinal
@@ -1619,13 +1806,20 @@ pub(crate) fn count_replica_messages_for_scopes(
 ) -> Result<u64, RestoreError> {
     let opened = open_replica(replica_path, key)?;
     let (account_id, _) = current_replica_identity(&opened.connection)?;
-    let mut statement = opened.connection.prepare(
+    let mut statement = match opened.connection.prepare(
         "SELECT COUNT(*) FROM message
          WHERE account_id = :account
            AND conversation_id = :conversation
            AND (:not_before IS NULL OR created_at_unix >= :not_before)
            AND (:not_after IS NULL OR created_at_unix <= :not_after)",
-    )?;
+    ) {
+        Ok(statement) => statement,
+        // Message planning is advisory. A missing/corrupt message surface is
+        // represented by the serving page's limitation code during export;
+        // it must not prevent healthy conversation/contact data from being
+        // projected.
+        Err(_) => return Ok(0),
+    };
     let mut total = 0_u64;
     let mut seen = HashSet::new();
     for (conversation_id, not_before_unix, not_after_unix) in scopes {
@@ -1647,7 +1841,7 @@ pub(crate) fn count_replica_messages_for_scopes(
                 "AI context scope has an inverted time range".to_string(),
             ));
         }
-        let count: i64 = statement.query_row(
+        let count: i64 = match statement.query_row(
             named_params! {
                 ":account": account_id,
                 ":conversation": conversation_id,
@@ -1655,7 +1849,10 @@ pub(crate) fn count_replica_messages_for_scopes(
                 ":not_after": not_after_unix,
             },
             |row| row.get(0),
-        )?;
+        ) {
+            Ok(count) => count,
+            Err(_) => continue,
+        };
         total = total.saturating_add(u64::try_from(count).map_err(|_| {
             RestoreError::Integrity("replica returned a negative message count".to_string())
         })?);
@@ -1690,18 +1887,35 @@ pub fn search_replica_cached_moments(
         ));
     }
 
-    let coverage: Option<Vec<u8>> = opened
+    let mut limitation_codes = BTreeSet::new();
+    let coverage_bytes: Option<Vec<u8>> = match opened
         .connection
         .query_row(
             "SELECT coverage_json FROM cached_surface_state WHERE account_id = ?1",
             [&account_id],
             |row| row.get(0),
         )
-        .optional()?;
-    let coverage: Option<crate::CachedSurfaceCoverage> = coverage
-        .map(|bytes| serde_json::from_slice(&bytes))
-        .transpose()?;
-    let availability = match coverage.as_ref() {
+        .optional()
+    {
+        Ok(value) => value,
+        Err(_) => {
+            limitation_codes.insert("cachedMomentCoverageUnavailable".to_string());
+            None
+        }
+    };
+    let coverage: Option<crate::CachedSurfaceCoverage> =
+        coverage_bytes.and_then(|bytes| match serde_json::from_slice(&bytes) {
+            Ok(value) if validate_cached_coverage_schema(&value).is_ok() => Some(value),
+            Err(_) => {
+                limitation_codes.insert("malformedCachedMomentCoverageOmitted".to_string());
+                None
+            }
+            Ok(_) => {
+                limitation_codes.insert("malformedCachedMomentCoverageOmitted".to_string());
+                None
+            }
+        });
+    let reported_availability = match coverage.as_ref() {
         None => ReplicaCachedSurfaceAvailability::Unavailable,
         Some(coverage) if !coverage.source_database_present => {
             ReplicaCachedSurfaceAvailability::Unavailable
@@ -1711,25 +1925,8 @@ pub fn search_replica_cached_moments(
         }
         Some(_) => ReplicaCachedSurfaceAvailability::Available,
     };
-    if availability == ReplicaCachedSurfaceAvailability::Unavailable {
-        if decoded.is_some() {
-            return Err(RestoreError::Integrity(
-                "cached-moment cursor cannot be resumed because the cached surface is unavailable"
-                    .to_string(),
-            ));
-        }
-        return Ok(ReplicaCachedMomentPage {
-            account_id,
-            source_fingerprint,
-            checkpoint_revision,
-            availability,
-            cache_completeness: coverage
-                .as_ref()
-                .map(|coverage| coverage.cache_completeness),
-            observed_at: coverage.map(|coverage| coverage.observed_at),
-            items: Vec::new(),
-            next_cursor: None,
-        });
+    if reported_availability == ReplicaCachedSurfaceAvailability::Unavailable {
+        limitation_codes.insert("cachedMomentSurfaceUnavailable".to_string());
     }
 
     let after_present = decoded.is_some();
@@ -1742,9 +1939,10 @@ pub fn search_replica_cached_moments(
         .map(|cursor| cursor.after_canonical_id.as_str())
         .unwrap_or("");
     let limit = requested_limit.clamp(1, 1_000);
-    let query_limit = checked_usize_i64(limit.saturating_add(1))?;
-    let mut statement = opened.connection.prepare(
-        "SELECT record_json FROM cached_moment
+    let scan_limit = limit.saturating_mul(8).saturating_add(1).min(8_001);
+    let query_limit = checked_usize_i64(scan_limit)?;
+    let mut statement = match opened.connection.prepare(
+        "SELECT created_at_unix, canonical_id, record_json FROM cached_moment
          WHERE account_id = :account
            AND (:author IS NULL OR author_id = :author)
            AND (:not_before IS NULL OR created_at_unix >= :not_before)
@@ -1760,8 +1958,27 @@ pub fn search_replica_cached_moments(
            )
          ORDER BY COALESCE(created_at_unix, -9223372036854775808), canonical_id
          LIMIT :limit",
-    )?;
-    let rows = statement.query_map(
+    ) {
+        Ok(statement) => statement,
+        Err(_) => {
+            limitation_codes.insert("cachedMomentTableUnavailable".to_string());
+            return Ok(ReplicaCachedMomentPage {
+                account_id,
+                source_fingerprint,
+                checkpoint_revision,
+                availability: ReplicaCachedSurfaceAvailability::Unavailable,
+                cache_completeness: coverage
+                    .as_ref()
+                    .map(|coverage| coverage.cache_completeness),
+                observed_at: coverage.map(|coverage| coverage.observed_at),
+                items: Vec::new(),
+                next_cursor: None,
+                omitted_item_count: 0,
+                limitation_codes: limitation_codes.into_iter().collect(),
+            });
+        }
+    };
+    let rows = match statement.query_map(
         named_params! {
             ":account": account_id,
             ":author": filter.author_id,
@@ -1773,21 +1990,82 @@ pub fn search_replica_cached_moments(
             ":after_canonical_id": after_canonical_id,
             ":limit": query_limit,
         },
-        |row| row.get::<_, Vec<u8>>(0),
-    )?;
-    let mut items = rows
-        .map(
-            |row| -> Result<crate::CanonicalCachedMoment, RestoreError> {
-                let moment: crate::CanonicalCachedMoment = serde_json::from_slice(&row?)?;
-                require_account(&moment.account_id, &account_id)?;
-                Ok(moment)
-            },
-        )
-        .collect::<Result<Vec<_>, _>>()?;
-    let has_more = items.len() > limit;
-    items.truncate(limit);
+        |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        },
+    ) {
+        Ok(rows) => rows,
+        Err(_) => {
+            limitation_codes.insert("cachedMomentTableUnavailable".to_string());
+            return Ok(ReplicaCachedMomentPage {
+                account_id,
+                source_fingerprint,
+                checkpoint_revision,
+                availability: ReplicaCachedSurfaceAvailability::Unavailable,
+                cache_completeness: coverage
+                    .as_ref()
+                    .map(|coverage| coverage.cache_completeness),
+                observed_at: coverage.map(|coverage| coverage.observed_at),
+                items: Vec::new(),
+                next_cursor: None,
+                omitted_item_count: 0,
+                limitation_codes: limitation_codes.into_iter().collect(),
+            });
+        }
+    };
+    let mut items = Vec::with_capacity(limit);
+    let mut omitted_item_count = 0_u64;
+    let mut last_scanned_identity = None;
+    let mut scanned_count = 0_usize;
+    let mut has_more = false;
+    for row in rows {
+        scanned_count = scanned_count.saturating_add(1);
+        let (indexed_created_at, indexed_id, bytes) = match row {
+            Ok(value) => value,
+            Err(_) => {
+                omitted_item_count = omitted_item_count.saturating_add(1);
+                continue;
+            }
+        };
+        last_scanned_identity = Some((indexed_created_at.unwrap_or(i64::MIN), indexed_id.clone()));
+        let Ok(moment) = serde_json::from_slice::<crate::CanonicalCachedMoment>(&bytes) else {
+            omitted_item_count = omitted_item_count.saturating_add(1);
+            continue;
+        };
+        if moment.account_id != account_id
+            || moment.canonical_id.is_empty()
+            || moment.canonical_id != indexed_id
+            || moment.created_at_unix != indexed_created_at
+        {
+            omitted_item_count = omitted_item_count.saturating_add(1);
+            continue;
+        }
+        items.push(moment);
+        if items.len() == limit {
+            has_more = true;
+            break;
+        }
+    }
+    if items.len() < limit && scanned_count == scan_limit && last_scanned_identity.is_some() {
+        has_more = true;
+    }
+    if omitted_item_count > 0 {
+        limitation_codes.insert("malformedCachedMomentOmitted".to_string());
+    }
+    let availability = if !items.is_empty() {
+        if reported_availability != ReplicaCachedSurfaceAvailability::Available {
+            limitation_codes.insert("cachedMomentCoverageDisagreesWithRecords".to_string());
+        }
+        ReplicaCachedSurfaceAvailability::Available
+    } else {
+        reported_availability
+    };
     let next_cursor = if has_more {
-        items.last().map(|moment| {
+        last_scanned_identity.map(|(after_created_at_unix, after_canonical_id)| {
             encode_cached_moment_cursor(&ReplicaCachedMomentCursor {
                 format_version: 1,
                 account_id: account_id.clone(),
@@ -1795,8 +2073,8 @@ pub fn search_replica_cached_moments(
                 source_fingerprint: source_fingerprint.clone(),
                 checkpoint_revision: checkpoint_revision.clone(),
                 filter_sha256,
-                after_created_at_unix: moment.created_at_unix.unwrap_or(i64::MIN),
-                after_canonical_id: moment.canonical_id.clone(),
+                after_created_at_unix,
+                after_canonical_id,
             })
         })
     } else {
@@ -1813,6 +2091,8 @@ pub fn search_replica_cached_moments(
         observed_at: coverage.map(|coverage| coverage.observed_at),
         items,
         next_cursor,
+        omitted_item_count,
+        limitation_codes: limitation_codes.into_iter().collect(),
     })
 }
 
@@ -1835,7 +2115,7 @@ pub fn get_replica_message(
     }
     let opened = open_replica(replica_path, key)?;
     let (account_id, _) = current_replica_identity(&opened.connection)?;
-    let bytes: Option<Vec<u8>> = opened
+    let bytes: Option<Vec<u8>> = match opened
         .connection
         .query_row(
             "SELECT record_json FROM message
@@ -1843,14 +2123,24 @@ pub fn get_replica_message(
             params![account_id, canonical_id],
             |row| row.get(0),
         )
-        .optional()?;
-    bytes
-        .map(|bytes| {
-            let message: CanonicalMessage = serde_json::from_slice(&bytes)?;
-            require_account(&message.account_id, &account_id)?;
-            Ok(message)
-        })
-        .transpose()
+        .optional()
+    {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+    let Ok(message) = serde_json::from_slice::<CanonicalMessage>(&bytes) else {
+        return Ok(None);
+    };
+    if message.account_id != account_id
+        || message.canonical_id != canonical_id
+        || message.conversation_id.is_empty()
+    {
+        return Ok(None);
+    }
+    Ok(Some(message))
 }
 
 pub fn get_replica_recent_messages(
@@ -1868,31 +2158,64 @@ pub fn get_replica_recent_messages(
     }
     let opened = open_replica(replica_path, key)?;
     let (account_id, _) = current_replica_identity(&opened.connection)?;
-    let limit = checked_usize_i64(requested_limit.clamp(1, 1_000))?;
-    let mut statement = opened.connection.prepare(
-        "SELECT record_json FROM message
+    let limit = requested_limit.clamp(1, 1_000);
+    let scan_limit = limit.saturating_mul(8).min(8_000);
+    let query_limit = checked_usize_i64(scan_limit)?;
+    let mut statement = match opened.connection.prepare(
+        "SELECT conversation_ordinal, canonical_id, created_at_unix, record_json FROM message
          WHERE account_id = ?1 AND conversation_id = ?2
            AND (?3 IS NULL OR created_at_unix >= ?3)
            AND (?4 IS NULL OR created_at_unix <= ?4)
          ORDER BY conversation_ordinal DESC, canonical_id DESC LIMIT ?5",
-    )?;
-    let rows = statement.query_map(
+    ) {
+        Ok(statement) => statement,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let rows = match statement.query_map(
         params![
             account_id,
             conversation_id,
             not_before_unix,
             not_after_unix,
-            limit
+            query_limit
         ],
-        |row| row.get::<_, Vec<u8>>(0),
-    )?;
-    let mut messages = rows
-        .map(|row| -> Result<CanonicalMessage, RestoreError> {
-            let message: CanonicalMessage = serde_json::from_slice(&row?)?;
-            require_account(&message.account_id, &account_id)?;
-            Ok(message)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        },
+    ) {
+        Ok(rows) => rows,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let mut messages = Vec::with_capacity(limit);
+    for row in rows {
+        let Ok((indexed_ordinal, indexed_id, indexed_created_at, bytes)) = row else {
+            continue;
+        };
+        let Ok(indexed_ordinal) = u64::try_from(indexed_ordinal) else {
+            continue;
+        };
+        let Ok(message) = serde_json::from_slice::<CanonicalMessage>(&bytes) else {
+            continue;
+        };
+        if message.account_id != account_id
+            || message.canonical_id.is_empty()
+            || message.conversation_id != conversation_id
+            || message.canonical_id != indexed_id
+            || message.conversation_ordinal != indexed_ordinal
+            || message.created_at_unix != indexed_created_at
+        {
+            continue;
+        }
+        messages.push(message);
+        if messages.len() == limit {
+            break;
+        }
+    }
     messages.reverse();
     Ok(messages)
 }
@@ -1938,15 +2261,16 @@ pub fn replica_restoration_report(
     key: &ReplicaKey,
 ) -> Result<Option<RestorationReport>, RestoreError> {
     let opened = open_replica(replica_path, key)?;
-    let account_id: Option<String> = opened
+    let identity: Option<(String, Option<String>)> = opened
         .connection
         .query_row(
-            "SELECT account_id FROM replica_identity WHERE singleton = 1",
+            "SELECT account_id, current_source_fingerprint
+             FROM replica_identity WHERE singleton = 1",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    let Some(account_id) = account_id else {
+    let Some((account_id, source_fingerprint)) = identity else {
         return Ok(None);
     };
     let report: Option<Vec<u8>> = opened
@@ -1961,6 +2285,11 @@ pub fn replica_restoration_report(
         .map(|bytes| {
             let report: RestorationReport = serde_json::from_slice(&bytes)?;
             require_account(&report.account_id, &account_id)?;
+            if source_fingerprint.as_deref() != Some(report.source_fingerprint.as_str()) {
+                return Err(RestoreError::Integrity(
+                    "replica restoration report belongs to another checkpoint".to_string(),
+                ));
+            }
             Ok(report)
         })
         .transpose()
@@ -2018,7 +2347,44 @@ pub fn replica_conversation_references_artifact_in_range(
     Ok(exists)
 }
 
-fn get_replica_record<T: DeserializeOwned>(
+trait ReplicaRecordIdentity {
+    fn replica_account_id(&self) -> Option<&str>;
+    fn replica_record_id(&self) -> &str;
+}
+
+impl ReplicaRecordIdentity for CanonicalConversation {
+    fn replica_account_id(&self) -> Option<&str> {
+        Some(&self.account_id)
+    }
+
+    fn replica_record_id(&self) -> &str {
+        &self.conversation_id
+    }
+}
+
+impl ReplicaRecordIdentity for CanonicalParticipant {
+    fn replica_account_id(&self) -> Option<&str> {
+        Some(&self.account_id)
+    }
+
+    fn replica_record_id(&self) -> &str {
+        &self.participant_id
+    }
+}
+
+impl ReplicaRecordIdentity for CanonicalArtifact {
+    fn replica_account_id(&self) -> Option<&str> {
+        // Artifact identities are account-scoped by the encrypted table key;
+        // the canonical artifact payload predates an embedded account field.
+        None
+    }
+
+    fn replica_record_id(&self) -> &str {
+        &self.artifact_id
+    }
+}
+
+fn get_replica_record<T: DeserializeOwned + ReplicaRecordIdentity>(
     replica_path: &Path,
     key: &ReplicaKey,
     table: &str,
@@ -2041,13 +2407,28 @@ fn get_replica_record<T: DeserializeOwned>(
         "SELECT record_json FROM {table}
          WHERE account_id = ?1 AND {identifier_column} = ?2"
     );
-    let bytes: Option<Vec<u8>> = opened
+    let bytes: Option<Vec<u8>> = match opened
         .connection
         .query_row(&query, params![account_id, identifier], |row| row.get(0))
-        .optional()?;
-    bytes
-        .map(|bytes| Ok(serde_json::from_slice(&bytes)?))
-        .transpose()
+        .optional()
+    {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+    let Ok(value) = serde_json::from_slice::<T>(&bytes) else {
+        return Ok(None);
+    };
+    if value
+        .replica_account_id()
+        .is_some_and(|record_account| record_account != account_id)
+        || value.replica_record_id() != identifier
+    {
+        return Ok(None);
+    }
+    Ok(Some(value))
 }
 
 pub fn list_replica_conversations(
@@ -2057,20 +2438,78 @@ pub fn list_replica_conversations(
 ) -> Result<ReplicaConversationPage, RestoreError> {
     let opened = open_replica(replica_path, key)?;
     let (account_id, _) = current_replica_identity(&opened.connection)?;
-    let limit = checked_usize_i64(requested_limit.clamp(1, 1_000))?;
-    let mut statement = opened.connection.prepare(
-        "SELECT record_json FROM conversation
+    let limit = requested_limit.clamp(1, 1_000);
+    let scan_limit = limit.saturating_mul(8).min(8_000);
+    let query_limit = checked_usize_i64(scan_limit)?;
+    let mut statement = match opened.connection.prepare(
+        "SELECT conversation_id, record_json FROM conversation
          WHERE account_id = ?1 ORDER BY conversation_id LIMIT ?2",
-    )?;
-    let rows = statement.query_map(params![account_id, limit], |row| row.get::<_, Vec<u8>>(0))?;
-    let items = rows
-        .map(|row| -> Result<CanonicalConversation, RestoreError> {
-            let conversation: CanonicalConversation = serde_json::from_slice(&row?)?;
-            require_account(&conversation.account_id, &account_id)?;
-            Ok(conversation)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(ReplicaConversationPage { account_id, items })
+    ) {
+        Ok(statement) => statement,
+        Err(_) => {
+            return Ok(ReplicaConversationPage {
+                account_id,
+                items: Vec::new(),
+                omitted_item_count: 0,
+                limitation_codes: vec!["replicaConversationTableUnavailable".to_string()],
+            });
+        }
+    };
+    let rows = match statement.query_map(params![account_id, query_limit], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+    }) {
+        Ok(rows) => rows,
+        Err(_) => {
+            return Ok(ReplicaConversationPage {
+                account_id,
+                items: Vec::new(),
+                omitted_item_count: 0,
+                limitation_codes: vec!["replicaConversationTableUnavailable".to_string()],
+            });
+        }
+    };
+    let mut items = Vec::with_capacity(limit);
+    let mut omitted_item_count = 0_u64;
+    let mut scanned_count = 0_usize;
+    for row in rows {
+        scanned_count = scanned_count.saturating_add(1);
+        let (indexed_id, bytes) = match row {
+            Ok(value) => value,
+            Err(_) => {
+                omitted_item_count = omitted_item_count.saturating_add(1);
+                continue;
+            }
+        };
+        let Ok(conversation) = serde_json::from_slice::<CanonicalConversation>(&bytes) else {
+            omitted_item_count = omitted_item_count.saturating_add(1);
+            continue;
+        };
+        if conversation.account_id != account_id
+            || conversation.conversation_id.is_empty()
+            || conversation.conversation_id != indexed_id
+        {
+            omitted_item_count = omitted_item_count.saturating_add(1);
+            continue;
+        }
+        items.push(conversation);
+        if items.len() == limit {
+            break;
+        }
+    }
+    let scan_limit_reached = items.len() < limit && scanned_count == scan_limit;
+    let mut limitation_codes = BTreeSet::new();
+    if omitted_item_count > 0 {
+        limitation_codes.insert("malformedReplicaConversationOmitted".to_string());
+    }
+    if scan_limit_reached {
+        limitation_codes.insert("replicaConversationScanLimitReached".to_string());
+    }
+    Ok(ReplicaConversationPage {
+        account_id,
+        items,
+        omitted_item_count,
+        limitation_codes: limitation_codes.into_iter().collect(),
+    })
 }
 
 pub fn replica_coverage(
@@ -2086,18 +2525,39 @@ pub fn replica_coverage(
     )?;
     let coverage: RestorationCoverage = serde_json::from_slice(&coverage)?;
     let report: RestorationReport = serde_json::from_slice(&report)?;
-    let cached_surfaces: Option<Vec<u8>> = opened
+    validate_restoration_coverage_schema(&coverage)?;
+    if report.account_id != account_id || report.source_fingerprint != source_fingerprint {
+        return Err(RestoreError::Integrity(
+            "replica coverage belongs to another account or checkpoint".to_string(),
+        ));
+    }
+    let mut limitation_codes = BTreeSet::new();
+    let cached_surface_bytes: Option<Vec<u8>> = match opened
         .connection
         .query_row(
             "SELECT coverage_json FROM cached_surface_state WHERE account_id = ?1",
             [&account_id],
             |row| row.get(0),
         )
-        .optional()?;
-    let cached_surfaces = cached_surfaces
-        .map(|bytes| serde_json::from_slice(&bytes))
-        .transpose()?;
-    require_account(&report.account_id, &account_id)?;
+        .optional()
+    {
+        Ok(value) => value,
+        Err(_) => {
+            limitation_codes.insert("cachedMomentCoverageUnavailable".to_string());
+            None
+        }
+    };
+    let cached_surfaces = cached_surface_bytes.and_then(|bytes| {
+        let Ok(coverage) = serde_json::from_slice::<crate::CachedSurfaceCoverage>(&bytes) else {
+            limitation_codes.insert("malformedCachedMomentCoverageOmitted".to_string());
+            return None;
+        };
+        if validate_cached_coverage_schema(&coverage).is_err() {
+            limitation_codes.insert("malformedCachedMomentCoverageOmitted".to_string());
+            return None;
+        }
+        Some(coverage)
+    });
     Ok(ReplicaCoverageView {
         account_id,
         self_participant_id: report.self_participant_id.clone(),
@@ -2108,6 +2568,7 @@ pub fn replica_coverage(
         integrity: report.integrity,
         completion: report.completion,
         cached_surfaces,
+        limitation_codes: limitation_codes.into_iter().collect(),
     })
 }
 
@@ -5638,17 +6099,23 @@ fn current_replica_identity(connection: &Connection) -> Result<(String, String),
             "SELECT account_id, current_source_fingerprint
              FROM replica_identity WHERE singleton = 1",
             [],
-            |row| Ok((row.get(0)?, row.get::<_, Option<String>>(1)?)),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )
         .map_err(RestoreError::from)
         .and_then(|(account, fingerprint)| {
-            fingerprint
-                .map(|fingerprint| (account, fingerprint))
+            let fingerprint = fingerprint
+                .filter(|value| !value.is_empty())
                 .ok_or_else(|| {
                     RestoreError::Integrity(
                         "replica has no authoritative source checkpoint".to_string(),
                     )
-                })
+                })?;
+            if account.is_empty() {
+                return Err(RestoreError::Integrity(
+                    "replica has an empty account identity".to_string(),
+                ));
+            }
+            Ok((account, fingerprint))
         })
 }
 
@@ -5670,14 +6137,18 @@ fn current_replica_checkpoint(
         )
         .map_err(RestoreError::from)
         .and_then(|(account, fingerprint, revision)| {
-            let fingerprint = fingerprint.ok_or_else(|| {
-                RestoreError::Integrity(
-                    "replica has no authoritative source checkpoint".to_string(),
-                )
-            })?;
-            revision.parse::<u128>().map_err(|_| {
-                RestoreError::Integrity("replica checkpoint revision is invalid".to_string())
-            })?;
+            let fingerprint = fingerprint
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    RestoreError::Integrity(
+                        "replica has no authoritative source checkpoint".to_string(),
+                    )
+                })?;
+            if account.is_empty() || !revision.parse::<u128>().is_ok_and(|revision| revision > 0) {
+                return Err(RestoreError::Integrity(
+                    "replica checkpoint identity or revision is invalid".to_string(),
+                ));
+            }
             Ok((account, fingerprint, revision))
         })
 }
@@ -5819,6 +6290,21 @@ fn table_count(connection: &Connection, table: &str) -> Result<u64, RestoreError
     let sql = format!("SELECT count(*) FROM {table}");
     let count: i64 = connection.query_row(&sql, [], |row| row.get(0))?;
     Ok(count.max(0) as u64)
+}
+
+fn best_effort_table_count(
+    connection: &Connection,
+    table: &str,
+    limitation_code: &str,
+    limitation_codes: &mut BTreeSet<String>,
+) -> u64 {
+    match table_count(connection, table) {
+        Ok(count) => count,
+        Err(_) => {
+            limitation_codes.insert(limitation_code.to_string());
+            0
+        }
+    }
 }
 
 fn replica_id(connection: &Connection) -> Result<String, RestoreError> {

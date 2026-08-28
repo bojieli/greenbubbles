@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-use crate::{CanonicalMessage, RestorationCompletion, RestorationReport, RestoreError};
+use crate::{
+    CanonicalConversation, CanonicalMessage, RestorationCompletion, RestorationReport, RestoreError,
+};
 
 const MAX_POLICY_PAGE_SIZE: usize = 1_000;
 
@@ -37,6 +39,10 @@ pub struct ConversationPage {
     pub items: Vec<CanonicalMessage>,
     pub next_cursor: Option<String>,
     pub restoration_completion: RestorationCompletion,
+    #[serde(default)]
+    pub omitted_message_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
 }
 
 pub fn create_conversation_policy(
@@ -51,7 +57,7 @@ pub fn create_conversation_policy(
         ));
     }
     let report = load_report(archive_directory)?;
-    let known = load_conversation_ids(archive_directory)?;
+    let known = load_conversation_ids(archive_directory, &report.account_id)?;
     if let Some(unknown) = enabled_conversation_ids
         .iter()
         .find(|identifier| !known.contains(*identifier))
@@ -104,18 +110,46 @@ pub fn read_conversation_page(
     let after = cursor.as_ref().map(|value| value.after_ordinal);
     let limit = requested_limit.clamp(1, policy.maximum_page_size);
     let message_path = archive_directory.join("messages.ndjson");
-    ensure_private_regular_file(&message_path)?;
+    if !private_regular_file_exists(&message_path)? {
+        return Ok(ConversationPage {
+            conversation_id: conversation_id.to_string(),
+            items: Vec::new(),
+            next_cursor: None,
+            restoration_completion: report.completion,
+            omitted_message_count: 0,
+            limitation_codes: vec!["archiveMessageLedgerUnavailable".to_string()],
+        });
+    }
     let reader = BufReader::new(File::open(&message_path)?);
     let mut seen = HashSet::new();
     let mut items = Vec::new();
     let mut has_more = false;
+    let mut omitted_message_count = 0_u64;
     for line in reader.lines() {
-        let line = line?;
-        let message: CanonicalMessage = serde_json::from_str(&line)?;
+        let line = match line {
+            Ok(line) => line,
+            Err(_) => {
+                omitted_message_count = omitted_message_count.saturating_add(1);
+                continue;
+            }
+        };
+        let message: CanonicalMessage = match serde_json::from_str(&line) {
+            Ok(message) => message,
+            Err(_) => {
+                omitted_message_count = omitted_message_count.saturating_add(1);
+                continue;
+            }
+        };
+        if message.account_id != report.account_id
+            || message.canonical_id.is_empty()
+            || message.conversation_id.is_empty()
+        {
+            omitted_message_count = omitted_message_count.saturating_add(1);
+            continue;
+        }
         if !seen.insert(message.canonical_id.clone()) {
-            return Err(RestoreError::Integrity(
-                "duplicate canonical identity encountered while paging".to_string(),
-            ));
+            omitted_message_count = omitted_message_count.saturating_add(1);
+            continue;
         }
         if message.conversation_id != conversation_id
             || after.is_some_and(|ordinal| message.conversation_ordinal <= ordinal)
@@ -145,6 +179,11 @@ pub fn read_conversation_page(
         items,
         next_cursor,
         restoration_completion: report.completion,
+        omitted_message_count,
+        limitation_codes: (omitted_message_count > 0)
+            .then_some("malformedArchiveMessageOmitted".to_string())
+            .into_iter()
+            .collect(),
     })
 }
 
@@ -168,22 +207,43 @@ pub(crate) fn load_policy(policy_path: &Path) -> Result<ConversationReadPolicy, 
 
 pub(crate) fn load_conversation_ids(
     archive_directory: &Path,
+    account_id: &str,
 ) -> Result<BTreeSet<String>, RestoreError> {
+    if account_id.is_empty() {
+        return Err(RestoreError::Integrity(
+            "archive account identity cannot be empty".to_string(),
+        ));
+    }
     let path = archive_directory.join("conversations.ndjson");
-    ensure_private_regular_file(&path)?;
-    let reader = BufReader::new(File::open(path)?);
     let mut result = BTreeSet::new();
-    for line in reader.lines() {
-        let value: serde_json::Value = serde_json::from_str(&line?)?;
-        let identifier = value
-            .get("conversationId")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                RestoreError::Integrity(
-                    "conversation archive record is missing its identifier".to_string(),
-                )
-            })?;
-        result.insert(identifier.to_string());
+    if private_regular_file_exists(&path)? {
+        for line in BufReader::new(File::open(path)?).lines() {
+            let Ok(line) = line else {
+                continue;
+            };
+            let Ok(conversation) = serde_json::from_str::<CanonicalConversation>(&line) else {
+                continue;
+            };
+            if conversation.account_id == account_id && !conversation.conversation_id.is_empty() {
+                result.insert(conversation.conversation_id);
+            }
+        }
+    }
+    // A damaged/missing conversation record must not prevent policy creation
+    // when a healthy, account-bound message still identifies that conversation.
+    let messages = archive_directory.join("messages.ndjson");
+    if private_regular_file_exists(&messages)? {
+        for line in BufReader::new(File::open(messages)?).lines() {
+            let Ok(line) = line else {
+                continue;
+            };
+            let Ok(message) = serde_json::from_str::<CanonicalMessage>(&line) else {
+                continue;
+            };
+            if message.account_id == account_id && !message.conversation_id.is_empty() {
+                result.insert(message.conversation_id);
+            }
+        }
     }
     Ok(result)
 }
@@ -228,6 +288,17 @@ pub(crate) fn ensure_private_regular_file(path: &Path) -> Result<(), RestoreErro
         )));
     }
     Ok(())
+}
+
+/// Treats a genuinely absent optional/domain ledger as unavailable while
+/// preserving fail-closed handling for symlinks, unsafe permissions, hard
+/// links, and other integrity failures.
+pub(crate) fn private_regular_file_exists(path: &Path) -> Result<bool, RestoreError> {
+    match ensure_private_regular_file(path) {
+        Ok(()) => Ok(true),
+        Err(RestoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 fn write_owner_only_json(path: &Path, value: &impl Serialize) -> Result<(), RestoreError> {

@@ -5,8 +5,9 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use greenbubbles_restore::tools::{
-    create_tool_policy, ConversationToolScope, DraftState, LocalToolService, ToolAuditOutcome,
-    ToolCapability, ToolDataDestination, ToolMessageField,
+    create_all_conversations_tool_policy_with_cached_moments, create_tool_policy,
+    ConversationToolScope, DraftState, LocalToolService, ToolAuditOutcome, ToolCapability,
+    ToolDataDestination, ToolMessageField,
 };
 use greenbubbles_restore::{
     CanonicalConversation, CanonicalMessage, ConversationKind, DirectionEvidence,
@@ -260,6 +261,119 @@ fn enforces_scopes_minimizes_context_and_creates_drafts_only() {
         .unwrap()
         .messages
         .is_empty());
+
+    for path in [
+        archive.join("conversations.ndjson"),
+        archive.join("messages.ndjson"),
+    ] {
+        OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(b"{not-json}\n")
+            .unwrap();
+    }
+    let tolerant_list = service
+        .list_enabled_conversations(ToolDataDestination::LocalModel)
+        .unwrap();
+    assert_eq!(tolerant_list.conversations.len(), 1);
+    assert_eq!(tolerant_list.omitted_conversation_count, 1);
+    let tolerant_recent = service
+        .read_recent_messages(ALLOWED_CONVERSATION, 10, ToolDataDestination::LocalModel)
+        .unwrap();
+    assert_eq!(tolerant_recent.messages.len(), 2);
+    assert_eq!(tolerant_recent.omitted_message_count, 1);
+    let tolerant_search = service
+        .search_messages(
+            "searchable",
+            Some(ALLOWED_CONVERSATION),
+            10,
+            ToolDataDestination::LocalModel,
+        )
+        .unwrap();
+    assert_eq!(tolerant_search.messages.len(), 1);
+    assert_eq!(tolerant_search.omitted_message_count, 1);
+
+    let mut foreign_conversation = conversation("foreign-conversation");
+    foreign_conversation.account_id = "foreign-account".to_string();
+    let mut foreign_message = message(
+        "foreign-message",
+        "foreign-message-conversation",
+        0,
+        "must never authorize a scope",
+    );
+    foreign_message.account_id = "foreign-account".to_string();
+    for (path, value) in [
+        (
+            archive.join("conversations.ndjson"),
+            serde_json::to_vec(&foreign_conversation).unwrap(),
+        ),
+        (
+            archive.join("messages.ndjson"),
+            serde_json::to_vec(&foreign_message).unwrap(),
+        ),
+    ] {
+        let mut file = OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(&value).unwrap();
+        file.write_all(b"\n").unwrap();
+    }
+    let all_policy = create_all_conversations_tool_policy_with_cached_moments(
+        &archive,
+        &private.join("all-policy.json"),
+        ConversationToolScope {
+            capabilities: BTreeSet::from([ToolCapability::ListConversations]),
+            message_fields: BTreeSet::new(),
+            not_before_unix: None,
+            not_after_unix: None,
+            allow_remote_model: false,
+        },
+        None,
+        10,
+        64,
+        1_024,
+    )
+    .unwrap();
+    assert_eq!(all_policy.conversation_scopes.len(), 2);
+    assert!(!all_policy
+        .conversation_scopes
+        .contains_key("foreign-conversation"));
+    assert!(!all_policy
+        .conversation_scopes
+        .contains_key("foreign-message-conversation"));
+
+    let conversation_ledger = archive.join("conversations.ndjson");
+    let unavailable_conversation_ledger = archive.join("conversations.unavailable");
+    fs::rename(&conversation_ledger, &unavailable_conversation_ledger).unwrap();
+    let unavailable_list = service
+        .list_enabled_conversations(ToolDataDestination::LocalModel)
+        .unwrap();
+    assert!(unavailable_list.conversations.is_empty());
+    assert!(unavailable_list
+        .limitation_codes
+        .contains(&"archiveConversationLedgerUnavailable".to_string()));
+    fs::rename(&unavailable_conversation_ledger, &conversation_ledger).unwrap();
+    fs::set_permissions(&conversation_ledger, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(service
+        .list_enabled_conversations(ToolDataDestination::LocalModel)
+        .is_err());
+    fs::set_permissions(&conversation_ledger, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let message_ledger = archive.join("messages.ndjson");
+    let unavailable_message_ledger = archive.join("messages.unavailable");
+    fs::rename(&message_ledger, &unavailable_message_ledger).unwrap();
+    let unavailable_messages = service
+        .read_recent_messages(ALLOWED_CONVERSATION, 10, ToolDataDestination::LocalModel)
+        .unwrap();
+    assert!(unavailable_messages.messages.is_empty());
+    assert!(unavailable_messages
+        .limitation_codes
+        .contains(&"archiveMessageLedgerUnavailable".to_string()));
+    fs::rename(&unavailable_message_ledger, &message_ledger).unwrap();
+    fs::set_permissions(&message_ledger, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(service
+        .read_recent_messages(ALLOWED_CONVERSATION, 10, ToolDataDestination::LocalModel,)
+        .is_err());
+    fs::set_permissions(&message_ledger, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
 fn conversation(identifier: &str) -> CanonicalConversation {

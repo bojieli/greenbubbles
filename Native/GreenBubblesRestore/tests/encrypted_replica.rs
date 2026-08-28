@@ -12,10 +12,12 @@ use greenbubbles_restore::follow::{
 };
 use greenbubbles_restore::replica::{
     audit_replica, audit_replica_backup, bootstrap_replica, bootstrap_replica_with_progress,
-    get_replica_changes, get_replica_message, list_replica_conversations, prepare_replica_recovery,
-    replica_conversation_references_artifact_in_range, replica_coverage, replica_status,
+    get_replica_artifact, get_replica_changes, get_replica_conversation, get_replica_message,
+    get_replica_participant, get_replica_recent_messages, list_replica_conversations,
+    prepare_replica_recovery, replica_conversation_references_artifact_in_range, replica_coverage,
+    replica_restoration_report, replica_status, search_replica_cached_moments,
     search_replica_messages, synchronize_replica, synchronize_replica_with_progress,
-    ReplicaMessageFilter,
+    ReplicaCachedMomentFilter, ReplicaMessageFilter,
 };
 use greenbubbles_restore::tools::{
     create_all_conversations_tool_policy_with_cached_moments, create_tool_policy,
@@ -716,7 +718,7 @@ fn failed_replica_storage_preflight_removes_a_new_namespace() {
 }
 
 #[test]
-fn malformed_replica_messages_are_omitted_without_stalling_pages_or_ai_queries() {
+fn malformed_replica_records_are_omitted_without_stalling_pages_or_ai_queries() {
     let fixture = tempfile::tempdir().unwrap();
     let private = fixture.path().join("private-malformed-message");
     fs::create_dir(&private).unwrap();
@@ -748,7 +750,68 @@ fn malformed_replica_messages_are_omitted_without_stalling_pages_or_ai_queries()
             [b"{".as_slice()],
         )
         .unwrap();
+    for table in ["conversation", "participant", "artifact"] {
+        connection
+            .execute(
+                &format!("UPDATE {table} SET record_json = ?1"),
+                [b"{".as_slice()],
+            )
+            .unwrap();
+    }
+    connection
+        .execute_batch(
+            "DROP TABLE message_fts;
+             DROP TABLE message_relationship;
+             DROP TABLE message_artifact;",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE change_log SET observed_at_unix_nanoseconds = 'invalid'
+             WHERE sequence = (SELECT MIN(sequence) FROM change_log)",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO change_log(
+               account_id, source_fingerprint, change_kind, entity_kind, entity_id,
+               conversation_id, record_sha256, observed_at_unix_nanoseconds
+             ) VALUES (
+               'account-a', 'source-a', 'changed', 'message', 'healthy-change',
+               'conversation-a', NULL, '1700000000000000000'
+             )",
+            [],
+        )
+        .unwrap();
     drop(connection);
+
+    assert!(get_replica_message(&replica, &key, "message-a")
+        .unwrap()
+        .is_none());
+    assert!(get_replica_conversation(&replica, &key, "conversation-a")
+        .unwrap()
+        .is_none());
+    assert!(get_replica_participant(&replica, &key, "participant-a")
+        .unwrap()
+        .is_none());
+    assert!(get_replica_artifact(&replica, &key, "artifact-a")
+        .unwrap()
+        .is_none());
+    let recent =
+        get_replica_recent_messages(&replica, &key, "conversation-a", None, None, 1).unwrap();
+    assert_eq!(recent.len(), 1);
+    assert_eq!(recent[0].canonical_id, "message-b");
+    let conversations = list_replica_conversations(&replica, &key, 10).unwrap();
+    assert!(conversations.items.is_empty());
+    assert_eq!(conversations.omitted_item_count, 1);
+
+    let changes = get_replica_changes(&replica, &key, None, 100).unwrap();
+    assert!(!changes.items.is_empty());
+    assert_eq!(changes.omitted_item_count, 1);
+    assert!(changes
+        .limitation_codes
+        .contains(&"malformedReplicaChangeOmitted".to_string()));
 
     let filter = ReplicaMessageFilter {
         conversation_id: Some("conversation-a".to_string()),
@@ -761,6 +824,21 @@ fn malformed_replica_messages_are_omitted_without_stalling_pages_or_ai_queries()
     assert!(page
         .limitation_codes
         .contains(&"malformedReplicaMessageOmitted".to_string()));
+    let unavailable_full_text = search_replica_messages(
+        &replica,
+        &key,
+        &ReplicaMessageFilter {
+            full_text_query: Some("healthy".to_string()),
+            ..Default::default()
+        },
+        None,
+        10,
+    )
+    .unwrap();
+    assert!(unavailable_full_text.items.is_empty());
+    assert!(unavailable_full_text
+        .limitation_codes
+        .contains(&"replicaMessageQueryUnavailable".to_string()));
     let following =
         search_replica_messages(&replica, &key, &filter, page.next_cursor.as_deref(), 1).unwrap();
     assert!(following.items.is_empty());
@@ -814,6 +892,176 @@ fn malformed_replica_messages_are_omitted_without_stalling_pages_or_ai_queries()
     };
     assert_eq!(page.messages[0].canonical_id, "message-b");
     assert_eq!(page.omitted_message_count, 1);
+}
+
+#[test]
+fn malformed_cached_moments_are_omitted_without_disabling_the_surface() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private-malformed-cached-moment");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive = build_archive(&private, "archive", "account-a", "source-a");
+    add_cached_surfaces_to_archive(&archive);
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+    bootstrap_replica(&archive, &replica, &key).unwrap();
+    let connection = keyed_connection(&replica);
+    connection
+        .execute(
+            "UPDATE cached_surface_state SET coverage_json = ?1",
+            [b"{".as_slice()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let healthy_without_coverage = search_replica_cached_moments(
+        &replica,
+        &key,
+        &ReplicaCachedMomentFilter::default(),
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(healthy_without_coverage.items.len(), 1);
+    assert!(healthy_without_coverage
+        .limitation_codes
+        .contains(&"malformedCachedMomentCoverageOmitted".to_string()));
+    assert!(healthy_without_coverage
+        .limitation_codes
+        .contains(&"cachedMomentCoverageDisagreesWithRecords".to_string()));
+    let coverage_without_cached_metadata = replica_coverage(&replica, &key).unwrap();
+    assert!(coverage_without_cached_metadata.cached_surfaces.is_none());
+    assert!(coverage_without_cached_metadata
+        .limitation_codes
+        .contains(&"malformedCachedMomentCoverageOmitted".to_string()));
+
+    let connection = keyed_connection(&replica);
+    connection
+        .execute(
+            "UPDATE cached_moment SET record_json = ?1",
+            [b"{".as_slice()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let page = search_replica_cached_moments(
+        &replica,
+        &key,
+        &ReplicaCachedMomentFilter::default(),
+        None,
+        10,
+    )
+    .unwrap();
+    assert!(page.items.is_empty());
+    assert_eq!(page.omitted_item_count, 1);
+    assert!(page
+        .limitation_codes
+        .contains(&"malformedCachedMomentOmitted".to_string()));
+}
+
+#[test]
+fn unavailable_cached_surface_is_typed_without_blocking_replica_queries() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private-unavailable-cached-surface");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive = build_archive(&private, "archive", "account-a", "source-a");
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+    bootstrap_replica(&archive, &replica, &key).unwrap();
+
+    let page = search_replica_cached_moments(
+        &replica,
+        &key,
+        &ReplicaCachedMomentFilter::default(),
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(
+        page.availability,
+        greenbubbles_restore::replica::ReplicaCachedSurfaceAvailability::Unavailable
+    );
+    assert!(page.items.is_empty());
+    assert!(page
+        .limitation_codes
+        .contains(&"cachedMomentSurfaceUnavailable".to_string()));
+
+    let messages =
+        search_replica_messages(&replica, &key, &ReplicaMessageFilter::default(), None, 10)
+            .unwrap();
+    assert_eq!(messages.items.len(), 1);
+}
+
+#[test]
+fn serving_control_metadata_corruption_fails_closed() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private-control-metadata");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive = build_archive(&private, "archive", "account-a", "source-a");
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+    bootstrap_replica(&archive, &replica, &key).unwrap();
+    let original_report = fs::read(archive.join("report.json")).unwrap();
+
+    let connection = keyed_connection(&replica);
+    connection
+        .execute(
+            "UPDATE replica_identity SET current_source_fingerprint = ''",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(replica_status(&replica, &key).is_err());
+    assert!(
+        search_replica_messages(&replica, &key, &ReplicaMessageFilter::default(), None, 10,)
+            .is_err()
+    );
+
+    let connection = keyed_connection(&replica);
+    connection
+        .execute(
+            "UPDATE replica_identity SET current_source_fingerprint = 'source-a'",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE coverage_state SET report_json = ?1",
+            [b"{".as_slice()],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(replica_status(&replica, &key).is_err());
+    assert!(replica_restoration_report(&replica, &key).is_err());
+
+    let connection = keyed_connection(&replica);
+    connection
+        .execute(
+            "UPDATE coverage_state SET report_json = ?1",
+            [original_report.as_slice()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE source_checkpoint SET committed_at_unix_nanoseconds = 'invalid'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    assert!(replica_status(&replica, &key).is_err());
+
+    let wrong_key = ReplicaKey::from_bytes(WRONG_KEY_BYTES);
+    assert!(replica_restoration_report(&replica, &wrong_key).is_err());
+    assert!(search_replica_messages(
+        &replica,
+        &wrong_key,
+        &ReplicaMessageFilter::default(),
+        None,
+        10,
+    )
+    .is_err());
 }
 
 #[test]
@@ -1234,7 +1482,6 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     let cli_memory_audit: greenbubbles_restore::ai_memory::AiMemoryAuditReport =
         serde_json::from_slice(&cli_memory_audit.stdout).unwrap();
     assert!(cli_memory_audit.markdown_documents_verified);
-
     let limited_bundle = private.join("ai-context-limited");
     copy_private_bundle(&cli_output, &limited_bundle);
     let messages_path = limited_bundle.join("messages.jsonl");

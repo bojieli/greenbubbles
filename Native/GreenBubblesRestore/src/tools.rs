@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::archive::{
     ensure_private_directory, ensure_private_regular_file, load_conversation_ids, load_report,
+    private_regular_file_exists,
 };
 use crate::{
     ArtifactRole, CanonicalCachedMoment, CanonicalConversation, CanonicalMessage, ConversationKind,
@@ -220,6 +221,10 @@ pub(crate) fn entity_source_database_freshness(
 pub struct ToolConversationList {
     pub destination: ToolDataDestination,
     pub conversations: Vec<ToolConversationView>,
+    #[serde(default)]
+    pub omitted_conversation_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,6 +234,10 @@ pub struct ToolMessageResult {
     pub searched_conversation_count: usize,
     pub messages: Vec<MinimizedMessage>,
     pub restoration_completion: RestorationCompletion,
+    #[serde(default)]
+    pub omitted_message_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -324,7 +333,14 @@ pub fn create_all_conversations_tool_policy_with_cached_moments(
     maximum_message_summary_bytes: usize,
     maximum_draft_bytes: usize,
 ) -> Result<ToolAuthorizationPolicy, RestoreError> {
-    let conversation_scopes = load_conversation_ids(archive_directory)?
+    let report = load_report(archive_directory)?;
+    let conversation_ids = load_conversation_ids(archive_directory, &report.account_id)?;
+    if report.integrity.conversation_count > 0 && conversation_ids.is_empty() {
+        return Err(RestoreError::Integrity(
+            "archive contains no healthy account-bound conversation identities".to_string(),
+        ));
+    }
+    let conversation_scopes = conversation_ids
         .into_iter()
         .map(|conversation_id| (conversation_id, conversation_scope.clone()))
         .collect();
@@ -351,7 +367,7 @@ pub fn create_tool_policy_with_cached_moments(
 ) -> Result<ToolAuthorizationPolicy, RestoreError> {
     validate_tool_scopes(&conversation_scopes, cached_moments_scope.as_ref())?;
     let report = load_report(archive_directory)?;
-    let known = load_conversation_ids(archive_directory)?;
+    let known = load_conversation_ids(archive_directory, &report.account_id)?;
     if let Some(unknown) = conversation_scopes
         .keys()
         .find(|identifier| !known.contains(*identifier))
@@ -433,40 +449,65 @@ impl LocalToolService {
         destination: ToolDataDestination,
     ) -> Result<ToolConversationList, RestoreError> {
         let path = self.archive_directory.join("conversations.ndjson");
-        ensure_private_regular_file(&path)?;
         let mut conversations = Vec::new();
         let mut seen = HashSet::new();
-        for line in BufReader::new(File::open(path)?).lines() {
-            let conversation: CanonicalConversation = serde_json::from_str(&line?)?;
-            if !seen.insert(conversation.conversation_id.clone()) {
-                return Err(RestoreError::Integrity(
-                    "duplicate canonical conversation identity in archive".to_string(),
-                ));
+        let mut omitted_conversation_count = 0_u64;
+        let mut limitation_codes = BTreeSet::new();
+        if !private_regular_file_exists(&path)? {
+            limitation_codes.insert("archiveConversationLedgerUnavailable".to_string());
+        } else {
+            let file = File::open(path)?;
+            for line in BufReader::new(file).lines() {
+                let line = match line {
+                    Ok(line) => line,
+                    Err(_) => {
+                        omitted_conversation_count = omitted_conversation_count.saturating_add(1);
+                        continue;
+                    }
+                };
+                let conversation: CanonicalConversation = match serde_json::from_str(&line) {
+                    Ok(conversation) => conversation,
+                    Err(_) => {
+                        omitted_conversation_count = omitted_conversation_count.saturating_add(1);
+                        continue;
+                    }
+                };
+                if conversation.account_id != self.policy.account_id
+                    || conversation.conversation_id.is_empty()
+                    || !seen.insert(conversation.conversation_id.clone())
+                {
+                    omitted_conversation_count = omitted_conversation_count.saturating_add(1);
+                    continue;
+                }
+                let Some(scope) = self
+                    .policy
+                    .conversation_scopes
+                    .get(&conversation.conversation_id)
+                else {
+                    continue;
+                };
+                if !scope
+                    .capabilities
+                    .contains(&ToolCapability::ListConversations)
+                    || (destination == ToolDataDestination::RemoteModel
+                        && !scope.allow_remote_model)
+                {
+                    continue;
+                }
+                conversations.push(ToolConversationView {
+                    conversation_id: conversation.conversation_id,
+                    kind: conversation.kind,
+                    participant_count: conversation.participant_ids.len(),
+                    entity_decode_state: conversation.entity_decode_state,
+                    capabilities: scope.capabilities.clone(),
+                    message_fields: scope.message_fields.clone(),
+                    not_before_unix: scope.not_before_unix,
+                    not_after_unix: scope.not_after_unix,
+                });
             }
-            let Some(scope) = self
-                .policy
-                .conversation_scopes
-                .get(&conversation.conversation_id)
-            else {
-                continue;
-            };
-            if !scope
-                .capabilities
-                .contains(&ToolCapability::ListConversations)
-                || (destination == ToolDataDestination::RemoteModel && !scope.allow_remote_model)
-            {
-                continue;
-            }
-            conversations.push(ToolConversationView {
-                conversation_id: conversation.conversation_id,
-                kind: conversation.kind,
-                participant_count: conversation.participant_ids.len(),
-                entity_decode_state: conversation.entity_decode_state,
-                capabilities: scope.capabilities.clone(),
-                message_fields: scope.message_fields.clone(),
-                not_before_unix: scope.not_before_unix,
-                not_after_unix: scope.not_after_unix,
-            });
+        }
+        if omitted_conversation_count > 0 {
+            limitation_codes.insert("malformedArchiveConversationOmitted".to_string());
         }
         conversations.sort_by(|left, right| left.conversation_id.cmp(&right.conversation_id));
         self.append_audit(
@@ -481,6 +522,8 @@ impl LocalToolService {
         Ok(ToolConversationList {
             destination,
             conversations,
+            omitted_conversation_count,
+            limitation_codes: limitation_codes.into_iter().collect(),
         })
     }
 
@@ -501,12 +544,30 @@ impl LocalToolService {
             .min(MAX_TOOL_RESULTS);
         let mut recent = VecDeque::with_capacity(limit);
         let mut seen = HashSet::new();
-        for message in self.message_reader()? {
-            let message = message?;
-            if !seen.insert(message.canonical_id.clone()) {
-                return Err(RestoreError::Integrity(
-                    "duplicate canonical message identity in archive".to_string(),
-                ));
+        let mut omitted_message_count = 0_u64;
+        let mut limitation_codes = BTreeSet::new();
+        let message_path = self.archive_directory.join("messages.ndjson");
+        let reader = if private_regular_file_exists(&message_path)? {
+            Some(self.message_reader()?)
+        } else {
+            limitation_codes.insert("archiveMessageLedgerUnavailable".to_string());
+            None
+        };
+        for message in reader.into_iter().flatten() {
+            let message = match message {
+                Ok(message) => message,
+                Err(_) => {
+                    omitted_message_count = omitted_message_count.saturating_add(1);
+                    continue;
+                }
+            };
+            if message.account_id != self.policy.account_id
+                || message.canonical_id.is_empty()
+                || message.conversation_id.is_empty()
+                || !seen.insert(message.canonical_id.clone())
+            {
+                omitted_message_count = omitted_message_count.saturating_add(1);
+                continue;
             }
             if message.conversation_id != conversation_id || !scope.includes_message(&message) {
                 continue;
@@ -520,6 +581,9 @@ impl LocalToolService {
                 &scope.message_fields,
                 &self.preserved_stale_source_set_ids,
             ));
+        }
+        if omitted_message_count > 0 {
+            limitation_codes.insert("malformedArchiveMessageOmitted".to_string());
         }
         let messages = recent.into_iter().collect::<Vec<_>>();
         let released_bytes = released_body_bytes(&messages);
@@ -537,6 +601,8 @@ impl LocalToolService {
             searched_conversation_count: 1,
             messages,
             restoration_completion: self.restoration_completion.clone(),
+            omitted_message_count,
+            limitation_codes: limitation_codes.into_iter().collect(),
         })
     }
 
@@ -603,12 +669,30 @@ impl LocalToolService {
         let query = query.to_lowercase();
         let mut messages = Vec::new();
         let mut seen = HashSet::new();
-        for message in self.message_reader()? {
-            let message = message?;
-            if !seen.insert(message.canonical_id.clone()) {
-                return Err(RestoreError::Integrity(
-                    "duplicate canonical message identity in archive".to_string(),
-                ));
+        let mut omitted_message_count = 0_u64;
+        let mut limitation_codes = BTreeSet::new();
+        let message_path = self.archive_directory.join("messages.ndjson");
+        let reader = if private_regular_file_exists(&message_path)? {
+            Some(self.message_reader()?)
+        } else {
+            limitation_codes.insert("archiveMessageLedgerUnavailable".to_string());
+            None
+        };
+        for message in reader.into_iter().flatten() {
+            let message = match message {
+                Ok(message) => message,
+                Err(_) => {
+                    omitted_message_count = omitted_message_count.saturating_add(1);
+                    continue;
+                }
+            };
+            if message.account_id != self.policy.account_id
+                || message.canonical_id.is_empty()
+                || message.conversation_id.is_empty()
+                || !seen.insert(message.canonical_id.clone())
+            {
+                omitted_message_count = omitted_message_count.saturating_add(1);
+                continue;
             }
             if !searchable.contains(&message.conversation_id) {
                 continue;
@@ -638,6 +722,9 @@ impl LocalToolService {
                 }
             }
         }
+        if omitted_message_count > 0 {
+            limitation_codes.insert("malformedArchiveMessageOmitted".to_string());
+        }
         let released_bytes = released_body_bytes(&messages);
         self.append_audit(
             ToolOperation::SearchMessages,
@@ -653,6 +740,8 @@ impl LocalToolService {
             searched_conversation_count: searchable.len(),
             messages,
             restoration_completion: self.restoration_completion.clone(),
+            omitted_message_count,
+            limitation_codes: limitation_codes.into_iter().collect(),
         })
     }
 

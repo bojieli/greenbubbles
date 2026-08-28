@@ -734,6 +734,7 @@ pub fn export_ai_context(
             }
             _ => {
                 artifact_error_count = artifact_error_count.saturating_add(1);
+                limitation_codes.insert("artifactResolutionUnavailable".to_string());
                 let error = response.error.unwrap_or(ConnectorErrorBody {
                     code: ConnectorErrorCode::IntegrityFailure,
                     message: "artifact resolution returned no result".to_string(),
@@ -1226,7 +1227,9 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
         omitted_message_count: manifest.omitted_message_count,
         content_complete: manifest.omitted_conversation_count == 0
             && manifest.omitted_message_count == 0
-            && artifact_error_count == 0,
+            && artifact_error_count == 0
+            && manifest.limitation_codes.is_empty()
+            && manifest.context.source_coverage_complete,
     })
 }
 
@@ -1636,7 +1639,7 @@ fn context_health(status: &ReplicaStatus) -> Result<AiContextHealth, RestoreErro
     let unavailable_artifacts = status.unavailable_artifact_count.unwrap_or(0);
     let artifact_decode_gaps = status.artifact_decode_gap_count.unwrap_or(0);
     let entity_gaps = status.entity_decode_gap_count.unwrap_or(0);
-    let mut limitations = Vec::new();
+    let mut limitations = status.limitation_codes.clone();
     if unavailable > 0 {
         limitations.push("unavailableDatabases".to_string());
     }
