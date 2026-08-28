@@ -11,19 +11,21 @@ use greenbubbles_restore::follow::{
     ReplicaFollowerHealth,
 };
 use greenbubbles_restore::replica::{
-    audit_replica, audit_replica_backup, bootstrap_replica, get_replica_changes,
-    get_replica_message, list_replica_conversations, prepare_replica_recovery,
+    audit_replica, audit_replica_backup, bootstrap_replica, bootstrap_replica_with_progress,
+    get_replica_changes, get_replica_message, list_replica_conversations, prepare_replica_recovery,
     replica_conversation_references_artifact_in_range, replica_coverage, replica_status,
-    search_replica_messages, synchronize_replica, ReplicaMessageFilter,
+    search_replica_messages, synchronize_replica, synchronize_replica_with_progress,
+    ReplicaMessageFilter,
 };
 use greenbubbles_restore::tools::{
-    create_tool_policy, ConversationToolScope, ToolCapability, ToolMessageField,
-    ToolSourceDatabaseFreshness,
+    create_all_conversations_tool_policy_with_cached_moments, create_tool_policy,
+    ConversationToolScope, ToolCapability, ToolMessageField, ToolSourceDatabaseFreshness,
 };
 use greenbubbles_restore::{
     ai_context::{
         audit_ai_context, export_ai_context, query_ai_context, AiQueryRequest, AiQueryResult,
     },
+    ai_memory::{audit_ai_memory, export_ai_memory, AiMemoryExportOptions},
     connector::{
         audit_connector_log, ConnectorDestination, ConnectorErrorCode, ConnectorOperation,
         ConnectorRequest, ConnectorResult, ConnectorService, CONNECTOR_API_VERSION,
@@ -37,9 +39,10 @@ use greenbubbles_restore::{
     CanonicalConversation, CanonicalMessage, CanonicalParticipant, ClientBuildCompatibilityState,
     ConversationKind, DirectionEvidence, EntityDecodeState, LocalProfileState,
     MessageArtifactReference, MessageDirection, MessageOrderingBasis, NoProgress, ProgressEvent,
-    ProgressObserver, ProgressState, RawSQLiteValue, ReplicaKey, RestorationCompletion,
-    RestorationCoverage, RestorationIntegrity, RestorationReport, SemanticDecodeState,
-    SnapshotAcquisitionEvidence, SnapshotAcquisitionMode, TypedPayload,
+    ProgressObserver, ProgressPhase, ProgressState, RawSQLiteValue, ReplicaKey,
+    RestorationCompletion, RestorationCoverage, RestorationIntegrity, RestorationReport,
+    RestorationStorageEvidence, SemanticDecodeState, SnapshotAcquisitionEvidence,
+    SnapshotAcquisitionMode, TypedPayload,
 };
 use rusqlite::Connection;
 use serde::Serialize;
@@ -541,6 +544,330 @@ impl ProgressObserver for CapturedProgress {
 }
 
 #[test]
+fn replica_application_progress_is_exact_monotonic_and_idempotent() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private-replica-progress");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive = build_archive(&private, "archive", "account-a", "source-a");
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+
+    let progress = CapturedProgress::default();
+    let report = bootstrap_replica_with_progress(&archive, &replica, &key, &progress).unwrap();
+    assert_eq!(report.conversation_count, 1);
+    assert_eq!(report.participant_count, 1);
+    assert_eq!(report.message_count, 1);
+    assert_eq!(report.artifact_count, 1);
+
+    let events = progress.0.lock().unwrap();
+    assert!(!events.is_empty());
+    assert!(events
+        .iter()
+        .all(|event| event.format_version == 3 && event.privacy_safe));
+    let application = events
+        .iter()
+        .filter(|event| event.phase == ProgressPhase::ReplicaApplication)
+        .collect::<Vec<_>>();
+    assert!(application
+        .windows(2)
+        .all(|pair| pair[0].phase_completed <= pair[1].phase_completed));
+    let completed_ledgers = application
+        .iter()
+        .filter(|event| {
+            event.state == ProgressState::Completed && event.operation.starts_with("applyReplica")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(completed_ledgers.len(), 5);
+    assert!(completed_ledgers.iter().all(|event| {
+        event.completed == event.total
+            && event.file_completed_byte_count == event.file_byte_count
+            && event.archive_byte_count.is_some_and(|bytes| bytes > 0)
+            && event.replica_file_byte_count.is_some_and(|bytes| bytes > 0)
+    }));
+    let final_event = application.last().unwrap();
+    assert_eq!(final_event.operation, "checkpointEncryptedReplica");
+    assert_eq!(final_event.state, ProgressState::Completed);
+    assert_eq!(final_event.phase_completed, final_event.phase_total);
+    assert_eq!(final_event.restored_record_count, Some(4));
+    let encoded = serde_json::to_string(&application).unwrap();
+    assert!(encoded.contains("\"formatVersion\":3"));
+    assert!(encoded.contains("\"privacySafe\":true"));
+    assert!(!encoded.contains(PRIVATE_TEXT));
+    assert!(!encoded.contains("account-a"));
+    drop(events);
+
+    let repeated_progress = CapturedProgress::default();
+    let repeated =
+        bootstrap_replica_with_progress(&archive, &replica, &key, &repeated_progress).unwrap();
+    assert!(repeated.idempotent);
+    let repeated_events = repeated_progress.0.lock().unwrap();
+    let repeated_application = repeated_events
+        .iter()
+        .filter(|event| event.phase == ProgressPhase::ReplicaApplication)
+        .collect::<Vec<_>>();
+    assert_eq!(repeated_application.len(), 1);
+    assert_eq!(repeated_application[0].operation, "reuseReplicaCheckpoint");
+    assert_eq!(
+        repeated_application[0].phase_completed,
+        repeated_application[0].phase_total
+    );
+    drop(repeated_events);
+
+    let next = clone_archive(&archive, &private, "archive-next", "source-b");
+    let sync_progress = CapturedProgress::default();
+    let synchronized =
+        synchronize_replica_with_progress(&next, &replica, &key, &sync_progress).unwrap();
+    assert!(!synchronized.idempotent);
+    let sync_events = sync_progress.0.lock().unwrap();
+    let sync_application = sync_events
+        .iter()
+        .filter(|event| event.phase == ProgressPhase::ReplicaApplication)
+        .collect::<Vec<_>>();
+    assert!(sync_application
+        .windows(2)
+        .all(|pair| pair[0].phase_completed <= pair[1].phase_completed));
+    assert_eq!(
+        sync_application.last().unwrap().operation,
+        "checkpointEncryptedReplica"
+    );
+    assert_eq!(
+        sync_application.last().unwrap().phase_completed,
+        sync_application.last().unwrap().phase_total
+    );
+}
+
+#[test]
+fn creates_an_explicit_local_scope_for_every_archive_conversation() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private-all-conversations-policy");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive = build_archive(&private, "archive", "account-a", "source-a");
+    let policy_path = private.join("all-conversations-policy.json");
+    let capabilities = BTreeSet::from([
+        ToolCapability::ListConversations,
+        ToolCapability::ReadRecentMessages,
+        ToolCapability::SearchMessages,
+    ]);
+    let message_fields = BTreeSet::from([
+        ToolMessageField::Sender,
+        ToolMessageField::CreatedAt,
+        ToolMessageField::Direction,
+        ToolMessageField::MessageType,
+        ToolMessageField::Content,
+        ToolMessageField::Attachments,
+        ToolMessageField::Relationships,
+    ]);
+    let policy = create_all_conversations_tool_policy_with_cached_moments(
+        &archive,
+        &policy_path,
+        ConversationToolScope {
+            capabilities: capabilities.clone(),
+            message_fields: message_fields.clone(),
+            not_before_unix: None,
+            not_after_unix: None,
+            allow_remote_model: false,
+        },
+        None,
+        100,
+        4_096,
+        16_384,
+    )
+    .unwrap();
+    assert_eq!(policy.conversation_scopes.len(), 1);
+    let scope = &policy.conversation_scopes["conversation-a"];
+    assert_eq!(scope.capabilities, capabilities);
+    assert_eq!(scope.message_fields, message_fields);
+    assert!(!scope.allow_remote_model);
+    assert!(!scope.capabilities.contains(&ToolCapability::CreateDraft));
+    assert_eq!(
+        fs::metadata(policy_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    let cli_policy_path = private.join("all-conversations-cli-policy.json");
+    let cli = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .args([
+            "tool-policy",
+            archive.to_str().unwrap(),
+            cli_policy_path.to_str().unwrap(),
+            "--all-conversations",
+            "--capabilities",
+            "list,read,search",
+            "--fields",
+            "sender,created-at,direction,type,content,attachments,relationships",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        cli.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    let cli_policy: greenbubbles_restore::tools::ToolAuthorizationPolicy =
+        serde_json::from_slice(&cli.stdout).unwrap();
+    assert_eq!(cli_policy.conversation_scopes.len(), 1);
+    assert!(!cli_policy.conversation_scopes["conversation-a"].allow_remote_model);
+
+    let rejected_path = private.join("mixed-policy.json");
+    let rejected = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .args([
+            "tool-policy",
+            archive.to_str().unwrap(),
+            rejected_path.to_str().unwrap(),
+            "conversation-a",
+            "--all-conversations",
+            "--capabilities",
+            "list",
+            "--fields",
+            "sender",
+        ])
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("mutually exclusive"));
+    assert!(!rejected_path.exists());
+}
+
+#[test]
+fn failed_replica_storage_preflight_removes_a_new_namespace() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private-replica-preflight");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive = build_archive(&private, "archive", "account-a", "source-a");
+    let report_path = archive.join("report.json");
+    let mut report: RestorationReport =
+        serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    report.storage = Some(RestorationStorageEvidence {
+        format_version: 1,
+        actual_archive_byte_count: u64::MAX,
+        ..Default::default()
+    });
+    overwrite_json(&report_path, &report);
+
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+    let progress = CapturedProgress::default();
+    let error = bootstrap_replica_with_progress(&archive, &replica, &key, &progress).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("insufficient free space for encrypted replica application"));
+    assert!(!replica.exists());
+    assert!(!private.join("replica.db-wal").exists());
+    assert!(!private.join("replica.db-shm").exists());
+    let events = progress.0.lock().unwrap();
+    assert!(events.iter().any(|event| {
+        event.phase == ProgressPhase::ReplicaApplication
+            && event.operation == "preflightReplicaStorage"
+            && event.state == ProgressState::Planned
+            && event.available_free_byte_count < event.required_free_byte_count
+    }));
+}
+
+#[test]
+fn malformed_replica_messages_are_omitted_without_stalling_pages_or_ai_queries() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private-malformed-message");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive = build_archive(&private, "archive", "account-a", "source-a");
+    let messages_path = archive.join("messages.ndjson");
+    let mut messages = read_ndjson::<CanonicalMessage>(&messages_path);
+    let mut healthy = messages[0].clone();
+    healthy.canonical_id = "message-b".to_string();
+    healthy.created_at_unix = Some(1_700_000_001);
+    healthy.conversation_ordinal = 1;
+    messages.push(healthy);
+    overwrite_ndjson(&messages_path, &messages);
+    let report_path = archive.join("report.json");
+    let mut report: RestorationReport =
+        serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    report.integrity.source_row_count = 2;
+    report.integrity.restored_row_count = 2;
+    report.completion = RestorationCompletion::evaluate(&report.integrity);
+    overwrite_json(&report_path, &report);
+
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+    bootstrap_replica(&archive, &replica, &key).unwrap();
+    let connection = keyed_connection(&replica);
+    connection
+        .execute(
+            "UPDATE message SET record_json = ?1 WHERE canonical_id = 'message-a'",
+            [b"{".as_slice()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let filter = ReplicaMessageFilter {
+        conversation_id: Some("conversation-a".to_string()),
+        ..Default::default()
+    };
+    let page = search_replica_messages(&replica, &key, &filter, None, 1).unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].canonical_id, "message-b");
+    assert_eq!(page.omitted_item_count, 1);
+    assert!(page
+        .limitation_codes
+        .contains(&"malformedReplicaMessageOmitted".to_string()));
+    let following =
+        search_replica_messages(&replica, &key, &filter, page.next_cursor.as_deref(), 1).unwrap();
+    assert!(following.items.is_empty());
+
+    let policy = private.join("policy.json");
+    create_tool_policy(
+        &archive,
+        &policy,
+        BTreeMap::from([(
+            "conversation-a".to_string(),
+            ConversationToolScope {
+                capabilities: BTreeSet::from([
+                    ToolCapability::ListConversations,
+                    ToolCapability::ReadRecentMessages,
+                ]),
+                message_fields: BTreeSet::from([
+                    ToolMessageField::CreatedAt,
+                    ToolMessageField::Content,
+                ]),
+                not_before_unix: None,
+                not_after_unix: None,
+                allow_remote_model: false,
+            },
+        )]),
+        100,
+        4_096,
+        4_096,
+    )
+    .unwrap();
+    let response = query_ai_context(
+        &replica,
+        &key,
+        &policy,
+        &private.join("audit.ndjson"),
+        AiQueryRequest {
+            format_version: 1,
+            request_id: "malformed-message-query".to_string(),
+            requester_id: "synthetic-agent".to_string(),
+            destination: ConnectorDestination::Local,
+            operation: ConnectorOperation::GetMessages {
+                conversation_id: "conversation-a".to_string(),
+                cursor: None,
+                limit: Some(1),
+            },
+        },
+    )
+    .unwrap();
+    assert!(response.ok);
+    let AiQueryResult::Messages(page) = response.result.unwrap() else {
+        panic!("unexpected AI query result")
+    };
+    assert_eq!(page.messages[0].canonical_id, "message-b");
+    assert_eq!(page.omitted_message_count, 1);
+}
+
+#[test]
 fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     let fixture = tempfile::tempdir().unwrap();
     let private = fixture.path().join("private");
@@ -866,6 +1193,138 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
         serde_json::from_slice(&cli_audit.stdout).unwrap();
     assert!(cli_audit.references_verified);
 
+    let memory_output = private.join("ai-memory");
+    let memory_manifest = export_ai_memory(
+        &cli_output,
+        &memory_output,
+        AiMemoryExportOptions {
+            maximum_messages_per_chunk: 1,
+            maximum_text_bytes_per_chunk: 4_096,
+        },
+    )
+    .unwrap();
+    assert_eq!(memory_manifest.projected_message_count, 1);
+    assert_eq!(memory_manifest.memory_chunk_count, 1);
+    assert!(memory_manifest.qmd_compatible);
+    assert!(memory_manifest.mem0_message_batch_compatible);
+    assert_eq!(file_mode(&memory_output), 0o700);
+    for name in [
+        "manifest.json",
+        "memories.jsonl",
+        "documents.jsonl",
+        "README.md",
+    ] {
+        assert_eq!(file_mode(&memory_output.join(name)), 0o600, "{name}");
+    }
+    let memory: serde_json::Value = serde_json::from_str(
+        fs::read_to_string(memory_output.join("memories.jsonl"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(memory["messages"][0]["role"], "user");
+    assert!(memory["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains(PRIVATE_TEXT));
+    assert_eq!(memory["metadata"]["contentTrust"], "untrustedSourceData");
+    assert!(memory["sourceMessages"][0]["citation"]
+        .as_str()
+        .unwrap()
+        .starts_with("greenbubbles:message:"));
+    let document_inventory: serde_json::Value = serde_json::from_str(
+        fs::read_to_string(memory_output.join("documents.jsonl"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    let document_path = memory_output.join(document_inventory["relativePath"].as_str().unwrap());
+    assert_eq!(file_mode(&document_path), 0o600);
+    let markdown = fs::read_to_string(document_path).unwrap();
+    assert!(markdown.contains("untrusted source data"));
+    assert!(markdown.contains(PRIVATE_TEXT));
+    assert!(markdown.contains("greenbubbles:message:message-a"));
+    let memory_audit = audit_ai_memory(&memory_output).unwrap();
+    assert!(memory_audit.file_digests_verified);
+    assert!(memory_audit.citations_verified);
+    assert_eq!(memory_audit.message_count, 1);
+
+    let cli_memory_output = private.join("ai-memory-cli");
+    let cli_memory = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .args([
+            "ai-memory-export",
+            cli_output.to_str().unwrap(),
+            cli_memory_output.to_str().unwrap(),
+            "--max-messages-per-chunk",
+            "1",
+            "--max-text-bytes-per-chunk",
+            "4096",
+        ])
+        .output()
+        .unwrap();
+    assert!(cli_memory.status.success(), "{:?}", cli_memory.stderr);
+    let cli_memory_manifest: greenbubbles_restore::ai_memory::AiMemoryManifest =
+        serde_json::from_slice(&cli_memory.stdout).unwrap();
+    assert_eq!(
+        cli_memory_manifest.projection_id,
+        memory_manifest.projection_id
+    );
+    let cli_memory_audit = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .args(["audit-ai-memory", cli_memory_output.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        cli_memory_audit.status.success(),
+        "{:?}",
+        cli_memory_audit.stderr
+    );
+    let cli_memory_audit: greenbubbles_restore::ai_memory::AiMemoryAuditReport =
+        serde_json::from_slice(&cli_memory_audit.stdout).unwrap();
+    assert!(cli_memory_audit.markdown_documents_verified);
+
+    let limited_bundle = private.join("ai-context-limited");
+    copy_private_bundle(&cli_output, &limited_bundle);
+    let messages_path = limited_bundle.join("messages.jsonl");
+    fs::write(&messages_path, b"{not-json}\n").unwrap();
+    fs::set_permissions(&messages_path, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut limited_manifest: greenbubbles_restore::ai_context::AiContextManifest =
+        serde_json::from_slice(&fs::read(limited_bundle.join("manifest.json")).unwrap()).unwrap();
+    let message_file = limited_manifest
+        .files
+        .iter_mut()
+        .find(|file| file.role == "messages")
+        .unwrap();
+    message_file.byte_count = b"{not-json}\n".len() as u64;
+    message_file.record_count = 1;
+    message_file.sha256 = hex::encode(Sha256::digest(b"{not-json}\n"));
+    fs::write(
+        limited_bundle.join("manifest.json"),
+        serde_json::to_vec_pretty(&limited_manifest).unwrap(),
+    )
+    .unwrap();
+    fs::set_permissions(
+        limited_bundle.join("manifest.json"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let limited_memory_output = private.join("ai-memory-limited");
+    let limited_memory = export_ai_memory(
+        &limited_bundle,
+        &limited_memory_output,
+        AiMemoryExportOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(limited_memory.projected_message_count, 0);
+    assert_eq!(limited_memory.projection_omitted_message_count, 1);
+    assert!(limited_memory
+        .limitation_codes
+        .contains(&"malformedContextMessageOmitted".to_string()));
+    assert!(!limited_memory.content_complete);
+
     let mut tampered = OpenOptions::new()
         .append(true)
         .open(output.join("messages.jsonl"))
@@ -1107,6 +1566,13 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
     added.content_base64 = Some("c2Vjb25kIHJldGFpbmVkIG1lc3NhZ2U=".to_string());
     messages.push(added);
     overwrite_ndjson(&archive_b.join("messages.ndjson"), &messages);
+    let report_path = archive_b.join("report.json");
+    let mut report: RestorationReport =
+        serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    report.integrity.source_row_count = 2;
+    report.integrity.restored_row_count = 2;
+    report.completion = RestorationCompletion::evaluate(&report.integrity);
+    overwrite_json(&report_path, &report);
     let synchronized = synchronize_replica(&archive_b, &replica, &key).unwrap();
     assert_eq!(synchronized.previous_source_fingerprint, "source-a");
     assert_eq!(synchronized.current_source_fingerprint, "source-sync-b");
@@ -1289,6 +1755,13 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
     artifacts[0].decoded_format = None;
     artifacts[0].decode_state = ArtifactDecodeState::NotRequired;
     overwrite_ndjson(&archive_d.join("artifacts.ndjson"), &artifacts);
+    let report_path = archive_d.join("report.json");
+    let mut report: RestorationReport =
+        serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    report.integrity.source_row_count = 1;
+    report.integrity.restored_row_count = 1;
+    report.completion = RestorationCompletion::evaluate(&report.integrity);
+    overwrite_json(&report_path, &report);
     let deletion = synchronize_replica(&archive_d, &replica, &key).unwrap();
     assert_eq!(deletion.added_count, 0);
     assert_eq!(deletion.changed_count, 1);
@@ -2624,6 +3097,17 @@ fn clone_archive(source: &Path, parent: &Path, name: &str, fingerprint: &str) ->
     )
     .unwrap();
     destination
+}
+
+fn copy_private_bundle(source: &Path, destination: &Path) {
+    fs::create_dir(destination).unwrap();
+    fs::set_permissions(destination, fs::Permissions::from_mode(0o700)).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let target = destination.join(entry.file_name());
+        fs::copy(entry.path(), &target).unwrap();
+        fs::set_permissions(target, fs::Permissions::from_mode(0o600)).unwrap();
+    }
 }
 
 fn read_ndjson<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
