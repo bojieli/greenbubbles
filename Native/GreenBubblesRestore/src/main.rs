@@ -5,7 +5,7 @@ use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -1680,9 +1680,9 @@ fn require_progress_file_outside(
     let Some(progress_file) = option_path(arguments, "--progress-file")? else {
         return Ok(());
     };
-    let progress_file = absolute_lexical_path(&progress_file)?;
+    let progress_file = resolved_path_for_comparison(&progress_file)?;
     for (root, description) in protected_roots {
-        let root = absolute_lexical_path(root)?;
+        let root = resolved_path_for_comparison(root)?;
         if progress_file == root || progress_file.starts_with(&root) {
             return Err(format!("--progress-file must be outside the {description}").into());
         }
@@ -1690,27 +1690,22 @@ fn require_progress_file_outside(
     Ok(())
 }
 
-fn absolute_lexical_path(path: &Path) -> io::Result<PathBuf> {
+fn resolved_path_for_comparison(path: &Path) -> io::Result<PathBuf> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
         env::current_dir()?.join(path)
     };
-    let mut normalized = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if normalized.parent().is_some() {
-                    normalized.pop();
-                }
-            }
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
-                normalized.push(component.as_os_str());
-            }
-        }
+    if std::fs::symlink_metadata(&absolute).is_ok() {
+        return std::fs::canonicalize(absolute);
     }
-    Ok(normalized)
+    let parent = absolute.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory")
+    })?;
+    let file_name = absolute.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "path has no final component")
+    })?;
+    Ok(std::fs::canonicalize(parent)?.join(file_name))
 }
 
 fn option_string(arguments: &[String], option: &str) -> Result<Option<String>, String> {

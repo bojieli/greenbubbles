@@ -1488,6 +1488,20 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
         .unwrap();
     assert!(!rejected_progress.status.success());
     assert!(!forbidden_progress.exists());
+    let progress_alias = private.join("progress-alias");
+    std::os::unix::fs::symlink(&private, &progress_alias).unwrap();
+    let aliased_progress = progress_alias
+        .join("ai-context-cli")
+        .join("must-not-modify-bundle-through-alias.ndjson");
+    let rejected_alias = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .args(["audit-ai-context", cli_output.to_str().unwrap()])
+        .args(["--progress-file", aliased_progress.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!rejected_alias.status.success());
+    assert!(!cli_output
+        .join("must-not-modify-bundle-through-alias.ndjson")
+        .exists());
     let cli_context_audit_progress = private.join("ai-context-audit-progress.ndjson");
     let cli_audit = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
         .args(["audit-ai-context", cli_output.to_str().unwrap()])
