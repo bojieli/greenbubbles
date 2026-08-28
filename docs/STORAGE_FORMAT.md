@@ -192,7 +192,10 @@ separate owner-only `--summary-file`. Progress contains no keys or row values,
 but database logical paths and schema metadata still make it private evidence.
 The human reporter throttles repetitive per-table events to periodic
 cumulative updates and always prints phase/database milestones; NDJSON and the
-progress file retain the full event stream. Offline publication forwards the
+progress file retain the full event stream. The file is flushed after every
+event, synchronized at least every five seconds and at workflow completion,
+and a write/sync failure is reported once and latched so it cannot flood stderr
+or stall the underlying restoration. Offline publication forwards the
 same ledger byte/record events during its final independent archive audit, so a
 successful restore cannot disappear into an unreported validation pass.
 

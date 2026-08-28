@@ -6,7 +6,10 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
 use std::time::{Duration, Instant};
 
 use greenbubbles_restore::{
@@ -1274,8 +1277,14 @@ impl ProgressWorkflow {
 struct ProgressReporter {
     output: ProgressOutput,
     workflow_phases: Vec<ProgressPhase>,
-    progress_file: Option<Mutex<BufWriter<File>>>,
+    progress_file: Option<Mutex<ProgressFileState>>,
+    progress_file_failed: AtomicBool,
     human_state: Mutex<HumanProgressState>,
+}
+
+struct ProgressFileState {
+    writer: BufWriter<File>,
+    last_synchronized_at: Instant,
 }
 
 #[derive(Default)]
@@ -1343,7 +1352,12 @@ impl ProgressReporter {
         let progress_file = option_path(arguments, "--progress-file")?
             .map(|path| {
                 owner_only_create_new_writer(&path)
-                    .map(Mutex::new)
+                    .map(|writer| {
+                        Mutex::new(ProgressFileState {
+                            writer,
+                            last_synchronized_at: Instant::now(),
+                        })
+                    })
                     .map_err(|error| format!("could not create private progress file: {error}"))
             })
             .transpose()?;
@@ -1351,6 +1365,7 @@ impl ProgressReporter {
             output,
             workflow_phases: workflow.phases(validates_exported_keys),
             progress_file,
+            progress_file_failed: AtomicBool::new(false),
             human_state: Mutex::new(HumanProgressState::default()),
         })
     }
@@ -1360,19 +1375,40 @@ impl ProgressObserver for ProgressReporter {
     fn observe(&self, mut event: ProgressEvent) {
         event.attach_workflow(&self.workflow_phases);
         if let Some(progress_file) = &self.progress_file {
+            if self.progress_file_failed.load(Ordering::Relaxed) {
+                return self.emit_display(event);
+            }
             let write_result = (|| -> Result<(), Box<dyn std::error::Error>> {
-                let mut writer = progress_file
+                let mut state = progress_file
                     .lock()
                     .map_err(|_| "private progress file lock was poisoned")?;
-                serde_json::to_writer(&mut *writer, &event)?;
-                writer.write_all(b"\n")?;
-                writer.flush()?;
+                serde_json::to_writer(&mut state.writer, &event)?;
+                state.writer.write_all(b"\n")?;
+                state.writer.flush()?;
+                let now = Instant::now();
+                let workflow_completed = event.workflow_completed.is_some()
+                    && event.workflow_completed == event.workflow_total;
+                if workflow_completed
+                    || now.saturating_duration_since(state.last_synchronized_at)
+                        >= Duration::from_secs(5)
+                {
+                    state.writer.get_ref().sync_data()?;
+                    state.last_synchronized_at = now;
+                }
                 Ok(())
             })();
             if let Err(error) = write_result {
-                eprintln!("error: could not append private progress event: {error}");
+                if !self.progress_file_failed.swap(true, Ordering::Relaxed) {
+                    eprintln!("error: could not append private progress event: {error}");
+                }
             }
         }
+        self.emit_display(event);
+    }
+}
+
+impl ProgressReporter {
+    fn emit_display(&self, event: ProgressEvent) {
         match self.output {
             ProgressOutput::Quiet => {}
             ProgressOutput::Json => {
