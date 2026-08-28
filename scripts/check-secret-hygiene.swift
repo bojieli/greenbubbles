@@ -40,8 +40,8 @@ func runGit(_ arguments: [String]) throws -> String {
   process.standardOutput = output
   process.standardError = output
   try process.run()
-  process.waitUntilExit()
   let data = output.fileHandleForReading.readDataToEndOfFile()
+  process.waitUntilExit()
   guard process.terminationReason == .exit, process.terminationStatus == 0 else {
     throw HygieneError.gitFailed(String(decoding: data, as: UTF8.self))
   }
@@ -64,8 +64,8 @@ func stagedContent(_ path: String) throws -> String? {
   process.arguments = ["-C", repositoryRoot.path, "show", ":\(path)"]
   process.standardOutput = output
   try process.run()
-  process.waitUntilExit()
   let data = output.fileHandleForReading.readDataToEndOfFile()
+  process.waitUntilExit()
   guard process.terminationReason == .exit, process.terminationStatus == 0 else {
     return nil
   }
