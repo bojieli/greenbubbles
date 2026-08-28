@@ -589,44 +589,45 @@ inconsistent storage equations or a retained ordering spool.
 
 The completed privacy-safe aggregate establishes that the selected corpus
 contains legitimate structured data rather than empty or nonsensical schemas.
-GreenBubbles authenticated 25 of 26 databases, classified all 6,542 tables and
-9,529,301 observed table rows as 6,291 message tables or 251 known auxiliary
+GreenBubbles authenticated 25 of 26 databases, classified all 6,543 tables and
+9,537,192 observed table rows as 6,292 message tables or 251 known auxiliary
 tables, and found zero generic `other` tables or unhandled message candidates.
-It restored 1,854,110/1,854,110 messages plus 23,589 cached Moments and 45,601
-interactions (1,923,300 restored source records) with zero rejected rows,
-duplicate canonical identities, unknown payloads, or cached-surface semantic
-gaps. The independent seven-ledger audit reproduced every count. The archive
-contains 4,581 conversations, 42,596 participants, and 235,108 explicitly
+It restored 1,855,548/1,855,548 messages plus 23,589 cached Moments and 45,601
+interactions (1,924,738 restored source records) with zero rejected rows,
+duplicate canonical identities, or unknown payloads. The independent
+seven-ledger audit reproduced every count. The archive contains 4,583
+conversations, 42,598 participants, and 235,277 explicitly
 deferred artifact references.
 
 The only message semantic gaps are two subtype `49:19` values that begin with
 closing XML fragments and contain no opening `<msg>` or `<appmsg>` structure;
 GreenBubbles retains the raw values and does not invent missing XML. Support
 for adjacent `voipinvitemsg`, optional `voipextinfo`, and `voiplocalinfo` roots
-closed 207 previously observed type-50 gaps. The aggregate also exposed a
+closed 207 previously observed type-50 gaps. A prior aggregate also exposed a
 quote-link adapter error: it searched compressed source columns after typed
-decoding. Across all 193,503 relationship references, only 1 identifier was
-already present; the privacy-safe profiler proved that 192,991 are recoverable
-from source-preserving decoded XML, 511 are genuinely absent from that XML, and
-0 lack decoded-XML evidence. The importer now extracts identifiers from that
-already decoded XML while keeping original-column provenance unchanged.
+decoding. Across that earlier set's 193,503 relationship references, only 1
+identifier was already present; the privacy-safe profiler proved that 192,991
+are recoverable from source-preserving decoded XML, 511 are genuinely absent
+from that XML, and 0 lack decoded-XML evidence. The importer now extracts
+identifiers from that already decoded XML while keeping original-column
+provenance unchanged.
 
 This evidence still does not check the three Phase 1 real-source items. The
-aggregate is a diagnostic subset, the run is not disposable-scenario
+aggregate has `partialDatabaseCoverage`, the run is not disposable-scenario
 synchronization evidence, and media was intentionally deferred. The observed
-signed 4.1.13 build belongs to the supported passive-restoration family, and
-one unavailable database no longer blocks healthy restoration or replica
-synchronization. Those improvements permit partial publication but do not turn
-the diagnostic archive into production input or establish full-restoration,
-active-read, or action evidence.
+signed 4.1.13 build belongs to the supported signed 4.1-and-later passive-
+restoration family, and one unavailable database no longer blocks healthy
+restoration or replica synchronization. Those improvements permit partial
+publication but do not establish full-restoration, active-read, or action
+evidence.
 
 Snapshot format 4 now integrity-binds the selected account during export, and
 restoration format 6 consumes that binding without an `--account-root`
-argument. A corrected account-bound real-corpus rerun and its independent audit
-remain pending; no account-bound direction counts are treated as evidence until
-that run emits its create-new privacy-safe summary successfully. Direct peers,
-contact names, message frequency, conversation shape, and group ownership are
-never self heuristics.
+argument. The corrected account-bound selected-set rerun and its independent
+archive audit completed with the aggregate counts above. Missing-database,
+media, disposable-scenario, and direction-completeness gates remain explicit;
+direct peers, contact names, message frequency, conversation shape, and group
+ownership are never self heuristics.
 
 ### 1E. Incoming event reconciler
 

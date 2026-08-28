@@ -383,23 +383,22 @@ or silently complete.
 
 The completed owner-local aggregate validation of this workflow authenticated
 25 of 26 databases and explicitly retained the one unavailable database. Across
-the selected set, GreenBubbles classified all 6,542 tables and 9,529,301
-observed rows as 6,291 message tables or 251 known auxiliary tables, with zero
+the selected set, GreenBubbles classified all 6,543 tables and 9,537,192
+observed rows as 6,292 message tables or 251 known auxiliary tables, with zero
 generic or unhandled candidates. It restored and independently audited
-1,854,110 messages plus 69,190 cached-SNS records (1,923,300 source records)
-with zero rejected rows, duplicate canonical identities, unknown payloads, or
-cached-surface semantic gaps. Two malformed subtype `49:19` values remain raw-
-retained semantic gaps. A follow-up GreenBubbles payload audit classified all
-193,503 relationship references: 1 identifier was already present, 192,991 are
-recoverable from source-preserving decoded XML, 511 are genuinely absent from
-that XML, and 0 lack decoded-XML evidence. This is diagnostic evidence, not a
-production-ready archive because it was intentionally created as a
-`diagnosticSubset`, media was deferred, and it predates the account-bound
-direction correction. A corrected format-4/account-bound rerun must complete
-its independent audit before its direction counts become evidence. The
-observed signed 4.1.13 client is inside the supported passive-restoration
-family; the unavailable icon database is explicit partial coverage rather than
-a pipeline-wide failure.
+1,855,548 messages plus 69,190 cached-SNS records (1,924,738 source records)
+with zero rejected rows, duplicate canonical identities, or unknown payloads.
+It contains 4,583 conversations, 42,598 participants, and 235,277 deferred
+artifact references; two malformed subtype `49:19` values remain raw-retained
+semantic gaps. A prior GreenBubbles payload diagnostic on the earlier selected
+set classified 193,503 relationship references: 1 identifier was already
+present, 192,991 are recoverable from source-preserving decoded XML, 511 are
+genuinely absent from that XML, and 0 lack decoded-XML evidence. The current
+format-6 archive is account-bound and independently audited, but remains
+non-disposable, media-deferred, `partialDatabaseCoverage` evidence rather than
+authoritative full-corpus proof. The observed signed 4.1.13 client is one member
+of the supported signed 4.1-and-later passive-restoration family; the unavailable
+icon database is explicit partial coverage rather than a pipeline-wide failure.
 
 `preflight` verifies every copied database/WAL/SHM digest and reports the
 current source-set count, copied database storage families, signed 4.1+-client
