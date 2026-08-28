@@ -47,6 +47,8 @@ struct Arguments {
   var overwrite = false
   var passphraseStdin = false
   var includePaths = false
+  var json = false
+  var verbose = false
 
   init(_ rawArguments: [String]) throws {
     var arguments = rawArguments
@@ -86,6 +88,10 @@ struct Arguments {
         passphraseStdin = true
       case "--include-paths":
         includePaths = true
+      case "--json":
+        json = true
+      case "--verbose":
+        verbose = true
       case "-h", "--help":
         command = .help
       default:
@@ -102,7 +108,7 @@ private let usage = """
   Usage: greenbubbles-acquire <command> [options]
 
   Commands:
-    preflight              Report capture readiness as JSON; exits non-zero when blocked
+    preflight              Check capture readiness; exits non-zero when blocked
     capture                Attach lldb to WeChat and capture the database passphrase
     verify                 Re-validate a stored passphrase read from standard input
     help                   Show this help
@@ -115,10 +121,12 @@ private let usage = """
     --overwrite            Replace an existing passphrase output file
     --passphrase-stdin     Read the 32-byte passphrase from standard input
     --include-paths        Include sensitive filesystem paths in local output
+    --json                 Emit machine-readable JSON instead of human-readable text
+    --verbose              Mirror lldb output during capture (for diagnosing stalls)
     -h, --help             Show this help
 
   Capture requires root, lldb, a running WeChat, and an owner re-signed client
-  without Hardened Runtime. When re-signing is required, preflight reports the
+  without Hardened Runtime. When re-signing is required, preflight prints the
   exact command for the owner to run manually; this tool never automates it.
   The capture mechanism breakpoints a system library function, so it works
   with any WeChat build; the active account's database root is discovered
@@ -152,6 +160,17 @@ private struct VerificationReport: Encodable {
   let allVerified: Bool
 }
 
+private struct PreflightCheck {
+  let ok: Bool
+  let label: String
+  let hint: String?
+}
+
+private struct PreflightResult {
+  let report: PreflightReport
+  let checks: [PreflightCheck]
+}
+
 private func printJSON<T: Encodable>(_ value: T) throws {
   let encoder = JSONEncoder()
   encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
@@ -167,6 +186,33 @@ private func printError(_ message: String) {
 
 private func printNote(_ message: String) {
   FileHandle.standardError.write(Data("note: \(message)\n".utf8))
+}
+
+private let stdoutIsTerminal = isatty(FileHandle.standardOutput.fileDescriptor) != 0
+
+private func statusMark(_ ok: Bool) -> String {
+  if stdoutIsTerminal {
+    return ok ? "\u{1B}[32m✓\u{1B}[0m" : "\u{1B}[31m✗\u{1B}[0m"
+  }
+  return ok ? "✓" : "✗"
+}
+
+// Human-readable rendering: one line per check, then a plain verdict.
+private func printPreflight(_ result: PreflightResult) {
+  for check in result.checks {
+    print("\(statusMark(check.ok)) \(check.label)")
+    if !check.ok, let hint = check.hint {
+      print("    \(hint)")
+    }
+  }
+  print("")
+  let failed = result.checks.filter { !$0.ok }.count
+  if result.report.ready {
+    print("Ready to capture.")
+    print("Next: sudo greenbubbles-acquire capture --owner-authorized --output <path>")
+  } else {
+    print("Not ready — \(failed) \(failed == 1 ? "problem" : "problems") to fix (see above).")
+  }
 }
 
 // Under sudo the effective home is /var/root, but the WeChat data lives in the
@@ -223,19 +269,25 @@ private func latestDatabaseModification(_ root: URL) -> Date {
   return latest
 }
 
-private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightReport {
-  var blockers: [String] = []
+private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightResult {
+  var checks: [PreflightCheck] = []
   var remediation: String?
 
   let lldbAvailable = LLDBPassphraseCapture().lldbAvailable
-  if !lldbAvailable {
-    blockers.append("lldb is not available; install the Xcode Command Line Tools")
-  }
+  checks.append(
+    PreflightCheck(
+      ok: lldbAvailable,
+      label: lldbAvailable ? "lldb is available" : "lldb is not available",
+      hint: lldbAvailable ? nil : "install the Xcode Command Line Tools: xcode-select --install"
+    ))
 
   let runningAsRoot = geteuid() == 0
-  if !runningAsRoot {
-    blockers.append("capture requires root privileges for lldb attach; re-run with sudo")
-  }
+  checks.append(
+    PreflightCheck(
+      ok: runningAsRoot,
+      label: runningAsRoot ? "running as root" : "not running as root",
+      hint: runningAsRoot ? nil : "capture needs to attach to WeChat; re-run with sudo"
+    ))
 
   // The capture mechanism breakpoints a system CommonCrypto symbol, so it is
   // build-agnostic: client version and signing state are reported for the
@@ -252,43 +304,77 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
       clientBuildVersion = build.buildVersion
       clientReSigned = !build.hardenedRuntime
     }
-  } else {
-    blockers.append("no WeChat installation was found")
   }
+  checks.append(
+    PreflightCheck(
+      ok: clientInstalled,
+      label: clientInstalled ? "WeChat is installed" : "no WeChat installation was found",
+      hint: clientInstalled ? nil : "install WeChat for macOS first"
+    ))
 
   var wechatProcessRunning = false
   var processHardeningStatus: ProcessHardeningStatus? = nil
+  var processLabel = "WeChat is not running"
+  var processHint: String? = "start WeChat and log in before capturing"
   if let processIDs = try? WeChatProcessLocator().processIDs(), let first = processIDs.first {
     wechatProcessRunning = true
     let status = RuntimeHardeningProbe.status(forProcessID: first)
     processHardeningStatus = status
-    if status == .hardened {
-      blockers.append(
-        "the running WeChat process still has Hardened Runtime; re-sign the app and restart WeChat"
-      )
+    let version = [clientMarketingVersion, clientBuildVersion.map { "build \($0)" }]
+      .compactMap { $0 }.joined(separator: ", ")
+    let suffix = version.isEmpty ? "" : " (\(version))"
+    switch status {
+    case .hardened:
+      processLabel = "WeChat is running\(suffix), but Hardened Runtime is still active"
+      processHint = "re-sign the app, then restart WeChat:\n    \(resignRemediation)"
       remediation = resignRemediation
+    case .notHardened:
+      processLabel = "WeChat is running\(suffix), Hardened Runtime removed"
+      processHint = nil
+    case .unknown:
+      processLabel = "WeChat is running\(suffix), hardening status unknown (proceeding)"
+      processHint = nil
     }
-  } else {
-    blockers.append("WeChat is not running; start it and log in before capturing")
   }
+  checks.append(
+    PreflightCheck(
+      ok: wechatProcessRunning && processHardeningStatus != .hardened,
+      label: processLabel,
+      hint: processHint
+    ))
 
   var databaseRootReference: PathReference? = nil
   var databaseCount: Int? = nil
   var distinctSaltCount: Int? = nil
+  var databaseLabel = "no WeChat database root was discovered"
+  var databaseHint: String? = "log into WeChat once so it creates its databases"
+  var databasesOK = false
   do {
     let root = try resolveDatabaseRoot(dbRootOption)
     databaseRootReference = PathPrivacy(includePaths: includePaths).reference(for: root)
     let inventory = try DatabaseSaltInventory(root: root)
     databaseCount = inventory.entries.count
     distinctSaltCount = inventory.distinctSalts.count
+    let origin = dbRootOption == nil ? "auto-discovered" : "from --db-root"
     if inventory.entries.isEmpty {
-      blockers.append("no WeChat databases were found under the database root")
+      databaseLabel = "database root found (\(origin)) but it contains no databases"
+    } else {
+      databasesOK = true
+      databaseLabel =
+        "database root \(origin) — \(inventory.entries.count) databases, "
+        + "\(inventory.distinctSalts.count) distinct salts"
+      databaseHint = nil
     }
   } catch {
-    blockers.append(String(describing: error))
+    databaseLabel = String(describing: error)
+    databaseHint = nil
   }
+  checks.append(PreflightCheck(ok: databasesOK, label: databaseLabel, hint: databaseHint))
 
-  return PreflightReport(
+  let blockers = checks.filter { !$0.ok }.map { check in
+    check.hint.map { "\(check.label) (\($0))" } ?? check.label
+  }
+  let report = PreflightReport(
     formatVersion: 1,
     ready: blockers.isEmpty,
     blockers: blockers,
@@ -306,6 +392,7 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
     databaseCount: databaseCount,
     distinctSaltCount: distinctSaltCount
   )
+  return PreflightResult(report: report, checks: checks)
 }
 
 private func verifyPassphrase(
@@ -334,12 +421,16 @@ do {
   case .help:
     print(usage)
   case .preflight:
-    let report = runPreflight(
+    let result = runPreflight(
       dbRootOption: arguments.dbRoot,
       includePaths: arguments.includePaths
     )
-    try printJSON(report)
-    if !report.ready { exit(1) }
+    if arguments.json {
+      try printJSON(result.report)
+    } else {
+      printPreflight(result)
+    }
+    if !result.report.ready { exit(1) }
   case .capture:
     guard arguments.ownerAuthorized else {
       throw CLIError.missingRequiredOption("--owner-authorized")
@@ -351,23 +442,25 @@ do {
       dbRootOption: arguments.dbRoot,
       includePaths: arguments.includePaths
     )
-    guard preflight.ready else {
-      try printJSON(preflight)
+    guard preflight.report.ready else {
+      if arguments.json {
+        try printJSON(preflight.report)
+      } else {
+        printPreflight(preflight)
+      }
       exit(1)
     }
     let root = try resolveDatabaseRoot(arguments.dbRoot)
     let inventory = try DatabaseSaltInventory(root: root)
-    guard let processID = try WeChatProcessLocator().processIDs().first else {
-      throw CLIError.verificationFailed("WeChat stopped running after preflight")
-    }
-    printNote("capture armed on WeChat process \(processID)")
     printNote("in WeChat, log out of the account (not just quit the app), then log back in")
     printNote("waiting up to \(arguments.timeoutSeconds) seconds for the login")
+    var capture = LLDBPassphraseCapture()
+    capture.verbose = arguments.verbose
+    capture.outputHandler = { message in
+      FileHandle.standardError.write(Data("note: \(message)\n".utf8))
+    }
     let started = Date()
-    let passphrase = try LLDBPassphraseCapture().capture(
-      processID: processID,
-      timeoutSeconds: arguments.timeoutSeconds
-    )
+    let passphrase = try capture.capture(timeoutSeconds: arguments.timeoutSeconds)
     let captureDurationSeconds = Date().timeIntervalSince(started)
     let verifiedSaltCount = try verifyPassphrase(passphrase, inventory: inventory)
     guard verifiedSaltCount > 0 else {
@@ -376,19 +469,31 @@ do {
       )
     }
     try SecretOutputWriter().write(passphrase, to: output, overwrite: arguments.overwrite)
-    try printJSON(
-      AcquisitionReport(
-        capturedAt: Date(),
-        captureDurationSeconds: captureDurationSeconds,
-        databaseCount: inventory.entries.count,
-        distinctSaltCount: inventory.distinctSalts.count,
-        verifiedSaltCount: verifiedSaltCount,
-        clientMarketingVersion: preflight.clientMarketingVersion,
-        clientBuildVersion: preflight.clientBuildVersion,
-        clientReSigned: preflight.clientReSigned,
-        databaseRoot: preflight.databaseRoot,
-        outputWritten: true
-      ))
+    if arguments.json {
+      try printJSON(
+        AcquisitionReport(
+          capturedAt: Date(),
+          captureDurationSeconds: captureDurationSeconds,
+          databaseCount: inventory.entries.count,
+          distinctSaltCount: inventory.distinctSalts.count,
+          verifiedSaltCount: verifiedSaltCount,
+          clientMarketingVersion: preflight.report.clientMarketingVersion,
+          clientBuildVersion: preflight.report.clientBuildVersion,
+          clientReSigned: preflight.report.clientReSigned,
+          databaseRoot: preflight.report.databaseRoot,
+          outputWritten: true
+        ))
+    } else {
+      let seconds = Int(captureDurationSeconds.rounded())
+      print("")
+      print(
+        "\(statusMark(true)) passphrase captured in \(seconds)s and verified against "
+          + "\(verifiedSaltCount)/\(inventory.distinctSalts.count) databases"
+      )
+      print("  written to \(output.path) (mode 0600, owner-only)")
+      print("")
+      print("Use it with:  cat \(output.path) | greenbubbles-restore <args> --passphrase-stdin")
+    }
   case .verify:
     guard arguments.passphraseStdin else {
       throw CLIError.missingRequiredOption("--passphrase-stdin")
@@ -399,14 +504,28 @@ do {
     let verifiedSaltCount = try verifyPassphrase(passphrase, inventory: inventory)
     let distinctSaltCount = inventory.distinctSalts.count
     let allVerified = distinctSaltCount > 0 && verifiedSaltCount == distinctSaltCount
-    try printJSON(
-      VerificationReport(
-        formatVersion: 1,
-        databaseCount: inventory.entries.count,
-        distinctSaltCount: distinctSaltCount,
-        verifiedSaltCount: verifiedSaltCount,
-        allVerified: allVerified
-      ))
+    if arguments.json {
+      try printJSON(
+        VerificationReport(
+          formatVersion: 1,
+          databaseCount: inventory.entries.count,
+          distinctSaltCount: distinctSaltCount,
+          verifiedSaltCount: verifiedSaltCount,
+          allVerified: allVerified
+        ))
+    } else {
+      if allVerified {
+        print(
+          "\(statusMark(true)) passphrase verified against all "
+            + "\(verifiedSaltCount) databases (\(distinctSaltCount) distinct salts)"
+        )
+      } else {
+        print(
+          "\(statusMark(false)) passphrase verified against only "
+            + "\(verifiedSaltCount)/\(distinctSaltCount) distinct salts"
+        )
+      }
+    }
     if !allVerified { exit(1) }
   }
 } catch {

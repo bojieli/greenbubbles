@@ -21,6 +21,34 @@ public enum LLDBOutputParser {
     return Array(bytes.prefix(32))
   }
 
+  /// Detects a failed `process attach` so the capture can fail fast instead of
+  /// stalling until the timeout. Returns lldb's error detail when found.
+  public static func detectAttachFailure(in output: String) -> String? {
+    for rawLine in output.split(whereSeparator: \.isNewline) {
+      let line = rawLine.trimmingCharacters(in: .whitespaces)
+      guard line.hasPrefix("error:") else { continue }
+      let detail = String(line.dropFirst("error:".count))
+        .trimmingCharacters(in: .whitespaces)
+      if detail.contains("attach") || detail.contains("Not allowed") {
+        return detail
+      }
+    }
+    return nil
+  }
+
+  /// Detects the target process exiting (or being detached) before the
+  /// breakpoint hit, e.g. when WeChat's logout flow restarts its main process.
+  public static func detectTargetExit(in output: String) -> Bool {
+    for rawLine in output.split(whereSeparator: \.isNewline) {
+      let line = rawLine.trimmingCharacters(in: .whitespaces)
+      guard line.hasPrefix("Process ") else { continue }
+      if line.contains(" exited") || line.contains(" detached") {
+        return true
+      }
+    }
+    return false
+  }
+
   private static func parseByteLine(_ line: String) -> [UInt8]? {
     guard line.hasPrefix("0x"), let colon = line.firstIndex(of: ":") else { return nil }
     let address = line[line.index(line.startIndex, offsetBy: 2)..<colon]

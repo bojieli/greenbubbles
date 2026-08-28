@@ -82,4 +82,31 @@ struct LLDBOutputParserTests {
         """
     #expect(LLDBOutputParser.parsePassphrase(from: output) == expectedBytes)
   }
+
+  @Test func detectsAttachFailure() {
+    let output = """
+      (lldb) process attach -p 66097
+      error: attach failed: attach failed (Not allowed to attach to process.)
+      (lldb)
+      """
+    let detail = LLDBOutputParser.detectAttachFailure(in: output)
+    #expect(detail != nil)
+    #expect(detail?.contains("attach failed") == true)
+  }
+
+  @Test func ignoresUnrelatedErrorsForAttachFailure() {
+    #expect(LLDBOutputParser.detectAttachFailure(in: "error: Process must be launched.") == nil)
+    #expect(
+      LLDBOutputParser.detectAttachFailure(in: "Breakpoint 1: no locations (pending).") == nil)
+    #expect(LLDBOutputParser.detectAttachFailure(in: "") == nil)
+  }
+
+  @Test func detectsTargetExitAndDetach() {
+    #expect(
+      LLDBOutputParser.detectTargetExit(in: "Process 69454 exited with status = 0 (0x00000000)"))
+    #expect(LLDBOutputParser.detectTargetExit(in: "Process 69454 detached"))
+    #expect(!LLDBOutputParser.detectTargetExit(in: "Process 69454 resuming"))
+    #expect(!LLDBOutputParser.detectTargetExit(in: "Process 69454 launched: '/tmp/x' (arm64)"))
+    #expect(!LLDBOutputParser.detectTargetExit(in: ""))
+  }
 }
