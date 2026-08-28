@@ -1,8 +1,10 @@
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -14,7 +16,10 @@ use crate::ai_context::{
 };
 use crate::archive::{ensure_private_directory, ensure_private_regular_file};
 use crate::tools::ToolSourceDatabaseFreshness;
-use crate::{ConversationKind, MessageDirection, RestoreError};
+use crate::{
+    ConversationKind, MessageDirection, NoProgress, ProgressEvent, ProgressObserver, ProgressPhase,
+    ProgressState, ProgressUnit, RestoreError,
+};
 
 pub const AI_MEMORY_SCHEMA: &str = "greenbubbles.ai-memory.v1";
 const AI_MEMORY_FORMAT_VERSION: u32 = 1;
@@ -25,6 +30,9 @@ const LEGACY_README_SHA256: [&str; 4] = [
     "eaf150d00252d15ae61264f2025a91162861c2f6de1bc10114e1b127f02cee0c",
     "7a410be7b123f6d4700af957847b7576a5a8f8fa5aab44b5861b93eb2876077b",
 ];
+const PROGRESS_RESOLUTION: u64 = 1_000_000;
+const PROGRESS_RECORD_INTERVAL: u64 = 1_000;
+const PROGRESS_BYTE_INTERVAL: u64 = 8 * 1024 * 1024;
 const README_CONTENT: &str = r#"# GreenBubbles personal-memory projection
 
 This directory is a deterministic derivative of one policy-scoped,
@@ -838,10 +846,409 @@ struct ProjectionOutput {
     limitation_codes: BTreeSet<String>,
 }
 
+struct AiMemoryProjectionProgress<'a> {
+    observer: &'a dyn ProgressObserver,
+    started: Instant,
+    source_byte_count: u64,
+    source_record_count: u64,
+    conversation_record_count: u64,
+    message_record_count: u64,
+    processed_conversation_count: u64,
+    processed_message_count: u64,
+    emitted_chunk_count: u64,
+    emitted_document_count: u64,
+    emitted_byte_count: u64,
+}
+
+impl<'a> AiMemoryProjectionProgress<'a> {
+    fn new(observer: &'a dyn ProgressObserver, files: &BTreeMap<String, AiContextFile>) -> Self {
+        Self {
+            observer,
+            started: Instant::now(),
+            source_byte_count: files
+                .values()
+                .map(|file| file.byte_count)
+                .fold(0_u64, u64::saturating_add),
+            source_record_count: files
+                .values()
+                .map(|file| file.record_count)
+                .fold(0_u64, u64::saturating_add),
+            conversation_record_count: files["conversations"].record_count,
+            message_record_count: files["messages"].record_count,
+            processed_conversation_count: 0,
+            processed_message_count: 0,
+            emitted_chunk_count: 0,
+            emitted_document_count: 0,
+            emitted_byte_count: 0,
+        }
+    }
+
+    fn synchronize_projector(&mut self, projector: &MemoryProjector<'_>) {
+        self.emitted_chunk_count = projector.chunk_count;
+        self.emitted_document_count = projector.chunk_count;
+        self.emitted_byte_count = projector
+            .memory_writer
+            .byte_count
+            .saturating_add(projector.document_writer.byte_count)
+            .saturating_add(projector.document_byte_count);
+    }
+
+    fn synchronize_projection(&mut self, projection: &ProjectionOutput) {
+        self.emitted_chunk_count = projection.chunk_count;
+        self.emitted_document_count = projection.chunk_count;
+        self.emitted_byte_count = projection
+            .memories
+            .byte_count
+            .saturating_add(projection.documents.byte_count)
+            .saturating_add(projection.document_byte_count);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe(
+        &self,
+        state: ProgressState,
+        operation: &str,
+        unit: ProgressUnit,
+        completed: u64,
+        total: u64,
+        phase_completed: u64,
+        file_index: Option<usize>,
+        logical_path: Option<&str>,
+        file_completed_byte_count: Option<u64>,
+        file_byte_count: Option<u64>,
+    ) {
+        let mut event = ProgressEvent::new(
+            ProgressPhase::MemoryProjection,
+            state,
+            operation,
+            unit,
+            completed,
+            total,
+            phase_completed.min(PROGRESS_RESOLUTION),
+            PROGRESS_RESOLUTION,
+        );
+        event.file_index = file_index;
+        event.file_count = Some(4);
+        event.logical_path = logical_path.map(str::to_string);
+        event.file_completed_byte_count = file_completed_byte_count;
+        event.file_byte_count = file_byte_count;
+        event.source_byte_count = Some(self.source_byte_count);
+        event.source_record_count = Some(self.source_record_count);
+        event.conversation_record_count = Some(self.conversation_record_count);
+        event.message_record_count = Some(self.message_record_count);
+        event.processed_conversation_count = Some(self.processed_conversation_count);
+        event.processed_message_count = Some(self.processed_message_count);
+        event.emitted_chunk_count = Some(self.emitted_chunk_count);
+        event.emitted_document_count = Some(self.emitted_document_count);
+        event.emitted_byte_count = Some(self.emitted_byte_count);
+        event.elapsed_milliseconds = Some(elapsed_milliseconds(self.started));
+        self.observer.observe(event);
+    }
+}
+
+struct AiMemoryAuditProgress<'a> {
+    observer: &'a dyn ProgressObserver,
+    started: Instant,
+    source_byte_count: u64,
+    source_record_count: u64,
+    conversation_record_count: u64,
+    message_record_count: u64,
+    completed_file_byte_count: u64,
+    processed_message_count: u64,
+    verified_chunk_count: u64,
+    verified_document_count: u64,
+    verified_byte_count: u64,
+}
+
+impl<'a> AiMemoryAuditProgress<'a> {
+    fn new(
+        observer: &'a dyn ProgressObserver,
+        manifest: &AiMemoryManifest,
+        files: &BTreeMap<&str, &AiMemoryFile>,
+    ) -> Self {
+        let manifest_file_bytes = files
+            .values()
+            .map(|file| file.byte_count)
+            .fold(0_u64, u64::saturating_add);
+        let manifest_file_records = files
+            .values()
+            .map(|file| file.record_count)
+            .fold(0_u64, u64::saturating_add);
+        Self {
+            observer,
+            started: Instant::now(),
+            source_byte_count: manifest_file_bytes
+                .saturating_add(manifest.markdown_document_byte_count),
+            source_record_count: manifest_file_records
+                .saturating_add(manifest.markdown_document_count),
+            conversation_record_count: manifest.source_conversation_record_count,
+            message_record_count: manifest.source_message_record_count,
+            completed_file_byte_count: 0,
+            processed_message_count: 0,
+            verified_chunk_count: 0,
+            verified_document_count: 0,
+            verified_byte_count: 0,
+        }
+    }
+
+    fn plan(&self) {
+        self.observe(
+            ProgressState::Planned,
+            "planAiMemoryAudit",
+            ProgressUnit::Bytes,
+            0,
+            self.source_byte_count,
+            0,
+            None,
+            None,
+            None,
+            None,
+        );
+        self.observe(
+            ProgressState::Started,
+            "auditAiMemory",
+            ProgressUnit::Bytes,
+            0,
+            self.source_byte_count,
+            0,
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn begin_group(
+        &self,
+        index: usize,
+        operation: &str,
+        unit: ProgressUnit,
+        total: u64,
+        logical_path: &str,
+        file_byte_count: u64,
+    ) {
+        self.observe(
+            ProgressState::Started,
+            operation,
+            unit,
+            0,
+            total,
+            self.byte_phase_position(0),
+            Some(index),
+            Some(logical_path),
+            Some(0),
+            Some(file_byte_count),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_group(
+        &mut self,
+        index: usize,
+        operation: &str,
+        unit: ProgressUnit,
+        completed: u64,
+        total: u64,
+        completed_bytes: u64,
+        file_byte_count: u64,
+        logical_path: &str,
+        processed_messages: Option<u64>,
+        chunks: Option<u64>,
+        documents: Option<u64>,
+    ) {
+        if let Some(count) = processed_messages {
+            self.processed_message_count = count;
+        }
+        if let Some(count) = chunks {
+            self.verified_chunk_count = count;
+        }
+        if let Some(count) = documents {
+            self.verified_document_count = count;
+        }
+        self.verified_byte_count = self
+            .completed_file_byte_count
+            .saturating_add(completed_bytes);
+        if completed != 1 && !completed.is_multiple_of(PROGRESS_RECORD_INTERVAL) {
+            return;
+        }
+        self.observe(
+            ProgressState::Advanced,
+            operation,
+            unit,
+            completed,
+            total,
+            self.byte_phase_position(completed_bytes),
+            Some(index),
+            Some(logical_path),
+            Some(completed_bytes),
+            Some(file_byte_count),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn complete_group(
+        &mut self,
+        index: usize,
+        operation: &str,
+        unit: ProgressUnit,
+        total: u64,
+        file_byte_count: u64,
+        logical_path: &str,
+        processed_messages: Option<u64>,
+        chunks: Option<u64>,
+        documents: Option<u64>,
+    ) {
+        if let Some(count) = processed_messages {
+            self.processed_message_count = count;
+        }
+        if let Some(count) = chunks {
+            self.verified_chunk_count = count;
+        }
+        if let Some(count) = documents {
+            self.verified_document_count = count;
+        }
+        self.verified_byte_count = self
+            .completed_file_byte_count
+            .saturating_add(file_byte_count);
+        self.observe(
+            ProgressState::Advanced,
+            operation,
+            unit,
+            total,
+            total,
+            self.byte_phase_position(file_byte_count),
+            Some(index),
+            Some(logical_path),
+            Some(file_byte_count),
+            Some(file_byte_count),
+        );
+        self.completed_file_byte_count = self
+            .completed_file_byte_count
+            .saturating_add(file_byte_count);
+    }
+
+    fn begin_document_inventory(&self, document_count: u64) {
+        self.observe(
+            ProgressState::Started,
+            "auditAiMemoryDocumentInventory",
+            ProgressUnit::Items,
+            0,
+            document_count,
+            950_000,
+            Some(4),
+            Some("documents/*.md"),
+            None,
+            None,
+        );
+    }
+
+    fn advance_document_inventory(&self, completed: u64, total: u64) {
+        if completed != 1
+            && completed != total
+            && !completed.is_multiple_of(PROGRESS_RECORD_INTERVAL)
+        {
+            return;
+        }
+        self.observe(
+            ProgressState::Advanced,
+            "auditAiMemoryDocumentInventory",
+            ProgressUnit::Items,
+            completed,
+            total,
+            progress_span(completed, total, 950_000, PROGRESS_RESOLUTION),
+            Some(4),
+            Some("documents/*.md"),
+            None,
+            None,
+        );
+    }
+
+    fn finish(&self) {
+        self.observe(
+            ProgressState::Completed,
+            "finalizeAiMemoryAudit",
+            ProgressUnit::Records,
+            self.source_record_count,
+            self.source_record_count,
+            PROGRESS_RESOLUTION,
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+
+    fn byte_phase_position(&self, current_file_bytes: u64) -> u64 {
+        progress_span(
+            self.completed_file_byte_count
+                .saturating_add(current_file_bytes),
+            self.source_byte_count,
+            0,
+            950_000,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe(
+        &self,
+        state: ProgressState,
+        operation: &str,
+        unit: ProgressUnit,
+        completed: u64,
+        total: u64,
+        phase_completed: u64,
+        file_index: Option<usize>,
+        logical_path: Option<&str>,
+        file_completed_byte_count: Option<u64>,
+        file_byte_count: Option<u64>,
+    ) {
+        let mut event = ProgressEvent::new(
+            ProgressPhase::MemoryAudit,
+            state,
+            operation,
+            unit,
+            completed,
+            total,
+            phase_completed.min(PROGRESS_RESOLUTION),
+            PROGRESS_RESOLUTION,
+        );
+        event.file_index = file_index;
+        event.file_count = Some(4);
+        event.logical_path = logical_path.map(str::to_string);
+        event.file_completed_byte_count = file_completed_byte_count;
+        event.file_byte_count = file_byte_count;
+        event.source_byte_count = Some(self.source_byte_count);
+        event.source_record_count = Some(self.source_record_count);
+        event.conversation_record_count = Some(self.conversation_record_count);
+        event.message_record_count = Some(self.message_record_count);
+        event.processed_message_count = Some(self.processed_message_count);
+        event.verified_chunk_count = Some(self.verified_chunk_count);
+        event.verified_document_count = Some(self.verified_document_count);
+        event.verified_byte_count = Some(self.verified_byte_count);
+        event.elapsed_milliseconds = Some(elapsed_milliseconds(self.started));
+        self.observer.observe(event);
+    }
+}
+
 pub fn export_ai_memory(
     context_bundle_directory: &Path,
     output_directory: &Path,
     options: AiMemoryExportOptions,
+) -> Result<AiMemoryManifest, RestoreError> {
+    export_ai_memory_with_progress(
+        context_bundle_directory,
+        output_directory,
+        options,
+        &NoProgress,
+    )
+}
+
+pub fn export_ai_memory_with_progress(
+    context_bundle_directory: &Path,
+    output_directory: &Path,
+    options: AiMemoryExportOptions,
+    observer: &dyn ProgressObserver,
 ) -> Result<AiMemoryManifest, RestoreError> {
     options.validate()?;
     verify_source_inventory(context_bundle_directory)?;
@@ -859,6 +1266,19 @@ pub fn export_ai_memory(
             "AI context source aggregate counts do not match its file evidence".to_string(),
         ));
     }
+    let mut progress = AiMemoryProjectionProgress::new(observer, &files);
+    progress.observe(
+        ProgressState::Planned,
+        "planAiMemoryProjection",
+        ProgressUnit::Records,
+        0,
+        progress.source_record_count,
+        0,
+        None,
+        None,
+        None,
+        None,
+    );
     let output_parent = output_directory.parent().unwrap_or_else(|| Path::new("."));
     ensure_private_directory(output_parent)?;
     if output_directory.try_exists()? {
@@ -870,6 +1290,18 @@ pub fn export_ai_memory(
         .prefix(".greenbubbles-ai-memory-")
         .tempdir_in(output_parent)?;
     fs::set_permissions(staging.path(), fs::Permissions::from_mode(0o700))?;
+    progress.observe(
+        ProgressState::Started,
+        "projectAiMemory",
+        ProgressUnit::Records,
+        0,
+        progress.source_record_count,
+        0,
+        None,
+        None,
+        None,
+        None,
+    );
 
     let mut limitation_codes = source
         .context
@@ -880,50 +1312,189 @@ pub fn export_ai_memory(
         .collect::<BTreeSet<_>>();
     let mut conversations = BTreeMap::new();
     let mut projection_omitted_conversation_count = 0_u64;
-    visit_verified_lines(context_bundle_directory, &files["conversations"], |line| {
-        let Some(line) = line else {
-            projection_omitted_conversation_count =
-                projection_omitted_conversation_count.saturating_add(1);
-            limitation_codes.insert("malformedContextConversationOmitted".to_string());
-            return Ok(());
-        };
-        let Ok(conversation) = serde_json::from_slice::<AiContextConversation>(line) else {
-            projection_omitted_conversation_count =
-                projection_omitted_conversation_count.saturating_add(1);
-            limitation_codes.insert("malformedContextConversationOmitted".to_string());
-            return Ok(());
-        };
-        if conversation.format_version != source.format_version
-            || conversation.conversation_id.is_empty()
-            || conversation.human_label.is_empty()
-        {
-            projection_omitted_conversation_count =
-                projection_omitted_conversation_count.saturating_add(1);
-            limitation_codes.insert("invalidContextConversationOmitted".to_string());
-            return Ok(());
-        }
-        let metadata = ConversationMetadata {
-            conversation_id: conversation.conversation_id.clone(),
-            label: conversation.human_label,
-            kind: conversation.kind,
-            limitation_codes: conversation.limitation_codes,
-        };
-        if conversations
-            .insert(conversation.conversation_id, metadata)
-            .is_some()
-        {
-            projection_omitted_conversation_count =
-                projection_omitted_conversation_count.saturating_add(1);
-            limitation_codes.insert("duplicateContextConversationOmitted".to_string());
-        }
-        Ok(())
-    })?;
+    let conversation_file = &files["conversations"];
+    progress.observe(
+        ProgressState::Started,
+        "projectMemoryConversations",
+        ProgressUnit::Records,
+        0,
+        conversation_file.record_count,
+        0,
+        Some(1),
+        Some(&conversation_file.relative_path),
+        Some(0),
+        Some(conversation_file.byte_count),
+    );
+    visit_verified_lines(
+        context_bundle_directory,
+        conversation_file,
+        |line, processed, processed_bytes| {
+            progress.processed_conversation_count = processed;
+            let Some(line) = line else {
+                projection_omitted_conversation_count =
+                    projection_omitted_conversation_count.saturating_add(1);
+                limitation_codes.insert("malformedContextConversationOmitted".to_string());
+                if should_emit_record_progress(processed, conversation_file.record_count) {
+                    progress.observe(
+                        ProgressState::Advanced,
+                        "projectMemoryConversations",
+                        ProgressUnit::Records,
+                        processed,
+                        conversation_file.record_count,
+                        progress_span(processed, conversation_file.record_count, 0, 100_000),
+                        Some(1),
+                        Some(&conversation_file.relative_path),
+                        Some(processed_bytes),
+                        Some(conversation_file.byte_count),
+                    );
+                }
+                return Ok(());
+            };
+            let Ok(conversation) = serde_json::from_slice::<AiContextConversation>(line) else {
+                projection_omitted_conversation_count =
+                    projection_omitted_conversation_count.saturating_add(1);
+                limitation_codes.insert("malformedContextConversationOmitted".to_string());
+                if should_emit_record_progress(processed, conversation_file.record_count) {
+                    progress.observe(
+                        ProgressState::Advanced,
+                        "projectMemoryConversations",
+                        ProgressUnit::Records,
+                        processed,
+                        conversation_file.record_count,
+                        progress_span(processed, conversation_file.record_count, 0, 100_000),
+                        Some(1),
+                        Some(&conversation_file.relative_path),
+                        Some(processed_bytes),
+                        Some(conversation_file.byte_count),
+                    );
+                }
+                return Ok(());
+            };
+            if conversation.format_version != source.format_version
+                || conversation.conversation_id.is_empty()
+                || conversation.human_label.is_empty()
+            {
+                projection_omitted_conversation_count =
+                    projection_omitted_conversation_count.saturating_add(1);
+                limitation_codes.insert("invalidContextConversationOmitted".to_string());
+                if should_emit_record_progress(processed, conversation_file.record_count) {
+                    progress.observe(
+                        ProgressState::Advanced,
+                        "projectMemoryConversations",
+                        ProgressUnit::Records,
+                        processed,
+                        conversation_file.record_count,
+                        progress_span(processed, conversation_file.record_count, 0, 100_000),
+                        Some(1),
+                        Some(&conversation_file.relative_path),
+                        Some(processed_bytes),
+                        Some(conversation_file.byte_count),
+                    );
+                }
+                return Ok(());
+            }
+            let metadata = ConversationMetadata {
+                conversation_id: conversation.conversation_id.clone(),
+                label: conversation.human_label,
+                kind: conversation.kind,
+                limitation_codes: conversation.limitation_codes,
+            };
+            if conversations
+                .insert(conversation.conversation_id, metadata)
+                .is_some()
+            {
+                projection_omitted_conversation_count =
+                    projection_omitted_conversation_count.saturating_add(1);
+                limitation_codes.insert("duplicateContextConversationOmitted".to_string());
+            }
+            if should_emit_record_progress(processed, conversation_file.record_count) {
+                progress.observe(
+                    ProgressState::Advanced,
+                    "projectMemoryConversations",
+                    ProgressUnit::Records,
+                    processed,
+                    conversation_file.record_count,
+                    progress_span(processed, conversation_file.record_count, 0, 100_000),
+                    Some(1),
+                    Some(&conversation_file.relative_path),
+                    Some(processed_bytes),
+                    Some(conversation_file.byte_count),
+                );
+            }
+            Ok(())
+        },
+    )?;
+    progress.observe(
+        ProgressState::Advanced,
+        "projectMemoryConversations",
+        ProgressUnit::Records,
+        conversation_file.record_count,
+        conversation_file.record_count,
+        100_000,
+        Some(1),
+        Some(&conversation_file.relative_path),
+        Some(conversation_file.byte_count),
+        Some(conversation_file.byte_count),
+    );
 
     // These files are not needed to construct a transcript, but verifying
     // their byte counts, line counts, and digests keeps the projection bound to
     // the complete canonical generation without loading them into memory.
-    verify_ndjson_file(context_bundle_directory, &files["contacts"])?;
-    verify_ndjson_file(context_bundle_directory, &files["artifacts"])?;
+    for (file_index, role, phase_start, phase_end, operation) in [
+        (2, "contacts", 100_000, 200_000, "verifyMemoryContacts"),
+        (3, "artifacts", 200_000, 300_000, "verifyMemoryArtifacts"),
+    ] {
+        let file = &files[role];
+        progress.observe(
+            ProgressState::Started,
+            operation,
+            ProgressUnit::Bytes,
+            0,
+            file.byte_count,
+            phase_start,
+            Some(file_index),
+            Some(&file.relative_path),
+            Some(0),
+            Some(file.byte_count),
+        );
+        let mut last_reported_bytes = 0_u64;
+        verify_ndjson_file_with_progress(
+            context_bundle_directory,
+            file,
+            |processed_bytes, _processed_records| {
+                if should_emit_byte_progress(
+                    processed_bytes,
+                    file.byte_count,
+                    &mut last_reported_bytes,
+                ) {
+                    progress.observe(
+                        ProgressState::Advanced,
+                        operation,
+                        ProgressUnit::Bytes,
+                        processed_bytes,
+                        file.byte_count,
+                        progress_span(processed_bytes, file.byte_count, phase_start, phase_end),
+                        Some(file_index),
+                        Some(&file.relative_path),
+                        Some(processed_bytes),
+                        Some(file.byte_count),
+                    );
+                }
+            },
+        )?;
+        progress.observe(
+            ProgressState::Advanced,
+            operation,
+            ProgressUnit::Bytes,
+            file.byte_count,
+            file.byte_count,
+            phase_end,
+            Some(file_index),
+            Some(&file.relative_path),
+            Some(file.byte_count),
+            Some(file.byte_count),
+        );
+    }
 
     let mut projector = MemoryProjector::new(
         staging.path(),
@@ -932,20 +1503,94 @@ pub fn export_ai_memory(
         &conversations,
         limitation_codes,
     )?;
-    visit_verified_lines(context_bundle_directory, &files["messages"], |line| {
-        let Some(line) = line else {
-            projector.omit_message("malformedContextMessageOmitted");
-            return Ok(());
-        };
-        match serde_json::from_slice::<AiContextMessage>(line) {
-            Ok(message) => projector.accept(message),
-            Err(_) => {
+    let message_file = &files["messages"];
+    progress.observe(
+        ProgressState::Started,
+        "projectMemoryMessages",
+        ProgressUnit::Records,
+        0,
+        message_file.record_count,
+        300_000,
+        Some(4),
+        Some(&message_file.relative_path),
+        Some(0),
+        Some(message_file.byte_count),
+    );
+    visit_verified_lines(
+        context_bundle_directory,
+        message_file,
+        |line, processed, processed_bytes| {
+            progress.processed_message_count = processed;
+            let Some(line) = line else {
                 projector.omit_message("malformedContextMessageOmitted");
-                Ok(())
+                progress.synchronize_projector(&projector);
+                if should_emit_record_progress(processed, message_file.record_count) {
+                    progress.observe(
+                        ProgressState::Advanced,
+                        "projectMemoryMessages",
+                        ProgressUnit::Records,
+                        processed,
+                        message_file.record_count,
+                        progress_span(processed, message_file.record_count, 300_000, 950_000),
+                        Some(4),
+                        Some(&message_file.relative_path),
+                        Some(processed_bytes),
+                        Some(message_file.byte_count),
+                    );
+                }
+                return Ok(());
+            };
+            let result = match serde_json::from_slice::<AiContextMessage>(line) {
+                Ok(message) => projector.accept(message),
+                Err(_) => {
+                    projector.omit_message("malformedContextMessageOmitted");
+                    Ok(())
+                }
+            };
+            progress.synchronize_projector(&projector);
+            if should_emit_record_progress(processed, message_file.record_count) {
+                progress.observe(
+                    ProgressState::Advanced,
+                    "projectMemoryMessages",
+                    ProgressUnit::Records,
+                    processed,
+                    message_file.record_count,
+                    progress_span(processed, message_file.record_count, 300_000, 950_000),
+                    Some(4),
+                    Some(&message_file.relative_path),
+                    Some(processed_bytes),
+                    Some(message_file.byte_count),
+                );
             }
-        }
-    })?;
+            result
+        },
+    )?;
     let mut projection = projector.finish()?;
+    progress.synchronize_projection(&projection);
+    progress.observe(
+        ProgressState::Advanced,
+        "projectMemoryMessages",
+        ProgressUnit::Records,
+        message_file.record_count,
+        message_file.record_count,
+        950_000,
+        Some(4),
+        Some(&message_file.relative_path),
+        Some(message_file.byte_count),
+        Some(message_file.byte_count),
+    );
+    progress.observe(
+        ProgressState::Started,
+        "finalizeAiMemoryProjection",
+        ProgressUnit::Items,
+        progress.emitted_chunk_count,
+        progress.emitted_chunk_count,
+        950_000,
+        None,
+        None,
+        None,
+        None,
+    );
 
     if source.omitted_conversation_count > 0 || source.omitted_message_count > 0 {
         projection
@@ -954,6 +1599,9 @@ pub fn export_ai_memory(
     }
 
     let readme = write_private_bytes(staging.path(), "README.md", README_CONTENT.as_bytes())?;
+    progress.emitted_byte_count = progress
+        .emitted_byte_count
+        .saturating_add(readme.byte_count);
     let projection_id = projection_id(&source, options)?;
     let content_complete = source.context.source_coverage_complete
         && source.limitation_codes.is_empty()
@@ -1001,7 +1649,11 @@ pub fn export_ai_memory(
         mem0_message_batch_compatible: true,
         files: vec![projection.memories, projection.documents, readme],
     };
-    write_private_json(&staging.path().join("manifest.json"), &manifest)?;
+    let staged_manifest_path = staging.path().join("manifest.json");
+    write_private_json(&staged_manifest_path, &manifest)?;
+    progress.emitted_byte_count = progress
+        .emitted_byte_count
+        .saturating_add(fs::metadata(&staged_manifest_path)?.len());
     File::open(staging.path())?.sync_all()?;
     if output_directory.try_exists()? {
         return Err(RestoreError::Integrity(
@@ -1010,10 +1662,29 @@ pub fn export_ai_memory(
     }
     fs::rename(staging.path(), output_directory)?;
     File::open(output_parent)?.sync_all()?;
+    progress.observe(
+        ProgressState::Completed,
+        "finalizeAiMemoryProjection",
+        ProgressUnit::Records,
+        progress.source_record_count,
+        progress.source_record_count,
+        PROGRESS_RESOLUTION,
+        None,
+        None,
+        None,
+        None,
+    );
     Ok(manifest)
 }
 
 pub fn audit_ai_memory(memory_directory: &Path) -> Result<AiMemoryAuditReport, RestoreError> {
+    audit_ai_memory_with_progress(memory_directory, &NoProgress)
+}
+
+pub fn audit_ai_memory_with_progress(
+    memory_directory: &Path,
+    observer: &dyn ProgressObserver,
+) -> Result<AiMemoryAuditReport, RestoreError> {
     ensure_private_directory(memory_directory)?;
     let expected_root_entries = BTreeSet::from([
         "manifest.json".to_string(),
@@ -1067,12 +1738,43 @@ pub fn audit_ai_memory(memory_directory: &Path) -> Result<AiMemoryAuditReport, R
         ));
     }
 
-    verify_plain_file(memory_directory, files["readme"])?;
+    let mut progress = AiMemoryAuditProgress::new(observer, &manifest, &files);
+    progress.plan();
+    let readme_file = files["readme"];
+    progress.begin_group(
+        1,
+        "auditAiMemoryReadme",
+        ProgressUnit::Records,
+        readme_file.record_count,
+        &readme_file.relative_path,
+        readme_file.byte_count,
+    );
+    verify_plain_file(memory_directory, readme_file)?;
+    progress.complete_group(
+        1,
+        "auditAiMemoryReadme",
+        ProgressUnit::Records,
+        readme_file.record_count,
+        readme_file.byte_count,
+        &readme_file.relative_path,
+        None,
+        None,
+        None,
+    );
 
     let mut document_evidence = BTreeMap::<String, AiMemoryDocumentEvidence>::new();
-    audit_memory_ndjson(
+    let document_inventory_file = files["markdownDocumentInventory"];
+    progress.begin_group(
+        2,
+        "auditAiMemoryDocumentEvidence",
+        ProgressUnit::Records,
+        document_inventory_file.record_count,
+        &document_inventory_file.relative_path,
+        document_inventory_file.byte_count,
+    );
+    audit_memory_ndjson_with_progress(
         memory_directory,
-        files["markdownDocumentInventory"],
+        document_inventory_file,
         |line| {
             let evidence: AiMemoryDocumentEvidence = serde_json::from_slice(line)?;
             if evidence.format_version != AI_MEMORY_FORMAT_VERSION
@@ -1090,56 +1792,125 @@ pub fn audit_ai_memory(memory_directory: &Path) -> Result<AiMemoryAuditReport, R
             }
             Ok(())
         },
+        |records, bytes| {
+            progress.advance_group(
+                2,
+                "auditAiMemoryDocumentEvidence",
+                ProgressUnit::Records,
+                records,
+                document_inventory_file.record_count,
+                bytes,
+                document_inventory_file.byte_count,
+                &document_inventory_file.relative_path,
+                None,
+                None,
+                Some(records),
+            );
+        },
     )?;
+    progress.complete_group(
+        2,
+        "auditAiMemoryDocumentEvidence",
+        ProgressUnit::Records,
+        document_inventory_file.record_count,
+        document_inventory_file.byte_count,
+        &document_inventory_file.relative_path,
+        None,
+        None,
+        Some(document_inventory_file.record_count),
+    );
 
     let mut memory_ids = BTreeSet::new();
     let mut conversation_ids = BTreeSet::new();
     let mut message_ids = BTreeSet::new();
-    let mut message_count = 0_u64;
+    let message_count = Cell::new(0_u64);
     let mut observed_truncated_message_count = 0_u64;
     let mut next_chunk_sequence = BTreeMap::<String, u64>::new();
     let mut expected_documents = BTreeMap::<String, (String, u64, String)>::new();
-    audit_memory_ndjson(memory_directory, files["memories"], |line| {
-        let chunk: AiMemoryChunk = serde_json::from_slice(line)?;
-        validate_memory_chunk(&manifest, &chunk)?;
-        let expected_sequence = next_chunk_sequence
-            .entry(chunk.conversation_id.clone())
-            .or_default();
-        if chunk.chunk_sequence != *expected_sequence {
-            return Err(RestoreError::Integrity(
-                "AI memory chunk sequences are not contiguous by conversation".to_string(),
-            ));
-        }
-        *expected_sequence = expected_sequence.saturating_add(1);
-        if !memory_ids.insert(chunk.memory_id.clone()) {
-            return Err(RestoreError::Integrity(
-                "AI memory chunks repeat a memory identity".to_string(),
-            ));
-        }
-        conversation_ids.insert(chunk.conversation_id.clone());
-        for source in &chunk.source_messages {
-            if !message_ids.insert(source.message_id.clone()) {
+    let memories_file = files["memories"];
+    progress.begin_group(
+        3,
+        "auditAiMemoryChunks",
+        ProgressUnit::Records,
+        memories_file.record_count,
+        &memories_file.relative_path,
+        memories_file.byte_count,
+    );
+    audit_memory_ndjson_with_progress(
+        memory_directory,
+        memories_file,
+        |line| {
+            let chunk: AiMemoryChunk = serde_json::from_slice(line)?;
+            validate_memory_chunk(&manifest, &chunk)?;
+            let expected_sequence = next_chunk_sequence
+                .entry(chunk.conversation_id.clone())
+                .or_default();
+            if chunk.chunk_sequence != *expected_sequence {
                 return Err(RestoreError::Integrity(
-                    "AI memory chunks repeat a canonical message identity".to_string(),
+                    "AI memory chunk sequences are not contiguous by conversation".to_string(),
                 ));
             }
-            if source.projection_content_truncated {
-                observed_truncated_message_count =
-                    observed_truncated_message_count.saturating_add(1);
+            *expected_sequence = expected_sequence.saturating_add(1);
+            if !memory_ids.insert(chunk.memory_id.clone()) {
+                return Err(RestoreError::Integrity(
+                    "AI memory chunks repeat a memory identity".to_string(),
+                ));
             }
-        }
-        let markdown = render_markdown(&chunk)?;
-        expected_documents.insert(
-            chunk.memory_id.clone(),
-            (
-                chunk.conversation_id.clone(),
-                u64::try_from(markdown.len()).unwrap_or(u64::MAX),
-                hex::encode(Sha256::digest(markdown.as_bytes())),
-            ),
-        );
-        message_count = message_count.saturating_add(chunk.message_count as u64);
-        Ok(())
-    })?;
+            conversation_ids.insert(chunk.conversation_id.clone());
+            for source in &chunk.source_messages {
+                if !message_ids.insert(source.message_id.clone()) {
+                    return Err(RestoreError::Integrity(
+                        "AI memory chunks repeat a canonical message identity".to_string(),
+                    ));
+                }
+                if source.projection_content_truncated {
+                    observed_truncated_message_count =
+                        observed_truncated_message_count.saturating_add(1);
+                }
+            }
+            let markdown = render_markdown(&chunk)?;
+            expected_documents.insert(
+                chunk.memory_id.clone(),
+                (
+                    chunk.conversation_id.clone(),
+                    u64::try_from(markdown.len()).unwrap_or(u64::MAX),
+                    hex::encode(Sha256::digest(markdown.as_bytes())),
+                ),
+            );
+            message_count.set(
+                message_count
+                    .get()
+                    .saturating_add(chunk.message_count as u64),
+            );
+            Ok(())
+        },
+        |records, bytes| {
+            progress.advance_group(
+                3,
+                "auditAiMemoryChunks",
+                ProgressUnit::Records,
+                records,
+                memories_file.record_count,
+                bytes,
+                memories_file.byte_count,
+                &memories_file.relative_path,
+                Some(message_count.get()),
+                Some(records),
+                None,
+            );
+        },
+    )?;
+    progress.complete_group(
+        3,
+        "auditAiMemoryChunks",
+        ProgressUnit::Records,
+        memories_file.record_count,
+        memories_file.byte_count,
+        &memories_file.relative_path,
+        Some(message_count.get()),
+        Some(memories_file.record_count),
+        None,
+    );
 
     if memory_ids != document_evidence.keys().cloned().collect::<BTreeSet<_>>() {
         return Err(RestoreError::Integrity(
@@ -1162,10 +1933,15 @@ pub fn audit_ai_memory(memory_directory: &Path) -> Result<AiMemoryAuditReport, R
             ));
         }
     }
-    verify_markdown_documents(memory_directory, &document_evidence)?;
+    verify_markdown_documents_with_progress(
+        memory_directory,
+        &document_evidence,
+        manifest.markdown_document_byte_count,
+        &mut progress,
+    )?;
 
     if manifest.projected_conversation_count != conversation_ids.len() as u64
-        || manifest.projected_message_count != message_count
+        || manifest.projected_message_count != message_count.get()
         || manifest.memory_chunk_count != memory_ids.len() as u64
         || manifest.markdown_document_count != document_evidence.len() as u64
         || manifest.memory_chunk_count != files["memories"].record_count
@@ -1182,7 +1958,7 @@ pub fn audit_ai_memory(memory_directory: &Path) -> Result<AiMemoryAuditReport, R
         ));
     }
 
-    Ok(AiMemoryAuditReport {
+    let report = AiMemoryAuditReport {
         format_version: AI_MEMORY_FORMAT_VERSION,
         schema: manifest.schema,
         privacy_safe_summary: true,
@@ -1195,7 +1971,7 @@ pub fn audit_ai_memory(memory_directory: &Path) -> Result<AiMemoryAuditReport, R
         markdown_documents_verified: true,
         content_complete: manifest.content_complete,
         conversation_count: conversation_ids.len() as u64,
-        message_count,
+        message_count: message_count.get(),
         memory_chunk_count: memory_ids.len() as u64,
         markdown_document_count: document_evidence.len() as u64,
         source_omitted_conversation_count: manifest.source_omitted_conversation_count,
@@ -1205,7 +1981,9 @@ pub fn audit_ai_memory(memory_directory: &Path) -> Result<AiMemoryAuditReport, R
         projection_omitted_message_count: manifest.projection_omitted_message_count,
         projection_truncated_message_count: manifest.projection_truncated_message_count,
         limitation_count: manifest.limitation_codes.len(),
-    })
+    };
+    progress.finish();
+    Ok(report)
 }
 
 fn validate_memory_manifest(manifest: &AiMemoryManifest) -> Result<(), RestoreError> {
@@ -1377,10 +2155,11 @@ fn validate_memory_chunk(
     Ok(())
 }
 
-fn audit_memory_ndjson(
+fn audit_memory_ndjson_with_progress(
     directory: &Path,
     evidence: &AiMemoryFile,
     mut visitor: impl FnMut(&[u8]) -> Result<(), RestoreError>,
+    mut progress: impl FnMut(u64, u64),
 ) -> Result<(), RestoreError> {
     let path = directory.join(&evidence.relative_path);
     ensure_private_regular_file(&path)?;
@@ -1393,6 +2172,7 @@ fn audit_memory_ndjson(
     let mut hasher = Sha256::new();
     let mut line = Vec::new();
     let mut count = 0_u64;
+    let mut completed_byte_count = 0_u64;
     loop {
         line.clear();
         let read = reader.read_until(b'\n', &mut line)?;
@@ -1407,6 +2187,9 @@ fn audit_memory_ndjson(
         hasher.update(&line);
         visitor(&line[..line.len() - 1])?;
         count = count.saturating_add(1);
+        completed_byte_count =
+            completed_byte_count.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        progress(count, completed_byte_count);
     }
     if count != evidence.record_count || hex::encode(hasher.finalize()) != evidence.sha256 {
         return Err(RestoreError::Integrity(
@@ -1433,13 +2216,26 @@ fn verify_plain_file(directory: &Path, evidence: &AiMemoryFile) -> Result<(), Re
     Ok(())
 }
 
-fn verify_markdown_documents(
+fn verify_markdown_documents_with_progress(
     directory: &Path,
     evidence: &BTreeMap<String, AiMemoryDocumentEvidence>,
+    document_byte_count: u64,
+    progress: &mut AiMemoryAuditProgress<'_>,
 ) -> Result<(), RestoreError> {
     let documents_directory = directory.join("documents");
     ensure_private_directory(&documents_directory)?;
     let mut expected_paths = BTreeSet::new();
+    let total = evidence.len() as u64;
+    progress.begin_group(
+        4,
+        "auditAiMemoryDocuments",
+        ProgressUnit::Items,
+        total,
+        "documents/*.md",
+        document_byte_count,
+    );
+    let mut completed = 0_u64;
+    let mut completed_bytes = 0_u64;
     for document in evidence.values() {
         let path = directory.join(&document.relative_path);
         ensure_private_regular_file(&path)?;
@@ -1452,8 +2248,36 @@ fn verify_markdown_documents(
             ));
         }
         expected_paths.insert(document.relative_path.clone());
+        completed = completed.saturating_add(1);
+        completed_bytes = completed_bytes.saturating_add(document.byte_count);
+        progress.advance_group(
+            4,
+            "auditAiMemoryDocuments",
+            ProgressUnit::Items,
+            completed,
+            total,
+            completed_bytes,
+            document_byte_count,
+            "documents/*.md",
+            None,
+            None,
+            Some(completed),
+        );
     }
+    progress.complete_group(
+        4,
+        "auditAiMemoryDocuments",
+        ProgressUnit::Items,
+        total,
+        document_byte_count,
+        "documents/*.md",
+        None,
+        None,
+        Some(total),
+    );
+    progress.begin_document_inventory(total);
     let mut observed_paths = BTreeSet::new();
+    let mut observed_file_count = 0_u64;
     for entry in WalkDir::new(&documents_directory).follow_links(false) {
         let entry = entry.map_err(|error| RestoreError::Integrity(error.to_string()))?;
         if entry.path() == documents_directory {
@@ -1474,6 +2298,8 @@ fn verify_markdown_documents(
                 .to_string_lossy()
                 .into_owned();
             observed_paths.insert(relative);
+            observed_file_count = observed_file_count.saturating_add(1);
+            progress.advance_document_inventory(observed_file_count, total);
         } else {
             return Err(RestoreError::Integrity(
                 "AI memory documents contain an unsafe filesystem entry".to_string(),
@@ -1486,6 +2312,7 @@ fn verify_markdown_documents(
                 .to_string(),
         ));
     }
+    progress.advance_document_inventory(total, total);
     Ok(())
 }
 
@@ -1578,7 +2405,7 @@ fn validate_source_files(
 fn visit_verified_lines(
     directory: &Path,
     evidence: &AiContextFile,
-    mut visitor: impl FnMut(Option<&[u8]>) -> Result<(), RestoreError>,
+    mut visitor: impl FnMut(Option<&[u8]>, u64, u64) -> Result<(), RestoreError>,
 ) -> Result<(), RestoreError> {
     let path = directory.join(&evidence.relative_path);
     ensure_private_regular_file(&path)?;
@@ -1591,6 +2418,7 @@ fn visit_verified_lines(
     let mut hasher = Sha256::new();
     let mut line = Vec::new();
     let mut record_count = 0_u64;
+    let mut completed_byte_count = 0_u64;
     loop {
         line.clear();
         let read = reader.read_until(b'\n', &mut line)?;
@@ -1599,6 +2427,8 @@ fn visit_verified_lines(
         }
         hasher.update(&line);
         record_count = record_count.saturating_add(1);
+        completed_byte_count =
+            completed_byte_count.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
         let terminated = line.last() == Some(&b'\n');
         if terminated {
             line.pop();
@@ -1607,9 +2437,9 @@ fn visit_verified_lines(
             line.pop();
         }
         if !terminated || line.is_empty() || line.len() > MAX_CONTEXT_RECORD_BYTES {
-            visitor(None)?;
+            visitor(None, record_count, completed_byte_count)?;
         } else {
-            visitor(Some(&line))?;
+            visitor(Some(&line), record_count, completed_byte_count)?;
         }
     }
     if record_count != evidence.record_count || hex::encode(hasher.finalize()) != evidence.sha256 {
@@ -1620,7 +2450,11 @@ fn visit_verified_lines(
     Ok(())
 }
 
-fn verify_ndjson_file(directory: &Path, evidence: &AiContextFile) -> Result<(), RestoreError> {
+fn verify_ndjson_file_with_progress(
+    directory: &Path,
+    evidence: &AiContextFile,
+    mut progress: impl FnMut(u64, u64),
+) -> Result<(), RestoreError> {
     let path = directory.join(&evidence.relative_path);
     ensure_private_regular_file(&path)?;
     if fs::metadata(&path)?.len() != evidence.byte_count {
@@ -1632,6 +2466,7 @@ fn verify_ndjson_file(directory: &Path, evidence: &AiContextFile) -> Result<(), 
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     let mut record_count = 0_u64;
+    let mut completed_byte_count = 0_u64;
     let mut final_byte = None;
     loop {
         let read = reader.read(&mut buffer)?;
@@ -1639,11 +2474,14 @@ fn verify_ndjson_file(directory: &Path, evidence: &AiContextFile) -> Result<(), 
             break;
         }
         hasher.update(&buffer[..read]);
+        completed_byte_count =
+            completed_byte_count.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
         record_count = record_count.saturating_add(
             u64::try_from(buffer[..read].iter().filter(|byte| **byte == b'\n').count())
                 .unwrap_or(u64::MAX),
         );
         final_byte = Some(buffer[read - 1]);
+        progress(completed_byte_count, record_count);
     }
     if (evidence.byte_count > 0 && final_byte != Some(b'\n'))
         || record_count != evidence.record_count
@@ -1654,6 +2492,34 @@ fn verify_ndjson_file(directory: &Path, evidence: &AiContextFile) -> Result<(), 
         ));
     }
     Ok(())
+}
+
+fn should_emit_record_progress(completed: u64, total: u64) -> bool {
+    completed == total || completed == 1 || completed.is_multiple_of(PROGRESS_RECORD_INTERVAL)
+}
+
+fn should_emit_byte_progress(completed: u64, total: u64, last_emitted: &mut u64) -> bool {
+    let should_emit = completed == total
+        || completed == 1
+        || completed.saturating_sub(*last_emitted) >= PROGRESS_BYTE_INTERVAL;
+    if should_emit {
+        *last_emitted = completed;
+    }
+    should_emit
+}
+
+fn progress_span(completed: u64, total: u64, start: u64, end: u64) -> u64 {
+    let span = end.saturating_sub(start);
+    if total == 0 {
+        return end;
+    }
+    start.saturating_add(
+        u64::try_from(completed.min(total) as u128 * span as u128 / total as u128).unwrap_or(span),
+    )
+}
+
+fn elapsed_milliseconds(started: Instant) -> u64 {
+    started.elapsed().as_millis().min(u64::MAX as u128) as u64
 }
 
 fn render_markdown(chunk: &AiMemoryChunk) -> Result<String, RestoreError> {

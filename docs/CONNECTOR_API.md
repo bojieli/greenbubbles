@@ -22,10 +22,18 @@ store. The key must be a distinct high-entropy 32-byte secret and is consumed
 from standard input before the server begins accepting requests. It never
 appears in a process argument, request, response, or audit event.
 The socket parent directory must already be owner-only. GreenBubbles refuses to
-replace an existing socket path and creates the socket with mode `0600`.
+replace an existing socket path and creates the socket with mode `0600`. Both
+the server and client require the socket to belong to the current user. The
+server bounds incomplete-request reads and abandoned-response writes, isolates
+connection-level failures so one broken caller does not terminate the daemon,
+and removes its socket on exit only when the path still identifies the socket
+that process created. The client bounds request/response I/O and rejects a
+response whose API version or request ID does not match the request envelope.
 
 `connector-call` accepts a request only from an owner-only JSON file so private
-queries and draft bodies do not appear in process arguments:
+queries and draft bodies do not appear in process arguments. It opens that file
+without following a symlink, requires current-user ownership and a single link,
+and verifies the same descriptor before and after the bounded read:
 
 ```json
 {

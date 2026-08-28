@@ -6,13 +6,20 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
 use std::time::{Duration, Instant};
 
 use greenbubbles_restore::{
     acquisition_audit::audit_acquisition_chain,
-    ai_context::{audit_ai_context, export_ai_context, load_ai_query_request, query_ai_context},
-    ai_memory::{audit_ai_memory, export_ai_memory, AiMemoryExportOptions},
+    ai_context::{
+        audit_ai_context_with_progress, export_ai_context, load_ai_query_request, query_ai_context,
+    },
+    ai_memory::{
+        audit_ai_memory_with_progress, export_ai_memory_with_progress, AiMemoryExportOptions,
+    },
     archive::{create_conversation_policy, read_conversation_page},
     audit::audit_archive_with_progress,
     benchmark::{run_synthetic_benchmark, SyntheticBenchmarkConfig},
@@ -29,10 +36,11 @@ use greenbubbles_restore::{
     prepare_catalog_batch_with_progress, prepare_catalog_with_progress,
     reconcile::reconcile_archives,
     replica::{
-        audit_replica, audit_replica_backup, bootstrap_replica_with_progress, get_replica_changes,
-        get_replica_message, list_replica_conversations, load_replica_message_filter,
-        prepare_replica_recovery, replica_coverage, replica_status, search_replica_cached_moments,
-        search_replica_messages, synchronize_replica_with_progress, ReplicaCachedMomentFilter,
+        audit_replica_backup_with_progress, audit_replica_with_progress,
+        bootstrap_replica_with_progress, get_replica_changes, get_replica_message,
+        list_replica_conversations, load_replica_message_filter, prepare_replica_recovery,
+        replica_coverage, replica_status, search_replica_cached_moments, search_replica_messages,
+        synchronize_replica_with_progress, ReplicaCachedMomentFilter,
     },
     restore_catalog_with_progress,
     tools::{
@@ -489,8 +497,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if !remaining.iter().any(|value| value == "--replica-key-stdin") {
                 return Err("replica keys must be supplied with --replica-key-stdin".into());
             }
+            require_progress_file_outside_replica_namespace(&remaining, &replica)?;
+            let reporter = ProgressReporter::from_arguments(
+                &remaining,
+                ProgressWorkflow::ReplicaAudit,
+                false,
+            )?;
             let key = ReplicaKey::read_stdin()?;
-            let report = audit_replica(&replica, &key)?;
+            let report = audit_replica_with_progress(&replica, &key, &reporter)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "audit-replica-backup" => {
@@ -499,8 +513,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if !remaining.iter().any(|value| value == "--replica-key-stdin") {
                 return Err("replica keys must be supplied with --replica-key-stdin".into());
             }
+            require_progress_file_outside_replica_namespace(&remaining, &backup)?;
+            let reporter = ProgressReporter::from_arguments(
+                &remaining,
+                ProgressWorkflow::ReplicaAudit,
+                false,
+            )?;
             let key = ReplicaKey::read_stdin()?;
-            let report = audit_replica_backup(&backup, &key)?;
+            let report = audit_replica_backup_with_progress(&backup, &key, &reporter)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "prepare-replica-recovery" => {
@@ -740,6 +760,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let requester = required_option(&remaining, "--requester")?;
             let destination =
                 parse_connector_destination(option_string(&remaining, "--destination")?)?;
+            require_progress_file_outside(&remaining, &[(&output, "AI context output directory")])?;
             let reporter =
                 ProgressReporter::from_arguments(&remaining, ProgressWorkflow::AiExport, false)?;
             let key = ReplicaKey::read_stdin()?;
@@ -757,13 +778,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         "audit-ai-context" => {
             let bundle = required_path(arguments.next(), "AI context bundle directory")?;
-            let report = audit_ai_context(&bundle)?;
+            let remaining = arguments.collect::<Vec<_>>();
+            require_progress_file_outside(&remaining, &[(&bundle, "AI context bundle")])?;
+            let reporter = ProgressReporter::from_arguments(
+                &remaining,
+                ProgressWorkflow::ContextAudit,
+                false,
+            )?;
+            let report = audit_ai_context_with_progress(&bundle, &reporter)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "ai-memory-export" => {
             let bundle = required_path(arguments.next(), "AI context bundle directory")?;
             let output = required_path(arguments.next(), "AI memory output directory")?;
             let remaining = arguments.collect::<Vec<_>>();
+            require_progress_file_outside(
+                &remaining,
+                &[
+                    (&bundle, "AI context bundle"),
+                    (&output, "AI memory output directory"),
+                ],
+            )?;
             let defaults = AiMemoryExportOptions::default();
             let options = AiMemoryExportOptions {
                 maximum_messages_per_chunk: option_usize(&remaining, "--max-messages-per-chunk")?
@@ -774,12 +809,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 )?
                 .unwrap_or(defaults.maximum_text_bytes_per_chunk),
             };
-            let manifest = export_ai_memory(&bundle, &output, options)?;
+            let reporter = ProgressReporter::from_arguments(
+                &remaining,
+                ProgressWorkflow::MemoryProjection,
+                false,
+            )?;
+            let manifest = export_ai_memory_with_progress(&bundle, &output, options, &reporter)?;
             println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
         "audit-ai-memory" => {
             let memory = required_path(arguments.next(), "AI memory output directory")?;
-            let report = audit_ai_memory(&memory)?;
+            let remaining = arguments.collect::<Vec<_>>();
+            require_progress_file_outside(&remaining, &[(&memory, "AI memory output directory")])?;
+            let reporter =
+                ProgressReporter::from_arguments(&remaining, ProgressWorkflow::MemoryAudit, false)?;
+            let report = audit_ai_memory_with_progress(&memory, &reporter)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "connector-serve" => {
@@ -978,8 +1022,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore merge-incremental <previous-archive> <fragment-archive> <output-archive>\n",
                     "  greenbubbles-restore replica-bootstrap <archive> <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
                     "  greenbubbles-restore replica-status <replica-path> --replica-key-stdin\n",
-                    "  greenbubbles-restore audit-replica <replica-path> --replica-key-stdin\n",
-                    "  greenbubbles-restore audit-replica-backup <pre-migration-backup-path> --replica-key-stdin\n",
+                    "  greenbubbles-restore audit-replica <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles-restore audit-replica-backup <pre-migration-backup-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
                     "  greenbubbles-restore prepare-replica-recovery <pre-migration-backup-path> <new-candidate-path> --replica-key-stdin\n",
                     "  greenbubbles-restore replica-sync <archive> <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
                     "  greenbubbles-restore replica-publish <replica-eligible-archive> <handoff-file> --generation <positive-integer>\n",
@@ -998,9 +1042,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore replica-coverage <replica-path> --replica-key-stdin\n",
                     "  greenbubbles-restore ai-query <replica-path> <policy-file> <connector-audit-log> <private-request-json> --replica-key-stdin\n",
                     "  greenbubbles-restore ai-export <replica-path> <policy-file> <connector-audit-log> <new-output-directory> --replica-key-stdin --requester <id> [--destination local|remote] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles-restore audit-ai-context <AI-context-bundle-directory>\n",
-                    "  greenbubbles-restore ai-memory-export <AI-context-bundle-directory> <new-output-directory> [--max-messages-per-chunk <n>] [--max-text-bytes-per-chunk <n>]\n",
-                    "  greenbubbles-restore audit-ai-memory <AI-memory-output-directory>\n",
+                    "  greenbubbles-restore audit-ai-context <AI-context-bundle-directory> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles-restore ai-memory-export <AI-context-bundle-directory> <new-output-directory> [--max-messages-per-chunk <n>] [--max-text-bytes-per-chunk <n>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles-restore audit-ai-memory <AI-memory-output-directory> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
                     "  greenbubbles-restore connector-serve <replica-path> <policy-file> <audit-log> <draft-directory> <socket-path> --replica-key-stdin\n",
                     "  greenbubbles-restore connector-call <socket-path> <private-request-json>\n",
                     "  greenbubbles-restore tool-policy <archive> <policy-file> ([<conversation-id>...] | --all-conversations) [--capabilities list,read,search,draft] [--fields sender,created-at,direction,type,content,attachments,relationships] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--enable-cached-moments --cached-fields author,created-at,type,content,title,description,url,media-count,like-count,comment-count] [--cached-not-before-unix <seconds>] [--cached-not-after-unix <seconds>] [--allow-cached-remote-model] [--max-results <n>] [--max-summary-bytes <n>] [--max-draft-bytes <n>]\n",
@@ -1017,6 +1061,32 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 fn ai_command_help(command: &str) -> Option<&'static str> {
     match command {
+        "audit-replica" => Some(concat!(
+            "Usage:\n",
+            "  greenbubbles-restore audit-replica <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
+            "Runs a read-only, aggregate-only deep audit of the encrypted serving replica.\n",
+            "Progress includes replica bytes, canonical/link/change totals, exact row progress,\n",
+            "stage and overall percentages, and elapsed time without exposing private content.\n\n",
+            "Options:\n",
+            "  --replica-key-stdin  Require the replica key on standard input\n",
+            "  --progress-file <path>  Create an owner-only NDJSON progress log\n",
+            "  --progress-json      Emit NDJSON progress on standard error\n",
+            "  --quiet-progress     Suppress human progress on standard error\n",
+            "  -h, --help           Show this help\n",
+        )),
+        "audit-replica-backup" => Some(concat!(
+            "Usage:\n",
+            "  greenbubbles-restore audit-replica-backup <pre-migration-backup-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
+            "Runs the historical-schema deep audit without migrating or rewriting the backup.\n",
+            "It reports the same privacy-safe byte, row, stage, percentage, and elapsed-time\n",
+            "progress as the current-replica audit.\n\n",
+            "Options:\n",
+            "  --replica-key-stdin  Require the replica key on standard input\n",
+            "  --progress-file <path>  Create an owner-only NDJSON progress log\n",
+            "  --progress-json      Emit NDJSON progress on standard error\n",
+            "  --quiet-progress     Suppress human progress on standard error\n",
+            "  -h, --help           Show this help\n",
+        )),
         "ai-query" => Some(concat!(
             "Usage:\n",
             "  greenbubbles-restore ai-query <replica-path> <policy-file> <connector-audit-log> <private-request-json> --replica-key-stdin\n\n",
@@ -1045,15 +1115,18 @@ fn ai_command_help(command: &str) -> Option<&'static str> {
         )),
         "audit-ai-context" => Some(concat!(
             "Usage:\n",
-            "  greenbubbles-restore audit-ai-context <AI-context-bundle-directory>\n\n",
+            "  greenbubbles-restore audit-ai-context <AI-context-bundle-directory> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
             "Verifies the bundle inventory, permissions, schemas, hashes, counts, identities,\n",
             "references, freshness, checkpoint, and policy binding without printing content.\n\n",
             "Options:\n",
-            "  -h, --help  Show this help\n",
+            "  --progress-file <path>  Create an owner-only NDJSON progress log\n",
+            "  --progress-json         Emit NDJSON progress on standard error\n",
+            "  --quiet-progress        Suppress human progress on standard error\n",
+            "  -h, --help              Show this help\n",
         )),
         "ai-memory-export" => Some(concat!(
             "Usage:\n",
-            "  greenbubbles-restore ai-memory-export <AI-context-bundle-directory> <new-output-directory> [--max-messages-per-chunk <n>] [--max-text-bytes-per-chunk <n>]\n\n",
+            "  greenbubbles-restore ai-memory-export <AI-context-bundle-directory> <new-output-directory> [--max-messages-per-chunk <n>] [--max-text-bytes-per-chunk <n>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
             "Projects an integrity-bound AI context bundle into deterministic, bounded\n",
             "conversation chunks for personal-memory systems. The atomic owner-only output\n",
             "contains Mem0-compatible JSON message batches and QMD-compatible Markdown.\n",
@@ -1062,15 +1135,21 @@ fn ai_command_help(command: &str) -> Option<&'static str> {
             "Options:\n",
             "  --max-messages-per-chunk <n>   1..1000; default 64\n",
             "  --max-text-bytes-per-chunk <n> 256..1048576; default 49152\n",
+            "  --progress-file <path>         Create an owner-only NDJSON progress log\n",
+            "  --progress-json                Emit NDJSON progress on standard error\n",
+            "  --quiet-progress               Suppress human progress on standard error\n",
             "  -h, --help                     Show this help\n",
         )),
         "audit-ai-memory" => Some(concat!(
             "Usage:\n",
-            "  greenbubbles-restore audit-ai-memory <AI-memory-output-directory>\n\n",
+            "  greenbubbles-restore audit-ai-memory <AI-memory-output-directory> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
             "Verifies the projection identity, owner-only inventory, hashes, bounded chunk\n",
             "schemas, source citations, and every Markdown document without printing content.\n\n",
             "Options:\n",
-            "  -h, --help  Show this help\n",
+            "  --progress-file <path>  Create an owner-only NDJSON progress log\n",
+            "  --progress-json         Emit NDJSON progress on standard error\n",
+            "  --quiet-progress        Suppress human progress on standard error\n",
+            "  -h, --help              Show this help\n",
         )),
         _ => None,
     }
@@ -1140,13 +1219,26 @@ enum ProgressWorkflow {
     RestoreAndAudit,
     Audit,
     ReplicaApply,
+    ReplicaAudit,
     AiExport,
+    ContextAudit,
+    MemoryProjection,
+    MemoryAudit,
 }
 
 impl ProgressWorkflow {
     fn phases(self, validates_exported_keys: bool) -> Vec<ProgressPhase> {
         if matches!(self, Self::AiExport) {
             return vec![ProgressPhase::ContextExport];
+        }
+        if matches!(self, Self::ContextAudit) {
+            return vec![ProgressPhase::ContextAudit];
+        }
+        if matches!(self, Self::MemoryProjection) {
+            return vec![ProgressPhase::MemoryProjection];
+        }
+        if matches!(self, Self::MemoryAudit) {
+            return vec![ProgressPhase::MemoryAudit];
         }
         if matches!(self, Self::Preflight) {
             return vec![ProgressPhase::SnapshotVerification];
@@ -1159,6 +1251,9 @@ impl ProgressWorkflow {
                 ProgressPhase::ArchiveAudit,
                 ProgressPhase::ReplicaApplication,
             ];
+        }
+        if matches!(self, Self::ReplicaAudit) {
+            return vec![ProgressPhase::ReplicaAudit];
         }
         let mut phases = vec![ProgressPhase::SnapshotVerification];
         if validates_exported_keys {
@@ -1182,8 +1277,14 @@ impl ProgressWorkflow {
 struct ProgressReporter {
     output: ProgressOutput,
     workflow_phases: Vec<ProgressPhase>,
-    progress_file: Option<Mutex<BufWriter<File>>>,
+    progress_file: Option<Mutex<ProgressFileState>>,
+    progress_file_failed: AtomicBool,
     human_state: Mutex<HumanProgressState>,
+}
+
+struct ProgressFileState {
+    writer: BufWriter<File>,
+    last_synchronized_at: Instant,
 }
 
 #[derive(Default)]
@@ -1251,7 +1352,12 @@ impl ProgressReporter {
         let progress_file = option_path(arguments, "--progress-file")?
             .map(|path| {
                 owner_only_create_new_writer(&path)
-                    .map(Mutex::new)
+                    .map(|writer| {
+                        Mutex::new(ProgressFileState {
+                            writer,
+                            last_synchronized_at: Instant::now(),
+                        })
+                    })
                     .map_err(|error| format!("could not create private progress file: {error}"))
             })
             .transpose()?;
@@ -1259,6 +1365,7 @@ impl ProgressReporter {
             output,
             workflow_phases: workflow.phases(validates_exported_keys),
             progress_file,
+            progress_file_failed: AtomicBool::new(false),
             human_state: Mutex::new(HumanProgressState::default()),
         })
     }
@@ -1268,19 +1375,40 @@ impl ProgressObserver for ProgressReporter {
     fn observe(&self, mut event: ProgressEvent) {
         event.attach_workflow(&self.workflow_phases);
         if let Some(progress_file) = &self.progress_file {
+            if self.progress_file_failed.load(Ordering::Relaxed) {
+                return self.emit_display(event);
+            }
             let write_result = (|| -> Result<(), Box<dyn std::error::Error>> {
-                let mut writer = progress_file
+                let mut state = progress_file
                     .lock()
                     .map_err(|_| "private progress file lock was poisoned")?;
-                serde_json::to_writer(&mut *writer, &event)?;
-                writer.write_all(b"\n")?;
-                writer.flush()?;
+                serde_json::to_writer(&mut state.writer, &event)?;
+                state.writer.write_all(b"\n")?;
+                state.writer.flush()?;
+                let now = Instant::now();
+                let workflow_completed = event.workflow_completed.is_some()
+                    && event.workflow_completed == event.workflow_total;
+                if workflow_completed
+                    || now.saturating_duration_since(state.last_synchronized_at)
+                        >= Duration::from_secs(5)
+                {
+                    state.writer.get_ref().sync_data()?;
+                    state.last_synchronized_at = now;
+                }
                 Ok(())
             })();
             if let Err(error) = write_result {
-                eprintln!("error: could not append private progress event: {error}");
+                if !self.progress_file_failed.swap(true, Ordering::Relaxed) {
+                    eprintln!("error: could not append private progress event: {error}");
+                }
             }
         }
+        self.emit_display(event);
+    }
+}
+
+impl ProgressReporter {
+    fn emit_display(&self, event: ProgressEvent) {
         match self.output {
             ProgressOutput::Quiet => {}
             ProgressOutput::Json => {
@@ -1360,6 +1488,9 @@ fn human_progress(event: &ProgressEvent) -> String {
     )];
     if let (Some(index), Some(count)) = (event.workflow_phase_index, event.workflow_phase_count) {
         fields.push(format!("phase {index}/{count}"));
+    }
+    if let (Some(index), Some(count)) = (event.stage_index, event.stage_count) {
+        fields.push(format!("stage {index}/{count}"));
     }
     if let (Some(index), Some(count)) = (event.database_index, event.database_count) {
         fields.push(format!("database {index}/{count}"));
@@ -1490,6 +1621,54 @@ fn human_progress(event: &ProgressEvent) -> String {
     if let Some(records) = event.source_record_count {
         fields.push(format!("{records} source records"));
     }
+    if let Some(records) = event.conversation_record_count {
+        fields.push(format!("{records} source conversations"));
+    }
+    if let Some(records) = event.message_record_count {
+        fields.push(format!("{records} source messages"));
+    }
+    if let Some(records) = event.canonical_record_count {
+        fields.push(format!("{records} canonical records"));
+    }
+    if let Some(records) = event.link_record_count {
+        fields.push(format!("{records} canonical links"));
+    }
+    if let Some(records) = event.change_record_count {
+        fields.push(format!("{records} change rows"));
+    }
+    if let Some(records) = event.processed_conversation_count {
+        fields.push(format!("{records} conversations processed"));
+    }
+    if let Some(records) = event.processed_message_count {
+        fields.push(format!("{records} messages processed"));
+    }
+    if let Some(records) = event.emitted_chunk_count {
+        fields.push(format!("{records} chunks emitted"));
+    }
+    if let Some(records) = event.emitted_document_count {
+        fields.push(format!("{records} documents emitted"));
+    }
+    if let Some(bytes) = event.emitted_byte_count {
+        fields.push(format!("{} emitted", format_bytes(bytes)));
+    }
+    if let Some(records) = event.verified_chunk_count {
+        fields.push(format!("{records} chunks verified"));
+    }
+    if let Some(records) = event.verified_document_count {
+        fields.push(format!("{records} documents verified"));
+    }
+    if let Some(bytes) = event.verified_byte_count {
+        fields.push(format!("{} verified", format_bytes(bytes)));
+    }
+    if let Some(records) = event.verified_record_count {
+        fields.push(format!("{records} canonical records verified"));
+    }
+    if let Some(records) = event.verified_link_count {
+        fields.push(format!("{records} canonical links verified"));
+    }
+    if let Some(records) = event.verified_change_count {
+        fields.push(format!("{records} change rows verified"));
+    }
     if let Some(records) = event.rejected_record_count {
         fields.push(format!("{records} rejected"));
     }
@@ -1592,6 +1771,65 @@ fn owner_only_create_new_writer(path: &Path) -> io::Result<BufWriter<File>> {
         ));
     }
     Ok(BufWriter::new(file))
+}
+
+fn require_progress_file_outside(
+    arguments: &[String],
+    protected_roots: &[(&Path, &str)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(progress_file) = option_path(arguments, "--progress-file")? else {
+        return Ok(());
+    };
+    let progress_file = resolved_path_for_comparison(&progress_file)?;
+    for (root, description) in protected_roots {
+        let root = resolved_path_for_comparison(root)?;
+        if progress_file == root || progress_file.starts_with(&root) {
+            return Err(format!("--progress-file must be outside the {description}").into());
+        }
+    }
+    Ok(())
+}
+
+fn require_progress_file_outside_replica_namespace(
+    arguments: &[String],
+    replica_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(progress_file) = option_path(arguments, "--progress-file")? else {
+        return Ok(());
+    };
+    let progress_file = resolved_path_for_comparison(&progress_file)?;
+    let replica = resolved_path_for_comparison(replica_path)?;
+    let mut protected = vec![replica.clone()];
+    let replica_name = replica
+        .file_name()
+        .ok_or("replica path has no final component")?
+        .to_string_lossy();
+    let parent = replica.parent().ok_or("replica path has no parent")?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        protected.push(parent.join(format!("{replica_name}{suffix}")));
+    }
+    if protected.contains(&progress_file) {
+        return Err("--progress-file must not overlap the replica storage namespace".into());
+    }
+    Ok(())
+}
+
+fn resolved_path_for_comparison(path: &Path) -> io::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+    if std::fs::symlink_metadata(&absolute).is_ok() {
+        return std::fs::canonicalize(absolute);
+    }
+    let parent = absolute.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory")
+    })?;
+    let file_name = absolute.file_name().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "path has no final component")
+    })?;
+    Ok(std::fs::canonicalize(parent)?.join(file_name))
 }
 
 fn option_string(arguments: &[String], option: &str) -> Result<Option<String>, String> {

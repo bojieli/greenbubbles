@@ -1174,7 +1174,9 @@ fn build_file_index(account_root: &Path) -> (MediaFileIndex, bool) {
                     let vanished = error
                         .io_error()
                         .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
-                        || error.path().is_some_and(|path| !path.exists());
+                        || error
+                            .path()
+                            .is_some_and(|path| is_confirmed_absent(path.try_exists()));
                     if vanished {
                         continue;
                     }
@@ -1209,6 +1211,10 @@ fn build_file_index(account_root: &Path) -> (MediaFileIndex, bool) {
         paths.dedup();
     }
     (result, incomplete)
+}
+
+fn is_confirmed_absent(existence: std::io::Result<bool>) -> bool {
+    matches!(existence, Ok(false))
 }
 
 fn validate_account_binding(
@@ -1487,4 +1493,22 @@ fn write_owner_only_once(path: &Path, data: &[u8]) -> Result<(), RestoreError> {
     file.write_all(data)?;
     file.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_confirmed_absent;
+
+    #[test]
+    fn only_a_successful_absence_check_is_treated_as_a_vanished_media_entry() {
+        assert!(is_confirmed_absent(Ok(false)));
+        assert!(!is_confirmed_absent(Ok(true)));
+        assert!(!is_confirmed_absent(Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "permission denied",
+        ))));
+        assert!(!is_confirmed_absent(Err(std::io::Error::other(
+            "input/output error",
+        ))));
+    }
 }

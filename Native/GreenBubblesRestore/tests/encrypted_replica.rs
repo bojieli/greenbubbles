@@ -11,7 +11,8 @@ use greenbubbles_restore::follow::{
     ReplicaFollowerHealth,
 };
 use greenbubbles_restore::replica::{
-    audit_replica, audit_replica_backup, bootstrap_replica, bootstrap_replica_with_progress,
+    audit_replica, audit_replica_backup, audit_replica_backup_with_progress,
+    audit_replica_with_progress, bootstrap_replica, bootstrap_replica_with_progress,
     get_replica_artifact, get_replica_changes, get_replica_conversation, get_replica_message,
     get_replica_participant, get_replica_recent_messages, list_replica_conversations,
     prepare_replica_recovery, replica_conversation_references_artifact_in_range, replica_coverage,
@@ -25,9 +26,13 @@ use greenbubbles_restore::tools::{
 };
 use greenbubbles_restore::{
     ai_context::{
-        audit_ai_context, export_ai_context, query_ai_context, AiQueryRequest, AiQueryResult,
+        audit_ai_context, audit_ai_context_with_progress, export_ai_context, query_ai_context,
+        AiQueryRequest, AiQueryResult,
     },
-    ai_memory::{audit_ai_memory, export_ai_memory, AiMemoryExportOptions},
+    ai_memory::{
+        audit_ai_memory_with_progress, export_ai_memory, export_ai_memory_with_progress,
+        AiMemoryExportOptions,
+    },
     connector::{
         audit_connector_log, ConnectorDestination, ConnectorErrorCode, ConnectorOperation,
         ConnectorRequest, ConnectorResult, ConnectorService, CONNECTOR_API_VERSION,
@@ -557,6 +562,107 @@ impl ProgressObserver for CapturedProgress {
     fn observe(&self, event: ProgressEvent) {
         self.0.lock().unwrap().push(event);
     }
+}
+
+fn assert_complete_monotonic_progress(events: &[ProgressEvent], phase: ProgressPhase) {
+    assert!(!events.is_empty());
+    assert_eq!(events.first().unwrap().state, ProgressState::Planned);
+    assert_eq!(events.last().unwrap().state, ProgressState::Completed);
+    assert!(events.iter().all(|event| {
+        event.phase == phase
+            && event.privacy_safe
+            && event.source_byte_count.is_some()
+            && event.source_record_count.is_some()
+            && event.conversation_record_count.is_some()
+            && event.message_record_count.is_some()
+    }));
+    assert!(events
+        .windows(2)
+        .all(|pair| pair[0].phase_completed <= pair[1].phase_completed));
+    assert_eq!(
+        events.last().unwrap().phase_completed,
+        events.last().unwrap().phase_total
+    );
+}
+
+fn assert_complete_replica_audit_progress(events: &[ProgressEvent]) {
+    assert!(!events.is_empty());
+    assert_eq!(events.first().unwrap().state, ProgressState::Planned);
+    assert_eq!(events.last().unwrap().state, ProgressState::Completed);
+    assert!(events.iter().all(|event| {
+        event.phase == ProgressPhase::ReplicaAudit
+            && event.format_version == 3
+            && event.privacy_safe
+            && event.replica_file_byte_count.is_some_and(|bytes| bytes > 0)
+            && event
+                .stage_index
+                .is_some_and(|index| (1..=8).contains(&index))
+            && event.stage_count == Some(8)
+            && event.elapsed_milliseconds.is_some()
+    }));
+    assert!(events
+        .windows(2)
+        .all(|pair| pair[0].phase_completed <= pair[1].phase_completed));
+    let final_event = events.last().unwrap();
+    assert_eq!(final_event.phase_completed, final_event.phase_total);
+    assert_eq!(
+        final_event.verified_record_count,
+        final_event.canonical_record_count
+    );
+    assert_eq!(
+        final_event.verified_link_count,
+        final_event.link_record_count
+    );
+    assert_eq!(
+        final_event.verified_change_count,
+        final_event.change_record_count
+    );
+    for operation in [
+        "verifyReplicaSQLiteIntegrity",
+        "verifyReplicaCanonicalRecords",
+        "verifyReplicaMessageLinks",
+        "verifyReplicaCheckpointCoverage",
+        "verifyReplicaFullTextIndex",
+        "verifyReplicaChangeStream",
+    ] {
+        assert!(events.iter().any(|event| event.operation == operation));
+    }
+    let encoded = serde_json::to_string(events).unwrap();
+    for private_value in [PRIVATE_TEXT, "account-a", "source-a"] {
+        assert!(!encoded.contains(private_value));
+    }
+}
+
+#[test]
+fn replica_and_backup_audits_report_complete_privacy_safe_progress() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private-replica-audit-progress");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive = build_archive(&private, "archive", "account-a", "source-a");
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+    bootstrap_replica(&archive, &replica, &key).unwrap();
+
+    let progress = CapturedProgress::default();
+    let report = audit_replica_with_progress(&replica, &key, &progress).unwrap();
+    assert_eq!(report.message_count, 1);
+    let events = progress.0.lock().unwrap();
+    assert_complete_replica_audit_progress(&events);
+    assert_eq!(events.last().unwrap().canonical_record_count, Some(4));
+    assert_eq!(events.last().unwrap().verified_record_count, Some(4));
+    drop(events);
+
+    downgrade_to_schema_1(&replica);
+    assert_eq!(replica_status(&replica, &key).unwrap().schema_version, 5);
+    let backup = migration_backup_path(&private, 1);
+    let backup_progress = CapturedProgress::default();
+    let report = audit_replica_backup_with_progress(&backup, &key, &backup_progress).unwrap();
+    assert_eq!(report.schema_version, 1);
+    let events = backup_progress.0.lock().unwrap();
+    assert_complete_replica_audit_progress(&events);
+    assert_eq!(events.last().unwrap().canonical_record_count, Some(4));
+    assert_eq!(events.last().unwrap().change_record_count, Some(0));
 }
 
 #[test]
@@ -1399,6 +1505,7 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     fs::create_dir(&private).unwrap();
     fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
     let archive = build_archive(&private, "archive", "account-a", "source-a");
+    expand_archive_artifacts(&archive, 300);
     bind_synthetic_account_holder(&archive);
     let messages_path = archive.join("messages.ndjson");
     let mut messages = read_ndjson::<CanonicalMessage>(&messages_path);
@@ -1639,7 +1746,7 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     assert_eq!(manifest.enabled_conversation_count, 1);
     assert_eq!(manifest.exported_contact_count, 1);
     assert_eq!(manifest.exported_message_count, 1);
-    assert_eq!(manifest.exported_artifact_count, 1);
+    assert_eq!(manifest.exported_artifact_count, 300);
     assert_eq!(manifest.artifact_resolution_error_count, 0);
     assert!(manifest
         .limitation_codes
@@ -1681,6 +1788,20 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
         self_contact["conversationProfiles"][0]["displayName"],
         "You"
     );
+    let connector_events = fs::read_to_string(&audit)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let artifact_export_events = connector_events
+        .iter()
+        .filter(|event| event["operation"] == "exportArtifacts")
+        .collect::<Vec<_>>();
+    assert_eq!(artifact_export_events.len(), 1);
+    assert_eq!(artifact_export_events[0]["returnedItemCount"], 300);
+    assert!(!connector_events
+        .iter()
+        .any(|event| event["operation"] == "getArtifact"));
 
     let events = progress.0.lock().unwrap();
     assert_eq!(events.first().unwrap().state, ProgressState::Planned);
@@ -1707,16 +1828,24 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     .unwrap_err()
     .to_string()
     .contains("already exists"));
-    let bundle_audit = audit_ai_context(&output).unwrap();
+    let context_audit_progress = CapturedProgress::default();
+    let bundle_audit = audit_ai_context_with_progress(&output, &context_audit_progress).unwrap();
     assert!(bundle_audit.file_digests_verified);
     assert!(bundle_audit.references_verified);
     assert!(bundle_audit.source_freshness_verified);
     assert_eq!(bundle_audit.conversation_count, 1);
     assert_eq!(bundle_audit.contact_count, 1);
     assert_eq!(bundle_audit.message_count, 1);
-    assert_eq!(bundle_audit.artifact_count, 1);
+    assert_eq!(bundle_audit.artifact_count, 300);
     assert_eq!(bundle_audit.omitted_artifact_reference_count, 2);
     assert_eq!(bundle_audit.omitted_relationship_reference_count, 2);
+    let context_audit_events = context_audit_progress.0.lock().unwrap();
+    assert_complete_monotonic_progress(&context_audit_events, ProgressPhase::ContextAudit);
+    assert_eq!(
+        context_audit_events.last().unwrap().processed_message_count,
+        Some(1)
+    );
+    drop(context_audit_events);
 
     let cli_request = private.join("ai-cli-request.json");
     write_json(
@@ -1789,29 +1918,83 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
         serde_json::from_slice(&cli_export.stdout).unwrap();
     assert!(cli_manifest.export_complete);
     assert_eq!(cli_manifest.exported_message_count, 1);
+    let forbidden_progress = cli_output.join("must-not-modify-bundle.ndjson");
+    let rejected_progress = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .args(["audit-ai-context", cli_output.to_str().unwrap()])
+        .args(["--progress-file", forbidden_progress.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!rejected_progress.status.success());
+    assert!(!forbidden_progress.exists());
+    let progress_alias = private.join("progress-alias");
+    std::os::unix::fs::symlink(&private, &progress_alias).unwrap();
+    let aliased_progress = progress_alias
+        .join("ai-context-cli")
+        .join("must-not-modify-bundle-through-alias.ndjson");
+    let rejected_alias = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .args(["audit-ai-context", cli_output.to_str().unwrap()])
+        .args(["--progress-file", aliased_progress.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!rejected_alias.status.success());
+    assert!(!cli_output
+        .join("must-not-modify-bundle-through-alias.ndjson")
+        .exists());
+    let cli_context_audit_progress = private.join("ai-context-audit-progress.ndjson");
     let cli_audit = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
         .args(["audit-ai-context", cli_output.to_str().unwrap()])
+        .args(["--progress-json", "--progress-file"])
+        .arg(&cli_context_audit_progress)
         .output()
         .unwrap();
     assert!(cli_audit.status.success(), "{:?}", cli_audit.stderr);
     let cli_audit: greenbubbles_restore::ai_context::AiContextAuditReport =
         serde_json::from_slice(&cli_audit.stdout).unwrap();
     assert!(cli_audit.references_verified);
+    assert!(fs::read_to_string(&cli_context_audit_progress)
+        .unwrap()
+        .lines()
+        .last()
+        .is_some_and(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            event["state"] == "completed"
+                && event["phase"] == "contextAudit"
+                && event["workflowCompleted"] == event["workflowTotal"]
+        }));
 
     let memory_output = private.join("ai-memory");
-    let memory_manifest = export_ai_memory(
+    let memory_progress = CapturedProgress::default();
+    let memory_manifest = export_ai_memory_with_progress(
         &cli_output,
         &memory_output,
         AiMemoryExportOptions {
             maximum_messages_per_chunk: 1,
             maximum_text_bytes_per_chunk: 4_096,
         },
+        &memory_progress,
     )
     .unwrap();
     assert_eq!(memory_manifest.projected_message_count, 1);
     assert_eq!(memory_manifest.memory_chunk_count, 1);
     assert!(memory_manifest.qmd_compatible);
     assert!(memory_manifest.mem0_message_batch_compatible);
+    let memory_events = memory_progress.0.lock().unwrap();
+    assert_complete_monotonic_progress(&memory_events, ProgressPhase::MemoryProjection);
+    assert_eq!(
+        memory_events.last().unwrap().processed_message_count,
+        Some(1)
+    );
+    assert_eq!(memory_events.last().unwrap().emitted_chunk_count, Some(1));
+    assert_eq!(
+        memory_events.last().unwrap().emitted_document_count,
+        Some(1)
+    );
+    assert!(memory_events
+        .last()
+        .unwrap()
+        .emitted_byte_count
+        .is_some_and(|bytes| bytes > 0));
+    drop(memory_events);
     assert_eq!(file_mode(&memory_output), 0o700);
     for name in [
         "manifest.json",
@@ -1868,12 +2051,26 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     assert!(markdown.contains("untrusted source data"));
     assert!(markdown.contains(PRIVATE_TEXT));
     assert!(markdown.contains("greenbubbles:message:message-a"));
-    let memory_audit = audit_ai_memory(&memory_output).unwrap();
+    let memory_audit_progress = CapturedProgress::default();
+    let memory_audit =
+        audit_ai_memory_with_progress(&memory_output, &memory_audit_progress).unwrap();
     assert!(memory_audit.file_digests_verified);
     assert!(memory_audit.citations_verified);
     assert_eq!(memory_audit.message_count, 1);
+    let memory_audit_events = memory_audit_progress.0.lock().unwrap();
+    assert_complete_monotonic_progress(&memory_audit_events, ProgressPhase::MemoryAudit);
+    assert_eq!(
+        memory_audit_events.last().unwrap().processed_message_count,
+        Some(1)
+    );
+    assert_eq!(
+        memory_audit_events.last().unwrap().verified_document_count,
+        Some(1)
+    );
+    drop(memory_audit_events);
 
     let cli_memory_output = private.join("ai-memory-cli");
+    let cli_memory_progress = private.join("ai-memory-export-progress.ndjson");
     let cli_memory = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
         .args([
             "ai-memory-export",
@@ -1883,6 +2080,9 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
             "1",
             "--max-text-bytes-per-chunk",
             "4096",
+            "--progress-json",
+            "--progress-file",
+            cli_memory_progress.to_str().unwrap(),
         ])
         .output()
         .unwrap();
@@ -1893,8 +2093,22 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
         cli_memory_manifest.projection_id,
         memory_manifest.projection_id
     );
+    assert!(fs::read_to_string(&cli_memory_progress)
+        .unwrap()
+        .lines()
+        .last()
+        .is_some_and(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            event["state"] == "completed"
+                && event["phase"] == "memoryProjection"
+                && event["processedMessageCount"] == 1
+                && event["emittedDocumentCount"] == 1
+        }));
+    let cli_memory_audit_progress = private.join("ai-memory-audit-progress.ndjson");
     let cli_memory_audit = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
         .args(["audit-ai-memory", cli_memory_output.to_str().unwrap()])
+        .args(["--progress-json", "--progress-file"])
+        .arg(&cli_memory_audit_progress)
         .output()
         .unwrap();
     assert!(
@@ -1905,6 +2119,16 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     let cli_memory_audit: greenbubbles_restore::ai_memory::AiMemoryAuditReport =
         serde_json::from_slice(&cli_memory_audit.stdout).unwrap();
     assert!(cli_memory_audit.markdown_documents_verified);
+    assert!(fs::read_to_string(&cli_memory_audit_progress)
+        .unwrap()
+        .lines()
+        .last()
+        .is_some_and(|line| {
+            let event: serde_json::Value = serde_json::from_str(line).unwrap();
+            event["state"] == "completed"
+                && event["phase"] == "memoryAudit"
+                && event["workflowCompleted"] == event["workflowTotal"]
+        }));
     let limited_bundle = private.join("ai-context-limited");
     copy_private_bundle(&cli_output, &limited_bundle);
     let messages_path = limited_bundle.join("messages.jsonl");
@@ -1943,6 +2167,40 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
         .limitation_codes
         .contains(&"malformedContextMessageOmitted".to_string()));
     assert!(!limited_memory.content_complete);
+
+    let connection = keyed_connection(&replica);
+    connection
+        .execute(
+            "UPDATE artifact SET record_json = ?1 WHERE artifact_id = 'artifact-0001'",
+            [b"{".as_slice()],
+        )
+        .unwrap();
+    drop(connection);
+    let degraded_output = private.join("ai-context-artifact-error");
+    let degraded = export_ai_context(
+        &replica,
+        &key,
+        &policy,
+        &audit,
+        &degraded_output,
+        "synthetic-agent",
+        ConnectorDestination::Local,
+        &NoProgress,
+    )
+    .unwrap();
+    assert_eq!(degraded.exported_artifact_count, 300);
+    assert_eq!(degraded.artifact_resolution_error_count, 1);
+    let artifact_error = fs::read_to_string(degraded_output.join("artifacts.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|artifact| artifact["artifactId"] == "artifact-0001")
+        .unwrap();
+    assert_eq!(artifact_error["error"]["code"], "integrityFailure");
+    assert!(artifact_error["detail"].is_null());
+    let degraded_audit = audit_ai_context(&degraded_output).unwrap();
+    assert_eq!(degraded_audit.artifact_resolution_error_count, 1);
+    assert!(!degraded_audit.content_complete);
 
     let mut tampered = OpenOptions::new()
         .append(true)
@@ -3040,10 +3298,13 @@ fn independently_audits_encrypted_replica_records_indexes_and_checkpoint() {
     drop(connection);
     assert!(audit_replica(&replica, &key).is_ok());
 
+    let audit_progress = private.join("replica-audit-progress.ndjson");
     let mut audit_process = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
         .arg("audit-replica")
         .arg(&replica)
         .arg("--replica-key-stdin")
+        .args(["--progress-file", audit_progress.to_str().unwrap()])
+        .arg("--quiet-progress")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -3073,6 +3334,38 @@ fn independently_audits_encrypted_replica_records_indexes_and_checkpoint() {
     ] {
         assert!(!audit_text.contains(private_value));
     }
+    assert!(audit_output.stderr.is_empty());
+    assert_eq!(file_mode(&audit_progress), 0o600);
+    let progress_events = fs::read_to_string(&audit_progress)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert!(!progress_events.is_empty());
+    assert!(progress_events.iter().all(|event| {
+        event["privacySafe"] == true
+            && event["phase"] == "replicaAudit"
+            && event["replicaFileByteCount"]
+                .as_u64()
+                .is_some_and(|bytes| bytes > 0)
+    }));
+    let final_progress = progress_events.last().unwrap();
+    assert_eq!(final_progress["state"], "completed");
+    assert_eq!(
+        final_progress["phaseCompleted"],
+        final_progress["phaseTotal"]
+    );
+    let overlapping_progress = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .arg("audit-replica")
+        .arg(&replica)
+        .arg("--replica-key-stdin")
+        .args(["--progress-file", replica.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!overlapping_progress.status.success());
+    assert!(String::from_utf8_lossy(&overlapping_progress.stderr)
+        .contains("must not overlap the replica storage namespace"));
+    assert!(audit_replica(&replica, &key).is_ok());
 
     let connection = keyed_connection(&replica);
     connection
@@ -3501,6 +3794,43 @@ fn build_archive(parent: &Path, name: &str, account: &str, fingerprint: &str) ->
     write_ndjson(&archive.join("artifacts.ndjson"), &[artifact]);
     write_ndjson(&archive.join("messages.ndjson"), &[message]);
     archive
+}
+
+fn expand_archive_artifacts(archive: &Path, count: usize) {
+    assert!(count > 0);
+    let template = read_ndjson::<CanonicalArtifact>(&archive.join("artifacts.ndjson"))
+        .into_iter()
+        .next()
+        .unwrap();
+    let artifacts = (0..count)
+        .map(|index| {
+            let mut artifact = template.clone();
+            artifact.artifact_id = format!("artifact-{index:04}");
+            artifact
+        })
+        .collect::<Vec<_>>();
+    overwrite_ndjson(&archive.join("artifacts.ndjson"), &artifacts);
+
+    let mut messages = read_ndjson::<CanonicalMessage>(&archive.join("messages.ndjson"));
+    messages[0].artifact_references = artifacts
+        .iter()
+        .map(|artifact| MessageArtifactReference {
+            artifact_id: artifact.artifact_id.clone(),
+            role: ArtifactRole::Original,
+            preferred: true,
+        })
+        .collect();
+    overwrite_ndjson(&archive.join("messages.ndjson"), &messages);
+
+    let report_path = archive.join("report.json");
+    let mut report: RestorationReport =
+        serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    report.integrity.unique_artifact_count = count as u64;
+    report.integrity.downloaded_artifact_count = count as u64;
+    report.integrity.decoded_artifact_count = count as u64;
+    report.integrity.artifact_reference_count = count as u64;
+    report.completion = RestorationCompletion::evaluate(&report.integrity);
+    overwrite_json(&report_path, &report);
 }
 
 fn add_cached_surfaces_to_archive(archive: &Path) {

@@ -619,7 +619,12 @@ the body-free change stream is ordered and resumable. See
 `audit-replica` is a read-only, aggregate-only deep check over SQLCipher/SQLite
 integrity, foreign keys, migration identities, canonical record hashes and
 projections, exact links, FTS, checkpoint/coverage state, and sync/change
-history. It never repairs a mismatch. See
+history. It never repairs a mismatch. Both replica audit commands show
+privacy-safe stage and overall percentages by default, including encrypted
+replica size, canonical/link/change row totals, exact row progress, and elapsed
+time. Use `--progress-json` for NDJSON, `--quiet-progress` to suppress console
+progress, or `--progress-file <owner-only-new-path>` to retain every event
+durably outside the replica storage namespace. See
 [docs/REPLICA_AUDIT.md](docs/REPLICA_AUDIT.md).
 
 `audit-replica-backup` verifies a retained schema-1 through schema-4 recovery
@@ -739,14 +744,24 @@ not inferred from names, peers, or group ownership. Existing v1 bundles remain
 readable. A missing record is never presented as evidence of
 deletion when a source database is unavailable.
 
-Export progress is shown on stderr and includes file position, record counts,
-phase percentage, and overall percentage. `--progress-json` provides NDJSON
-events on stderr; `--progress-file <owner-only-new-path>` persists the same
+Attachment metadata export uses one checkpoint-consistent, read-only SQLCipher
+snapshot with bounded, deterministic ID batches and one restoration-report
+load. Authorization is inherited from the already policy-filtered message
+references; each available file is descriptor/digest verified, individual
+failures remain typed in `artifacts.jsonl`, and the connector journal receives
+one aggregate `exportArtifacts` event instead of one durable event per
+attachment.
+
+Export and audit progress is shown on stderr and includes source/current-file
+sizes, record counts, processed conversations/messages, file position, phase
+percentage, and overall percentage. `--progress-json` provides NDJSON events on
+stderr; `--progress-file <owner-only-new-path>` persists the same
 machine-readable events. If synchronization changes the replica during export,
 the staged bundle is discarded instead of publishing mixed generations.
 `audit-ai-context <bundle-directory>` independently verifies the private file
 inventory, hashes, counts, schemas, identities, references, and freshness while
-emitting only aggregate evidence.
+emitting only aggregate evidence. It accepts the same progress options; keep a
+durable progress file outside the audited bundle directory.
 
 For personal-memory and retrieval frameworks, project an audited bundle into
 bounded conversational documents instead of sending millions of isolated
@@ -756,7 +771,8 @@ message records to an LLM:
 cargo run --locked --manifest-path Native/GreenBubblesRestore/Cargo.toml \
   --bin greenbubbles-restore -- \
   ai-memory-export /private/greenbubbles-tools/context-generation-1 \
-  /private/greenbubbles-tools/memory-generation-1
+  /private/greenbubbles-tools/memory-generation-1 \
+  --progress-file /private/greenbubbles-tools/memory-export-progress.ndjson
 ```
 
 The atomic owner-only output contains `memories.jsonl` (role/content batches
@@ -772,7 +788,11 @@ with typed counts; a wrong checkpoint, digest, key, policy, or unsafe path is
 still a hard failure. Run
 `audit-ai-memory <memory-generation-directory>` after copying a projection and
 before indexing it; the aggregate report verifies every chunk, citation, hash,
-permission, and Markdown document without printing content. See
+permission, and Markdown document without printing content. Memory projection
+and audit expose source/file bytes and records, processed messages, emitted or
+verified chunk/document counts and bytes, elapsed time, and monotonic
+phase/overall percentages through the same human, JSON-stderr, durable-file,
+and quiet progress modes. See
 [docs/AI_MEMORY_INTEGRATION.md](docs/AI_MEMORY_INTEGRATION.md).
 
 The repository also includes the discoverable

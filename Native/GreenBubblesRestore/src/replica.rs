@@ -856,7 +856,27 @@ pub fn audit_replica(
     replica_path: &Path,
     key: &ReplicaKey,
 ) -> Result<ReplicaAuditReport, RestoreError> {
+    audit_replica_with_progress(replica_path, key, &NoProgress)
+}
+
+pub fn audit_replica_with_progress(
+    replica_path: &Path,
+    key: &ReplicaKey,
+    observer: &dyn ProgressObserver,
+) -> Result<ReplicaAuditReport, RestoreError> {
     verify_private_replica_files(replica_path)?;
+    let replica_byte_count = replica_namespace_byte_count(replica_path)?;
+    let mut progress = ReplicaAuditProgress::new(observer, replica_byte_count);
+    progress.emit(
+        0,
+        ProgressState::Planned,
+        "planReplicaAudit",
+        ProgressUnit::Bytes,
+        0,
+        replica_byte_count,
+        ReplicaAuditCounter::None,
+        None,
+    );
     let (mut connection, _) = open_existing_replica_read_only(replica_path, key)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
     let connection = &*transaction;
@@ -867,10 +887,7 @@ pub fn audit_replica(
         )));
     }
     validate_replica_migration_ledger(connection, version)?;
-    verify_sqlite_integrity(connection)?;
-    verify_foreign_keys(connection)?;
     let _ = replica_id(connection)?;
-
     let conversation_count = table_count(connection, "conversation")?;
     let participant_count = table_count(connection, "participant")?;
     let message_count = table_count(connection, "message")?;
@@ -880,6 +897,8 @@ pub fn audit_replica(
     let relationship_count = table_count(connection, "message_relationship")?;
     let message_artifact_count = table_count(connection, "message_artifact")?;
     let change_count = table_count(connection, "change_log")?;
+    let synchronization_run_count = table_count(connection, "sync_run")?;
+    let membership_count = table_count(connection, "conversation_participant")?;
     let transient_count = table_count(connection, "sync_seen")?;
     if transient_count != 0 {
         return Err(RestoreError::Integrity(
@@ -895,6 +914,41 @@ pub fn audit_replica(
     }
     let initialized = identity_count == 1;
     let mut record_audit = ReplicaRecordAudit::default();
+    progress.set_totals(ReplicaAuditTotals {
+        conversation_count,
+        message_count,
+        canonical_record_count: conversation_count
+            .saturating_add(participant_count)
+            .saturating_add(message_count)
+            .saturating_add(artifact_count)
+            .saturating_add(cached_moment_count)
+            .saturating_add(cached_moment_interaction_count),
+        link_record_count: membership_count
+            .saturating_add(relationship_count)
+            .saturating_add(message_artifact_count),
+        change_record_count: change_count.saturating_add(synchronization_run_count),
+    });
+    progress.emit(
+        0,
+        ProgressState::Completed,
+        "openReplicaAuditSnapshot",
+        ProgressUnit::Bytes,
+        replica_byte_count,
+        replica_byte_count,
+        ReplicaAuditCounter::None,
+        None,
+    );
+    with_replica_audit_heartbeat(
+        &progress,
+        1,
+        "verifyReplicaSQLiteIntegrity",
+        ProgressUnit::Bytes,
+        replica_byte_count,
+        || {
+            verify_sqlite_integrity(connection)?;
+            verify_foreign_keys(connection)
+        },
+    )?;
     if initialized {
         let identity: (String, String, bool, String, String) = connection.query_row(
             "SELECT account_id, current_source_fingerprint, restoration_complete,
@@ -918,7 +972,7 @@ pub fn audit_replica(
                 "replica identity is incomplete".to_string(),
             ));
         }
-        record_audit = audit_replica_records(connection, &identity.0, true)?;
+        record_audit = audit_replica_records(connection, &identity.0, true, &progress)?;
         if record_audit.conversation_count != conversation_count
             || record_audit.participant_count != participant_count
             || record_audit.message_count != message_count
@@ -930,8 +984,17 @@ pub fn audit_replica(
                 "replica record audit counts changed during verification".to_string(),
             ));
         }
-        verify_replica_message_links(connection, &identity.0, &record_audit)?;
-        verify_replica_fts(connection, &identity.0, message_count)?;
+        verify_replica_message_links(connection, &identity.0, &record_audit, &progress)?;
+        progress.emit(
+            4,
+            ProgressState::Started,
+            "verifyReplicaCheckpointCoverage",
+            ProgressUnit::Items,
+            0,
+            1,
+            ReplicaAuditCounter::None,
+            None,
+        );
         verify_replica_checkpoint_and_coverage(
             connection,
             &identity,
@@ -943,7 +1006,31 @@ pub fn audit_replica(
             cached_moment_count,
             cached_moment_interaction_count,
         )?;
-        verify_replica_change_stream(connection, &identity.0, change_count)?;
+        progress.emit(
+            4,
+            ProgressState::Completed,
+            "verifyReplicaCheckpointCoverage",
+            ProgressUnit::Items,
+            1,
+            1,
+            ReplicaAuditCounter::None,
+            None,
+        );
+        with_replica_audit_heartbeat(
+            &progress,
+            5,
+            "verifyReplicaFullTextIndex",
+            ProgressUnit::Records,
+            message_count,
+            || verify_replica_fts(connection, &identity.0, message_count),
+        )?;
+        verify_replica_change_stream(
+            connection,
+            &identity.0,
+            change_count,
+            synchronization_run_count,
+            &progress,
+        )?;
     } else {
         let content_count = conversation_count
             .saturating_add(participant_count)
@@ -954,7 +1041,7 @@ pub fn audit_replica(
             .saturating_add(relationship_count)
             .saturating_add(message_artifact_count)
             .saturating_add(change_count)
-            .saturating_add(table_count(connection, "conversation_participant")?)
+            .saturating_add(membership_count)
             .saturating_add(table_count(connection, "coverage_state")?)
             .saturating_add(table_count(connection, "source_checkpoint")?)
             .saturating_add(table_count(connection, "sync_run")?)
@@ -965,8 +1052,84 @@ pub fn audit_replica(
                 "uninitialized replica contains orphan serving state".to_string(),
             ));
         }
+        progress.emit_rows(
+            2,
+            ProgressState::Completed,
+            "verifyReplicaCanonicalRecords",
+            0,
+            0,
+            ReplicaAuditCounter::CanonicalRecords,
+            None,
+        );
+        progress.emit_rows(
+            3,
+            ProgressState::Completed,
+            "verifyReplicaMessageLinks",
+            0,
+            0,
+            ReplicaAuditCounter::Links,
+            None,
+        );
+        progress.emit(
+            4,
+            ProgressState::Started,
+            "verifyReplicaCheckpointCoverage",
+            ProgressUnit::Items,
+            0,
+            1,
+            ReplicaAuditCounter::None,
+            None,
+        );
+        progress.emit(
+            4,
+            ProgressState::Completed,
+            "verifyReplicaCheckpointCoverage",
+            ProgressUnit::Items,
+            1,
+            1,
+            ReplicaAuditCounter::None,
+            None,
+        );
+        progress.emit_rows(
+            5,
+            ProgressState::Completed,
+            "verifyReplicaFullTextIndex",
+            0,
+            0,
+            ReplicaAuditCounter::None,
+            None,
+        );
+        progress.emit_rows(
+            6,
+            ProgressState::Completed,
+            "verifyReplicaChangeStream",
+            0,
+            0,
+            ReplicaAuditCounter::Changes,
+            None,
+        );
     }
+    progress.emit(
+        7,
+        ProgressState::Started,
+        "finalizeReplicaAudit",
+        ProgressUnit::Items,
+        0,
+        1,
+        ReplicaAuditCounter::None,
+        None,
+    );
     transaction.rollback()?;
+    progress.emit(
+        7,
+        ProgressState::Completed,
+        "finalizeReplicaAudit",
+        ProgressUnit::Items,
+        1,
+        1,
+        ReplicaAuditCounter::None,
+        None,
+    );
     Ok(ReplicaAuditReport {
         format_version: 1,
         privacy_safe_summary: true,
@@ -1006,7 +1169,27 @@ pub fn audit_replica_backup(
     backup_path: &Path,
     key: &ReplicaKey,
 ) -> Result<ReplicaBackupAuditReport, RestoreError> {
+    audit_replica_backup_with_progress(backup_path, key, &NoProgress)
+}
+
+pub fn audit_replica_backup_with_progress(
+    backup_path: &Path,
+    key: &ReplicaKey,
+    observer: &dyn ProgressObserver,
+) -> Result<ReplicaBackupAuditReport, RestoreError> {
     verify_private_replica_files(backup_path)?;
+    let replica_byte_count = replica_namespace_byte_count(backup_path)?;
+    let mut progress = ReplicaAuditProgress::new(observer, replica_byte_count);
+    progress.emit(
+        0,
+        ProgressState::Planned,
+        "planReplicaBackupAudit",
+        ProgressUnit::Bytes,
+        0,
+        replica_byte_count,
+        ReplicaAuditCounter::None,
+        None,
+    );
     let (mut connection, _) = open_existing_replica_read_only(backup_path, key)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
     let connection = &*transaction;
@@ -1017,8 +1200,68 @@ pub fn audit_replica_backup(
         ));
     }
     validate_replica_migration_ledger(connection, version)?;
-    verify_sqlite_integrity(connection)?;
-    verify_foreign_keys(connection)?;
+    let conversation_count = table_count(connection, "conversation")?;
+    let participant_count = table_count(connection, "participant")?;
+    let message_count = table_count(connection, "message")?;
+    let artifact_count = table_count(connection, "artifact")?;
+    let cached_moment_count = if version >= 4 {
+        table_count(connection, "cached_moment")?
+    } else {
+        0
+    };
+    let cached_moment_interaction_count = if version >= 4 {
+        table_count(connection, "cached_moment_interaction")?
+    } else {
+        0
+    };
+    let membership_count = table_count(connection, "conversation_participant")?;
+    let relationship_count = table_count(connection, "message_relationship")?;
+    let message_artifact_count = table_count(connection, "message_artifact")?;
+    let change_count = if version >= 2 {
+        table_count(connection, "change_log")?
+    } else {
+        0
+    };
+    let synchronization_run_count = if version >= 2 {
+        table_count(connection, "sync_run")?
+    } else {
+        0
+    };
+    progress.set_totals(ReplicaAuditTotals {
+        conversation_count,
+        message_count,
+        canonical_record_count: conversation_count
+            .saturating_add(participant_count)
+            .saturating_add(message_count)
+            .saturating_add(artifact_count)
+            .saturating_add(cached_moment_count)
+            .saturating_add(cached_moment_interaction_count),
+        link_record_count: membership_count
+            .saturating_add(relationship_count)
+            .saturating_add(message_artifact_count),
+        change_record_count: change_count.saturating_add(synchronization_run_count),
+    });
+    progress.emit(
+        0,
+        ProgressState::Completed,
+        "openReplicaBackupAuditSnapshot",
+        ProgressUnit::Bytes,
+        replica_byte_count,
+        replica_byte_count,
+        ReplicaAuditCounter::None,
+        None,
+    );
+    with_replica_audit_heartbeat(
+        &progress,
+        1,
+        "verifyReplicaSQLiteIntegrity",
+        ProgressUnit::Bytes,
+        replica_byte_count,
+        || {
+            verify_sqlite_integrity(connection)?;
+            verify_foreign_keys(connection)
+        },
+    )?;
     let replica_format_version: i64 = connection.query_row(
         "SELECT replica_format_version FROM replica_schema WHERE singleton = 1",
         [],
@@ -1062,20 +1305,70 @@ pub fn audit_replica_backup(
             ));
         }
         let include_cached = version >= 4;
-        record_audit = audit_replica_records(connection, &identity.0, include_cached)?;
-        verify_replica_message_links(connection, &identity.0, &record_audit)?;
+        record_audit = audit_replica_records(connection, &identity.0, include_cached, &progress)?;
+        verify_replica_message_links(connection, &identity.0, &record_audit, &progress)?;
+        progress.emit(
+            4,
+            ProgressState::Started,
+            "verifyReplicaCheckpointCoverage",
+            ProgressUnit::Items,
+            0,
+            1,
+            ReplicaAuditCounter::None,
+            None,
+        );
         verify_legacy_replica_coverage(connection, &identity, &record_audit, include_cached)?;
         if version >= 2 {
             verify_legacy_replica_checkpoint(connection, &identity, &record_audit)?;
-            verify_replica_fts(connection, &identity.0, record_audit.message_count)?;
+        }
+        progress.emit(
+            4,
+            ProgressState::Completed,
+            "verifyReplicaCheckpointCoverage",
+            ProgressUnit::Items,
+            1,
+            1,
+            ReplicaAuditCounter::None,
+            None,
+        );
+        if version >= 2 {
+            with_replica_audit_heartbeat(
+                &progress,
+                5,
+                "verifyReplicaFullTextIndex",
+                ProgressUnit::Records,
+                record_audit.message_count,
+                || verify_replica_fts(connection, &identity.0, record_audit.message_count),
+            )?;
             verify_replica_change_stream(
                 connection,
                 &identity.0,
-                table_count(connection, "change_log")?,
+                change_count,
+                synchronization_run_count,
+                &progress,
             )?;
             checkpoint_state_verified = true;
             full_text_index_verified = true;
             change_stream_verified = true;
+        } else {
+            progress.emit_rows(
+                5,
+                ProgressState::Completed,
+                "verifyReplicaFullTextIndex",
+                0,
+                0,
+                ReplicaAuditCounter::None,
+                None,
+            );
+            progress.emit_rows(
+                6,
+                ProgressState::Completed,
+                "verifyReplicaChangeStream",
+                0,
+                0,
+                ReplicaAuditCounter::Changes,
+                None,
+            );
         }
         if version >= 3 {
             let _ = replica_id(connection)?;
@@ -1087,19 +1380,19 @@ pub fn audit_replica_backup(
             transient_state_empty = true;
         }
     } else {
-        let mut content_count = table_count(connection, "conversation")?
-            .saturating_add(table_count(connection, "participant")?)
-            .saturating_add(table_count(connection, "message")?)
-            .saturating_add(table_count(connection, "artifact")?)
-            .saturating_add(table_count(connection, "conversation_participant")?)
-            .saturating_add(table_count(connection, "message_relationship")?)
-            .saturating_add(table_count(connection, "message_artifact")?)
+        let mut content_count = conversation_count
+            .saturating_add(participant_count)
+            .saturating_add(message_count)
+            .saturating_add(artifact_count)
+            .saturating_add(membership_count)
+            .saturating_add(relationship_count)
+            .saturating_add(message_artifact_count)
             .saturating_add(table_count(connection, "coverage_state")?);
         if version >= 2 {
             content_count = content_count
                 .saturating_add(table_count(connection, "source_checkpoint")?)
-                .saturating_add(table_count(connection, "sync_run")?)
-                .saturating_add(table_count(connection, "change_log")?)
+                .saturating_add(synchronization_run_count)
+                .saturating_add(change_count)
                 .saturating_add(table_count(connection, "message_fts")?);
             checkpoint_state_verified = true;
             full_text_index_verified = true;
@@ -1112,8 +1405,8 @@ pub fn audit_replica_backup(
         }
         if version >= 4 {
             content_count = content_count
-                .saturating_add(table_count(connection, "cached_moment")?)
-                .saturating_add(table_count(connection, "cached_moment_interaction")?)
+                .saturating_add(cached_moment_count)
+                .saturating_add(cached_moment_interaction_count)
                 .saturating_add(table_count(connection, "cached_surface_state")?);
         }
         if content_count != 0 {
@@ -1121,8 +1414,84 @@ pub fn audit_replica_backup(
                 "uninitialized replica backup contains orphan serving state".to_string(),
             ));
         }
+        progress.emit_rows(
+            2,
+            ProgressState::Completed,
+            "verifyReplicaCanonicalRecords",
+            0,
+            0,
+            ReplicaAuditCounter::CanonicalRecords,
+            None,
+        );
+        progress.emit_rows(
+            3,
+            ProgressState::Completed,
+            "verifyReplicaMessageLinks",
+            0,
+            0,
+            ReplicaAuditCounter::Links,
+            None,
+        );
+        progress.emit(
+            4,
+            ProgressState::Started,
+            "verifyReplicaCheckpointCoverage",
+            ProgressUnit::Items,
+            0,
+            1,
+            ReplicaAuditCounter::None,
+            None,
+        );
+        progress.emit(
+            4,
+            ProgressState::Completed,
+            "verifyReplicaCheckpointCoverage",
+            ProgressUnit::Items,
+            1,
+            1,
+            ReplicaAuditCounter::None,
+            None,
+        );
+        progress.emit_rows(
+            5,
+            ProgressState::Completed,
+            "verifyReplicaFullTextIndex",
+            0,
+            0,
+            ReplicaAuditCounter::None,
+            None,
+        );
+        progress.emit_rows(
+            6,
+            ProgressState::Completed,
+            "verifyReplicaChangeStream",
+            0,
+            0,
+            ReplicaAuditCounter::Changes,
+            None,
+        );
     }
+    progress.emit(
+        7,
+        ProgressState::Started,
+        "finalizeReplicaBackupAudit",
+        ProgressUnit::Items,
+        0,
+        1,
+        ReplicaAuditCounter::None,
+        None,
+    );
     transaction.rollback()?;
+    progress.emit(
+        7,
+        ProgressState::Completed,
+        "finalizeReplicaBackupAudit",
+        ProgressUnit::Items,
+        1,
+        1,
+        ReplicaAuditCounter::None,
+        None,
+    );
     Ok(ReplicaBackupAuditReport {
         format_version: 1,
         privacy_safe_summary: true,
@@ -2376,6 +2745,168 @@ pub(crate) fn get_replica_participant_batch(
     )
 }
 
+const REPLICA_ARTIFACT_READ_BATCH_SIZE: usize = 256;
+
+pub(crate) enum ReplicaArtifactSnapshotItem {
+    Available(Box<CanonicalArtifact>),
+    Missing,
+    Invalid,
+}
+
+pub(crate) struct ReplicaArtifactSnapshotReport {
+    pub checkpoint_revision: String,
+    pub requested_count: u64,
+    pub available_count: u64,
+    pub missing_count: u64,
+    pub invalid_count: u64,
+}
+
+/// Streams a deterministic set of artifacts from one checkpoint-consistent,
+/// read-only SQLCipher transaction.
+///
+/// Each bounded SQL batch is materialized only long enough to restore the
+/// caller's requested order. Missing or malformed individual records are
+/// reported as typed items so a damaged attachment cannot hide healthy ones.
+/// Replica identity, checkpoint, or restoration-report failures remain fatal.
+pub(crate) fn stream_replica_artifact_snapshot(
+    replica_path: &Path,
+    key: &ReplicaKey,
+    artifact_ids: &BTreeSet<String>,
+    mut visit: impl FnMut(
+        &str,
+        ReplicaArtifactSnapshotItem,
+        &RestorationReport,
+    ) -> Result<(), RestoreError>,
+) -> Result<ReplicaArtifactSnapshotReport, RestoreError> {
+    verify_private_replica_files(replica_path)?;
+    let (mut connection, _) = open_existing_replica_read_only(replica_path, key)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+    let connection = &*transaction;
+    let (account_id, source_fingerprint, checkpoint_revision) =
+        current_replica_checkpoint(connection)?;
+    let report_bytes: Vec<u8> = connection.query_row(
+        "SELECT report_json FROM coverage_state WHERE account_id = ?1",
+        [&account_id],
+        |row| row.get(0),
+    )?;
+    let report: RestorationReport = serde_json::from_slice(&report_bytes)?;
+    if report.account_id != account_id || report.source_fingerprint != source_fingerprint {
+        return Err(RestoreError::Integrity(
+            "replica artifact snapshot disagrees with its restoration report".to_string(),
+        ));
+    }
+
+    let identifiers = artifact_ids.iter().collect::<Vec<_>>();
+    let mut available_count = 0_u64;
+    let mut missing_count = 0_u64;
+    let mut invalid_count = 0_u64;
+    for chunk in identifiers.chunks(REPLICA_ARTIFACT_READ_BATCH_SIZE) {
+        let placeholders = (2..=chunk.len() + 1)
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            "SELECT artifact_id, kind, role, availability, source_sha256,
+                    decoded_sha256, record_sha256, record_json
+             FROM artifact
+             WHERE account_id = ?1 AND artifact_id IN ({placeholders})
+             ORDER BY artifact_id"
+        );
+        let mut outcomes = BTreeMap::new();
+        let mut batch_query_failed = false;
+        match connection.prepare(&query) {
+            Ok(mut statement) => {
+                let mut parameters: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(chunk.len() + 1);
+                parameters.push(&account_id);
+                parameters.extend(
+                    chunk
+                        .iter()
+                        .map(|identifier| *identifier as &dyn rusqlite::ToSql),
+                );
+                match statement.query(rusqlite::params_from_iter(parameters)) {
+                    Ok(mut rows) => loop {
+                        let row = match rows.next() {
+                            Ok(Some(row)) => row,
+                            Ok(None) => break,
+                            Err(_) => {
+                                batch_query_failed = true;
+                                break;
+                            }
+                        };
+                        let Ok(identifier) = row.get::<_, String>(0) else {
+                            batch_query_failed = true;
+                            continue;
+                        };
+                        let decoded = (|| -> Result<CanonicalArtifact, RestoreError> {
+                            let kind: String = row.get(1)?;
+                            let role: String = row.get(2)?;
+                            let availability: String = row.get(3)?;
+                            let source_sha: Option<String> = row.get(4)?;
+                            let decoded_sha: Option<String> = row.get(5)?;
+                            let digest: String = row.get(6)?;
+                            let bytes: Vec<u8> = row.get(7)?;
+                            let artifact: CanonicalArtifact =
+                                verify_stored_record(&bytes, &digest)?;
+                            if artifact.artifact_id != identifier
+                                || kind != json_enum(&artifact.kind)?
+                                || role != json_enum(&artifact.role)?
+                                || availability != json_enum(&artifact.availability)?
+                                || source_sha != artifact.source_sha256
+                                || decoded_sha != artifact.decoded_sha256
+                            {
+                                return Err(RestoreError::Integrity(
+                                    "replica artifact projection differs from its canonical record"
+                                        .to_string(),
+                                ));
+                            }
+                            Ok(artifact)
+                        })();
+                        let outcome = decoded
+                            .map_or(ReplicaArtifactSnapshotItem::Invalid, |artifact| {
+                                ReplicaArtifactSnapshotItem::Available(Box::new(artifact))
+                            });
+                        if outcomes.insert(identifier, outcome).is_some() {
+                            batch_query_failed = true;
+                        }
+                    },
+                    Err(_) => batch_query_failed = true,
+                }
+            }
+            Err(_) => batch_query_failed = true,
+        }
+
+        for identifier in chunk {
+            let outcome = outcomes.remove(*identifier).unwrap_or({
+                if batch_query_failed {
+                    ReplicaArtifactSnapshotItem::Invalid
+                } else {
+                    ReplicaArtifactSnapshotItem::Missing
+                }
+            });
+            match outcome {
+                ReplicaArtifactSnapshotItem::Available(_) => {
+                    available_count = available_count.saturating_add(1)
+                }
+                ReplicaArtifactSnapshotItem::Missing => {
+                    missing_count = missing_count.saturating_add(1)
+                }
+                ReplicaArtifactSnapshotItem::Invalid => {
+                    invalid_count = invalid_count.saturating_add(1)
+                }
+            }
+            visit(identifier, outcome, &report)?;
+        }
+    }
+    transaction.rollback()?;
+    Ok(ReplicaArtifactSnapshotReport {
+        checkpoint_revision,
+        requested_count: artifact_ids.len() as u64,
+        available_count,
+        missing_count,
+        invalid_count,
+    })
+}
+
 pub fn replica_restoration_report(
     replica_path: &Path,
     key: &ReplicaKey,
@@ -2899,6 +3430,217 @@ struct ReplicaRecordAudit {
     omitted_artifact_reference_count: u64,
 }
 
+impl ReplicaRecordAudit {
+    fn canonical_record_count(&self) -> u64 {
+        self.conversation_count
+            .saturating_add(self.participant_count)
+            .saturating_add(self.message_count)
+            .saturating_add(self.artifact_count)
+            .saturating_add(self.cached_moment_count)
+            .saturating_add(self.cached_moment_interaction_count)
+    }
+}
+
+const REPLICA_AUDIT_STAGE_COUNT: usize = 8;
+const REPLICA_AUDIT_STAGE_RESOLUTION: u64 = 1_000_000;
+const REPLICA_AUDIT_ROW_EVENT_INTERVAL: u64 = 1_000;
+const REPLICA_AUDIT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+const REPLICA_AUDIT_RECORD_STAGE: usize = 2;
+const REPLICA_AUDIT_LINK_STAGE: usize = 3;
+const REPLICA_AUDIT_CHANGE_STAGE: usize = 6;
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ReplicaAuditTotals {
+    conversation_count: u64,
+    message_count: u64,
+    canonical_record_count: u64,
+    link_record_count: u64,
+    change_record_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplicaAuditCounter {
+    None,
+    CanonicalRecords,
+    Links,
+    Changes,
+}
+
+struct ReplicaAuditProgress<'a> {
+    observer: &'a dyn ProgressObserver,
+    replica_byte_count: u64,
+    totals: Option<ReplicaAuditTotals>,
+    started_at: Instant,
+}
+
+impl<'a> ReplicaAuditProgress<'a> {
+    fn new(observer: &'a dyn ProgressObserver, replica_byte_count: u64) -> Self {
+        Self {
+            observer,
+            replica_byte_count,
+            totals: None,
+            started_at: Instant::now(),
+        }
+    }
+
+    fn set_totals(&mut self, totals: ReplicaAuditTotals) {
+        self.totals = Some(totals);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit(
+        &self,
+        stage: usize,
+        state: ProgressState,
+        operation: &str,
+        unit: ProgressUnit,
+        completed: u64,
+        total: u64,
+        counter: ReplicaAuditCounter,
+        table_name: Option<&str>,
+    ) {
+        debug_assert!(stage < REPLICA_AUDIT_STAGE_COUNT);
+        let within_stage = if total > 0 {
+            (completed.min(total) as u128 * REPLICA_AUDIT_STAGE_RESOLUTION as u128 / total as u128)
+                as u64
+        } else if state == ProgressState::Completed {
+            REPLICA_AUDIT_STAGE_RESOLUTION
+        } else {
+            0
+        };
+        let phase_completed = (stage as u64)
+            .saturating_mul(REPLICA_AUDIT_STAGE_RESOLUTION)
+            .saturating_add(within_stage);
+        let phase_total =
+            (REPLICA_AUDIT_STAGE_COUNT as u64).saturating_mul(REPLICA_AUDIT_STAGE_RESOLUTION);
+        let mut event = ProgressEvent::new(
+            ProgressPhase::ReplicaAudit,
+            state,
+            operation,
+            unit,
+            completed,
+            total,
+            phase_completed,
+            phase_total,
+        );
+        event.stage_index = Some(stage + 1);
+        event.stage_count = Some(REPLICA_AUDIT_STAGE_COUNT);
+        event.replica_file_byte_count = Some(self.replica_byte_count);
+        event.table_name = table_name.map(str::to_string);
+        event.elapsed_milliseconds = Some(self.started_at.elapsed().as_millis() as u64);
+        if let Some(totals) = self.totals {
+            event.conversation_record_count = Some(totals.conversation_count);
+            event.message_record_count = Some(totals.message_count);
+            event.canonical_record_count = Some(totals.canonical_record_count);
+            event.link_record_count = Some(totals.link_record_count);
+            event.change_record_count = Some(totals.change_record_count);
+            event.verified_record_count = Some(match stage.cmp(&REPLICA_AUDIT_RECORD_STAGE) {
+                std::cmp::Ordering::Less => 0,
+                std::cmp::Ordering::Equal if counter == ReplicaAuditCounter::CanonicalRecords => {
+                    completed.min(totals.canonical_record_count)
+                }
+                _ => totals.canonical_record_count,
+            });
+            event.verified_link_count = Some(match stage.cmp(&REPLICA_AUDIT_LINK_STAGE) {
+                std::cmp::Ordering::Less => 0,
+                std::cmp::Ordering::Equal if counter == ReplicaAuditCounter::Links => {
+                    completed.min(totals.link_record_count)
+                }
+                _ => totals.link_record_count,
+            });
+            event.verified_change_count = Some(match stage.cmp(&REPLICA_AUDIT_CHANGE_STAGE) {
+                std::cmp::Ordering::Less => 0,
+                std::cmp::Ordering::Equal if counter == ReplicaAuditCounter::Changes => {
+                    completed.min(totals.change_record_count)
+                }
+                _ => totals.change_record_count,
+            });
+        }
+        self.observer.observe(event);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_rows(
+        &self,
+        stage: usize,
+        state: ProgressState,
+        operation: &str,
+        completed: u64,
+        total: u64,
+        counter: ReplicaAuditCounter,
+        table_name: Option<&str>,
+    ) {
+        self.emit(
+            stage,
+            state,
+            operation,
+            ProgressUnit::Records,
+            completed,
+            total,
+            counter,
+            table_name,
+        );
+    }
+}
+
+fn replica_audit_row_event_due(completed: u64, total: u64) -> bool {
+    completed == total || completed.is_multiple_of(REPLICA_AUDIT_ROW_EVENT_INTERVAL)
+}
+
+fn with_replica_audit_heartbeat<T>(
+    progress: &ReplicaAuditProgress<'_>,
+    stage: usize,
+    operation: &str,
+    unit: ProgressUnit,
+    total: u64,
+    body: impl FnOnce() -> Result<T, RestoreError>,
+) -> Result<T, RestoreError> {
+    progress.emit(
+        stage,
+        ProgressState::Started,
+        operation,
+        unit,
+        0,
+        total,
+        ReplicaAuditCounter::None,
+        None,
+    );
+    let result = std::thread::scope(|scope| {
+        let (stop_sender, stop_receiver) = std::sync::mpsc::channel::<()>();
+        scope.spawn(move || loop {
+            match stop_receiver.recv_timeout(REPLICA_AUDIT_HEARTBEAT_INTERVAL) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => progress.emit(
+                    stage,
+                    ProgressState::Advanced,
+                    operation,
+                    unit,
+                    0,
+                    total,
+                    ReplicaAuditCounter::None,
+                    None,
+                ),
+            }
+        });
+        let result = body();
+        let _ = stop_sender.send(());
+        result
+    });
+    if result.is_ok() {
+        progress.emit(
+            stage,
+            ProgressState::Completed,
+            operation,
+            unit,
+            total,
+            total,
+            ReplicaAuditCounter::None,
+            None,
+        );
+    }
+    result
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReplicaStorageEntrySeal {
     present: bool,
@@ -3073,8 +3815,21 @@ fn audit_replica_records(
     connection: &Connection,
     account_id: &str,
     include_cached: bool,
+    progress: &ReplicaAuditProgress<'_>,
 ) -> Result<ReplicaRecordAudit, RestoreError> {
     let mut audit = ReplicaRecordAudit::default();
+    let total = progress
+        .totals
+        .map_or(0, |totals| totals.canonical_record_count);
+    progress.emit_rows(
+        REPLICA_AUDIT_RECORD_STAGE,
+        ProgressState::Started,
+        "verifyReplicaCanonicalRecords",
+        0,
+        total,
+        ReplicaAuditCounter::CanonicalRecords,
+        Some("conversation"),
+    );
     {
         let mut statement = connection.prepare(
             "SELECT account_id, conversation_id, kind, entity_decode_state,
@@ -3112,6 +3867,18 @@ fn audit_replica_records(
                 ))?);
             }
             audit.conversation_count = audit.conversation_count.saturating_add(1);
+            let completed = audit.canonical_record_count();
+            if replica_audit_row_event_due(completed, total) {
+                progress.emit_rows(
+                    REPLICA_AUDIT_RECORD_STAGE,
+                    ProgressState::Advanced,
+                    "verifyReplicaCanonicalRecords",
+                    completed,
+                    total,
+                    ReplicaAuditCounter::CanonicalRecords,
+                    Some("conversation"),
+                );
+            }
         }
     }
     {
@@ -3138,6 +3905,18 @@ fn audit_replica_records(
                 ));
             }
             audit.participant_count = audit.participant_count.saturating_add(1);
+            let completed = audit.canonical_record_count();
+            if replica_audit_row_event_due(completed, total) {
+                progress.emit_rows(
+                    REPLICA_AUDIT_RECORD_STAGE,
+                    ProgressState::Advanced,
+                    "verifyReplicaCanonicalRecords",
+                    completed,
+                    total,
+                    ReplicaAuditCounter::CanonicalRecords,
+                    Some("participant"),
+                );
+            }
         }
     }
     {
@@ -3172,6 +3951,18 @@ fn audit_replica_records(
             }
             audit.artifact_ids.insert(value.artifact_id);
             audit.artifact_count = audit.artifact_count.saturating_add(1);
+            let completed = audit.canonical_record_count();
+            if replica_audit_row_event_due(completed, total) {
+                progress.emit_rows(
+                    REPLICA_AUDIT_RECORD_STAGE,
+                    ProgressState::Advanced,
+                    "verifyReplicaCanonicalRecords",
+                    completed,
+                    total,
+                    ReplicaAuditCounter::CanonicalRecords,
+                    Some("artifact"),
+                );
+            }
         }
     }
     {
@@ -3250,11 +4041,32 @@ fn audit_replica_records(
                 ))?);
             }
             audit.message_count = audit.message_count.saturating_add(1);
+            let completed = audit.canonical_record_count();
+            if replica_audit_row_event_due(completed, total) {
+                progress.emit_rows(
+                    REPLICA_AUDIT_RECORD_STAGE,
+                    ProgressState::Advanced,
+                    "verifyReplicaCanonicalRecords",
+                    completed,
+                    total,
+                    ReplicaAuditCounter::CanonicalRecords,
+                    Some("message"),
+                );
+            }
         }
     }
     if include_cached {
-        audit_cached_records(connection, account_id, &mut audit)?;
+        audit_cached_records(connection, account_id, &mut audit, progress, total)?;
     }
+    progress.emit_rows(
+        REPLICA_AUDIT_RECORD_STAGE,
+        ProgressState::Completed,
+        "verifyReplicaCanonicalRecords",
+        total,
+        total,
+        ReplicaAuditCounter::CanonicalRecords,
+        None,
+    );
     Ok(audit)
 }
 
@@ -3262,6 +4074,8 @@ fn audit_cached_records(
     connection: &Connection,
     account_id: &str,
     audit: &mut ReplicaRecordAudit,
+    progress: &ReplicaAuditProgress<'_>,
+    total: u64,
 ) -> Result<(), RestoreError> {
     let mut statement = connection.prepare(
         "SELECT account_id, canonical_id, author_id, created_at_unix, content_type,
@@ -3290,6 +4104,18 @@ fn audit_cached_records(
             ));
         }
         audit.cached_moment_count = audit.cached_moment_count.saturating_add(1);
+        let completed = audit.canonical_record_count();
+        if replica_audit_row_event_due(completed, total) {
+            progress.emit_rows(
+                REPLICA_AUDIT_RECORD_STAGE,
+                ProgressState::Advanced,
+                "verifyReplicaCanonicalRecords",
+                completed,
+                total,
+                ReplicaAuditCounter::CanonicalRecords,
+                Some("cached_moment"),
+            );
+        }
     }
     drop(rows);
     drop(statement);
@@ -3324,6 +4150,18 @@ fn audit_cached_records(
         }
         audit.cached_moment_interaction_count =
             audit.cached_moment_interaction_count.saturating_add(1);
+        let completed = audit.canonical_record_count();
+        if replica_audit_row_event_due(completed, total) {
+            progress.emit_rows(
+                REPLICA_AUDIT_RECORD_STAGE,
+                ProgressState::Advanced,
+                "verifyReplicaCanonicalRecords",
+                completed,
+                total,
+                ReplicaAuditCounter::CanonicalRecords,
+                Some("cached_moment_interaction"),
+            );
+        }
     }
     Ok(())
 }
@@ -3332,7 +4170,19 @@ fn verify_replica_message_links(
     connection: &Connection,
     account_id: &str,
     audit: &ReplicaRecordAudit,
+    progress: &ReplicaAuditProgress<'_>,
 ) -> Result<(), RestoreError> {
+    let total = progress.totals.map_or(0, |totals| totals.link_record_count);
+    let mut completed = 0_u64;
+    progress.emit_rows(
+        REPLICA_AUDIT_LINK_STAGE,
+        ProgressState::Started,
+        "verifyReplicaMessageLinks",
+        completed,
+        total,
+        ReplicaAuditCounter::Links,
+        Some("conversation_participant"),
+    );
     let mut memberships = BTreeSet::new();
     let mut statement = connection.prepare(
         "SELECT account_id, conversation_id, participant_id, membership_role,
@@ -3355,6 +4205,18 @@ fn verify_replica_message_links(
             row.get::<_, String>(3)?,
             row.get::<_, Option<String>>(4)?,
         ))?);
+        completed = completed.saturating_add(1);
+        if replica_audit_row_event_due(completed, total) {
+            progress.emit_rows(
+                REPLICA_AUDIT_LINK_STAGE,
+                ProgressState::Advanced,
+                "verifyReplicaMessageLinks",
+                completed,
+                total,
+                ReplicaAuditCounter::Links,
+                Some("conversation_participant"),
+            );
+        }
     }
     if memberships != audit.memberships {
         return Err(RestoreError::Integrity(
@@ -3389,6 +4251,18 @@ fn verify_replica_message_links(
             row.get::<_, bool>(5)?,
             row.get::<_, Vec<u8>>(6)?,
         ))?);
+        completed = completed.saturating_add(1);
+        if replica_audit_row_event_due(completed, total) {
+            progress.emit_rows(
+                REPLICA_AUDIT_LINK_STAGE,
+                ProgressState::Advanced,
+                "verifyReplicaMessageLinks",
+                completed,
+                total,
+                ReplicaAuditCounter::Links,
+                Some("message_relationship"),
+            );
+        }
     }
     if relationships != audit.relationships {
         return Err(RestoreError::Integrity(
@@ -3420,12 +4294,33 @@ fn verify_replica_message_links(
             row.get::<_, String>(4)?,
             row.get::<_, bool>(5)?,
         ))?);
+        completed = completed.saturating_add(1);
+        if replica_audit_row_event_due(completed, total) {
+            progress.emit_rows(
+                REPLICA_AUDIT_LINK_STAGE,
+                ProgressState::Advanced,
+                "verifyReplicaMessageLinks",
+                completed,
+                total,
+                ReplicaAuditCounter::Links,
+                Some("message_artifact"),
+            );
+        }
     }
     if artifacts != audit.message_artifacts {
         return Err(RestoreError::Integrity(
             "replica message-artifact projection differs from canonical messages".to_string(),
         ));
     }
+    progress.emit_rows(
+        REPLICA_AUDIT_LINK_STAGE,
+        ProgressState::Completed,
+        "verifyReplicaMessageLinks",
+        total,
+        total,
+        ReplicaAuditCounter::Links,
+        None,
+    );
     Ok(())
 }
 
@@ -3775,7 +4670,20 @@ fn verify_replica_change_stream(
     connection: &Connection,
     account_id: &str,
     change_count: u64,
+    synchronization_run_count: u64,
+    progress: &ReplicaAuditProgress<'_>,
 ) -> Result<(), RestoreError> {
+    let total = change_count.saturating_add(synchronization_run_count);
+    let mut completed = 0_u64;
+    progress.emit_rows(
+        REPLICA_AUDIT_CHANGE_STAGE,
+        ProgressState::Started,
+        "verifyReplicaChangeStream",
+        completed,
+        total,
+        ReplicaAuditCounter::Changes,
+        Some("change_log"),
+    );
     if change_count == 0 {
         return Err(RestoreError::Integrity(
             "initialized replica has no checkpoint change event".to_string(),
@@ -3829,6 +4737,18 @@ fn verify_replica_change_stream(
             ));
         }
         verify_positive_timestamp(&timestamp, "replica change")?;
+        completed = completed.saturating_add(1);
+        if replica_audit_row_event_due(completed, total) {
+            progress.emit_rows(
+                REPLICA_AUDIT_CHANGE_STAGE,
+                ProgressState::Advanced,
+                "verifyReplicaChangeStream",
+                completed,
+                total,
+                ReplicaAuditCounter::Changes,
+                Some("change_log"),
+            );
+        }
     }
     let mut statement = connection.prepare(
         "SELECT account_id, mode, source_fingerprint, started_at_unix_nanoseconds,
@@ -3858,12 +4778,38 @@ fn verify_replica_change_stream(
             ));
         }
         run_count = run_count.saturating_add(1);
+        completed = completed.saturating_add(1);
+        if replica_audit_row_event_due(completed, total) {
+            progress.emit_rows(
+                REPLICA_AUDIT_CHANGE_STAGE,
+                ProgressState::Advanced,
+                "verifyReplicaChangeStream",
+                completed,
+                total,
+                ReplicaAuditCounter::Changes,
+                Some("sync_run"),
+            );
+        }
     }
     if run_count == 0 {
         return Err(RestoreError::Integrity(
             "initialized replica has no synchronization history".to_string(),
         ));
     }
+    if run_count != synchronization_run_count {
+        return Err(RestoreError::Integrity(
+            "replica synchronization history changed during verification".to_string(),
+        ));
+    }
+    progress.emit_rows(
+        REPLICA_AUDIT_CHANGE_STAGE,
+        ProgressState::Completed,
+        "verifyReplicaChangeStream",
+        total,
+        total,
+        ReplicaAuditCounter::Changes,
+        None,
+    );
     Ok(())
 }
 

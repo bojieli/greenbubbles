@@ -5,6 +5,11 @@ private restoration archive. The replica-backed versioned service now uses the
 same policy principles through the one-shot CLI and owner-only Unix socket
 documented in `AI_CONTEXT_CLI.md` and `CONNECTOR_API.md`.
 
+The shared private-input boundary requires directories and regular files to
+belong to the current effective user in addition to rejecting symlinks,
+group/world permissions, and (for files) multiple links. A restrictive mode on
+an object owned by another account is not treated as owner authorization.
+
 ## Policy dimensions
 
 Tool policy format 3 binds authorization to one opaque account ID and grants

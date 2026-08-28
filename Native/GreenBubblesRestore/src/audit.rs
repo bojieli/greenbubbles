@@ -174,6 +174,50 @@ struct VerifiedFile {
     modified_nanoseconds: i64,
 }
 
+pub(crate) struct RecordedArtifactFileVerifier {
+    root: PathBuf,
+    verified_files: HashMap<PathBuf, VerifiedFile>,
+}
+
+impl RecordedArtifactFileVerifier {
+    pub(crate) fn open(archive_directory: &Path) -> Result<Self, RestoreError> {
+        ensure_private_directory(archive_directory)?;
+        Ok(Self {
+            root: fs::canonicalize(archive_directory)?,
+            verified_files: HashMap::new(),
+        })
+    }
+
+    pub(crate) fn verify(&mut self, artifact: &CanonicalArtifact) -> Result<(), RestoreError> {
+        if artifact_has_external_source(artifact) {
+            let source_path = required_artifact_path(
+                artifact.source_local_path.as_deref(),
+                "downloaded artifact lacks its source path",
+            )?;
+            verify_external_source(artifact, &source_path, &mut self.verified_files)?;
+        }
+        if let Some(materialized) = artifact.materialized_local_path.as_deref() {
+            verify_connector_file(
+                &self.root,
+                &PathBuf::from(materialized),
+                artifact.source_byte_count,
+                artifact.source_sha256.as_deref(),
+                &mut self.verified_files,
+            )?;
+        }
+        if let Some(decoded) = artifact.decoded_local_path.as_deref() {
+            verify_connector_file(
+                &self.root,
+                &PathBuf::from(decoded),
+                artifact.decoded_byte_count,
+                artifact.decoded_sha256.as_deref(),
+                &mut self.verified_files,
+            )?;
+        }
+        Ok(())
+    }
+}
+
 pub fn audit_archive(archive_directory: &Path) -> Result<ArchiveAuditReport, RestoreError> {
     audit_archive_with_progress(archive_directory, &NoProgress)
 }
@@ -396,35 +440,7 @@ pub fn verify_recorded_artifact_files(
     archive_directory: &Path,
     artifact: &CanonicalArtifact,
 ) -> Result<(), RestoreError> {
-    ensure_private_directory(archive_directory)?;
-    let root = fs::canonicalize(archive_directory)?;
-    let mut verified_files = HashMap::new();
-    if artifact_has_external_source(artifact) {
-        let source_path = required_artifact_path(
-            artifact.source_local_path.as_deref(),
-            "downloaded artifact lacks its source path",
-        )?;
-        verify_external_source(artifact, &source_path, &mut verified_files)?;
-    }
-    if let Some(materialized) = artifact.materialized_local_path.as_deref() {
-        verify_connector_file(
-            &root,
-            &PathBuf::from(materialized),
-            artifact.source_byte_count,
-            artifact.source_sha256.as_deref(),
-            &mut verified_files,
-        )?;
-    }
-    if let Some(decoded) = artifact.decoded_local_path.as_deref() {
-        verify_connector_file(
-            &root,
-            &PathBuf::from(decoded),
-            artifact.decoded_byte_count,
-            artifact.decoded_sha256.as_deref(),
-            &mut verified_files,
-        )?;
-    }
-    Ok(())
+    RecordedArtifactFileVerifier::open(archive_directory)?.verify(artifact)
 }
 
 pub fn validate_canonical_artifact(
@@ -1299,6 +1315,10 @@ fn audit_artifacts(
             // Archives written before per-artifact role sets record a single
             // role; treat it as the complete set.
             roles.insert(artifact.role);
+        } else if !roles.contains(&artifact.role) {
+            return Err(integrity(
+                "artifact role set does not contain its primary role",
+            ));
         }
         result.roles.insert(artifact.artifact_id.clone(), roles);
         result.count += 1;

@@ -5,7 +5,8 @@ key-gated integrity pass for a serving replica:
 
 ```sh
 greenbubbles-restore audit-replica \
-  <encrypted-replica.db> --replica-key-stdin
+  <encrypted-replica.db> --replica-key-stdin \
+  --progress-file <owner-only-new-progress.ndjson>
 ```
 
 The random 32-byte replica key is distinct from the WeChat database
@@ -17,6 +18,20 @@ one deferred read transaction. It does not create or migrate a replica,
 advance a checkpoint, repair an index, or open a restoration archive or live
 WeChat store. The database, WAL, and SHM entries must be owner-only regular
 files without symlinks or hard links.
+
+Human-readable progress is emitted to standard error by default. It reports
+eight monotonic stages and an overall percentage: opening/planning, SQLite and
+foreign-key integrity, canonical records, canonical links, checkpoint and
+coverage, FTS, change/synchronization history, and finalization. Events include
+the encrypted replica namespace size, canonical/link/change totals, exact row
+counts for the row-addressable stages, elapsed time, and periodic heartbeats
+while SQLite integrity and FTS queries are running. Those SQLite operations do
+not expose a trustworthy internal row cursor, so their heartbeat remains at
+the stage's starting percentage until the operation completes rather than
+inventing progress. `--progress-json` emits the privacy-safe events as NDJSON;
+`--quiet-progress` suppresses console output. `--progress-file` creates a new
+mode-`0600` file in an owner-only directory and flushes every event. It cannot
+overlap the database, WAL, SHM, or journal path.
 
 Within the consistent transaction it verifies:
 

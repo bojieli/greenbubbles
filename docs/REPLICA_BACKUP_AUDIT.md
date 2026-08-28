@@ -13,13 +13,22 @@ An operator can independently verify a retained backup before relying on it:
 
 ```sh
 greenbubbles-restore audit-replica-backup \
-  <encrypted-pre-migration-backup.db> --replica-key-stdin
+  <encrypted-pre-migration-backup.db> --replica-key-stdin \
+  --progress-file <owner-only-new-progress.ndjson>
 ```
 
 The 32-byte replica key is distinct from the WeChat database passphrase. Pass
 it locally through standard input, preferably from an owner-controlled secret
 manager. Never place it in an argument, report, issue, commit, chat, or model
 prompt.
+
+The command has the same privacy-safe progress contract as `audit-replica`:
+human progress by default, `--progress-json` for NDJSON, `--quiet-progress` for
+silence, and a flushed owner-only `--progress-file`. It reports encrypted file
+size, schema-appropriate canonical/link/change totals, exact row progress,
+eight audit stages, overall percentage, elapsed time, and honest heartbeats for
+long SQLite integrity and FTS checks. The progress path cannot overlap the
+backup database or any SQLite sidecar.
 
 ## Verification contract
 

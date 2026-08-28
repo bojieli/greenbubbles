@@ -109,7 +109,9 @@ After copying or before indexing a generation, run the aggregate-only bundled
 verifier:
 
 ```text
-greenbubbles-restore audit-ai-context <context-bundle-directory>
+greenbubbles-restore audit-ai-context <context-bundle-directory> \
+  [--progress-file <owner-only-new-events.ndjson>] \
+  [--progress-json | --quiet-progress]
 ```
 
 It verifies the exact five-file inventory, owner-only files, manifest and
@@ -144,7 +146,9 @@ after export:
 greenbubbles-restore ai-memory-export \
   <AI-context-bundle-directory> <new-output-directory> \
   [--max-messages-per-chunk <1..1000>] \
-  [--max-text-bytes-per-chunk <256..1048576>]
+  [--max-text-bytes-per-chunk <256..1048576>] \
+  [--progress-file <owner-only-new-events.ndjson>] \
+  [--progress-json | --quiet-progress]
 ```
 
 Defaults are 64 messages and 49,152 UTF-8 text bytes per chunk. Boundaries are
@@ -177,7 +181,9 @@ for tested framework workflows and update semantics.
 Before indexing or after copying a projection, run:
 
 ```text
-greenbubbles-restore audit-ai-memory <AI-memory-output-directory>
+greenbubbles-restore audit-ai-memory <AI-memory-output-directory> \
+  [--progress-file <owner-only-new-events.ndjson>] \
+  [--progress-json | --quiet-progress]
 ```
 
 The privacy-safe report verifies the projection/source binding, exact
@@ -198,14 +204,32 @@ error and does not abort unrelated messages or attachments. An agent that needs
 the actual local file must make an authorized local `getArtifact` query; remote
 destinations never receive a path.
 
+Static export resolves attachment metadata as one internal batch, not as one
+connector request per attachment. Authorization comes exclusively from the
+attachment references already returned by policy-authorized message pages. A
+single read-only SQLCipher transaction loads requested canonical artifacts in
+stable ID order through bounded query batches and loads the bound restoration
+report once. One reusable descriptor/digest verifier checks every available
+file, while missing, malformed, or changed individual artifacts become typed
+records in `artifacts.jsonl`. Replica identity, checkpoint, or report failures
+still fail the export. The connector journal records one aggregate
+`exportArtifacts` event, and the existing start/end checkpoint comparison
+discards the staged bundle if synchronization raced the batch.
+
 ## Progress and partial coverage
 
-Default human progress is emitted on stderr. `--progress-json` emits the same
-events as NDJSON, and `--progress-file` creates an owner-only durable event log.
-Events expose bundle planning, conversation/contact/message/artifact phases,
-current and total record counts, file index/count, elapsed time, phase
-percentage, and end-to-end percentage. Stdout remains machine-readable final
-JSON.
+`ai-export`, `audit-ai-context`, `ai-memory-export`, and `audit-ai-memory` emit
+human progress on stderr by default. `--progress-json` emits the same events as
+NDJSON, and `--progress-file` creates an owner-only durable event log. Events
+expose source and current-file sizes, source records, processed
+conversation/message counts, emitted or verified chunk/document counts and
+bytes, file position, elapsed time, phase percentage, and end-to-end
+percentage. Large attachment sets emit exact cumulative milestones every 1,000
+records plus the final count, avoiding hundreds of thousands of flushed
+progress lines while preserving deterministic totals. Stdout remains
+machine-readable final JSON. Keep progress logs
+outside audited bundle directories so the exact private inventory is not
+changed by the act of auditing it.
 
 Unavailable databases do not block synchronization or context publication.
 Their counts and preserved-stale state remain visible in every query and static
