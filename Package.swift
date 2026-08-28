@@ -9,6 +9,7 @@ let package = Package(
   ],
   products: [
     .library(name: "GreenBubblesCore", targets: ["GreenBubblesCore"]),
+    .library(name: "GreenBubblesHistory", targets: ["GreenBubblesHistory"]),
     .library(name: "GreenBubblesWeb", targets: ["GreenBubblesWeb"]),
     .library(name: "GreenBubblesAcquire", targets: ["GreenBubblesAcquire"]),
     .executable(name: "greenbubbles", targets: ["GreenBubblesCLI"]),
@@ -20,9 +21,17 @@ let package = Package(
       name: "greenbubbles-acquire",
       targets: ["GreenBubblesAcquireCLI"]
     ),
+    .executable(
+      name: "greenbubbles-history",
+      targets: ["GreenBubblesHistoryApp"]
+    ),
   ],
   targets: [
     .target(name: "GreenBubblesCore"),
+    .target(
+      name: "GreenBubblesHistory",
+      linkerSettings: [.linkedLibrary("sqlite3")]
+    ),
     .target(name: "GreenBubblesWeb"),
     .target(
       name: "GreenBubblesAcquire",
@@ -40,9 +49,17 @@ let package = Package(
       name: "GreenBubblesAcquireCLI",
       dependencies: ["GreenBubblesAcquire"]
     ),
+    .executableTarget(
+      name: "GreenBubblesHistoryApp",
+      dependencies: ["GreenBubblesHistory"]
+    ),
     .testTarget(
       name: "GreenBubblesCoreTests",
       dependencies: ["GreenBubblesCore"]
+    ),
+    .testTarget(
+      name: "GreenBubblesHistoryTests",
+      dependencies: ["GreenBubblesHistory"]
     ),
     .testTarget(
       name: "GreenBubblesWebTests",
