@@ -6,8 +6,8 @@ use std::path::Path;
 
 use greenbubbles_restore::tools::{
     create_all_conversations_tool_policy_with_cached_moments, create_tool_policy,
-    ConversationToolScope, DraftState, LocalToolService, ToolAuditOutcome, ToolCapability,
-    ToolDataDestination, ToolMessageField,
+    CachedMomentField, CachedMomentsToolScope, ConversationToolScope, DraftState, LocalToolService,
+    ToolAuditOutcome, ToolCapability, ToolDataDestination, ToolMessageField,
 };
 use greenbubbles_restore::{
     CanonicalConversation, CanonicalMessage, ConversationKind, DirectionEvidence,
@@ -374,6 +374,34 @@ fn enforces_scopes_minimizes_context_and_creates_drafts_only() {
         .read_recent_messages(ALLOWED_CONVERSATION, 10, ToolDataDestination::LocalModel,)
         .is_err());
     fs::set_permissions(&message_ledger, fs::Permissions::from_mode(0o600)).unwrap();
+
+    fs::rename(&conversation_ledger, &unavailable_conversation_ledger).unwrap();
+    fs::rename(&message_ledger, &unavailable_message_ledger).unwrap();
+    let cached_only_policy = create_all_conversations_tool_policy_with_cached_moments(
+        &archive,
+        &private.join("cached-only-degraded-policy.json"),
+        ConversationToolScope {
+            capabilities: BTreeSet::from([ToolCapability::ListConversations]),
+            message_fields: BTreeSet::new(),
+            not_before_unix: None,
+            not_after_unix: None,
+            allow_remote_model: false,
+        },
+        Some(CachedMomentsToolScope {
+            fields: BTreeSet::from([CachedMomentField::CreatedAt]),
+            not_before_unix: None,
+            not_after_unix: None,
+            allow_remote_model: false,
+        }),
+        10,
+        64,
+        1_024,
+    )
+    .unwrap();
+    assert!(cached_only_policy.conversation_scopes.is_empty());
+    assert!(cached_only_policy.cached_moments_scope.is_some());
+    fs::rename(&unavailable_conversation_ledger, &conversation_ledger).unwrap();
+    fs::rename(&unavailable_message_ledger, &message_ledger).unwrap();
 }
 
 fn conversation(identifier: &str) -> CanonicalConversation {

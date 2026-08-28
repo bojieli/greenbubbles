@@ -335,11 +335,6 @@ pub fn create_all_conversations_tool_policy_with_cached_moments(
 ) -> Result<ToolAuthorizationPolicy, RestoreError> {
     let report = load_report(archive_directory)?;
     let conversation_ids = load_conversation_ids(archive_directory, &report.account_id)?;
-    if report.integrity.conversation_count > 0 && conversation_ids.is_empty() {
-        return Err(RestoreError::Integrity(
-            "archive contains no healthy account-bound conversation identities".to_string(),
-        ));
-    }
     let conversation_scopes = conversation_ids
         .into_iter()
         .map(|conversation_id| (conversation_id, conversation_scope.clone()))

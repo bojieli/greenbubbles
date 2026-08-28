@@ -22,6 +22,71 @@ pub(crate) fn validate_restoration_coverage_schema(
 pub(crate) fn validate_cached_coverage_schema(
     coverage: &CachedSurfaceCoverage,
 ) -> Result<(), RestoreError> {
+    let table_omitted_row_count = coverage.tables.iter().try_fold(0_u64, |total, table| {
+        let restores_rows = matches!(
+            table.role,
+            crate::CachedSurfaceTableRole::MomentTimeline
+                | crate::CachedSurfaceTableRole::MomentInteraction
+        );
+        if table.restored_row_count > table.source_row_count {
+            return Err(RestoreError::Integrity(
+                "cached-surface table restores more rows than it observed".to_string(),
+            ));
+        }
+        match table.availability {
+            crate::TableCoverageAvailability::Complete
+                if (restores_rows && table.source_row_count != table.restored_row_count)
+                    || table.limitation_code.is_some() =>
+            {
+                return Err(RestoreError::Integrity(
+                    "complete cached-surface table has omission evidence".to_string(),
+                ));
+            }
+            crate::TableCoverageAvailability::Partial
+                if table.limitation_code.as_deref().is_none_or(str::is_empty) =>
+            {
+                return Err(RestoreError::Integrity(
+                    "partial cached-surface table lacks a limitation code".to_string(),
+                ));
+            }
+            crate::TableCoverageAvailability::Unavailable
+                if table.restored_row_count != 0
+                    || table.limitation_code.as_deref().is_none_or(str::is_empty) =>
+            {
+                return Err(RestoreError::Integrity(
+                    "unavailable cached-surface table has records or no limitation code"
+                        .to_string(),
+                ));
+            }
+            _ => {}
+        }
+        Ok(if restores_rows {
+            total.saturating_add(table.source_row_count - table.restored_row_count)
+        } else {
+            total
+        })
+    })?;
+    if coverage.omitted_row_count < table_omitted_row_count
+        || coverage.limitation_codes.iter().any(String::is_empty)
+        || !coverage
+            .limitation_codes
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+        || (coverage.omitted_row_count > 0)
+            != coverage
+                .limitation_codes
+                .iter()
+                .any(|code| code == "cachedSurfaceRowsOmitted")
+    {
+        return Err(RestoreError::Integrity(
+            "cached-surface omission evidence is inconsistent".to_string(),
+        ));
+    }
+    let requires_complete_profile = coverage.format_version >= 2
+        && coverage.tables.iter().all(|table| {
+            table.schema_fingerprint.is_some()
+                && table.availability == crate::TableCoverageAvailability::Complete
+        });
     validate_schema_profile(
         coverage.tables.iter().map(|table| {
             (
@@ -31,7 +96,7 @@ pub(crate) fn validate_cached_coverage_schema(
             )
         }),
         coverage.schema_profile_fingerprint.as_deref(),
-        coverage.format_version >= 2,
+        requires_complete_profile,
     )
 }
 

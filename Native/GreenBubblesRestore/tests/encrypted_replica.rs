@@ -895,6 +895,72 @@ fn malformed_replica_records_are_omitted_without_stalling_pages_or_ai_queries() 
 }
 
 #[test]
+fn malformed_message_storage_classes_still_advance_the_replica_cursor() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private-malformed-storage-class");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive = build_archive(&private, "archive", "account-a", "source-a");
+    let messages_path = archive.join("messages.ndjson");
+    let template = read_ndjson::<CanonicalMessage>(&messages_path)
+        .into_iter()
+        .next()
+        .unwrap();
+    let messages = (0_u64..10)
+        .map(|ordinal| {
+            let mut message = template.clone();
+            message.canonical_id = if ordinal == 9 {
+                "healthy-message".to_string()
+            } else {
+                format!("malformed-message-{ordinal:02}")
+            };
+            message.conversation_ordinal = ordinal;
+            message
+        })
+        .collect::<Vec<_>>();
+    overwrite_ndjson(&messages_path, &messages);
+    let report_path = archive.join("report.json");
+    let mut report: RestorationReport =
+        serde_json::from_slice(&fs::read(&report_path).unwrap()).unwrap();
+    report.integrity.source_row_count = messages.len() as u64;
+    report.integrity.restored_row_count = messages.len() as u64;
+    report.completion = RestorationCompletion::evaluate(&report.integrity);
+    overwrite_json(&report_path, &report);
+
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+    bootstrap_replica(&archive, &replica, &key).unwrap();
+    let connection = keyed_connection(&replica);
+    connection
+        .execute(
+            "UPDATE message SET record_json = 'not-json'
+             WHERE canonical_id != 'healthy-message'",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+
+    let filter = ReplicaMessageFilter {
+        conversation_id: Some("conversation-a".to_string()),
+        ..Default::default()
+    };
+    let damaged_page = search_replica_messages(&replica, &key, &filter, None, 1).unwrap();
+    assert!(damaged_page.items.is_empty());
+    assert_eq!(damaged_page.omitted_item_count, 9);
+    assert!(damaged_page.next_cursor.is_some());
+    let healthy_page = search_replica_messages(
+        &replica,
+        &key,
+        &filter,
+        damaged_page.next_cursor.as_deref(),
+        1,
+    )
+    .unwrap();
+    assert_eq!(healthy_page.items.len(), 1);
+    assert_eq!(healthy_page.items[0].canonical_id, "healthy-message");
+}
+
+#[test]
 fn malformed_cached_moments_are_omitted_without_disabling_the_surface() {
     let fixture = tempfile::tempdir().unwrap();
     let private = fixture.path().join("private-malformed-cached-moment");
@@ -3129,6 +3195,8 @@ fn add_cached_surfaces_to_archive(archive: &Path) {
             moment_count: 1,
             interaction_count: 1,
             semantic_gap_count: 0,
+            omitted_row_count: 0,
+            limitation_codes: Vec::new(),
             tables: Vec::new(),
         },
     );

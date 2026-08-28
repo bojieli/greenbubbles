@@ -563,6 +563,68 @@ fn merge_cached_surfaces(
                 .is_some_and(|(_, _, coverage)| coverage.source_database_present));
     let moments = moments.into_values().collect::<Vec<_>>();
     let interactions = interactions.into_values().collect::<Vec<_>>();
+    let table_omitted_row_count = tables
+        .iter()
+        .map(|table| {
+            table
+                .source_row_count
+                .saturating_sub(table.restored_row_count)
+        })
+        .sum::<u64>();
+    let input_residual_omissions = previous
+        .as_ref()
+        .map(|(_, _, coverage)| {
+            let table_gaps = coverage
+                .tables
+                .iter()
+                .map(|table| {
+                    table
+                        .source_row_count
+                        .saturating_sub(table.restored_row_count)
+                })
+                .sum::<u64>();
+            coverage.omitted_row_count.saturating_sub(table_gaps)
+        })
+        .unwrap_or_default()
+        .saturating_add(
+            fragment
+                .as_ref()
+                .map(|(_, _, coverage)| {
+                    let table_gaps = coverage
+                        .tables
+                        .iter()
+                        .map(|table| {
+                            table
+                                .source_row_count
+                                .saturating_sub(table.restored_row_count)
+                        })
+                        .sum::<u64>();
+                    coverage.omitted_row_count.saturating_sub(table_gaps)
+                })
+                .unwrap_or_default(),
+        );
+    let omitted_row_count = table_omitted_row_count.saturating_add(input_residual_omissions);
+    let mut limitation_codes = previous
+        .as_ref()
+        .into_iter()
+        .flat_map(|(_, _, coverage)| coverage.limitation_codes.iter().cloned())
+        .chain(
+            fragment
+                .as_ref()
+                .into_iter()
+                .flat_map(|(_, _, coverage)| coverage.limitation_codes.iter().cloned()),
+        )
+        .chain(
+            tables
+                .iter()
+                .filter_map(|table| table.limitation_code.clone()),
+        )
+        .collect::<BTreeSet<_>>();
+    if omitted_row_count > 0 {
+        limitation_codes.insert("cachedSurfaceRowsOmitted".to_string());
+    } else {
+        limitation_codes.remove("cachedSurfaceRowsOmitted");
+    }
     let schema_profile_fingerprint = schema_profile_fingerprint(tables.iter().map(|table| {
         (
             table.source_logical_path.as_str(),
@@ -590,6 +652,8 @@ fn merge_cached_surfaces(
             .iter()
             .filter(|moment| moment.semantic_decode_state != SemanticDecodeState::Complete)
             .count() as u64,
+        omitted_row_count,
+        limitation_codes: limitation_codes.into_iter().collect(),
         tables,
     };
     Ok(Some((moments, interactions, coverage)))
@@ -1292,6 +1356,9 @@ fn calculate_integrity(
             .unwrap_or_default(),
         cached_surface_semantic_gap_count: cached_surfaces
             .map(|(_, _, coverage)| coverage.semantic_gap_count)
+            .unwrap_or_default(),
+        cached_surface_omitted_row_count: cached_surfaces
+            .map(|(_, _, coverage)| coverage.omitted_row_count)
             .unwrap_or_default(),
         ..Default::default()
     };

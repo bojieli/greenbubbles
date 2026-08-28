@@ -296,6 +296,13 @@ pub struct CachedSurfaceTableCoverage {
     pub restored_row_count: u64,
     pub role: CachedSurfaceTableRole,
     pub classification_reason: String,
+    /// Readability of this optional source table. A partial or unavailable
+    /// cached table must never prevent healthy chat or cached-surface records
+    /// from being published.
+    #[serde(default)]
+    pub availability: TableCoverageAvailability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limitation_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -310,6 +317,12 @@ pub struct CachedSurfaceCoverage {
     pub moment_count: u64,
     pub interaction_count: u64,
     pub semantic_gap_count: u64,
+    /// Source rows known during planning but omitted because an optional
+    /// cached-surface table became unreadable.
+    #[serde(default)]
+    pub omitted_row_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
     pub tables: Vec<CachedSurfaceTableCoverage>,
 }
 
@@ -486,6 +499,8 @@ pub struct RestorationIntegrity {
     pub cached_moment_count: u64,
     pub cached_moment_interaction_count: u64,
     pub cached_surface_semantic_gap_count: u64,
+    #[serde(default)]
+    pub cached_surface_omitted_row_count: u64,
 }
 
 impl RestorationIntegrity {
@@ -784,7 +799,8 @@ impl RestorationCompletion {
             && entity_coverage_complete
             && relationship_coverage_complete
             && artifact_verification_complete
-            && artifact_decoding_complete;
+            && artifact_decoding_complete
+            && integrity.cached_surface_omitted_row_count == 0;
         Self {
             row_equation_holds,
             zero_rejected_rows,

@@ -523,6 +523,8 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
         moment_count: cached_moments.len() as u64,
         interaction_count: 0,
         semantic_gap_count: 0,
+        omitted_row_count: 0,
+        limitation_codes: Vec::new(),
         tables: source_sets
             .iter()
             .map(|source_set| CachedSurfaceTableCoverage {
@@ -542,6 +544,8 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
                 restored_row_count: 1,
                 role: CachedSurfaceTableRole::MomentTimeline,
                 classification_reason: "synthetic exact signature".to_string(),
+                availability: greenbubbles_restore::TableCoverageAvailability::Complete,
+                limitation_code: None,
             })
             .collect(),
     };

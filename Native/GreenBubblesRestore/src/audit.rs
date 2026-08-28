@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 use crate::archive::{ensure_private_directory, ensure_private_regular_file};
-use crate::schema::schema_profile_fingerprint;
+use crate::schema::{schema_profile_fingerprint, validate_cached_coverage_schema};
 use crate::{
     ArtifactAvailability, ArtifactDecodeState, ArtifactKind, CachedSurfaceCoverage,
     CachedSurfaceTableRole, CanonicalArtifact, CanonicalCachedMoment,
@@ -49,6 +49,8 @@ pub struct ArchiveAuditReport {
     pub participant_count: u64,
     pub cached_moment_count: u64,
     pub cached_moment_interaction_count: u64,
+    #[serde(default)]
+    pub cached_surface_omitted_row_count: u64,
     pub verified_external_source_file_count: u64,
     pub verified_connector_owned_file_count: u64,
     pub row_equation_holds: bool,
@@ -311,6 +313,7 @@ pub fn audit_archive_with_progress(
         participant_count: participants.len() as u64,
         cached_moment_count,
         cached_moment_interaction_count: cached_interaction_count,
+        cached_surface_omitted_row_count: report.integrity.cached_surface_omitted_row_count,
         verified_external_source_file_count: artifacts.external_paths.len() as u64,
         verified_connector_owned_file_count: artifacts.connector_paths.len() as u64,
         row_equation_holds: true,
@@ -2166,6 +2169,7 @@ fn audit_cached_surfaces(
     if !matches!(coverage.format_version, 1 | 2) {
         return Err(integrity("cached-surface coverage format is unsupported"));
     }
+    validate_cached_coverage_schema(&coverage)?;
     let moments = read_unique_ndjson::<CanonicalCachedMoment, _, _>(
         &root.join("cached-moments.ndjson"),
         |value| value.canonical_id.clone(),
@@ -2326,7 +2330,12 @@ fn audit_cached_surfaces(
             || table
                 .schema_fingerprint
                 .as_deref()
-                .is_none_or(|value| !is_lower_hex(value, 64))
+                .is_some_and(|value| !is_lower_hex(value, 64))
+            || (table.availability == crate::TableCoverageAvailability::Complete
+                && table
+                    .schema_fingerprint
+                    .as_deref()
+                    .is_none_or(|value| !is_lower_hex(value, 64)))
         {
             return Err(integrity(
                 "cached coverage has duplicate or incomplete table evidence",
@@ -2335,24 +2344,22 @@ fn audit_cached_surfaces(
         match table.role {
             CachedSurfaceTableRole::MomentTimeline => {
                 moment_rows += table.restored_row_count;
-                if table.source_row_count != table.restored_row_count
-                    || moment_table_counts
-                        .get(&identity)
-                        .copied()
-                        .unwrap_or_default()
-                        != table.restored_row_count
+                if moment_table_counts
+                    .get(&identity)
+                    .copied()
+                    .unwrap_or_default()
+                    != table.restored_row_count
                 {
                     return Err(integrity("cached Moment table row equation failed"));
                 }
             }
             CachedSurfaceTableRole::MomentInteraction => {
                 interaction_rows += table.restored_row_count;
-                if table.source_row_count != table.restored_row_count
-                    || interaction_table_counts
-                        .get(&identity)
-                        .copied()
-                        .unwrap_or_default()
-                        != table.restored_row_count
+                if interaction_table_counts
+                    .get(&identity)
+                    .copied()
+                    .unwrap_or_default()
+                    != table.restored_row_count
                 {
                     return Err(integrity("cached interaction table row equation failed"));
                 }
@@ -2396,10 +2403,30 @@ fn audit_cached_surfaces(
             )
         })
         .collect::<HashMap<_, _>>();
-    if restoration_cached_tables.len() != table_ids.len()
-        || table_ids
-            .iter()
-            .any(|identity| !restoration_cached_tables.contains_key(identity))
+    let unavailable_source_sets = report
+        .database_coverage
+        .as_ref()
+        .map(|database| {
+            database
+                .unavailable_source_set_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let cached_inventory_degraded = coverage.limitation_codes.iter().any(|code| {
+        matches!(
+            code.as_str(),
+            "cachedSurfaceDatabaseUnavailable" | "cachedSurfaceTableUnavailable"
+        )
+    });
+    if table_ids.iter().any(|identity| {
+        !restoration_cached_tables.contains_key(identity)
+            && !unavailable_source_sets.contains(identity.0.as_str())
+    }) || (!cached_inventory_degraded
+        && restoration_cached_tables
+            .keys()
+            .any(|identity| !table_ids.contains(identity)))
     {
         return Err(integrity(
             "cached table ledger does not match complete restoration coverage",
@@ -2411,12 +2438,21 @@ fn audit_cached_surfaces(
             table.source_logical_path.clone(),
             table.source_table_id.clone(),
         );
-        let source = restoration_cached_tables
-            .get(&identity)
-            .ok_or_else(|| integrity("cached table is absent from restoration coverage"))?;
+        let Some(source) = restoration_cached_tables.get(&identity) else {
+            if table.availability == crate::TableCoverageAvailability::Unavailable
+                && unavailable_source_sets.contains(identity.0.as_str())
+            {
+                continue;
+            }
+            return Err(integrity(
+                "cached table is absent from restoration coverage",
+            ));
+        };
+        let degraded_metadata = table.availability != crate::TableCoverageAvailability::Complete
+            && table.limitation_code.is_some();
         if source.source_table_name != table.source_table_name
-            || source.columns != table.columns
-            || source.schema_fingerprint != table.schema_fingerprint
+            || (!degraded_metadata && source.columns != table.columns)
+            || (!degraded_metadata && source.schema_fingerprint != table.schema_fingerprint)
         {
             return Err(integrity(
                 "cached table provenance disagrees with restoration coverage",
@@ -2437,6 +2473,7 @@ fn audit_cached_surfaces(
         || coverage.interaction_count != interactions.len() as u64
         || observed_semantic_gaps != coverage.semantic_gap_count
         || coverage.semantic_gap_count != report.integrity.cached_surface_semantic_gap_count
+        || coverage.omitted_row_count != report.integrity.cached_surface_omitted_row_count
     {
         return Err(integrity(
             "cached-surface coverage does not match its record ledgers",

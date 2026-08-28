@@ -147,6 +147,7 @@ pub struct AiMemoryManifest {
     pub markdown_document_set_sha256: String,
     pub source_omitted_conversation_count: u64,
     pub source_omitted_message_count: u64,
+    #[serde(default)]
     pub source_artifact_resolution_error_count: u64,
     pub projection_omitted_conversation_count: u64,
     pub projection_omitted_message_count: u64,
@@ -179,6 +180,7 @@ pub struct AiMemoryAuditReport {
     pub markdown_document_count: u64,
     pub source_omitted_conversation_count: u64,
     pub source_omitted_message_count: u64,
+    #[serde(default)]
     pub source_artifact_resolution_error_count: u64,
     pub projection_omitted_conversation_count: u64,
     pub projection_omitted_message_count: u64,
@@ -1159,7 +1161,10 @@ fn validate_memory_manifest(manifest: &AiMemoryManifest) -> Result<(), RestoreEr
         || manifest.account_id.is_empty()
         || manifest.source_fingerprint.is_empty()
         || manifest.checkpoint_revision.is_empty()
-        || manifest.checkpoint_revision.parse::<u128>().is_err()
+        || !manifest
+            .checkpoint_revision
+            .parse::<u128>()
+            .is_ok_and(|revision| revision > 0)
         || !valid_sha256(&manifest.policy_sha256)
         || manifest.content_trust != "untrustedSourceData"
         || !manifest.qmd_compatible

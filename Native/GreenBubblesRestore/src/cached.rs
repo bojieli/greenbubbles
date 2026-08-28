@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -65,6 +65,7 @@ pub(crate) fn restore_cached_surfaces_with_progress(
     let mut interaction_count = 0_u64;
     let mut semantic_gap_count = 0_u64;
     let mut source_database_present = false;
+    let mut limitation_codes = BTreeSet::new();
     let mut progress = CachedSurfaceProgress::new(
         observer,
         phase_start,
@@ -87,28 +88,78 @@ pub(crate) fn restore_cached_surfaces_with_progress(
             connection.execute_batch("PRAGMA query_only = ON")?;
             Ok(connection)
         })();
-        let Ok(connection) = connection else {
-            semantic_gap_count = semantic_gap_count.saturating_add(1);
-            continue;
+        let connection = match connection {
+            Ok(connection) => connection,
+            Err(_) => {
+                limitation_codes.insert("cachedSurfaceDatabaseUnavailable".to_string());
+                for table in &database.tables {
+                    tables.push(CachedSurfaceTableCoverage {
+                        source_set_id: database.source_set_id.clone(),
+                        source_logical_path: database.logical_path.clone(),
+                        source_table_id: opaque_id(table.as_bytes()),
+                        source_table_name: table.clone(),
+                        columns: Vec::new(),
+                        schema_fingerprint: None,
+                        source_row_count: 0,
+                        restored_row_count: 0,
+                        role: classify_table(table, &[]).0,
+                        classification_reason:
+                            "cached source database was unavailable during restoration".to_string(),
+                        availability: crate::TableCoverageAvailability::Unavailable,
+                        limitation_code: Some("cachedSurfaceDatabaseUnavailable".to_string()),
+                    });
+                }
+                continue;
+            }
         };
         for table in &database.tables {
-            let inspection = (|| -> Result<_, RestoreError> {
-                let columns = table_columns(&connection, table)?;
-                let schema_fingerprint = table_schema_fingerprint(&connection, table)?;
-                let source_row_count = table_row_count(&connection, table)?;
-                Ok((columns, schema_fingerprint, source_row_count))
-            })();
-            let (columns, schema_fingerprint, source_row_count) = match inspection {
-                Ok(inspection) => inspection,
+            let columns = match table_columns(&connection, table) {
+                Ok(columns) => columns,
                 Err(_) => {
-                    semantic_gap_count = semantic_gap_count.saturating_add(1);
+                    limitation_codes.insert("cachedSurfaceTableUnavailable".to_string());
+                    tables.push(CachedSurfaceTableCoverage {
+                        source_set_id: database.source_set_id.clone(),
+                        source_logical_path: database.logical_path.clone(),
+                        source_table_id: opaque_id(table.as_bytes()),
+                        source_table_name: table.clone(),
+                        columns: Vec::new(),
+                        schema_fingerprint: None,
+                        source_row_count: 0,
+                        restored_row_count: 0,
+                        role: classify_table(table, &[]).0,
+                        classification_reason:
+                            "cached source table metadata was unavailable during restoration"
+                                .to_string(),
+                        availability: crate::TableCoverageAvailability::Unavailable,
+                        limitation_code: Some("cachedSurfaceTableUnavailable".to_string()),
+                    });
                     continue;
                 }
             };
             let source_table_id = opaque_id(table.as_bytes());
             let (role, reason) = classify_table(table, &columns);
-            progress.begin_table(database, database_index, table, role, source_row_count);
-            let restored_row_count = match role {
+            let observed_source_row_count = match table_row_count(&connection, table) {
+                Ok(count) => Some(count),
+                Err(_) => {
+                    limitation_codes.insert("cachedSurfaceSourceCountUnavailable".to_string());
+                    None
+                }
+            };
+            let schema_fingerprint = match table_schema_fingerprint(&connection, table) {
+                Ok(fingerprint) => Some(fingerprint),
+                Err(_) => {
+                    limitation_codes.insert("cachedSurfaceSchemaUnavailable".to_string());
+                    None
+                }
+            };
+            progress.begin_table(
+                database,
+                database_index,
+                table,
+                role,
+                observed_source_row_count.unwrap_or_default(),
+            );
+            let (restored_row_count, read_failed) = match role {
                 CachedSurfaceTableRole::MomentTimeline => restore_moments(
                     &connection,
                     table,
@@ -124,7 +175,7 @@ pub(crate) fn restore_cached_surfaces_with_progress(
                     database,
                     database_index,
                     role,
-                    source_row_count,
+                    observed_source_row_count.unwrap_or_default(),
                 )?,
                 CachedSurfaceTableRole::MomentInteraction => restore_interactions(
                     &connection,
@@ -141,9 +192,32 @@ pub(crate) fn restore_cached_surfaces_with_progress(
                     database,
                     database_index,
                     role,
-                    source_row_count,
+                    observed_source_row_count.unwrap_or_default(),
                 )?,
-                CachedSurfaceTableRole::UnsupportedCandidate | CachedSurfaceTableRole::Other => 0,
+                CachedSurfaceTableRole::UnsupportedCandidate | CachedSurfaceTableRole::Other => {
+                    (0, false)
+                }
+            };
+            let source_row_count = observed_source_row_count
+                .unwrap_or(restored_row_count)
+                .max(restored_row_count);
+            let (availability, limitation_code) = if read_failed {
+                limitation_codes.insert("unreadableCachedSurfaceRowsOmitted".to_string());
+                (
+                    if restored_row_count == 0 {
+                        crate::TableCoverageAvailability::Unavailable
+                    } else {
+                        crate::TableCoverageAvailability::Partial
+                    },
+                    Some("unreadableCachedSurfaceRowsOmitted".to_string()),
+                )
+            } else if schema_fingerprint.is_none() || observed_source_row_count.is_none() {
+                (
+                    crate::TableCoverageAvailability::Partial,
+                    Some("cachedSurfaceMetadataUnavailable".to_string()),
+                )
+            } else {
+                (crate::TableCoverageAvailability::Complete, None)
             };
             progress.complete_table(
                 database,
@@ -167,11 +241,13 @@ pub(crate) fn restore_cached_surfaces_with_progress(
                 source_table_id,
                 source_table_name: table.clone(),
                 columns,
-                schema_fingerprint: Some(schema_fingerprint),
+                schema_fingerprint,
                 source_row_count,
                 restored_row_count,
                 role,
                 classification_reason: reason.to_string(),
+                availability,
+                limitation_code,
             });
         }
     }
@@ -196,6 +272,25 @@ pub(crate) fn restore_cached_surfaces_with_progress(
             table.schema_fingerprint.as_deref(),
         )
     }));
+    let restored_surface_row_count = moment_count.saturating_add(interaction_count);
+    let table_omitted_row_count = tables
+        .iter()
+        .filter(|table| is_restored_role(table.role))
+        .map(|table| {
+            table
+                .source_row_count
+                .saturating_sub(table.restored_row_count)
+        })
+        .sum::<u64>();
+    let omitted_row_count = expected_rows
+        .saturating_sub(restored_surface_row_count)
+        .max(table_omitted_row_count);
+    if omitted_row_count > 0 {
+        limitation_codes.insert("cachedSurfaceRowsOmitted".to_string());
+    }
+    if restored_surface_row_count.saturating_add(omitted_row_count) != expected_rows {
+        limitation_codes.insert("cachedSurfacePlanningCountChanged".to_string());
+    }
     let coverage = CachedSurfaceCoverage {
         format_version: 2,
         schema_profile_fingerprint,
@@ -205,10 +300,17 @@ pub(crate) fn restore_cached_surfaces_with_progress(
         moment_count,
         interaction_count,
         semantic_gap_count,
+        omitted_row_count,
+        limitation_codes: limitation_codes.into_iter().collect(),
         tables,
     };
     write_json(&coverage_path, &coverage)?;
-    progress.finish(moment_count, interaction_count, semantic_gap_count)?;
+    progress.finish(
+        moment_count,
+        interaction_count,
+        omitted_row_count,
+        semantic_gap_count,
+    )?;
     Ok(CachedSurfaceRestoration {
         moments_path,
         interactions_path,
@@ -234,33 +336,28 @@ fn restore_moments(
     database_index: usize,
     role: CachedSurfaceTableRole,
     source_row_count: u64,
-) -> Result<u64, RestoreError> {
+) -> Result<(u64, bool), RestoreError> {
     let sql = format!(
         "SELECT rowid, * FROM {} ORDER BY rowid",
         quote_identifier(table)
     );
     let mut statement = match connection.prepare(&sql) {
         Ok(statement) => statement,
-        Err(_) => {
-            *semantic_gap_count = semantic_gap_count.saturating_add(1);
-            return Ok(0);
-        }
+        Err(_) => return Ok((0, true)),
     };
     let mut rows = match statement.query([]) {
         Ok(rows) => rows,
-        Err(_) => {
-            *semantic_gap_count = semantic_gap_count.saturating_add(1);
-            return Ok(0);
-        }
+        Err(_) => return Ok((0, true)),
     };
     let mut count = 0_u64;
+    let mut read_failed = false;
     let mut throttle = CachedProgressThrottle::new(source_row_count);
     loop {
         let row = match rows.next() {
             Ok(Some(row)) => row,
             Ok(None) => break,
             Err(_) => {
-                *semantic_gap_count = semantic_gap_count.saturating_add(1);
+                read_failed = true;
                 break;
             }
         };
@@ -368,7 +465,7 @@ fn restore_moments(
             );
         }
     }
-    Ok(count)
+    Ok((count, read_failed))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -388,33 +485,28 @@ fn restore_interactions(
     database_index: usize,
     role: CachedSurfaceTableRole,
     source_row_count: u64,
-) -> Result<u64, RestoreError> {
+) -> Result<(u64, bool), RestoreError> {
     let sql = format!(
         "SELECT rowid, * FROM {} ORDER BY rowid",
         quote_identifier(table)
     );
     let mut statement = match connection.prepare(&sql) {
         Ok(statement) => statement,
-        Err(_) => {
-            *semantic_gap_count = semantic_gap_count.saturating_add(1);
-            return Ok(0);
-        }
+        Err(_) => return Ok((0, true)),
     };
     let mut rows = match statement.query([]) {
         Ok(rows) => rows,
-        Err(_) => {
-            *semantic_gap_count = semantic_gap_count.saturating_add(1);
-            return Ok(0);
-        }
+        Err(_) => return Ok((0, true)),
     };
     let mut count = 0_u64;
+    let mut read_failed = false;
     let mut throttle = CachedProgressThrottle::new(source_row_count);
     loop {
         let row = match rows.next() {
             Ok(Some(row)) => row,
             Ok(None) => break,
             Err(_) => {
-                *semantic_gap_count = semantic_gap_count.saturating_add(1);
+                read_failed = true;
                 break;
             }
         };
@@ -477,7 +569,7 @@ fn restore_interactions(
             );
         }
     }
-    Ok(count)
+    Ok((count, read_failed))
 }
 
 fn cached_surface_row_count(catalog: &PreparedCatalog) -> Result<u64, RestoreError> {
@@ -713,28 +805,32 @@ impl<'a> CachedSurfaceProgress<'a> {
         &self,
         moment_count: u64,
         interaction_count: u64,
+        omitted_row_count: u64,
         semantic_gaps: u64,
     ) -> Result<(), RestoreError> {
-        if self.processed_rows != self.expected_rows
-            || moment_count.saturating_add(interaction_count) != self.expected_rows
-        {
+        let restored_row_count = moment_count.saturating_add(interaction_count);
+        if self.processed_rows != restored_row_count {
             return Err(RestoreError::Integrity(
-                "cached-surface progress accounting differs from restored rows".to_string(),
+                "cached-surface internal progress differs from restored rows".to_string(),
             ));
         }
+        let completed_row_count = restored_row_count
+            .saturating_add(omitted_row_count)
+            .max(self.expected_rows);
         let mut event = ProgressEvent::new(
             ProgressPhase::ArchiveFinalization,
             ProgressState::Completed,
             "restoreCachedSurfaces",
             ProgressUnit::Records,
-            self.expected_rows,
-            self.expected_rows,
+            completed_row_count,
+            completed_row_count,
             self.phase_start.saturating_add(self.phase_work),
             self.phase_total,
         );
         event.database_count = Some(self.database_count);
         event.source_record_count = Some(self.expected_rows);
-        event.restored_record_count = Some(self.expected_rows);
+        event.restored_record_count = Some(restored_row_count);
+        event.rejected_record_count = Some(omitted_row_count);
         event.semantic_gap_count = Some(semantic_gaps);
         event.elapsed_milliseconds = Some(elapsed_milliseconds(self.started_at));
         self.observer.observe(event);

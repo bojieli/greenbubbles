@@ -442,6 +442,125 @@ fn restores_cached_moments_and_interactions_without_claiming_cache_completeness(
     .is_err());
 }
 
+#[test]
+fn unreadable_cached_table_rows_are_omitted_without_aborting_the_archive_or_replica() {
+    let fixture = tempfile::tempdir().unwrap();
+    let snapshot = fixture.path().join("snapshot-unreadable-cached-table");
+    fs::create_dir_all(snapshot.join("sets/0000")).unwrap();
+    let database = snapshot.join("sets/0000/database.db");
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute_batch(
+            r#"CREATE TABLE SnsTimeLine(
+                 tid INTEGER PRIMARY KEY,
+                 user_name TEXT,
+                 content BLOB,
+                 pack_info_buf BLOB
+               ) WITHOUT ROWID;
+               INSERT INTO SnsTimeLine VALUES(
+                 1,
+                 'wxid_author',
+                 '<TimelineObject><username>wxid_author</username><createTime>1</createTime></TimelineObject>',
+                 NULL
+               );"#,
+        )
+        .unwrap();
+    drop(connection);
+
+    let bytes = fs::read(&database).unwrap();
+    let metadata = fs::metadata(&database).unwrap();
+    let manifest = SnapshotManifest {
+        manifest_format_version: 1,
+        snapshot_id: "00000000-0000-4000-8000-000000000098".to_string(),
+        created_at: "2026-08-27T03:04:05Z".to_string(),
+        source_fingerprint: "unreadable-cached-table-fixture".to_string(),
+        account_binding: None,
+        client_build: None,
+        acquisition: None,
+        entries: vec![SnapshotEntry {
+            source: greenbubbles_restore::manifest::PathReference {
+                opaque_id: "source".to_string(),
+                path: None,
+            },
+            source_set_id: "sns-unreadable-set".to_string(),
+            logical_path: "sns/sns.db".to_string(),
+            relative_path: "sets/0000/database.db".to_string(),
+            role: SnapshotFileRole::Database,
+            fingerprint: greenbubbles_restore::manifest::SourceFileFingerprint {
+                device_id: 1,
+                file_id: 3,
+                byte_count: metadata.len() as i64,
+                modified_seconds: 0,
+                modified_nanoseconds: 0,
+            },
+            sha256: hex::encode(Sha256::digest(bytes)),
+        }],
+    };
+    fs::write(
+        snapshot.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let catalog = prepare_catalog(&snapshot, None).unwrap();
+    let archive = fixture.path().join("archive-unreadable-cached-table");
+    let report = restore_catalog(
+        &catalog,
+        &RestorationOptions {
+            output_directory: archive.clone(),
+            account_root: None,
+            defer_media: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(report.integrity.cached_moment_count, 0);
+    assert_eq!(report.integrity.cached_surface_omitted_row_count, 1);
+    assert!(!report.completion.full_restoration_achieved);
+
+    let coverage: serde_json::Value =
+        serde_json::from_slice(&fs::read(archive.join("cached-surfaces.json")).unwrap()).unwrap();
+    assert_eq!(coverage["omittedRowCount"], json!(1));
+    assert!(coverage["limitationCodes"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("cachedSurfaceRowsOmitted")));
+    assert_eq!(coverage["tables"][0]["availability"], json!("unavailable"));
+    assert_eq!(
+        coverage["tables"][0]["limitationCode"],
+        json!("unreadableCachedSurfaceRowsOmitted")
+    );
+    let archive_audit = audit_archive(&archive).unwrap();
+    assert_eq!(archive_audit.cached_surface_omitted_row_count, 1);
+
+    let private = fixture.path().join("replica-unreadable-cached-table");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes([0x6a; 32]);
+    bootstrap_replica(&archive, &replica, &key).unwrap();
+    let status = replica_status(&replica, &key).unwrap();
+    assert_eq!(status.cached_surface_omitted_row_count, Some(1));
+    assert!(status
+        .limitation_codes
+        .contains(&"cachedSurfaceSourceRowsOmitted".to_string()));
+    let page = search_replica_cached_moments(
+        &replica,
+        &key,
+        &ReplicaCachedMomentFilter::default(),
+        None,
+        10,
+    )
+    .unwrap();
+    assert_eq!(
+        page.availability,
+        ReplicaCachedSurfaceAvailability::Unavailable
+    );
+    assert!(page.items.is_empty());
+    assert!(page
+        .limitation_codes
+        .contains(&"cachedSurfaceSourceRowsOmitted".to_string()));
+}
+
 #[derive(Default)]
 struct CapturingProgress {
     events: Mutex<Vec<ProgressEvent>>,

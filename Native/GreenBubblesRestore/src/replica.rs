@@ -56,6 +56,8 @@ pub struct ReplicaBootstrapReport {
     pub artifact_count: u64,
     pub cached_moment_count: u64,
     pub cached_moment_interaction_count: u64,
+    #[serde(default)]
+    pub cached_surface_omitted_row_count: u64,
     pub relationship_count: u64,
     pub message_artifact_count: u64,
     pub pre_migration_backup_file_name: Option<String>,
@@ -90,6 +92,7 @@ pub struct ReplicaStatus {
     pub artifact_count: u64,
     pub cached_moment_count: u64,
     pub cached_moment_interaction_count: u64,
+    pub cached_surface_omitted_row_count: Option<u64>,
     pub last_checkpoint_unix_nanoseconds: Option<u128>,
     pub checkpoint_age_seconds: Option<u64>,
     pub last_sync_kind: Option<String>,
@@ -582,6 +585,7 @@ pub(crate) fn bootstrap_audited_replica_with_progress(
             artifact_count: counts.artifacts,
             cached_moment_count: counts.cached_moments,
             cached_moment_interaction_count: counts.cached_moment_interactions,
+            cached_surface_omitted_row_count: report.integrity.cached_surface_omitted_row_count,
             relationship_count: counts.relationships,
             message_artifact_count: counts.message_artifacts,
             pre_migration_backup_file_name: opened.pre_migration_backup_file_name,
@@ -674,6 +678,9 @@ pub fn replica_status(
             return Err(RestoreError::Integrity(
                 "replica account-holder binding disagrees with its coverage state".to_string(),
             ));
+        }
+        if report.integrity.cached_surface_omitted_row_count > 0 {
+            limitation_codes.insert("cachedSurfaceSourceRowsOmitted".to_string());
         }
     }
     let checkpoint_age_seconds = checkpoint.and_then(|timestamp| {
@@ -784,6 +791,8 @@ pub fn replica_status(
         artifact_count,
         cached_moment_count,
         cached_moment_interaction_count,
+        cached_surface_omitted_row_count: stored_report
+            .map(|report| report.integrity.cached_surface_omitted_row_count),
         last_checkpoint_unix_nanoseconds: checkpoint,
         checkpoint_age_seconds,
         last_sync_kind: sync_health.last_kind,
@@ -1693,11 +1702,13 @@ pub fn search_replica_messages(
         },
         |row| {
             Ok((
-                row.get::<_, Option<i64>>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Vec<u8>>(4)?,
+                (
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ),
+                row.get::<_, Vec<u8>>(4),
             ))
         },
     ) {
@@ -1721,7 +1732,7 @@ pub fn search_replica_messages(
     let mut scanned_count = 0_usize;
     for row in rows {
         scanned_count = scanned_count.saturating_add(1);
-        let (indexed_created_at, indexed_conversation_id, indexed_ordinal, indexed_id, bytes) =
+        let ((indexed_created_at, indexed_conversation_id, indexed_ordinal, indexed_id), bytes) =
             match row {
                 Ok(value) => value,
                 Err(_) => {
@@ -1736,6 +1747,10 @@ pub fn search_replica_messages(
             indexed_ordinal,
             indexed_id.clone(),
         ));
+        let Ok(bytes) = bytes else {
+            omitted_item_count = omitted_item_count.saturating_add(1);
+            continue;
+        };
         let Ok(message) = serde_json::from_slice::<CanonicalMessage>(&bytes) else {
             omitted_item_count = omitted_item_count.saturating_add(1);
             continue;
@@ -1915,9 +1930,31 @@ pub fn search_replica_cached_moments(
                 None
             }
         });
+    if let Some(coverage) = coverage.as_ref() {
+        limitation_codes.extend(coverage.limitation_codes.iter().cloned());
+        if coverage.omitted_row_count > 0 {
+            limitation_codes.insert("cachedSurfaceSourceRowsOmitted".to_string());
+        }
+    }
     let reported_availability = match coverage.as_ref() {
         None => ReplicaCachedSurfaceAvailability::Unavailable,
         Some(coverage) if !coverage.source_database_present => {
+            ReplicaCachedSurfaceAvailability::Unavailable
+        }
+        Some(coverage)
+            if coverage.moment_count == 0
+                && coverage.limitation_codes.iter().any(|code| {
+                    matches!(
+                        code.as_str(),
+                        "cachedSurfaceDatabaseUnavailable"
+                            | "cachedSurfaceTableUnavailable"
+                            | "cachedSurfaceSourceCountUnavailable"
+                    )
+                }) =>
+        {
+            ReplicaCachedSurfaceAvailability::Unavailable
+        }
+        Some(coverage) if coverage.moment_count == 0 && coverage.omitted_row_count > 0 => {
             ReplicaCachedSurfaceAvailability::Unavailable
         }
         Some(coverage) if coverage.moment_count == 0 => {
@@ -1992,9 +2029,8 @@ pub fn search_replica_cached_moments(
         },
         |row| {
             Ok((
-                row.get::<_, Option<i64>>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
+                (row.get::<_, Option<i64>>(0)?, row.get::<_, String>(1)?),
+                row.get::<_, Vec<u8>>(2),
             ))
         },
     ) {
@@ -2024,7 +2060,7 @@ pub fn search_replica_cached_moments(
     let mut has_more = false;
     for row in rows {
         scanned_count = scanned_count.saturating_add(1);
-        let (indexed_created_at, indexed_id, bytes) = match row {
+        let ((indexed_created_at, indexed_id), bytes) = match row {
             Ok(value) => value,
             Err(_) => {
                 omitted_item_count = omitted_item_count.saturating_add(1);
@@ -2032,6 +2068,10 @@ pub fn search_replica_cached_moments(
             }
         };
         last_scanned_identity = Some((indexed_created_at.unwrap_or(i64::MIN), indexed_id.clone()));
+        let Ok(bytes) = bytes else {
+            omitted_item_count = omitted_item_count.saturating_add(1);
+            continue;
+        };
         let Ok(moment) = serde_json::from_slice::<crate::CanonicalCachedMoment>(&bytes) else {
             omitted_item_count = omitted_item_count.saturating_add(1);
             continue;
@@ -2181,10 +2221,12 @@ pub fn get_replica_recent_messages(
         ],
         |row| {
             Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<i64>>(2)?,
-                row.get::<_, Vec<u8>>(3)?,
+                (
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ),
+                row.get::<_, Vec<u8>>(3),
             ))
         },
     ) {
@@ -2193,7 +2235,10 @@ pub fn get_replica_recent_messages(
     };
     let mut messages = Vec::with_capacity(limit);
     for row in rows {
-        let Ok((indexed_ordinal, indexed_id, indexed_created_at, bytes)) = row else {
+        let Ok(((indexed_ordinal, indexed_id, indexed_created_at), bytes)) = row else {
+            continue;
+        };
+        let Ok(bytes) = bytes else {
             continue;
         };
         let Ok(indexed_ordinal) = u64::try_from(indexed_ordinal) else {
@@ -2456,7 +2501,7 @@ pub fn list_replica_conversations(
         }
     };
     let rows = match statement.query_map(params![account_id, query_limit], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)))
     }) {
         Ok(rows) => rows,
         Err(_) => {
@@ -2479,6 +2524,10 @@ pub fn list_replica_conversations(
                 omitted_item_count = omitted_item_count.saturating_add(1);
                 continue;
             }
+        };
+        let Ok(bytes) = bytes else {
+            omitted_item_count = omitted_item_count.saturating_add(1);
+            continue;
         };
         let Ok(conversation) = serde_json::from_slice::<CanonicalConversation>(&bytes) else {
             omitted_item_count = omitted_item_count.saturating_add(1);
@@ -6211,6 +6260,7 @@ fn bootstrap_report(
             &opened.connection,
             "cached_moment_interaction",
         )?,
+        cached_surface_omitted_row_count: report.integrity.cached_surface_omitted_row_count,
         relationship_count: table_count(&opened.connection, "message_relationship")?,
         message_artifact_count: table_count(&opened.connection, "message_artifact")?,
         pre_migration_backup_file_name: opened.pre_migration_backup_file_name.clone(),

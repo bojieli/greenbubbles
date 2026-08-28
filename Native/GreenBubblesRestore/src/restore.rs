@@ -1119,6 +1119,7 @@ pub fn restore_catalog_with_progress(
     integrity.cached_moment_count = cached_surfaces.coverage.moment_count;
     integrity.cached_moment_interaction_count = cached_surfaces.coverage.interaction_count;
     integrity.cached_surface_semantic_gap_count = cached_surfaces.coverage.semantic_gap_count;
+    integrity.cached_surface_omitted_row_count = cached_surfaces.coverage.omitted_row_count;
     let cached_phase_end = cached_phase_start.saturating_add(cached_surface_work);
     let published_after_cached_surfaces = archive_file_byte_count(&output_directory)?;
     let cached_remaining =
