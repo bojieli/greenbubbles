@@ -5,14 +5,18 @@ use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use greenbubbles_restore::{
     acquisition_audit::audit_acquisition_chain,
-    ai_context::{audit_ai_context, export_ai_context, load_ai_query_request, query_ai_context},
-    ai_memory::{audit_ai_memory, export_ai_memory, AiMemoryExportOptions},
+    ai_context::{
+        audit_ai_context_with_progress, export_ai_context, load_ai_query_request, query_ai_context,
+    },
+    ai_memory::{
+        audit_ai_memory_with_progress, export_ai_memory_with_progress, AiMemoryExportOptions,
+    },
     archive::{create_conversation_policy, read_conversation_page},
     audit::audit_archive_with_progress,
     benchmark::{run_synthetic_benchmark, SyntheticBenchmarkConfig},
@@ -740,6 +744,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let requester = required_option(&remaining, "--requester")?;
             let destination =
                 parse_connector_destination(option_string(&remaining, "--destination")?)?;
+            require_progress_file_outside(&remaining, &[(&output, "AI context output directory")])?;
             let reporter =
                 ProgressReporter::from_arguments(&remaining, ProgressWorkflow::AiExport, false)?;
             let key = ReplicaKey::read_stdin()?;
@@ -757,13 +762,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         "audit-ai-context" => {
             let bundle = required_path(arguments.next(), "AI context bundle directory")?;
-            let report = audit_ai_context(&bundle)?;
+            let remaining = arguments.collect::<Vec<_>>();
+            require_progress_file_outside(&remaining, &[(&bundle, "AI context bundle")])?;
+            let reporter = ProgressReporter::from_arguments(
+                &remaining,
+                ProgressWorkflow::ContextAudit,
+                false,
+            )?;
+            let report = audit_ai_context_with_progress(&bundle, &reporter)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "ai-memory-export" => {
             let bundle = required_path(arguments.next(), "AI context bundle directory")?;
             let output = required_path(arguments.next(), "AI memory output directory")?;
             let remaining = arguments.collect::<Vec<_>>();
+            require_progress_file_outside(
+                &remaining,
+                &[
+                    (&bundle, "AI context bundle"),
+                    (&output, "AI memory output directory"),
+                ],
+            )?;
             let defaults = AiMemoryExportOptions::default();
             let options = AiMemoryExportOptions {
                 maximum_messages_per_chunk: option_usize(&remaining, "--max-messages-per-chunk")?
@@ -774,12 +793,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 )?
                 .unwrap_or(defaults.maximum_text_bytes_per_chunk),
             };
-            let manifest = export_ai_memory(&bundle, &output, options)?;
+            let reporter = ProgressReporter::from_arguments(
+                &remaining,
+                ProgressWorkflow::MemoryProjection,
+                false,
+            )?;
+            let manifest = export_ai_memory_with_progress(&bundle, &output, options, &reporter)?;
             println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
         "audit-ai-memory" => {
             let memory = required_path(arguments.next(), "AI memory output directory")?;
-            let report = audit_ai_memory(&memory)?;
+            let remaining = arguments.collect::<Vec<_>>();
+            require_progress_file_outside(&remaining, &[(&memory, "AI memory output directory")])?;
+            let reporter =
+                ProgressReporter::from_arguments(&remaining, ProgressWorkflow::MemoryAudit, false)?;
+            let report = audit_ai_memory_with_progress(&memory, &reporter)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "connector-serve" => {
@@ -998,9 +1026,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore replica-coverage <replica-path> --replica-key-stdin\n",
                     "  greenbubbles-restore ai-query <replica-path> <policy-file> <connector-audit-log> <private-request-json> --replica-key-stdin\n",
                     "  greenbubbles-restore ai-export <replica-path> <policy-file> <connector-audit-log> <new-output-directory> --replica-key-stdin --requester <id> [--destination local|remote] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles-restore audit-ai-context <AI-context-bundle-directory>\n",
-                    "  greenbubbles-restore ai-memory-export <AI-context-bundle-directory> <new-output-directory> [--max-messages-per-chunk <n>] [--max-text-bytes-per-chunk <n>]\n",
-                    "  greenbubbles-restore audit-ai-memory <AI-memory-output-directory>\n",
+                    "  greenbubbles-restore audit-ai-context <AI-context-bundle-directory> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles-restore ai-memory-export <AI-context-bundle-directory> <new-output-directory> [--max-messages-per-chunk <n>] [--max-text-bytes-per-chunk <n>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles-restore audit-ai-memory <AI-memory-output-directory> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
                     "  greenbubbles-restore connector-serve <replica-path> <policy-file> <audit-log> <draft-directory> <socket-path> --replica-key-stdin\n",
                     "  greenbubbles-restore connector-call <socket-path> <private-request-json>\n",
                     "  greenbubbles-restore tool-policy <archive> <policy-file> ([<conversation-id>...] | --all-conversations) [--capabilities list,read,search,draft] [--fields sender,created-at,direction,type,content,attachments,relationships] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--enable-cached-moments --cached-fields author,created-at,type,content,title,description,url,media-count,like-count,comment-count] [--cached-not-before-unix <seconds>] [--cached-not-after-unix <seconds>] [--allow-cached-remote-model] [--max-results <n>] [--max-summary-bytes <n>] [--max-draft-bytes <n>]\n",
@@ -1045,15 +1073,18 @@ fn ai_command_help(command: &str) -> Option<&'static str> {
         )),
         "audit-ai-context" => Some(concat!(
             "Usage:\n",
-            "  greenbubbles-restore audit-ai-context <AI-context-bundle-directory>\n\n",
+            "  greenbubbles-restore audit-ai-context <AI-context-bundle-directory> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
             "Verifies the bundle inventory, permissions, schemas, hashes, counts, identities,\n",
             "references, freshness, checkpoint, and policy binding without printing content.\n\n",
             "Options:\n",
-            "  -h, --help  Show this help\n",
+            "  --progress-file <path>  Create an owner-only NDJSON progress log\n",
+            "  --progress-json         Emit NDJSON progress on standard error\n",
+            "  --quiet-progress        Suppress human progress on standard error\n",
+            "  -h, --help              Show this help\n",
         )),
         "ai-memory-export" => Some(concat!(
             "Usage:\n",
-            "  greenbubbles-restore ai-memory-export <AI-context-bundle-directory> <new-output-directory> [--max-messages-per-chunk <n>] [--max-text-bytes-per-chunk <n>]\n\n",
+            "  greenbubbles-restore ai-memory-export <AI-context-bundle-directory> <new-output-directory> [--max-messages-per-chunk <n>] [--max-text-bytes-per-chunk <n>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
             "Projects an integrity-bound AI context bundle into deterministic, bounded\n",
             "conversation chunks for personal-memory systems. The atomic owner-only output\n",
             "contains Mem0-compatible JSON message batches and QMD-compatible Markdown.\n",
@@ -1062,15 +1093,21 @@ fn ai_command_help(command: &str) -> Option<&'static str> {
             "Options:\n",
             "  --max-messages-per-chunk <n>   1..1000; default 64\n",
             "  --max-text-bytes-per-chunk <n> 256..1048576; default 49152\n",
+            "  --progress-file <path>         Create an owner-only NDJSON progress log\n",
+            "  --progress-json                Emit NDJSON progress on standard error\n",
+            "  --quiet-progress               Suppress human progress on standard error\n",
             "  -h, --help                     Show this help\n",
         )),
         "audit-ai-memory" => Some(concat!(
             "Usage:\n",
-            "  greenbubbles-restore audit-ai-memory <AI-memory-output-directory>\n\n",
+            "  greenbubbles-restore audit-ai-memory <AI-memory-output-directory> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
             "Verifies the projection identity, owner-only inventory, hashes, bounded chunk\n",
             "schemas, source citations, and every Markdown document without printing content.\n\n",
             "Options:\n",
-            "  -h, --help  Show this help\n",
+            "  --progress-file <path>  Create an owner-only NDJSON progress log\n",
+            "  --progress-json         Emit NDJSON progress on standard error\n",
+            "  --quiet-progress        Suppress human progress on standard error\n",
+            "  -h, --help              Show this help\n",
         )),
         _ => None,
     }
@@ -1141,12 +1178,24 @@ enum ProgressWorkflow {
     Audit,
     ReplicaApply,
     AiExport,
+    ContextAudit,
+    MemoryProjection,
+    MemoryAudit,
 }
 
 impl ProgressWorkflow {
     fn phases(self, validates_exported_keys: bool) -> Vec<ProgressPhase> {
         if matches!(self, Self::AiExport) {
             return vec![ProgressPhase::ContextExport];
+        }
+        if matches!(self, Self::ContextAudit) {
+            return vec![ProgressPhase::ContextAudit];
+        }
+        if matches!(self, Self::MemoryProjection) {
+            return vec![ProgressPhase::MemoryProjection];
+        }
+        if matches!(self, Self::MemoryAudit) {
+            return vec![ProgressPhase::MemoryAudit];
         }
         if matches!(self, Self::Preflight) {
             return vec![ProgressPhase::SnapshotVerification];
@@ -1490,6 +1539,36 @@ fn human_progress(event: &ProgressEvent) -> String {
     if let Some(records) = event.source_record_count {
         fields.push(format!("{records} source records"));
     }
+    if let Some(records) = event.conversation_record_count {
+        fields.push(format!("{records} source conversations"));
+    }
+    if let Some(records) = event.message_record_count {
+        fields.push(format!("{records} source messages"));
+    }
+    if let Some(records) = event.processed_conversation_count {
+        fields.push(format!("{records} conversations processed"));
+    }
+    if let Some(records) = event.processed_message_count {
+        fields.push(format!("{records} messages processed"));
+    }
+    if let Some(records) = event.emitted_chunk_count {
+        fields.push(format!("{records} chunks emitted"));
+    }
+    if let Some(records) = event.emitted_document_count {
+        fields.push(format!("{records} documents emitted"));
+    }
+    if let Some(bytes) = event.emitted_byte_count {
+        fields.push(format!("{} emitted", format_bytes(bytes)));
+    }
+    if let Some(records) = event.verified_chunk_count {
+        fields.push(format!("{records} chunks verified"));
+    }
+    if let Some(records) = event.verified_document_count {
+        fields.push(format!("{records} documents verified"));
+    }
+    if let Some(bytes) = event.verified_byte_count {
+        fields.push(format!("{} verified", format_bytes(bytes)));
+    }
     if let Some(records) = event.rejected_record_count {
         fields.push(format!("{records} rejected"));
     }
@@ -1592,6 +1671,46 @@ fn owner_only_create_new_writer(path: &Path) -> io::Result<BufWriter<File>> {
         ));
     }
     Ok(BufWriter::new(file))
+}
+
+fn require_progress_file_outside(
+    arguments: &[String],
+    protected_roots: &[(&Path, &str)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(progress_file) = option_path(arguments, "--progress-file")? else {
+        return Ok(());
+    };
+    let progress_file = absolute_lexical_path(&progress_file)?;
+    for (root, description) in protected_roots {
+        let root = absolute_lexical_path(root)?;
+        if progress_file == root || progress_file.starts_with(&root) {
+            return Err(format!("--progress-file must be outside the {description}").into());
+        }
+    }
+    Ok(())
+}
+
+fn absolute_lexical_path(path: &Path) -> io::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if normalized.parent().is_some() {
+                    normalized.pop();
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    Ok(normalized)
 }
 
 fn option_string(arguments: &[String], option: &str) -> Result<Option<String>, String> {

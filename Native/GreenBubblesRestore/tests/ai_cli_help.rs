@@ -30,6 +30,11 @@ fn ai_commands_expose_help_without_opening_private_inputs() {
             let stdout = String::from_utf8(output.stdout).expect("help should be UTF-8");
             assert!(stdout.starts_with("Usage:\n"));
             assert!(stdout.contains(expected));
+            if command != "ai-query" {
+                assert!(stdout.contains("--progress-file"));
+                assert!(stdout.contains("--progress-json"));
+                assert!(stdout.contains("--quiet-progress"));
+            }
         }
     }
 }

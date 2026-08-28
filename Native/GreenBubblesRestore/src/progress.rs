@@ -12,6 +12,9 @@ pub enum ProgressPhase {
     ArchiveAudit,
     ReplicaApplication,
     ContextExport,
+    ContextAudit,
+    MemoryProjection,
+    MemoryAudit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -121,6 +124,26 @@ pub struct ProgressEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_table_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_record_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_record_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processed_conversation_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processed_message_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emitted_chunk_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emitted_document_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emitted_byte_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_chunk_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_document_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_byte_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub restored_record_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_record_count: Option<u64>,
@@ -193,6 +216,16 @@ impl ProgressEvent {
             table_schema_fingerprint: None,
             table_count: None,
             message_table_count: None,
+            conversation_record_count: None,
+            message_record_count: None,
+            processed_conversation_count: None,
+            processed_message_count: None,
+            emitted_chunk_count: None,
+            emitted_document_count: None,
+            emitted_byte_count: None,
+            verified_chunk_count: None,
+            verified_document_count: None,
+            verified_byte_count: None,
             restored_record_count: None,
             source_record_count: None,
             rejected_record_count: None,

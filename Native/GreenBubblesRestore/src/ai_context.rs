@@ -26,7 +26,7 @@ use crate::tools::{
 };
 use crate::{
     ArtifactAvailability, ArtifactDecodeState, ArtifactKind, ArtifactRole,
-    ClientBuildCompatibilityState, ConversationKind, EntityDecodeState, ProgressEvent,
+    ClientBuildCompatibilityState, ConversationKind, EntityDecodeState, NoProgress, ProgressEvent,
     ProgressObserver, ProgressPhase, ProgressState, ProgressUnit, ReplicaKey, RestoreError,
 };
 
@@ -280,6 +280,200 @@ pub struct AiContextAuditReport {
     pub omitted_conversation_count: u64,
     pub omitted_message_count: u64,
     pub content_complete: bool,
+}
+
+struct AiContextAuditProgress<'a> {
+    observer: &'a dyn ProgressObserver,
+    started: Instant,
+    source_byte_count: u64,
+    source_record_count: u64,
+    conversation_record_count: u64,
+    message_record_count: u64,
+    completed_file_byte_count: u64,
+    processed_conversation_count: u64,
+    processed_message_count: u64,
+}
+
+impl<'a> AiContextAuditProgress<'a> {
+    fn new(observer: &'a dyn ProgressObserver, files: &BTreeMap<&str, &AiContextFile>) -> Self {
+        Self {
+            observer,
+            started: Instant::now(),
+            source_byte_count: files
+                .values()
+                .map(|file| file.byte_count)
+                .fold(0_u64, u64::saturating_add),
+            source_record_count: files
+                .values()
+                .map(|file| file.record_count)
+                .fold(0_u64, u64::saturating_add),
+            conversation_record_count: files["conversations"].record_count,
+            message_record_count: files["messages"].record_count,
+            completed_file_byte_count: 0,
+            processed_conversation_count: 0,
+            processed_message_count: 0,
+        }
+    }
+
+    fn plan(&self) {
+        self.observe(
+            ProgressState::Planned,
+            "planAiContextAudit",
+            ProgressUnit::Bytes,
+            0,
+            self.source_byte_count,
+            0,
+            None,
+            None,
+            None,
+            None,
+        );
+        self.observe(
+            ProgressState::Started,
+            "auditAiContext",
+            ProgressUnit::Bytes,
+            0,
+            self.source_byte_count,
+            0,
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+
+    fn begin_file(&self, index: usize, operation: &str, file: &AiContextFile) {
+        self.observe(
+            ProgressState::Started,
+            operation,
+            ProgressUnit::Records,
+            0,
+            file.record_count,
+            self.phase_position(0),
+            Some(index),
+            Some(&file.relative_path),
+            Some(0),
+            Some(file.byte_count),
+        );
+    }
+
+    fn advance_file(
+        &mut self,
+        index: usize,
+        role: &str,
+        operation: &str,
+        file: &AiContextFile,
+        completed_records: u64,
+        completed_bytes: u64,
+    ) {
+        if role == "conversations" {
+            self.processed_conversation_count = completed_records;
+        } else if role == "messages" {
+            self.processed_message_count = completed_records;
+        }
+        if completed_records != 1 && !completed_records.is_multiple_of(1_000) {
+            return;
+        }
+        self.observe(
+            ProgressState::Advanced,
+            operation,
+            ProgressUnit::Records,
+            completed_records,
+            file.record_count,
+            self.phase_position(completed_bytes),
+            Some(index),
+            Some(&file.relative_path),
+            Some(completed_bytes),
+            Some(file.byte_count),
+        );
+    }
+
+    fn complete_file(&mut self, index: usize, role: &str, operation: &str, file: &AiContextFile) {
+        if role == "conversations" {
+            self.processed_conversation_count = file.record_count;
+        } else if role == "messages" {
+            self.processed_message_count = file.record_count;
+        }
+        self.observe(
+            ProgressState::Advanced,
+            operation,
+            ProgressUnit::Records,
+            file.record_count,
+            file.record_count,
+            self.phase_position(file.byte_count),
+            Some(index),
+            Some(&file.relative_path),
+            Some(file.byte_count),
+            Some(file.byte_count),
+        );
+        self.completed_file_byte_count = self
+            .completed_file_byte_count
+            .saturating_add(file.byte_count);
+    }
+
+    fn finish(&self) {
+        self.observe(
+            ProgressState::Completed,
+            "finalizeAiContextAudit",
+            ProgressUnit::Records,
+            self.source_record_count,
+            self.source_record_count,
+            PHASE_RESOLUTION,
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+
+    fn phase_position(&self, current_file_bytes: u64) -> u64 {
+        progress_fraction(
+            self.completed_file_byte_count
+                .saturating_add(current_file_bytes),
+            self.source_byte_count,
+            PHASE_RESOLUTION,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn observe(
+        &self,
+        state: ProgressState,
+        operation: &str,
+        unit: ProgressUnit,
+        completed: u64,
+        total: u64,
+        phase_completed: u64,
+        file_index: Option<usize>,
+        logical_path: Option<&str>,
+        file_completed_byte_count: Option<u64>,
+        file_byte_count: Option<u64>,
+    ) {
+        let mut event = ProgressEvent::new(
+            ProgressPhase::ContextAudit,
+            state,
+            operation,
+            unit,
+            completed,
+            total,
+            phase_completed.min(PHASE_RESOLUTION),
+            PHASE_RESOLUTION,
+        );
+        event.file_index = file_index;
+        event.file_count = Some(4);
+        event.logical_path = logical_path.map(str::to_string);
+        event.file_completed_byte_count = file_completed_byte_count;
+        event.file_byte_count = file_byte_count;
+        event.source_byte_count = Some(self.source_byte_count);
+        event.source_record_count = Some(self.source_record_count);
+        event.conversation_record_count = Some(self.conversation_record_count);
+        event.message_record_count = Some(self.message_record_count);
+        event.processed_conversation_count = Some(self.processed_conversation_count);
+        event.processed_message_count = Some(self.processed_message_count);
+        event.elapsed_milliseconds =
+            Some(self.started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+        self.observer.observe(event);
+    }
 }
 
 #[derive(Default)]
@@ -835,6 +1029,13 @@ pub fn export_ai_context(
 }
 
 pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport, RestoreError> {
+    audit_ai_context_with_progress(bundle_directory, &NoProgress)
+}
+
+pub fn audit_ai_context_with_progress(
+    bundle_directory: &Path,
+    observer: &dyn ProgressObserver,
+) -> Result<AiContextAuditReport, RestoreError> {
     ensure_private_directory(bundle_directory)?;
     let expected_entries = BTreeSet::from([
         "manifest.json".to_string(),
@@ -889,222 +1090,284 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
             "AI context manifest file roles or paths are invalid".to_string(),
         ));
     }
+    let mut progress = AiContextAuditProgress::new(observer, &files);
+    progress.plan();
 
     let mut conversation_ids = BTreeSet::new();
     let mut required_contact_ids = BTreeSet::new();
     let conversation_file = files["conversations"];
-    audit_ndjson_values(bundle_directory, conversation_file, |value| {
-        let object = value.as_object().ok_or_else(|| {
-            RestoreError::Integrity("AI context conversation record is not an object".to_string())
-        })?;
-        let (required_owner_field, forbidden_owner_field) =
-            if manifest.format_version == AI_CONTEXT_FORMAT_VERSION {
-                ("groupOwnerParticipantId", "ownerParticipantId")
-            } else {
-                ("ownerParticipantId", "groupOwnerParticipantId")
-            };
-        if !object.contains_key(required_owner_field) || object.contains_key(forbidden_owner_field)
-        {
-            return Err(RestoreError::Integrity(
-                "AI context conversation uses the wrong group-owner field".to_string(),
-            ));
-        }
-        let conversation: AiContextConversation = serde_json::from_value(value)?;
-        require_ai_record_format(
-            conversation.format_version,
-            manifest.format_version,
-            "conversation",
-        )?;
-        require_nonempty(&conversation.conversation_id, "conversation ID")?;
-        require_nonempty(&conversation.human_label, "conversation label")?;
-        if !conversation_ids.insert(conversation.conversation_id.clone()) {
-            return Err(RestoreError::Integrity(
-                "AI context conversations repeat an identity".to_string(),
-            ));
-        }
-        if (conversation.participant_count != conversation.participants.len()
-            && !conversation
-                .limitation_codes
-                .iter()
-                .any(|code| code == "conversationResolutionUnavailable"))
-            || conversation
-                .not_before_unix
-                .zip(conversation.not_after_unix)
-                .is_some_and(|(start, end)| start > end)
-        {
-            return Err(RestoreError::Integrity(
-                "AI context conversation metadata is internally inconsistent".to_string(),
-            ));
-        }
-        let mut participants = BTreeSet::new();
-        for participant in &conversation.participants {
-            require_nonempty(&participant.participant_id, "participant ID")?;
-            require_nonempty(&participant.display_name, "participant display name")?;
-            require_nonempty(&participant.role, "participant role")?;
-            if manifest.format_version == AI_CONTEXT_FORMAT_VERSION
-                && manifest.context.self_participant_id.as_deref()
-                    == Some(participant.participant_id.as_str())
-                && participant.display_name != "You"
+    progress.begin_file(1, "auditAiContextConversations", conversation_file);
+    audit_ndjson_values_with_progress(
+        bundle_directory,
+        conversation_file,
+        |value| {
+            let object = value.as_object().ok_or_else(|| {
+                RestoreError::Integrity(
+                    "AI context conversation record is not an object".to_string(),
+                )
+            })?;
+            let (required_owner_field, forbidden_owner_field) =
+                if manifest.format_version == AI_CONTEXT_FORMAT_VERSION {
+                    ("groupOwnerParticipantId", "ownerParticipantId")
+                } else {
+                    ("ownerParticipantId", "groupOwnerParticipantId")
+                };
+            if !object.contains_key(required_owner_field)
+                || object.contains_key(forbidden_owner_field)
             {
                 return Err(RestoreError::Integrity(
-                    "AI context self participant is not labelled as You".to_string(),
+                    "AI context conversation uses the wrong group-owner field".to_string(),
                 ));
             }
-            if !participants.insert(participant.participant_id.clone()) {
+            let conversation: AiContextConversation = serde_json::from_value(value)?;
+            require_ai_record_format(
+                conversation.format_version,
+                manifest.format_version,
+                "conversation",
+            )?;
+            require_nonempty(&conversation.conversation_id, "conversation ID")?;
+            require_nonempty(&conversation.human_label, "conversation label")?;
+            if !conversation_ids.insert(conversation.conversation_id.clone()) {
                 return Err(RestoreError::Integrity(
-                    "AI context conversation repeats a participant".to_string(),
+                    "AI context conversations repeat an identity".to_string(),
                 ));
             }
-            required_contact_ids.insert(participant.participant_id.clone());
-        }
-        if conversation
-            .group_owner_participant_id
-            .as_ref()
-            .is_some_and(|owner| !participants.contains(owner))
-        {
-            return Err(RestoreError::Integrity(
-                "AI context group owner is not a conversation participant".to_string(),
-            ));
-        }
-        validate_entity_freshness(conversation.source_database_freshness, &manifest.context)
-    })?;
+            if (conversation.participant_count != conversation.participants.len()
+                && !conversation
+                    .limitation_codes
+                    .iter()
+                    .any(|code| code == "conversationResolutionUnavailable"))
+                || conversation
+                    .not_before_unix
+                    .zip(conversation.not_after_unix)
+                    .is_some_and(|(start, end)| start > end)
+            {
+                return Err(RestoreError::Integrity(
+                    "AI context conversation metadata is internally inconsistent".to_string(),
+                ));
+            }
+            let mut participants = BTreeSet::new();
+            for participant in &conversation.participants {
+                require_nonempty(&participant.participant_id, "participant ID")?;
+                require_nonempty(&participant.display_name, "participant display name")?;
+                require_nonempty(&participant.role, "participant role")?;
+                if manifest.format_version == AI_CONTEXT_FORMAT_VERSION
+                    && manifest.context.self_participant_id.as_deref()
+                        == Some(participant.participant_id.as_str())
+                    && participant.display_name != "You"
+                {
+                    return Err(RestoreError::Integrity(
+                        "AI context self participant is not labelled as You".to_string(),
+                    ));
+                }
+                if !participants.insert(participant.participant_id.clone()) {
+                    return Err(RestoreError::Integrity(
+                        "AI context conversation repeats a participant".to_string(),
+                    ));
+                }
+                required_contact_ids.insert(participant.participant_id.clone());
+            }
+            if conversation
+                .group_owner_participant_id
+                .as_ref()
+                .is_some_and(|owner| !participants.contains(owner))
+            {
+                return Err(RestoreError::Integrity(
+                    "AI context group owner is not a conversation participant".to_string(),
+                ));
+            }
+            validate_entity_freshness(conversation.source_database_freshness, &manifest.context)
+        },
+        |records, bytes| {
+            progress.advance_file(
+                1,
+                "conversations",
+                "auditAiContextConversations",
+                conversation_file,
+                records,
+                bytes,
+            );
+        },
+    )?;
+    progress.complete_file(
+        1,
+        "conversations",
+        "auditAiContextConversations",
+        conversation_file,
+    );
 
     let mut contact_ids = BTreeSet::new();
     let contact_file = files["contacts"];
-    audit_ndjson::<AiContextContact, _>(bundle_directory, contact_file, |contact| {
-        require_ai_record_format(contact.format_version, manifest.format_version, "contact")?;
-        require_nonempty(&contact.participant_id, "contact ID")?;
-        require_nonempty(&contact.display_name, "contact display name")?;
-        if manifest.format_version == AI_CONTEXT_FORMAT_VERSION
-            && manifest.context.self_participant_id.as_deref()
-                == Some(contact.participant_id.as_str())
-            && contact.display_name != "You"
-        {
-            return Err(RestoreError::Integrity(
-                "AI context self contact is not labelled as You".to_string(),
-            ));
-        }
-        if !contact_ids.insert(contact.participant_id.clone()) {
-            return Err(RestoreError::Integrity(
-                "AI context contacts repeat an identity".to_string(),
-            ));
-        }
-        validate_entity_freshness(contact.source_database_freshness, &manifest.context)?;
-        let enabled = contact
-            .enabled_conversation_ids
-            .iter()
-            .collect::<BTreeSet<_>>();
-        if enabled.len() != contact.enabled_conversation_ids.len()
-            || enabled
-                .iter()
-                .any(|conversation| !conversation_ids.contains(*conversation))
-        {
-            return Err(RestoreError::Integrity(
-                "AI context contact references an absent or repeated conversation".to_string(),
-            ));
-        }
-        let mut profiles = BTreeSet::new();
-        for profile in &contact.conversation_profiles {
-            require_nonempty(&profile.display_name, "contact profile display name")?;
-            require_nonempty(&profile.role, "contact profile role")?;
+    progress.begin_file(2, "auditAiContextContacts", contact_file);
+    audit_ndjson_with_progress::<AiContextContact, _, _>(
+        bundle_directory,
+        contact_file,
+        |contact| {
+            require_ai_record_format(contact.format_version, manifest.format_version, "contact")?;
+            require_nonempty(&contact.participant_id, "contact ID")?;
+            require_nonempty(&contact.display_name, "contact display name")?;
             if manifest.format_version == AI_CONTEXT_FORMAT_VERSION
                 && manifest.context.self_participant_id.as_deref()
                     == Some(contact.participant_id.as_str())
-                && profile.display_name != "You"
+                && contact.display_name != "You"
             {
                 return Err(RestoreError::Integrity(
-                    "AI context self contact profile is not labelled as You".to_string(),
+                    "AI context self contact is not labelled as You".to_string(),
                 ));
             }
-            if !conversation_ids.contains(&profile.conversation_id)
-                || !profiles.insert((profile.conversation_id.clone(), profile.role.clone()))
-            {
+            if !contact_ids.insert(contact.participant_id.clone()) {
                 return Err(RestoreError::Integrity(
-                    "AI context contact profile is absent or repeated".to_string(),
+                    "AI context contacts repeat an identity".to_string(),
                 ));
             }
-        }
-        Ok(())
-    })?;
-    let mut artifact_ids = BTreeSet::new();
-    let mut artifact_error_count = 0_u64;
-    let artifact_file = files["artifacts"];
-    audit_ndjson::<AiContextArtifact, _>(bundle_directory, artifact_file, |artifact| {
-        require_ai_record_format(artifact.format_version, manifest.format_version, "artifact")?;
-        require_nonempty(&artifact.artifact_id, "artifact ID")?;
-        if !artifact_ids.insert(artifact.artifact_id.clone()) {
-            return Err(RestoreError::Integrity(
-                "AI context artifacts repeat an identity".to_string(),
-            ));
-        }
-        let conversations = artifact.conversation_ids.iter().collect::<BTreeSet<_>>();
-        if conversations.is_empty()
-            || conversations.len() != artifact.conversation_ids.len()
-            || conversations
+            validate_entity_freshness(contact.source_database_freshness, &manifest.context)?;
+            let enabled = contact
+                .enabled_conversation_ids
                 .iter()
-                .any(|conversation| !conversation_ids.contains(*conversation))
-        {
-            return Err(RestoreError::Integrity(
-                "AI context artifact references an absent or repeated conversation".to_string(),
-            ));
-        }
-        match (&artifact.detail, &artifact.error) {
-            (Some(detail), None) => validate_ai_artifact_detail(detail)?,
-            (None, Some(error)) => {
-                artifact_error_count = artifact_error_count.saturating_add(1);
-                require_nonempty(&error.message, "artifact error message")?;
-                if error.message != safe_query_error_message(error.code) {
+                .collect::<BTreeSet<_>>();
+            if enabled.len() != contact.enabled_conversation_ids.len()
+                || enabled
+                    .iter()
+                    .any(|conversation| !conversation_ids.contains(*conversation))
+            {
+                return Err(RestoreError::Integrity(
+                    "AI context contact references an absent or repeated conversation".to_string(),
+                ));
+            }
+            let mut profiles = BTreeSet::new();
+            for profile in &contact.conversation_profiles {
+                require_nonempty(&profile.display_name, "contact profile display name")?;
+                require_nonempty(&profile.role, "contact profile role")?;
+                if manifest.format_version == AI_CONTEXT_FORMAT_VERSION
+                    && manifest.context.self_participant_id.as_deref()
+                        == Some(contact.participant_id.as_str())
+                    && profile.display_name != "You"
+                {
                     return Err(RestoreError::Integrity(
-                        "AI context artifact contains a non-canonical error message".to_string(),
+                        "AI context self contact profile is not labelled as You".to_string(),
+                    ));
+                }
+                if !conversation_ids.contains(&profile.conversation_id)
+                    || !profiles.insert((profile.conversation_id.clone(), profile.role.clone()))
+                {
+                    return Err(RestoreError::Integrity(
+                        "AI context contact profile is absent or repeated".to_string(),
                     ));
                 }
             }
-            _ => {
+            Ok(())
+        },
+        |records, bytes| {
+            progress.advance_file(
+                2,
+                "contacts",
+                "auditAiContextContacts",
+                contact_file,
+                records,
+                bytes,
+            );
+        },
+    )?;
+    progress.complete_file(2, "contacts", "auditAiContextContacts", contact_file);
+    let mut artifact_ids = BTreeSet::new();
+    let mut artifact_error_count = 0_u64;
+    let artifact_file = files["artifacts"];
+    progress.begin_file(3, "auditAiContextArtifacts", artifact_file);
+    audit_ndjson_with_progress::<AiContextArtifact, _, _>(
+        bundle_directory,
+        artifact_file,
+        |artifact| {
+            require_ai_record_format(artifact.format_version, manifest.format_version, "artifact")?;
+            require_nonempty(&artifact.artifact_id, "artifact ID")?;
+            if !artifact_ids.insert(artifact.artifact_id.clone()) {
                 return Err(RestoreError::Integrity(
-                    "AI context artifact must contain exactly one detail or error result"
-                        .to_string(),
+                    "AI context artifacts repeat an identity".to_string(),
                 ));
             }
-        }
-        Ok(())
-    })?;
+            let conversations = artifact.conversation_ids.iter().collect::<BTreeSet<_>>();
+            if conversations.is_empty()
+                || conversations.len() != artifact.conversation_ids.len()
+                || conversations
+                    .iter()
+                    .any(|conversation| !conversation_ids.contains(*conversation))
+            {
+                return Err(RestoreError::Integrity(
+                    "AI context artifact references an absent or repeated conversation".to_string(),
+                ));
+            }
+            match (&artifact.detail, &artifact.error) {
+                (Some(detail), None) => validate_ai_artifact_detail(detail)?,
+                (None, Some(error)) => {
+                    artifact_error_count = artifact_error_count.saturating_add(1);
+                    require_nonempty(&error.message, "artifact error message")?;
+                    if error.message != safe_query_error_message(error.code) {
+                        return Err(RestoreError::Integrity(
+                            "AI context artifact contains a non-canonical error message"
+                                .to_string(),
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(RestoreError::Integrity(
+                        "AI context artifact must contain exactly one detail or error result"
+                            .to_string(),
+                    ));
+                }
+            }
+            Ok(())
+        },
+        |records, bytes| {
+            progress.advance_file(
+                3,
+                "artifacts",
+                "auditAiContextArtifacts",
+                artifact_file,
+                records,
+                bytes,
+            );
+        },
+    )?;
+    progress.complete_file(3, "artifacts", "auditAiContextArtifacts", artifact_file);
 
     let mut message_ids = BTreeSet::new();
     let mut referenced_artifact_ids = BTreeSet::new();
     let mut referenced_sender_ids = BTreeSet::new();
     let mut stale_message_count = 0_u64;
     let message_file = files["messages"];
-    audit_ai_messages(bundle_directory, message_file, |message| {
-        require_ai_record_format(message.format_version, manifest.format_version, "message")?;
-        require_nonempty(&message.message.canonical_id, "message ID")?;
-        require_nonempty(&message.message.conversation_id, "message conversation ID")?;
-        require_nonempty(&message.conversation_label, "message conversation label")?;
-        if !message_ids.insert(message.message.canonical_id.clone()) {
-            return Err(RestoreError::Integrity(
-                "AI context messages repeat an identity".to_string(),
-            ));
-        }
-        if !conversation_ids.contains(&message.message.conversation_id) {
-            return Err(RestoreError::Integrity(
-                "AI context message references an absent conversation".to_string(),
-            ));
-        }
-        if message
-            .message
-            .sender_id
-            .as_ref()
-            .is_some_and(|sender| !contact_ids.contains(sender))
-        {
-            return Err(RestoreError::Integrity(
-                "AI context message references an absent contact".to_string(),
-            ));
-        }
-        if let Some(sender_id) = message.message.sender_id.as_ref() {
-            referenced_sender_ids.insert(sender_id.clone());
-        }
-        if manifest.format_version == AI_CONTEXT_FORMAT_VERSION {
-            let self_participant_id =
-                manifest
+    progress.begin_file(4, "auditAiContextMessages", message_file);
+    audit_ai_messages_with_progress(
+        bundle_directory,
+        message_file,
+        |message| {
+            require_ai_record_format(message.format_version, manifest.format_version, "message")?;
+            require_nonempty(&message.message.canonical_id, "message ID")?;
+            require_nonempty(&message.message.conversation_id, "message conversation ID")?;
+            require_nonempty(&message.conversation_label, "message conversation label")?;
+            if !message_ids.insert(message.message.canonical_id.clone()) {
+                return Err(RestoreError::Integrity(
+                    "AI context messages repeat an identity".to_string(),
+                ));
+            }
+            if !conversation_ids.contains(&message.message.conversation_id) {
+                return Err(RestoreError::Integrity(
+                    "AI context message references an absent conversation".to_string(),
+                ));
+            }
+            if message
+                .message
+                .sender_id
+                .as_ref()
+                .is_some_and(|sender| !contact_ids.contains(sender))
+            {
+                return Err(RestoreError::Integrity(
+                    "AI context message references an absent contact".to_string(),
+                ));
+            }
+            if let Some(sender_id) = message.message.sender_id.as_ref() {
+                referenced_sender_ids.insert(sender_id.clone());
+            }
+            if manifest.format_version == AI_CONTEXT_FORMAT_VERSION {
+                let self_participant_id = manifest
                     .context
                     .self_participant_id
                     .as_deref()
@@ -1114,58 +1377,70 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
                                 .to_string(),
                         )
                     })?;
-            if let Some(sender_id) = message.message.sender_id.as_deref() {
-                let expected = if sender_id == self_participant_id {
-                    crate::MessageDirection::Outgoing
-                } else {
-                    crate::MessageDirection::Incoming
-                };
-                if message
-                    .message
-                    .direction
-                    .is_some_and(|direction| direction != expected)
-                {
-                    return Err(RestoreError::Integrity(
-                        "AI context message direction disagrees with the bound account holder"
-                            .to_string(),
-                    ));
-                }
-                if sender_id == self_participant_id
-                    && message.sender_display_name.as_deref() != Some("You")
-                {
-                    return Err(RestoreError::Integrity(
-                        "AI context self-authored message is not labelled as You".to_string(),
-                    ));
+                if let Some(sender_id) = message.message.sender_id.as_deref() {
+                    let expected = if sender_id == self_participant_id {
+                        crate::MessageDirection::Outgoing
+                    } else {
+                        crate::MessageDirection::Incoming
+                    };
+                    if message
+                        .message
+                        .direction
+                        .is_some_and(|direction| direction != expected)
+                    {
+                        return Err(RestoreError::Integrity(
+                            "AI context message direction disagrees with the bound account holder"
+                                .to_string(),
+                        ));
+                    }
+                    if sender_id == self_participant_id
+                        && message.sender_display_name.as_deref() != Some("You")
+                    {
+                        return Err(RestoreError::Integrity(
+                            "AI context self-authored message is not labelled as You".to_string(),
+                        ));
+                    }
                 }
             }
-        }
-        match message.message.source_database_freshness {
-            ToolSourceDatabaseFreshness::Fresh => {}
-            ToolSourceDatabaseFreshness::PreservedStale => {
-                if manifest.context.preserved_stale_database_count.unwrap_or(0) == 0 {
-                    return Err(RestoreError::Integrity(
+            match message.message.source_database_freshness {
+                ToolSourceDatabaseFreshness::Fresh => {}
+                ToolSourceDatabaseFreshness::PreservedStale => {
+                    if manifest.context.preserved_stale_database_count.unwrap_or(0) == 0 {
+                        return Err(RestoreError::Integrity(
                             "AI context message claims stale provenance without stale database coverage"
                                 .to_string(),
                         ));
+                    }
+                    stale_message_count = stale_message_count.saturating_add(1);
                 }
-                stale_message_count = stale_message_count.saturating_add(1);
+                ToolSourceDatabaseFreshness::Mixed | ToolSourceDatabaseFreshness::Derived => {
+                    return Err(RestoreError::Integrity(
+                        "AI context message has an invalid source freshness state".to_string(),
+                    ));
+                }
             }
-            ToolSourceDatabaseFreshness::Mixed | ToolSourceDatabaseFreshness::Derived => {
-                return Err(RestoreError::Integrity(
-                    "AI context message has an invalid source freshness state".to_string(),
-                ));
+            for reference in &message.message.artifact_references {
+                if !artifact_ids.contains(&reference.artifact_id) {
+                    return Err(RestoreError::Integrity(
+                        "AI context message references an absent artifact".to_string(),
+                    ));
+                }
+                referenced_artifact_ids.insert(reference.artifact_id.clone());
             }
-        }
-        for reference in &message.message.artifact_references {
-            if !artifact_ids.contains(&reference.artifact_id) {
-                return Err(RestoreError::Integrity(
-                    "AI context message references an absent artifact".to_string(),
-                ));
-            }
-            referenced_artifact_ids.insert(reference.artifact_id.clone());
-        }
-        Ok(())
-    })?;
+            Ok(())
+        },
+        |records, bytes| {
+            progress.advance_file(
+                4,
+                "messages",
+                "auditAiContextMessages",
+                message_file,
+                records,
+                bytes,
+            );
+        },
+    )?;
+    progress.complete_file(4, "messages", "auditAiContextMessages", message_file);
     if referenced_artifact_ids != artifact_ids {
         return Err(RestoreError::Integrity(
             "AI context artifacts do not exactly match message references".to_string(),
@@ -1204,7 +1479,7 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
             "AI context bundle identity does not match its checkpoint and policy".to_string(),
         ));
     }
-    Ok(AiContextAuditReport {
+    let report = AiContextAuditReport {
         format_version: AI_CONTEXT_FORMAT_VERSION,
         privacy_safe_summary: true,
         schema: manifest.schema,
@@ -1230,7 +1505,9 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
             && artifact_error_count == 0
             && manifest.limitation_codes.is_empty()
             && manifest.context.source_coverage_complete,
-    })
+    };
+    progress.finish();
+    Ok(report)
 }
 
 /// Loads the small identity manifest for a downstream projection. Callers must
@@ -1365,64 +1642,76 @@ fn validate_ai_artifact_detail(detail: &AiContextArtifactDetail) -> Result<(), R
     Ok(())
 }
 
-fn audit_ai_messages(
+fn audit_ai_messages_with_progress(
     directory: &Path,
     evidence: &AiContextFile,
     mut visitor: impl FnMut(AiContextMessage) -> Result<(), RestoreError>,
+    progress: impl FnMut(u64, u64),
 ) -> Result<(), RestoreError> {
-    audit_ndjson_values(directory, evidence, |value| {
-        let object = value.as_object().ok_or_else(|| {
-            RestoreError::Integrity("AI context message record is not an object".to_string())
-        })?;
-        const ALLOWED_FIELDS: &[&str] = &[
-            "formatVersion",
-            "conversationLabel",
-            "senderDisplayName",
-            "canonicalId",
-            "conversationId",
-            "sourceDatabaseFreshness",
-            "senderId",
-            "createdAtUnix",
-            "conversationOrdinal",
-            "direction",
-            "logicalType",
-            "subType",
-            "payloadKind",
-            "payloadSummary",
-            "payloadSummaryTruncated",
-            "artifactReferences",
-            "relationships",
-        ];
-        if object
-            .keys()
-            .any(|field| !ALLOWED_FIELDS.contains(&field.as_str()))
-        {
-            return Err(RestoreError::Integrity(
-                "AI context message contains an unknown field".to_string(),
-            ));
-        }
-        visitor(serde_json::from_value(value)?)
-    })
+    audit_ndjson_values_with_progress(
+        directory,
+        evidence,
+        |value| {
+            let object = value.as_object().ok_or_else(|| {
+                RestoreError::Integrity("AI context message record is not an object".to_string())
+            })?;
+            const ALLOWED_FIELDS: &[&str] = &[
+                "formatVersion",
+                "conversationLabel",
+                "senderDisplayName",
+                "canonicalId",
+                "conversationId",
+                "sourceDatabaseFreshness",
+                "senderId",
+                "createdAtUnix",
+                "conversationOrdinal",
+                "direction",
+                "logicalType",
+                "subType",
+                "payloadKind",
+                "payloadSummary",
+                "payloadSummaryTruncated",
+                "artifactReferences",
+                "relationships",
+            ];
+            if object
+                .keys()
+                .any(|field| !ALLOWED_FIELDS.contains(&field.as_str()))
+            {
+                return Err(RestoreError::Integrity(
+                    "AI context message contains an unknown field".to_string(),
+                ));
+            }
+            visitor(serde_json::from_value(value)?)
+        },
+        progress,
+    )
 }
 
-fn audit_ndjson<T, F>(
+fn audit_ndjson_with_progress<T, F, P>(
     directory: &Path,
     evidence: &AiContextFile,
     mut visitor: F,
+    progress: P,
 ) -> Result<(), RestoreError>
 where
     T: serde::de::DeserializeOwned,
     F: FnMut(T) -> Result<(), RestoreError>,
+    P: FnMut(u64, u64),
 {
-    audit_ndjson_values(directory, evidence, |value| {
-        visitor(serde_json::from_value(value)?)
-    })
+    audit_ndjson_values_with_progress(
+        directory,
+        evidence,
+        |value| visitor(serde_json::from_value(value)?),
+        progress,
+    )
 }
 
-fn audit_ndjson_values(
+fn audit_ndjson_values_with_progress(
     directory: &Path,
     evidence: &AiContextFile,
     mut visitor: impl FnMut(serde_json::Value) -> Result<(), RestoreError>,
+    mut progress: impl FnMut(u64, u64),
 ) -> Result<(), RestoreError> {
     const MAX_RECORD_BYTES: usize = 16 * 1024 * 1024;
     let path = directory.join(&evidence.relative_path);
@@ -1437,6 +1726,7 @@ fn audit_ndjson_values(
     let mut hasher = Sha256::new();
     let mut buffer = Vec::new();
     let mut count = 0_u64;
+    let mut completed_byte_count = 0_u64;
     loop {
         buffer.clear();
         let read = reader.read_until(b'\n', &mut buffer)?;
@@ -1456,6 +1746,9 @@ fn audit_ndjson_values(
         hasher.update(&buffer);
         visitor(serde_json::from_slice(&buffer[..buffer.len() - 1])?)?;
         count = count.saturating_add(1);
+        completed_byte_count =
+            completed_byte_count.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        progress(count, completed_byte_count);
     }
     if count != evidence.record_count || hex::encode(hasher.finalize()) != evidence.sha256 {
         return Err(RestoreError::Integrity(
