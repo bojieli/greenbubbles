@@ -11,6 +11,7 @@ pub enum ProgressPhase {
     ArchiveFinalization,
     ArchiveAudit,
     ReplicaApplication,
+    ReplicaAudit,
     ContextExport,
     ContextAudit,
     MemoryProjection,
@@ -55,6 +56,10 @@ pub struct ProgressEvent {
     pub workflow_phase_index: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workflow_phase_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub database_index: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -128,6 +133,12 @@ pub struct ProgressEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_record_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub canonical_record_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_record_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_record_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub processed_conversation_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub processed_message_count: Option<u64>,
@@ -143,6 +154,12 @@ pub struct ProgressEvent {
     pub verified_document_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verified_byte_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_record_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_link_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_change_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restored_record_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -182,6 +199,8 @@ impl ProgressEvent {
             workflow_total: None,
             workflow_phase_index: None,
             workflow_phase_count: None,
+            stage_index: None,
+            stage_count: None,
             database_index: None,
             database_count: None,
             file_index: None,
@@ -218,6 +237,9 @@ impl ProgressEvent {
             message_table_count: None,
             conversation_record_count: None,
             message_record_count: None,
+            canonical_record_count: None,
+            link_record_count: None,
+            change_record_count: None,
             processed_conversation_count: None,
             processed_message_count: None,
             emitted_chunk_count: None,
@@ -226,6 +248,9 @@ impl ProgressEvent {
             verified_chunk_count: None,
             verified_document_count: None,
             verified_byte_count: None,
+            verified_record_count: None,
+            verified_link_count: None,
+            verified_change_count: None,
             restored_record_count: None,
             source_record_count: None,
             rejected_record_count: None,

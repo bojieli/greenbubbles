@@ -11,7 +11,8 @@ use greenbubbles_restore::follow::{
     ReplicaFollowerHealth,
 };
 use greenbubbles_restore::replica::{
-    audit_replica, audit_replica_backup, bootstrap_replica, bootstrap_replica_with_progress,
+    audit_replica, audit_replica_backup, audit_replica_backup_with_progress,
+    audit_replica_with_progress, bootstrap_replica, bootstrap_replica_with_progress,
     get_replica_artifact, get_replica_changes, get_replica_conversation, get_replica_message,
     get_replica_participant, get_replica_recent_messages, list_replica_conversations,
     prepare_replica_recovery, replica_conversation_references_artifact_in_range, replica_coverage,
@@ -517,6 +518,86 @@ fn assert_complete_monotonic_progress(events: &[ProgressEvent], phase: ProgressP
         events.last().unwrap().phase_completed,
         events.last().unwrap().phase_total
     );
+}
+
+fn assert_complete_replica_audit_progress(events: &[ProgressEvent]) {
+    assert!(!events.is_empty());
+    assert_eq!(events.first().unwrap().state, ProgressState::Planned);
+    assert_eq!(events.last().unwrap().state, ProgressState::Completed);
+    assert!(events.iter().all(|event| {
+        event.phase == ProgressPhase::ReplicaAudit
+            && event.format_version == 3
+            && event.privacy_safe
+            && event.replica_file_byte_count.is_some_and(|bytes| bytes > 0)
+            && event
+                .stage_index
+                .is_some_and(|index| (1..=8).contains(&index))
+            && event.stage_count == Some(8)
+            && event.elapsed_milliseconds.is_some()
+    }));
+    assert!(events
+        .windows(2)
+        .all(|pair| pair[0].phase_completed <= pair[1].phase_completed));
+    let final_event = events.last().unwrap();
+    assert_eq!(final_event.phase_completed, final_event.phase_total);
+    assert_eq!(
+        final_event.verified_record_count,
+        final_event.canonical_record_count
+    );
+    assert_eq!(
+        final_event.verified_link_count,
+        final_event.link_record_count
+    );
+    assert_eq!(
+        final_event.verified_change_count,
+        final_event.change_record_count
+    );
+    for operation in [
+        "verifyReplicaSQLiteIntegrity",
+        "verifyReplicaCanonicalRecords",
+        "verifyReplicaMessageLinks",
+        "verifyReplicaCheckpointCoverage",
+        "verifyReplicaFullTextIndex",
+        "verifyReplicaChangeStream",
+    ] {
+        assert!(events.iter().any(|event| event.operation == operation));
+    }
+    let encoded = serde_json::to_string(events).unwrap();
+    for private_value in [PRIVATE_TEXT, "account-a", "source-a"] {
+        assert!(!encoded.contains(private_value));
+    }
+}
+
+#[test]
+fn replica_and_backup_audits_report_complete_privacy_safe_progress() {
+    let fixture = tempfile::tempdir().unwrap();
+    let private = fixture.path().join("private-replica-audit-progress");
+    fs::create_dir(&private).unwrap();
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+    let archive = build_archive(&private, "archive", "account-a", "source-a");
+    let replica = private.join("replica.db");
+    let key = ReplicaKey::from_bytes(KEY_BYTES);
+    bootstrap_replica(&archive, &replica, &key).unwrap();
+
+    let progress = CapturedProgress::default();
+    let report = audit_replica_with_progress(&replica, &key, &progress).unwrap();
+    assert_eq!(report.message_count, 1);
+    let events = progress.0.lock().unwrap();
+    assert_complete_replica_audit_progress(&events);
+    assert_eq!(events.last().unwrap().canonical_record_count, Some(4));
+    assert_eq!(events.last().unwrap().verified_record_count, Some(4));
+    drop(events);
+
+    downgrade_to_schema_1(&replica);
+    assert_eq!(replica_status(&replica, &key).unwrap().schema_version, 5);
+    let backup = migration_backup_path(&private, 1);
+    let backup_progress = CapturedProgress::default();
+    let report = audit_replica_backup_with_progress(&backup, &key, &backup_progress).unwrap();
+    assert_eq!(report.schema_version, 1);
+    let events = backup_progress.0.lock().unwrap();
+    assert_complete_replica_audit_progress(&events);
+    assert_eq!(events.last().unwrap().canonical_record_count, Some(4));
+    assert_eq!(events.last().unwrap().change_record_count, Some(0));
 }
 
 #[test]
@@ -2791,10 +2872,13 @@ fn independently_audits_encrypted_replica_records_indexes_and_checkpoint() {
     drop(connection);
     assert!(audit_replica(&replica, &key).is_ok());
 
+    let audit_progress = private.join("replica-audit-progress.ndjson");
     let mut audit_process = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
         .arg("audit-replica")
         .arg(&replica)
         .arg("--replica-key-stdin")
+        .args(["--progress-file", audit_progress.to_str().unwrap()])
+        .arg("--quiet-progress")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2824,6 +2908,38 @@ fn independently_audits_encrypted_replica_records_indexes_and_checkpoint() {
     ] {
         assert!(!audit_text.contains(private_value));
     }
+    assert!(audit_output.stderr.is_empty());
+    assert_eq!(file_mode(&audit_progress), 0o600);
+    let progress_events = fs::read_to_string(&audit_progress)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert!(!progress_events.is_empty());
+    assert!(progress_events.iter().all(|event| {
+        event["privacySafe"] == true
+            && event["phase"] == "replicaAudit"
+            && event["replicaFileByteCount"]
+                .as_u64()
+                .is_some_and(|bytes| bytes > 0)
+    }));
+    let final_progress = progress_events.last().unwrap();
+    assert_eq!(final_progress["state"], "completed");
+    assert_eq!(
+        final_progress["phaseCompleted"],
+        final_progress["phaseTotal"]
+    );
+    let overlapping_progress = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+        .arg("audit-replica")
+        .arg(&replica)
+        .arg("--replica-key-stdin")
+        .args(["--progress-file", replica.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!overlapping_progress.status.success());
+    assert!(String::from_utf8_lossy(&overlapping_progress.stderr)
+        .contains("must not overlap the replica storage namespace"));
+    assert!(audit_replica(&replica, &key).is_ok());
 
     let connection = keyed_connection(&replica);
     connection

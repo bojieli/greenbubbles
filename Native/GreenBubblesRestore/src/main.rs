@@ -33,10 +33,11 @@ use greenbubbles_restore::{
     prepare_catalog_batch_with_progress, prepare_catalog_with_progress,
     reconcile::reconcile_archives,
     replica::{
-        audit_replica, audit_replica_backup, bootstrap_replica_with_progress, get_replica_changes,
-        get_replica_message, list_replica_conversations, load_replica_message_filter,
-        prepare_replica_recovery, replica_coverage, replica_status, search_replica_cached_moments,
-        search_replica_messages, synchronize_replica_with_progress, ReplicaCachedMomentFilter,
+        audit_replica_backup_with_progress, audit_replica_with_progress,
+        bootstrap_replica_with_progress, get_replica_changes, get_replica_message,
+        list_replica_conversations, load_replica_message_filter, prepare_replica_recovery,
+        replica_coverage, replica_status, search_replica_cached_moments, search_replica_messages,
+        synchronize_replica_with_progress, ReplicaCachedMomentFilter,
     },
     restore_catalog_with_progress,
     tools::{
@@ -493,8 +494,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if !remaining.iter().any(|value| value == "--replica-key-stdin") {
                 return Err("replica keys must be supplied with --replica-key-stdin".into());
             }
+            require_progress_file_outside_replica_namespace(&remaining, &replica)?;
+            let reporter = ProgressReporter::from_arguments(
+                &remaining,
+                ProgressWorkflow::ReplicaAudit,
+                false,
+            )?;
             let key = ReplicaKey::read_stdin()?;
-            let report = audit_replica(&replica, &key)?;
+            let report = audit_replica_with_progress(&replica, &key, &reporter)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "audit-replica-backup" => {
@@ -503,8 +510,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if !remaining.iter().any(|value| value == "--replica-key-stdin") {
                 return Err("replica keys must be supplied with --replica-key-stdin".into());
             }
+            require_progress_file_outside_replica_namespace(&remaining, &backup)?;
+            let reporter = ProgressReporter::from_arguments(
+                &remaining,
+                ProgressWorkflow::ReplicaAudit,
+                false,
+            )?;
             let key = ReplicaKey::read_stdin()?;
-            let report = audit_replica_backup(&backup, &key)?;
+            let report = audit_replica_backup_with_progress(&backup, &key, &reporter)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         "prepare-replica-recovery" => {
@@ -1006,8 +1019,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore merge-incremental <previous-archive> <fragment-archive> <output-archive>\n",
                     "  greenbubbles-restore replica-bootstrap <archive> <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
                     "  greenbubbles-restore replica-status <replica-path> --replica-key-stdin\n",
-                    "  greenbubbles-restore audit-replica <replica-path> --replica-key-stdin\n",
-                    "  greenbubbles-restore audit-replica-backup <pre-migration-backup-path> --replica-key-stdin\n",
+                    "  greenbubbles-restore audit-replica <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles-restore audit-replica-backup <pre-migration-backup-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
                     "  greenbubbles-restore prepare-replica-recovery <pre-migration-backup-path> <new-candidate-path> --replica-key-stdin\n",
                     "  greenbubbles-restore replica-sync <archive> <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
                     "  greenbubbles-restore replica-publish <replica-eligible-archive> <handoff-file> --generation <positive-integer>\n",
@@ -1045,6 +1058,32 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 fn ai_command_help(command: &str) -> Option<&'static str> {
     match command {
+        "audit-replica" => Some(concat!(
+            "Usage:\n",
+            "  greenbubbles-restore audit-replica <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
+            "Runs a read-only, aggregate-only deep audit of the encrypted serving replica.\n",
+            "Progress includes replica bytes, canonical/link/change totals, exact row progress,\n",
+            "stage and overall percentages, and elapsed time without exposing private content.\n\n",
+            "Options:\n",
+            "  --replica-key-stdin  Require the replica key on standard input\n",
+            "  --progress-file <path>  Create an owner-only NDJSON progress log\n",
+            "  --progress-json      Emit NDJSON progress on standard error\n",
+            "  --quiet-progress     Suppress human progress on standard error\n",
+            "  -h, --help           Show this help\n",
+        )),
+        "audit-replica-backup" => Some(concat!(
+            "Usage:\n",
+            "  greenbubbles-restore audit-replica-backup <pre-migration-backup-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
+            "Runs the historical-schema deep audit without migrating or rewriting the backup.\n",
+            "It reports the same privacy-safe byte, row, stage, percentage, and elapsed-time\n",
+            "progress as the current-replica audit.\n\n",
+            "Options:\n",
+            "  --replica-key-stdin  Require the replica key on standard input\n",
+            "  --progress-file <path>  Create an owner-only NDJSON progress log\n",
+            "  --progress-json      Emit NDJSON progress on standard error\n",
+            "  --quiet-progress     Suppress human progress on standard error\n",
+            "  -h, --help           Show this help\n",
+        )),
         "ai-query" => Some(concat!(
             "Usage:\n",
             "  greenbubbles-restore ai-query <replica-path> <policy-file> <connector-audit-log> <private-request-json> --replica-key-stdin\n\n",
@@ -1177,6 +1216,7 @@ enum ProgressWorkflow {
     RestoreAndAudit,
     Audit,
     ReplicaApply,
+    ReplicaAudit,
     AiExport,
     ContextAudit,
     MemoryProjection,
@@ -1208,6 +1248,9 @@ impl ProgressWorkflow {
                 ProgressPhase::ArchiveAudit,
                 ProgressPhase::ReplicaApplication,
             ];
+        }
+        if matches!(self, Self::ReplicaAudit) {
+            return vec![ProgressPhase::ReplicaAudit];
         }
         let mut phases = vec![ProgressPhase::SnapshotVerification];
         if validates_exported_keys {
@@ -1410,6 +1453,9 @@ fn human_progress(event: &ProgressEvent) -> String {
     if let (Some(index), Some(count)) = (event.workflow_phase_index, event.workflow_phase_count) {
         fields.push(format!("phase {index}/{count}"));
     }
+    if let (Some(index), Some(count)) = (event.stage_index, event.stage_count) {
+        fields.push(format!("stage {index}/{count}"));
+    }
     if let (Some(index), Some(count)) = (event.database_index, event.database_count) {
         fields.push(format!("database {index}/{count}"));
     } else if let Some(count) = event.database_count {
@@ -1545,6 +1591,15 @@ fn human_progress(event: &ProgressEvent) -> String {
     if let Some(records) = event.message_record_count {
         fields.push(format!("{records} source messages"));
     }
+    if let Some(records) = event.canonical_record_count {
+        fields.push(format!("{records} canonical records"));
+    }
+    if let Some(records) = event.link_record_count {
+        fields.push(format!("{records} canonical links"));
+    }
+    if let Some(records) = event.change_record_count {
+        fields.push(format!("{records} change rows"));
+    }
     if let Some(records) = event.processed_conversation_count {
         fields.push(format!("{records} conversations processed"));
     }
@@ -1568,6 +1623,15 @@ fn human_progress(event: &ProgressEvent) -> String {
     }
     if let Some(bytes) = event.verified_byte_count {
         fields.push(format!("{} verified", format_bytes(bytes)));
+    }
+    if let Some(records) = event.verified_record_count {
+        fields.push(format!("{records} canonical records verified"));
+    }
+    if let Some(records) = event.verified_link_count {
+        fields.push(format!("{records} canonical links verified"));
+    }
+    if let Some(records) = event.verified_change_count {
+        fields.push(format!("{records} change rows verified"));
     }
     if let Some(records) = event.rejected_record_count {
         fields.push(format!("{records} rejected"));
@@ -1686,6 +1750,30 @@ fn require_progress_file_outside(
         if progress_file == root || progress_file.starts_with(&root) {
             return Err(format!("--progress-file must be outside the {description}").into());
         }
+    }
+    Ok(())
+}
+
+fn require_progress_file_outside_replica_namespace(
+    arguments: &[String],
+    replica_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(progress_file) = option_path(arguments, "--progress-file")? else {
+        return Ok(());
+    };
+    let progress_file = resolved_path_for_comparison(&progress_file)?;
+    let replica = resolved_path_for_comparison(replica_path)?;
+    let mut protected = vec![replica.clone()];
+    let replica_name = replica
+        .file_name()
+        .ok_or("replica path has no final component")?
+        .to_string_lossy();
+    let parent = replica.parent().ok_or("replica path has no parent")?;
+    for suffix in ["-wal", "-shm", "-journal"] {
+        protected.push(parent.join(format!("{replica_name}{suffix}")));
+    }
+    if protected.contains(&progress_file) {
+        return Err("--progress-file must not overlap the replica storage namespace".into());
     }
     Ok(())
 }

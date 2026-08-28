@@ -619,7 +619,12 @@ the body-free change stream is ordered and resumable. See
 `audit-replica` is a read-only, aggregate-only deep check over SQLCipher/SQLite
 integrity, foreign keys, migration identities, canonical record hashes and
 projections, exact links, FTS, checkpoint/coverage state, and sync/change
-history. It never repairs a mismatch. See
+history. It never repairs a mismatch. Both replica audit commands show
+privacy-safe stage and overall percentages by default, including encrypted
+replica size, canonical/link/change row totals, exact row progress, and elapsed
+time. Use `--progress-json` for NDJSON, `--quiet-progress` to suppress console
+progress, or `--progress-file <owner-only-new-path>` to retain every event
+durably outside the replica storage namespace. See
 [docs/REPLICA_AUDIT.md](docs/REPLICA_AUDIT.md).
 
 `audit-replica-backup` verifies a retained schema-1 through schema-4 recovery

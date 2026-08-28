@@ -3,6 +3,14 @@ use std::process::Command;
 #[test]
 fn ai_commands_expose_help_without_opening_private_inputs() {
     for (command, expected) in [
+        (
+            "audit-replica",
+            "deep audit of the encrypted serving replica",
+        ),
+        (
+            "audit-replica-backup",
+            "without migrating or rewriting the backup",
+        ),
         ("ai-query", "policy-scoped, read-only JSON request"),
         (
             "ai-export",
