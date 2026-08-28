@@ -11,6 +11,11 @@ struct GreenBubblesHistoryApplication: App {
     WindowGroup("GreenBubbles History") {
       HistoryRootView(model: model)
         .frame(minWidth: 980, minHeight: 680)
+        .onAppear {
+          applicationDelegate.registerOpenURLHandler { [weak model] urls in
+            model?.openExternalURLs(urls)
+          }
+        }
     }
     .defaultSize(width: 1_320, height: 860)
     .commands {
@@ -32,6 +37,9 @@ struct GreenBubblesHistoryApplication: App {
 
 @MainActor
 final class HistoryApplicationDelegate: NSObject, NSApplicationDelegate {
+  private var openURLHandler: (([URL]) -> Void)?
+  private var pendingOpenURLs: [URL] = []
+
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApplication.shared.setActivationPolicy(.regular)
     NSApplication.shared.activate(ignoringOtherApps: true)
@@ -39,5 +47,21 @@ final class HistoryApplicationDelegate: NSObject, NSApplicationDelegate {
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
     true
+  }
+
+  func application(_ application: NSApplication, open urls: [URL]) {
+    if let openURLHandler {
+      openURLHandler(urls)
+    } else {
+      pendingOpenURLs.append(contentsOf: urls)
+    }
+  }
+
+  func registerOpenURLHandler(_ handler: @escaping ([URL]) -> Void) {
+    openURLHandler = handler
+    guard !pendingOpenURLs.isEmpty else { return }
+    let urls = pendingOpenURLs
+    pendingOpenURLs.removeAll()
+    handler(urls)
   }
 }

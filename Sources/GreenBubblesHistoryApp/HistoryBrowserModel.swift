@@ -73,10 +73,17 @@ final class HistoryBrowserModel {
   private var activeTimelineID = UUID()
   private var activeSearchID = UUID()
   private var activeArtifactID = UUID()
+  private var pendingStartupBundleURL: URL?
+  private var processedStartupBundle = false
   private let mediaSessionURL = FileManager.default.temporaryDirectory.appending(
     path: "greenbubbles-history-media-\(UUID().uuidString)", directoryHint: .isDirectory)
 
-  init() {
+  init(
+    arguments: [String] = Array(CommandLine.arguments.dropFirst()),
+    currentDirectoryURL: URL = URL(
+      fileURLWithPath: FileManager.default.currentDirectoryPath,
+      isDirectory: true)
+  ) {
     let candidates = [
       Bundle.main.executableURL?.deletingLastPathComponent().appending(
         path: "greenbubbles-restore"),
@@ -87,6 +94,14 @@ final class HistoryBrowserModel {
       FileManager.default.isExecutableFile(atPath: $0.path)
     }) {
       liveExecutablePath = executable.path
+    }
+    do {
+      pendingStartupBundleURL = try HistoryBrowserLaunchOptions(
+        arguments: arguments,
+        currentDirectoryURL: currentDirectoryURL
+      ).bundleURL
+    } catch {
+      libraryError = String(describing: error)
     }
   }
 
@@ -146,6 +161,22 @@ final class HistoryBrowserModel {
     panel.resolvesAliases = false
     guard panel.runModal() == .OK, let url = panel.url else { return }
     openBundle(url)
+  }
+
+  func openStartupBundleIfNeeded() {
+    guard !processedStartupBundle else { return }
+    processedStartupBundle = true
+    guard let pendingStartupBundleURL else { return }
+    self.pendingStartupBundleURL = nil
+    openBundle(pendingStartupBundleURL)
+  }
+
+  func openExternalURLs(_ urls: [URL]) {
+    guard urls.count == 1, let url = urls.first else {
+      libraryError = "Open one history bundle at a time."
+      return
+    }
+    openBundle(HistoryBrowserLaunchOptions.normalizeOpenedURL(url))
   }
 
   func openBundle(_ url: URL) {

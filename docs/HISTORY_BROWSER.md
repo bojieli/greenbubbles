@@ -168,10 +168,13 @@ Build or run the native SwiftUI executable from the repository root:
 ```sh
 swift build --product greenbubbles-history
 swift run greenbubbles-history
+swift run greenbubbles-history --bundle /absolute/path/to/ai-context-bundle
 ```
 
 Open a new output directory produced by `greenbubbles-restore ai-export`, or
-drag that directory into the empty browser window. The directory and every file
+drag that directory into the empty browser window. The explicit `--bundle`
+launch option, file panel, drag/drop path, and macOS directory/`manifest.json`
+open events all converge on the same verifier. The directory and every file
 must retain their owner-only permissions. The private derived index is stored
 under `Application Support/GreenBubbles/HistoryIndexes` and contains normalized
 search text, so it must remain private even though it contains no keys or raw

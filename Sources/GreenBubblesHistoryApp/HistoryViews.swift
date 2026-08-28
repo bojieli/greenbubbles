@@ -19,6 +19,9 @@ struct HistoryRootView: View {
         HistoryLibraryView(model: model)
       }
     }
+    .task {
+      model.openStartupBundleIfNeeded()
+    }
     .dropDestination(for: URL.self) { urls, _ in
       guard let directory = urls.first,
         (try? directory.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true

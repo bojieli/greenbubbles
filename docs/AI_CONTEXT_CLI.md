@@ -242,6 +242,11 @@ multilingual search. It presents coverage limitations and per-record freshness
 alongside conversations, contacts, messages, relationships, and typed media
 metadata.
 
+For an explicit startup bundle, run
+`swift run greenbubbles-history --bundle /absolute/path/to/ai-context-bundle`.
+The file panel, drag/drop, and macOS open-event paths use the same verification
+gate.
+
 Actual media remains outside the static bundle. An explicit preview calls the
 same read-only `ai-query/getArtifact` operation, supplies the replica key only
 over standard input, then rechecks descriptor identity, size, and SHA-256 while

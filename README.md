@@ -779,9 +779,12 @@ Build or run the read-only macOS browser from the repository root:
 ```sh
 swift build --product greenbubbles-history
 swift run greenbubbles-history
+swift run greenbubbles-history --bundle /absolute/path/to/ai-context-bundle
 ```
 
-Open the private five-file directory created by `ai-export`. The browser
+Open the private five-file directory created by `ai-export` from the launch
+option, the owner-only file panel, a drag/drop operation, or a macOS open event.
+The browser
 independently checks exact inventory, owner-only permissions, schemas, hashes,
 counts, identities, references, freshness, bundle/checkpoint/policy binding,
 and then atomically creates a private SQLite/FTS index. Import shows phase,
