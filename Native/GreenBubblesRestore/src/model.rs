@@ -183,7 +183,7 @@ pub struct CanonicalArtifact {
     /// primary (first-recorded) role for consumers. Archives written before
     /// this field existed deserialize with an empty set, which consumers must
     /// treat as exactly `role`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub roles: BTreeSet<ArtifactRole>,
     pub availability: ArtifactAvailability,
     pub source_md5: Option<String>,
@@ -918,10 +918,19 @@ pub struct MessageTableCoverage {
 #[cfg(test)]
 mod tests {
     use super::{
-        RestorationArchiveScope, RestorationCompletion, RestorationDatabaseCoverage,
-        RestorationIntegrity, RestorationMediaPhase, RestorationReport,
-        RestorationUnavailableDatabase,
+        CanonicalArtifact, RestorationArchiveScope, RestorationCompletion,
+        RestorationDatabaseCoverage, RestorationIntegrity, RestorationMediaPhase,
+        RestorationReport, RestorationUnavailableDatabase,
     };
+
+    #[test]
+    fn legacy_artifact_without_role_set_round_trips_byte_for_byte() {
+        let legacy = br#"{"artifactId":"artifact-a","kind":"image","role":"original","availability":"notDownloaded","sourceMd5":null,"sourceLocalPath":null,"accountRelativePath":null,"sourceByteCount":null,"sourceDeviceId":null,"sourceFileId":null,"sourceModifiedSeconds":null,"sourceModifiedNanoseconds":null,"sourceSha256":null,"detectedFormat":null,"materializedLocalPath":null,"decodedLocalPath":null,"decodedByteCount":null,"decodedSha256":null,"decodedFormat":null,"decodeState":"notRequired","verificationDetail":null,"sourceResourceSetId":null,"sourceResourceLogicalPath":null,"sourceResourceTableId":null,"sourceResourceTableName":null,"sourceResourceRowId":null}"#;
+        let artifact: CanonicalArtifact = serde_json::from_slice(legacy).unwrap();
+
+        assert!(artifact.roles.is_empty());
+        assert_eq!(serde_json::to_vec(&artifact).unwrap(), legacy);
+    }
 
     #[test]
     fn pending_relationships_cannot_satisfy_completion() {

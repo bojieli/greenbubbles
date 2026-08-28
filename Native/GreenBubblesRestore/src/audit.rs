@@ -1301,6 +1301,10 @@ fn audit_artifacts(
             // Archives written before per-artifact role sets record a single
             // role; treat it as the complete set.
             roles.insert(artifact.role);
+        } else if !roles.contains(&artifact.role) {
+            return Err(integrity(
+                "artifact role set does not contain its primary role",
+            ));
         }
         result.roles.insert(artifact.artifact_id.clone(), roles);
         result.count += 1;
