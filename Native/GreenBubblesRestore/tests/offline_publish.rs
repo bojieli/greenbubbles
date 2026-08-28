@@ -484,13 +484,13 @@ fn pinned_client() -> ClientBuildFingerprint {
     ClientBuildFingerprint {
         format_version: 1,
         bundle_identifier: "com.tencent.xinWeChat".to_string(),
-        marketing_version: "4.1.12".to_string(),
-        build_version: "269365".to_string(),
-        executable_sha256: "2c61ba7f64c2b98e897553cd226364642a1eb213b5b7f74556c6fc2efc363e32"
+        marketing_version: "4.1.13".to_string(),
+        build_version: "269579".to_string(),
+        executable_sha256: "041f2632f8c9f4208f0b1ad26d574384e0b854952097a851f7d9c7c6f64a8542"
             .to_string(),
         signing_identifier: "com.tencent.xinWeChat".to_string(),
         team_identifier: "5A4RE8SF68".to_string(),
-        code_directory_sha256: "fa11b242567cbe161e2b332139dbc459c534b85f3855a8603614252bf908106e"
+        code_directory_sha256: "c6b9f9587044784456eb96314f685c965fbd7d88bdacb72387284b8df551df4f"
             .to_string(),
         architectures: vec!["arm64".to_string(), "x86_64".to_string()],
         hardened_runtime: true,

@@ -9,12 +9,12 @@ active-read implementation and not permission to interact with a live client.
 The inspected build is:
 
 - bundle and signing identifier `com.tencent.xinWeChat`;
-- marketing version `4.1.12`, build `269365`;
+- marketing version `4.1.13`, build `269579`;
 - team identifier `5A4RE8SF68`;
 - executable SHA-256
-  `2c61ba7f64c2b98e897553cd226364642a1eb213b5b7f74556c6fc2efc363e32`;
+  `041f2632f8c9f4208f0b1ad26d574384e0b854952097a851f7d9c7c6f64a8542`;
 - CodeDirectory SHA-256
-  `fa11b242567cbe161e2b332139dbc459c534b85f3855a8603614252bf908106e`;
+  `c6b9f9587044784456eb96314f685c965fbd7d88bdacb72387284b8df551df4f`;
 - `arm64` and `x86_64`, with Hardened Runtime and a valid deep signature.
 
 The assessment read only the signed app bundle's property lists,

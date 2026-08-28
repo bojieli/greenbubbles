@@ -17,8 +17,8 @@ WeChat versions `4.1` and later when all of these identity checks hold:
 
 The executable, CodeDirectory, build number, and architecture evidence remain
 recorded for audit and incident diagnosis, but an ordinary update within the
-signed `4.1+` family does not block restoration or publication. The originally
-validated `4.1.12`/`269365` fingerprint is reported as `supportedPinned`; other
+signed `4.1+` family does not block restoration or publication. The pinned
+`4.1.13`/`269579` fingerprint is reported as `supportedPinned`; other
 qualifying versions are reported as `supportedCompatible`. The separately
 gated debugger-based passphrase-acquisition helper remains exact-build-bound
 because its live attachment behavior has a narrower safety boundary.

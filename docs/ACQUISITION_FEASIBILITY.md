@@ -19,12 +19,12 @@ swift run greenbubbles acquisition-surfaces
 It accepts only the exact signed WeChat macOS build pinned by GreenBubbles:
 
 - bundle and signing identifier `com.tencent.xinWeChat`;
-- marketing version `4.1.12`, build `269365`;
+- marketing version `4.1.13`, build `269579`;
 - team identifier `5A4RE8SF68`;
 - executable SHA-256
-  `2c61ba7f64c2b98e897553cd226364642a1eb213b5b7f74556c6fc2efc363e32`;
+  `041f2632f8c9f4208f0b1ad26d574384e0b854952097a851f7d9c7c6f64a8542`;
 - CodeDirectory SHA-256
-  `fa11b242567cbe161e2b332139dbc459c534b85f3855a8603614252bf908106e`;
+  `c6b9f9587044784456eb96314f685c965fbd7d88bdacb72387284b8df551df4f`;
 - `arm64` and `x86_64`, Hardened Runtime, and a valid deep signature.
 
 The command reads only the regular, single-link signed-bundle resource at the
@@ -34,8 +34,8 @@ being read, and emits no absolute application path. It does not launch WeChat,
 invoke a UI or service, attach to a process, read memory, access an account,
 inspect user content, or export a credential.
 
-On 2026-08-27, the pinned resource was 341,447,152 bytes with SHA-256
-`9109337319f72712d3a69cc6bbdced7916303cfae35005ec1c7762899fad7111`.
+On 2026-08-28, the pinned resource was 345,985,680 bytes with SHA-256
+`e1b802637eb9d9154e2d98a4e315b041d5bba34938112b8e3803a2f8e934fc37`.
 Bounded feature markers were observed for all four workflow families:
 
 | Workflow family | Static conclusion | Supported interpretation |

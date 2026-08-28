@@ -181,7 +181,7 @@ public struct WeChatAcquisitionSurfaceInspector: Sendable {
 
   public init(homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser) {
     self.homeDirectory = homeDirectory.standardizedFileURL
-    self.supportedBuilds = [WeChatIntegrationSurfaceInspector.pinnedWeChat4112]
+    self.supportedBuilds = [WeChatIntegrationSurfaceInspector.pinnedWeChat4113]
   }
 
   init(

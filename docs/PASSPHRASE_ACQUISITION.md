@@ -15,7 +15,7 @@ plaintext/passphrase input is available; it is not a general capability.
 
 ## Mechanism
 
-The pinned WeChat macOS build (marketing version `4.1.12`, build `269365`)
+The pinned WeChat macOS build (marketing version `4.1.13`, build `269579`)
 derives each database's encryption key from a stable 32-byte account passphrase
 at login time by calling the exported system CommonCrypto symbol
 `CCKeyDerivationPBKDF`. `greenbubbles-acquire capture`:

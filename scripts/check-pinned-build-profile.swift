@@ -99,9 +99,9 @@ let swiftSource = try read(
 let rustSource = try read("Native/GreenBubblesRestore/src/manifest.rs")
 
 let swiftBlock = try oneCapture(
-  #"(?s)static let pinnedWeChat4112 = WeChatClientBuildFingerprint\((.*?)\n  \)"#,
+  #"(?s)static let pinnedWeChat4113 = WeChatClientBuildFingerprint\((.*?)\n  \)"#,
   in: swiftSource,
-  label: "Swift pinnedWeChat4112 block"
+  label: "Swift pinnedWeChat4113 block"
 )
 let rustBlock = try oneCapture(
   #"(?s)pub\(crate\) fn supported_client_build\(\) -> ClientBuildFingerprint \{\s*ClientBuildFingerprint \{(.*?)\n    \}\n\}"#,

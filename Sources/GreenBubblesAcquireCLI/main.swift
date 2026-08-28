@@ -205,7 +205,7 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
       let build = try buildInspector.inspect(application: application)
       clientMarketingVersion = build.marketingVersion
       clientBuildVersion = build.buildVersion
-      let pinned = WeChatIntegrationSurfaceInspector.pinnedWeChat4112
+      let pinned = WeChatIntegrationSurfaceInspector.pinnedWeChat4113
       if build.hardenedRuntime, build.signatureValid {
         // Still fully signed: the complete fingerprint must match the pin.
         clientFingerprintMatchesPin = build == pinned
@@ -216,7 +216,7 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
           remediation = resignRemediation
         } else {
           blockers.append(
-            "the installed WeChat build does not match the pinned 4.1.12 fingerprint; capture is disabled for unpinned builds"
+            "the installed WeChat build does not match the pinned 4.1.13 fingerprint; capture is disabled for unpinned builds"
           )
         }
       } else if build.hardenedRuntime {
@@ -235,7 +235,7 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
           && build.teamIdentifier == pinned.teamIdentifier
         if !plistMatches {
           blockers.append(
-            "the re-signed WeChat version metadata does not match the pinned 4.1.12 profile; capture is disabled for unpinned builds"
+            "the re-signed WeChat version metadata does not match the pinned 4.1.13 profile; capture is disabled for unpinned builds"
           )
         }
       }

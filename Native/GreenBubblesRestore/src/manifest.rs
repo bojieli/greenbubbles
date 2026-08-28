@@ -72,14 +72,14 @@ impl Default for ClientBuildCompatibilityEvidence {
     }
 }
 
-// The exact 4.1.12 fingerprint remains the cross-language reference profile
+// The exact 4.1.13 fingerprint remains the cross-language reference profile
 // and the acquisition helper's pin. Passive restoration applies the broader
 // signed 4.1+ compatibility policy in `client_build_compatibility`.
-const SUPPORTED_PROFILE_ID: &str = "wechat-macos-4.1.12-269365";
+const SUPPORTED_PROFILE_ID: &str = "wechat-macos-4.1.13-269579";
 const SUPPORTED_EXECUTABLE_SHA256: &str =
-    "2c61ba7f64c2b98e897553cd226364642a1eb213b5b7f74556c6fc2efc363e32";
+    "041f2632f8c9f4208f0b1ad26d574384e0b854952097a851f7d9c7c6f64a8542";
 const SUPPORTED_CODE_DIRECTORY_SHA256: &str =
-    "fa11b242567cbe161e2b332139dbc459c534b85f3855a8603614252bf908106e";
+    "c6b9f9587044784456eb96314f685c965fbd7d88bdacb72387284b8df551df4f";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -501,8 +501,8 @@ pub(crate) fn supported_client_build() -> ClientBuildFingerprint {
     ClientBuildFingerprint {
         format_version: 1,
         bundle_identifier: "com.tencent.xinWeChat".to_string(),
-        marketing_version: "4.1.12".to_string(),
-        build_version: "269365".to_string(),
+        marketing_version: "4.1.13".to_string(),
+        build_version: "269579".to_string(),
         executable_sha256: SUPPORTED_EXECUTABLE_SHA256.to_string(),
         signing_identifier: "com.tencent.xinWeChat".to_string(),
         team_identifier: "5A4RE8SF68".to_string(),
