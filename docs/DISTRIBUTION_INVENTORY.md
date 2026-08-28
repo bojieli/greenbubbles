@@ -60,7 +60,7 @@ it as MIT-licensed derived material.
 
 ## Rust dependency boundary
 
-The restoration engine has 17 normal direct dependencies and one development
+The restoration engine has 18 normal direct dependencies and one development
 dependency. `Cargo.lock` is committed. At this audit the important direct
 families are:
 
@@ -79,6 +79,7 @@ families are:
 | `thiserror` | 2.0.20 | MIT OR Apache-2.0 | errors |
 | `walkdir` | 2.5.0 | Unlicense/MIT | bounded media traversal |
 | `zeroize` | 1.9.0 | Apache-2.0 OR MIT | secret cleanup |
+| `zstd` | 0.13.3 | MIT | compressed private restoration-ordering spool |
 | `wx-db`, `wx-decrypt`, `wx-media` | 0.7.4 at the revision below | absent on package records | pinned decoder primitives |
 | `filetime` (development only) | 0.2.29 | MIT/Apache-2.0 | timestamp tests |
 
@@ -159,6 +160,17 @@ metadata value for `silk-rs`. It must include the applicable bundled SILK
 notice, and patent/supportability questions remain for qualified review. This
 inventory makes no patent or distribution conclusion.
 
+### Zstandard staging compression
+
+`wx-db` already selected `zstd`; GreenBubbles now also declares it directly for
+the private, ephemeral restoration-ordering spool. The resolved Rust wrappers
+report MIT (`zstd`) and MIT OR Apache-2.0 (`zstd-safe`), while `zstd-sys`
+reports MIT/Apache-2.0 and compiles bundled Zstandard 1.5.7 C sources. Those
+sources carry Meta's BSD license and require the copyright, conditions, and
+disclaimer to accompany source or binary redistribution. The fail-closed
+dependency inventory now tracks `zstd-sys` explicitly; a binary notice bundle
+must include the bundled Zstandard notice.
+
 ## Publication categories
 
 These are separate review units; approval of one does not approve the others.
@@ -167,7 +179,7 @@ These are separate review units; approval of one does not approve the others.
 | --- | --- | --- |
 | GreenBubbles source | Swift/Rust implementation, scripts, CI | No project license selected; dependency and mechanism review required. |
 | Source build dependencies | pinned `wx-cli`, crates.io sources, bundled C | Preserve upstream terms; resolve package metadata ambiguity and nested native notices. |
-| Prebuilt binaries | CLI, restoration engine, service/MCP processes | Requires complete binary notice bundle, linkage review, target-specific inventory, and exact mechanism/legal approval. |
+| Prebuilt binaries | CLI, restoration engine, and local service processes | Requires complete binary notice bundle, linkage review, target-specific inventory, and exact mechanism/legal approval. |
 | Schema/format documentation | storage signatures, SQLCipher profile, row/type mappings | Assess separately under Phase 0.5; documentation may expose private implementation details even without code. |
 | Sanitized fixtures | generated databases and synthetic payloads | Publish only with provenance proving generation or redistribution permission and a privacy scan. |
 | Real restored data or captures | messages, media, database fragments, absolute paths, IDs, digests | Never publish or commit; owner-private artifacts only. |

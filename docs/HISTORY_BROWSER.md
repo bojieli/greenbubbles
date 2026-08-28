@@ -79,13 +79,14 @@ Before any history is displayed, the browser independently verifies:
 - current-user ownership, single-link regular files, owner-only permissions,
   and no followed symlinks;
 - manifest format/completion evidence and the bundle identity bound to replica,
-  checkpoint, policy, policy source, and destination;
+  checkpoint, policy, policy source, destination, and, for version 2,
+  `selfParticipantId`;
 - each JSONL file's manifest byte count, record count, and SHA-256;
 - every record schema, format version, unique identity, source freshness, and
   allowed reference;
 - exact conversation-participant/contact coverage;
 - message-to-conversation, sender-to-contact, relationship, and artifact
-  references; and
+  references, plus sender-versus-account direction consistency; and
 - exact correspondence between message artifact references and artifact
   records, including the manifest's artifact error count.
 
@@ -98,6 +99,16 @@ cross-record references and `PRAGMA integrity_check`, flushes it, and publishes
 it with one rename. Cancellation rolls back and removes the unpublished index.
 The final index is bound to the bundle ID, checkpoint, policy digest,
 source-file digests, and record counts.
+
+The loader reads both legacy `greenbubbles.ai-context.v1` bundles and current
+`greenbubbles.ai-context.v2` bundles. Version 2 requires an opaque
+`selfParticipantId`, uses `groupOwnerParticipantId` only for the creator/owner
+of a group, rejects the legacy owner field in new records, and verifies every
+released sender/direction pair. The UI derives self-authorship from
+`senderId == selfParticipantId`, displays the account holder as `You`, and never
+uses group ownership, contact names, or conversation shape as a self heuristic.
+Opening a version-1 bundle preserves its recorded legacy direction because it
+contains no integrity-bound account-holder identity.
 
 Reopening the same generation still revalidates every source byte and record;
 it may then reuse the bound index. The browser holds descriptors for message and
@@ -198,9 +209,10 @@ target; the repository's licensing and distribution gates remain controlling.
 
 ## Automated evidence
 
-`GreenBubblesHistoryTests` builds complete owner-only synthetic bundles and
+`GreenBubblesHistoryTests` builds complete owner-only synthetic v1 and v2 bundles and
 executes the real loader/index/store. It covers bundle identity, schemas,
-hashes, permissions, record/reference checks, stale coverage, FTS and short
+account-holder direction validation, group-owner separation, hashes,
+permissions, record/reference checks, stale coverage, FTS and short
 Chinese search, keyset pagination, exact artifact lookup, index reuse, source
 tampering, validation-to-store path replacement, post-open mutation, large-
 corpus transactions, and cancellation without index publication.

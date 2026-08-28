@@ -27,7 +27,7 @@ expand policy.
 
 ## One-shot query format
 
-The request schema is `greenbubbles.ai-query.v1`:
+The request schema remains `greenbubbles.ai-query.v1`:
 
 ```json
 {
@@ -60,7 +60,8 @@ operation bodies are the same stable tagged JSON union documented in
 
 Every response has `formatVersion`, schema, API version, request identity,
 `ok`, a `context` object, and either `result` or `error`. The context object
-contains the account/replica/checkpoint binding, client compatibility, archive
+contains the account/replica/checkpoint binding, the privacy-safe
+`selfParticipantId` when the replica is account-bound, client compatibility, archive
 scope, total/fresh/unavailable/preserved-stale database counts, canonical
 entity counts, gap counts, checkpoint age, `sourceCoverageComplete`, stable
 `limitationCodes`, and a plain-language `coverageNote`.
@@ -71,7 +72,8 @@ freshness metadata from another generation.
 
 ## Static bundle format
 
-`ai-export` writes schema `greenbubbles.ai-context.v1`:
+New `ai-export` generations write schema `greenbubbles.ai-context.v2` and
+`formatVersion: 2`:
 
 ```text
 greenbubbles-restore ai-export \
@@ -85,10 +87,18 @@ flushes and synchronizes each file, verifies the final checkpoint, and then
 publishes with one rename. An error or concurrent sync removes the staging
 directory and leaves no apparently complete output generation.
 
+Version 2 requires the replica to carry account-holder identity evidence
+integrity-bound to the selected account by snapshot acquisition or legacy
+account-root restoration. Export refuses an
+unbound legacy replica. The opaque `selfParticipantId` is safe to propagate; the
+source WeChat identifier remains confined to the private snapshot/archive
+boundary. `audit-ai-context` and the Swift history loader continue to accept
+existing version-1 bundles, but all new exports use version 2.
+
 `manifest.json` contains:
 
 - a deterministic bundle identity bound to replica, checkpoint, policy digest,
-  destination, and policy source identity;
+  destination, policy source identity, and `selfParticipantId`;
 - creation time, requester, destination, and explicit `exportComplete` state;
 - the complete context/freshness object returned by live queries;
 - enabled conversation, contact, message, and attachment counts;
@@ -104,16 +114,17 @@ greenbubbles-restore audit-ai-context <context-bundle-directory>
 
 It verifies the exact five-file inventory, owner-only files, manifest and
 record schemas, file sizes/digests/counts, unique identities, conversation-
-contact-message-artifact references, per-record freshness consistency, and the
-bundle/checkpoint/policy identity. It emits only counts and boolean evidence;
+contact-message-artifact references, per-record freshness consistency,
+sender-versus-account direction consistency, and the
+bundle/checkpoint/policy/account-holder identity. It emits only counts and boolean evidence;
 it never prints labels, message text, contact names, paths, or identifiers.
 
 The JSONL files are:
 
 | File | AI-oriented content |
 | --- | --- |
-| `conversations.jsonl` | Stable conversation ID, human label, kind, participant names and roles, owner evidence, decode state, source-database freshness, capabilities, allowed fields, and time range. |
-| `contacts.jsonl` | Stable participant ID, preferred normalized display name, local-profile availability, source-database freshness, enabled conversations, and per-conversation display names and roles. |
+| `conversations.jsonl` | Stable conversation ID, human label, kind, participant names and roles, explicit `groupOwnerParticipantId` evidence, decode state, source-database freshness, capabilities, allowed fields, and time range. Group ownership is never interpreted as account ownership. |
+| `contacts.jsonl` | Stable participant ID, preferred normalized display name, local-profile availability, source-database freshness, enabled conversations, and per-conversation display names and roles. Every representation of the bound account holder is labelled `You`. |
 | `messages.jsonl` | Stable message/conversation IDs, conversation label, sender ID/name, creation time, ordinal, direction, logical type/subtype, normalized payload kind/summary, per-message source-database freshness, relationships, and attachment references. |
 | `artifacts.jsonl` | Stable artifact ID, referencing conversations, availability/decode state, format, byte count, digest, safe account-relative path, and explicit resolution error when verification fails. |
 
@@ -121,6 +132,14 @@ Static files deliberately omit source logical paths, database/table/row
 identities, raw columns, packed fields, original base64 payloads, raw XML,
 schema SQL, and absolute filesystem paths. The lossless encrypted replica and
 restoration archive retain those details inside the local trust boundary.
+
+When sender and direction fields are authorized, version 2 applies one rule:
+`senderId == selfParticipantId` is outgoing, and every other sender is incoming.
+A self sender is labelled `You`. AI query/export normalizes an authorized
+sender/direction pair to that rule, and bundle audit rejects a pair that still
+disagrees; no contact name, direct-chat peer, message frequency, or group-owner
+field is used to guess self. Sender-less records may retain an explicit source
+direction, otherwise they remain unknown.
 
 An attachment's metadata is included only after the connector's descriptor-read
 and digest verification. Verification failure is retained as a typed artifact

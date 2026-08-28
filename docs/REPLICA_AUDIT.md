@@ -30,8 +30,9 @@ Within the consistent transaction it verifies:
   ordinals/fields against canonical messages;
 - one exact FTS row for every message and no missing, extra, duplicate, stale,
   cross-account, or differently rendered FTS row;
-- the single account identity, source checkpoint counts/timestamp, latest sync
-  run, authoritative report, restoration coverage, completion state, schema
+- the single account identity, opaque account-holder participant and binding
+  provenance, source checkpoint counts/timestamp, latest sync run,
+  authoritative report, restoration coverage, completion state, schema
   profiles, and optional cached-surface coverage as one committed revision;
 - a contiguous append-only change sequence with bounded known kinds, valid
   digests/timestamps, valid synchronization history, and empty reconciliation

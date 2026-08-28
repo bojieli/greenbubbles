@@ -54,6 +54,12 @@ The response always includes a `context` object alongside `result` or `error`.
 Check `sourceCoverageComplete`, database counts, `limitationCodes`, and
 `coverageNote` before answering. A failed request has `ok: false`; do not infer
 an empty result from an authorization, integrity, or availability error.
+For an account-bound replica, `context.selfParticipantId` is the opaque
+account-holder identity. `resolveContact` and `resolveConversation` label that
+participant `You`. When both fields are authorized, a message is outgoing only
+when `senderId == selfParticipantId`; do not infer self from a name, direct-chat
+shape, message frequency, or group ownership. A missing sender or direction
+field may simply be policy-redacted.
 
 ## Static context bundle
 
@@ -72,13 +78,19 @@ caller to retry. Progress is written to stderr; `--progress-json` or an
 owner-only `--progress-file <events.ndjson>` provides machine-readable record
 counts and percentages.
 
+New bundles use `formatVersion: 2` and schema
+`greenbubbles.ai-context.v2`. The auditor and native history browser can still
+read existing version-1 bundles, but version 1 has no verified
+`selfParticipantId`, so its recorded direction remains legacy evidence.
+
 The bundle contains:
 
 - `manifest.json`: bundle/checkpoint identity, policy digest, file hashes and
   counts, source freshness, unavailable/preserved-stale database counts, and
   limitations;
-- `conversations.jsonl`: human labels, kinds, participant roles, enabled
-  operations/fields, and authorized time windows;
+- `conversations.jsonl`: human labels, kinds, participant roles, optional
+  `groupOwnerParticipantId`, enabled operations/fields, and authorized time
+  windows. Group ownership is not account-holder evidence;
 - `contacts.jsonl`: normalized display names, local-profile availability,
   source-database freshness, and per-conversation names/roles;
 - `messages.jsonl`: ordered normalized content summaries, sender display names,
@@ -87,6 +99,11 @@ The bundle contains:
 - `artifacts.jsonl`: digest-verified attachment metadata with absolute paths
   removed. Use a local `getArtifact` query only when the actual verified file is
   needed.
+
+In version 2, every representation of the bound account holder—including
+conversation participants, contacts, per-conversation contact profiles, and
+self-authored message sender labels—uses `You`. Preserve opaque IDs even when
+displaying that friendly label.
 
 Every JSONL line is an independent JSON object. Verify each file against the
 SHA-256 and record count in `manifest.json` before bulk ingestion. Prefer the

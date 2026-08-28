@@ -15,6 +15,8 @@ Both snapshot directories and manifests must be owner-only and non-symlinked.
 Every copied DB/WAL/SHM entry is independently digest-verified before the two
 complete source inventories are compared. The command then requires:
 
+- the integrity-bound selected-account evidence to be exactly unchanged at both
+  endpoints (legacy unbound chains remain explicitly unbound);
 - the current baseline fingerprint to equal the previous snapshot's source
   fingerprint;
 - signed WeChat 4.1+ compatibility at both endpoints; exact build equality is
@@ -29,7 +31,8 @@ complete source inventories are compared. The command then requires:
 - the current manifest's selected copied entries to remain complete and
   consistent with its current source inventory.
 
-The successful JSON result contains only aggregate counts, modes, and booleans.
+The successful format-3 JSON result contains only aggregate counts, modes, and
+booleans, including `accountBindingUnchanged`.
 It emits no snapshot/account identifier, source-set identity, path, timestamp,
 digest, database name, or content.
 

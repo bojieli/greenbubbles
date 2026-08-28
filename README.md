@@ -189,6 +189,16 @@ database/WAL/SHM set into an owner-only temporary directory, rejects concurrent
 mutation, prints a redacted manifest, and automatically removes the copy when
 the command exits.
 
+Snapshot manifest format 4 binds every new export to exactly one selected
+WeChat account. Acquisition derives the canonical account holder from the
+account directory itself (with independently confirmed normalization for legacy
+aliases), checks databases and WAL/SHM sidecars against the same `db_storage`
+hierarchy, and includes the binding in the source fingerprint. There is no
+public caller override. The raw source identifier exists only as private
+manifest evidence; downstream surfaces receive its account-scoped opaque
+participant ID. A format-1–3 snapshot remains readable, but it cannot be the
+baseline for a new incremental format-4 snapshot; take a fresh bootstrap first.
+
 On APFS, snapshot acquisition first uses descriptor-based atomic copy-on-write
 file clones and records `atomicCopyOnWriteClone` on each captured entry. It
 captures a database and its WAL/SHM sidecars as one bounded group, requires the
@@ -350,6 +360,12 @@ whether relationship identifiers are present, recoverable from already decoded
 raw XML, genuinely absent there, or lack decoded XML. Its report remains
 aggregate-only and owner-only.
 
+Diagnostic summary formats 4 (`diagnose-batch`) and 2
+(`diagnose-available`) also expose only privacy-safe account/direction evidence:
+whether the account holder was bound, incoming/outgoing/unknown counts,
+sender/flag conflict counts, and the independent audit's direction-completeness
+verdict. They never include the source account identifier.
+
 The normal `restore` and `restore-publish` paths use the same independent key
 authentication but are fault tolerant: one unavailable database no longer
 aborts healthy database restoration or publication. Full-snapshot output is
@@ -363,8 +379,8 @@ surface archive scope and aggregate total/fresh/unavailable/stale database
 coverage, so a running system is visibly degraded rather than appearing halted
 or silently complete.
 
-The latest owner-local aggregate validation of this workflow authenticated 25
-of 26 databases and explicitly retained the one unavailable database. Across
+The completed owner-local aggregate validation of this workflow authenticated
+25 of 26 databases and explicitly retained the one unavailable database. Across
 the selected set, GreenBubbles classified all 6,542 tables and 9,529,301
 observed rows as 6,291 message tables or 251 known auxiliary tables, with zero
 generic or unhandled candidates. It restored and independently audited
@@ -376,11 +392,12 @@ retained semantic gaps. A follow-up GreenBubbles payload audit classified all
 recoverable from source-preserving decoded XML, 511 are genuinely absent from
 that XML, and 0 lack decoded-XML evidence. This is diagnostic evidence, not a
 production-ready archive because it was intentionally created as a
-`diagnosticSubset`, media was deferred, and it predates the fault-tolerant
-publication/relationship corrections. The observed signed 4.1.13 client is now
-inside the supported passive-restoration family; the unavailable icon database
-would be explicit partial coverage rather than a pipeline-wide failure in a new
-publication run.
+`diagnosticSubset`, media was deferred, and it predates the account-bound
+direction correction. A corrected format-4/account-bound rerun must complete
+its independent audit before its direction counts become evidence. The
+observed signed 4.1.13 client is inside the supported passive-restoration
+family; the unavailable icon database is explicit partial coverage rather than
+a pipeline-wide failure.
 
 `preflight` verifies every copied database/WAL/SHM digest and reports the
 current source-set count, copied database storage families, signed 4.1+-client
@@ -407,13 +424,25 @@ including explicit external-attestation limitations. A moved, evicted,
 substituted, or changed media file fails closed. See
 [docs/ARCHIVE_AUDIT.md](docs/ARCHIVE_AUDIT.md).
 
+Restoration progress format 3 also prevents a large import from appearing to
+stall after decryption. Once tables and rows are counted, GreenBubbles reports
+selected source bytes, estimated final archive/compressed staging/peak bytes,
+free and required bytes, then fails before creating archive files when the
+budget is unsafe. The record and finalization phases add actual compressed and
+source-JSON staging sizes, on-disk spool size, published archive bytes,
+database/table ordinals, records, percentages, and elapsed time. Only the
+owner-only temporary ordering spool is compressed; `messages.ndjson` remains
+ordinary lossless JSONL. The final report records the estimates, measured peak,
+compression totals, initial free space, and exact archive size.
+
 `audit-acquisition-chain` digest-verifies two owner-only snapshots and proves
-that baseline continuity, client build, changed/reconciliation/deleted set
+that selected-account binding, baseline continuity, client build,
+changed/reconciliation/deleted set
 classification, and selected copied entries agree with both complete source
-inventories. Its output is aggregate-only. See
+inventories. Its format-3 output is aggregate-only. See
 [docs/ACQUISITION_CHAIN_AUDIT.md](docs/ACQUISITION_CHAIN_AUDIT.md).
 
-For an already acquired format-3 snapshot, the offline operator can combine
+For an already acquired format-3 or current format-4 snapshot, the offline operator can combine
 restoration, acquisition-chain verification, independent archive audits,
 incremental merge, and monotonic publication without exposing the passphrase on
 the command line:
@@ -576,7 +605,9 @@ private. See [docs/ARCHIVE_RETENTION.md](docs/ARCHIVE_RETENTION.md).
 Avoid placing a real key literally in shell history; pipe it from an
 owner-controlled secret manager. The example value is a placeholder. Bootstrap
 atomically stores canonical records, provenance, coverage, FTS, and its source
-checkpoint. Each replica rejects another account, and migrations retain an
+checkpoint. Replica schema 5 also stores the opaque account-holder participant
+and rejects identity changes or downgrades. Each replica rejects another
+account, and migrations retain an
 encrypted pre-migration backup. Before migration or normal use, the exact
 contiguous migration identity ledger and replica format are verified; changed
 or incomplete history fails before another backup is created. Synchronization
@@ -590,7 +621,7 @@ projections, exact links, FTS, checkpoint/coverage state, and sync/change
 history. It never repairs a mismatch. See
 [docs/REPLICA_AUDIT.md](docs/REPLICA_AUDIT.md).
 
-`audit-replica-backup` verifies a retained schema-1 through schema-3 recovery
+`audit-replica-backup` verifies a retained schema-1 through schema-4 recovery
 database without migrating or rewriting it. Backup creation runs this same
 schema-aware audit before the serving replica is upgraded; an invalid candidate
 aborts migration and is removed. See
@@ -688,7 +719,12 @@ authorized time/field scope, and no raw columns, base64 source payloads, schema
 SQL, or absolute attachment paths. The
 manifest records per-file counts, byte sizes, SHA-256 digests, source checkpoint,
 policy digest, client compatibility, and complete/fresh/unavailable/preserved-
-stale database counts. A missing record is never presented as evidence of
+stale database counts. New bundles use `greenbubbles.ai-context.v2`: their
+identity includes `selfParticipantId`, self-authored senders are labelled `You`,
+and group creation is separately named `groupOwnerParticipantId`. Sender-bearing
+directions are deterministic (`senderId == selfParticipantId` means outgoing),
+not inferred from names, peers, or group ownership. Existing v1 bundles remain
+readable. A missing record is never presented as evidence of
 deletion when a source database is unavailable.
 
 Export progress is shown on stderr and includes file position, record counts,
@@ -727,7 +763,8 @@ its bound index.
 
 The native UI provides coverage/status dashboards, conversation and contact
 navigation, Chinese/multilingual message search, keyset-paged timelines,
-incoming/outgoing/unknown direction, relationship links, and typed image/audio/
+account-bound incoming/outgoing/unknown direction, a distinct `You` identity,
+relationship links, and typed image/audio/
 video/document cards. Static browsing needs no key. An explicit media preview
 uses the GreenBubbles `ai-query/getArtifact` boundary with the replica key on
 standard input, then makes a fresh descriptor/size/SHA-256-verified private copy

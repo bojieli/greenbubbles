@@ -67,6 +67,52 @@ derivative; an unavailable state cannot retain local-file evidence; and a
 decoded state cannot omit its derivative size, digest, format, or archive-owned
 path.
 
+## Account-holder binding and direction
+
+Every new export uses snapshot manifest format 4. During acquisition—not later
+AI analysis—the exporter derives the account holder from the single selected
+WeChat account directory, verifies that every database/WAL/SHM source belongs
+under that account's `db_storage`, and writes private binding evidence into the
+manifest. The source identifier stays base64-encoded inside that owner-only
+manifest. Archives, replicas, AI bundles, and UI state receive only its
+account-scoped opaque participant ID. The binding is part of the source
+fingerprint and cannot change across an incremental chain.
+
+Restoration determines direction in this order:
+
+```text
+sender == bound account holder  -> outgoing / self-authored
+sender != bound account holder  -> incoming / other-authored
+no sender + explicit source flag -> direction represented by that flag
+no sender + no explicit flag     -> unknown
+```
+
+A sender-bearing row is never classified from a contact display name, direct
+conversation peer, message frequency, conversation shape, or group ownership.
+The sender comparison outranks an `is_sender`-style source flag; disagreement is
+retained as `senderAccountConflictWithExplicitSourceColumn`, increments
+`directionConflictCount`, and makes restoration incomplete. A group's owner or
+creator remains separate conversation metadata and is not evidence that the
+owner is the local account holder.
+
+An empty source sender is absence and never becomes a synthetic participant.
+For Pat messages (logical type 49/subtype 62) whose ordinary sender column is
+empty, restoration reads `<fromusername>` from the retained typed XML. Blank
+duplicates are ignored and identical nonempty duplicates agree; two different
+nonempty values, nested values, malformed XML, control characters, or an
+oversized value fail closed and leave the sender unresolved. The independent
+audit regenerates this XML evidence and rejects disagreement with any retained
+row sender. System notices without either sender evidence or an explicit flag
+remain honestly `unknown`.
+
+Account-bound restoration writes archive report format 6 with
+`selfParticipantId` and binding evidence. Its independent audit rechecks every
+sender-bearing message against that identity, verifies sender-less flag
+fallback, and reproduces every retained sender/flag conflict. Such a conflict
+is reported and keeps direction completion false, but does not by itself abort
+the aggregate audit. Format-5 and older archives remain readable as legacy
+evidence but do not acquire an identity by heuristic.
+
 Raw payloads are held inside the local trust boundary. AI-facing tools receive
 only policy-approved normalized fields, never the lossless archive by default.
 
@@ -109,16 +155,29 @@ Each run produces counts that can be checked without printing message content:
 - source and output fingerprints;
 - decoder and supported-client versions.
 
+Before archive creation, record planning also produces a fail-fast storage
+budget: selected source bytes, record counts, estimated archive/staging/peak
+bytes, current free bytes, and required free bytes including an operating
+reserve. Progress-event format 3 carries that budget throughout restoration,
+plus measured compressed/uncompressed spool bytes, on-disk staging bytes, and
+published archive bytes. Canonical output remains ordinary NDJSON; only the
+private ephemeral ordering spool uses per-record Zstandard compression. The
+spool is removed on completion or propagated failure without deleting partial
+archive evidence. The final report retains aggregate storage evidence and an
+exact archive byte count. Independent audit rejects inconsistent estimate
+equations, missing spool measurements, retained `.staging-*` directories,
+unsafe archive files, or a final byte-count mismatch.
+
 `report.json` also carries signed-client compatibility evidence and a
-component-by-component completion verdict. For current format-2 snapshots, the
-top-level `fullRestorationAchieved` flag is true only when the client is a
+component-by-component completion verdict. For production snapshot manifests,
+the top-level `fullRestorationAchieved` flag is true only when the client is a
 signed compatible WeChat 4.1+ build and row accounting, canonical identity
 uniqueness, semantic decoding, directions, entities, relationships, artifact
 verification, and artifact decoding all pass. Retaining raw bytes is necessary
 for losslessness but does not by itself satisfy production compatibility,
 semantic completeness, or playable-media completeness.
 
-Archive report format 5 separately records database freshness. Every source set
+Archive report format 5 introduced database freshness. Every source set
 inside the restoration boundary is classified as freshly restored or
 unavailable; cumulative publication may additionally mark unavailable sets
 whose prior canonical records were preserved as stale. An unavailable database
@@ -126,10 +185,12 @@ therefore prevents a full-restoration claim but does not abort export,
 publication, or synchronization. Replica mutation accepts
 `partialDatabaseCoverage` only when the complete database inventory is
 accounted for, and incremental merge retains stale records until a later fresh
-generation replaces them.
+generation replaces them. Account-bound report format 6 retains those fields
+and adds the verified account-holder identity, binding provenance, and
+sender-versus-account direction contract described above.
 
-`coverage.json` format 3 contains the complete schema ledger in `allTables`.
-Each table carries a SHA-256 fingerprint derived from its ordered
+Current `coverage.json` format 4 contains the complete schema ledger in
+`allTables`. Each table carries a SHA-256 fingerprint derived from its ordered
 `table_xinfo` evidence and related table/index/trigger definitions. The
 top-level schema-profile fingerprint hashes the ordered logical database/table
 identities and those table fingerprints. SQL definitions are not emitted.
@@ -161,7 +222,8 @@ full semantic restoration until each observed type is understood.
 `audit-archive` does not accept the writer's completion report on trust. It
 streams every canonical ledger again, reproduces row/type/gap/reference/entity
 and cached-surface counts, validates the table and schema-profile ledgers,
-checks ordering and bidirectional relationships, regenerates every present
+checks ordering, account-bound directions, and bidirectional relationships,
+regenerates every present
 nested-XML projection from its retained source XML, and verifies every recorded
 source or derivative file from a read-only no-follow descriptor. A complete
 nested message cannot omit or alter that projection. Legacy partial records may

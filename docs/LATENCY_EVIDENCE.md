@@ -22,9 +22,11 @@ greenbubbles-restore compose-latency-evidence \
 
 The composer requires:
 
-- snapshot report format 2 with a retained format-3 snapshot;
+- snapshot report format 2 with a retained acquisition-aware format-3 or
+  account-bound format-4 snapshot;
 - the exact same acquisition mode and private source fingerprint as the current
-  format-3 handoff;
+  format-3 handoff; a format-4 snapshot must also contain a structurally valid
+  private account binding;
 - one common positive publication generation across offline, follower, and
   handoff reports;
 - a fully verified bootstrap, incremental, or integrity-scan publication

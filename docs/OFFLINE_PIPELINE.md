@@ -17,8 +17,12 @@ greenbubbles-restore restore-publish \
   --account-root <authorized-account-root> --passphrase-stdin
 ```
 
-The command requires format-3 acquisition evidence and a signed official
-WeChat 4.1-or-later client. It prepares the immutable snapshot, restores it, independently
+The command requires acquisition-aware format-3 or account-bound format-4
+evidence and a signed official WeChat 4.1-or-later client. New format-4
+snapshots already carry the account holder derived by the exporter; an optional
+account root is independently checked against that binding and remains useful
+for local media resolution. The command prepares the immutable snapshot,
+restores it, independently
 audits every archive ledger and recorded local artifact, and only then publishes
 the bootstrap as generation 1 under the handoff lock. An existing handoff is
 rejected. The output archive must not already exist.
@@ -40,7 +44,8 @@ Before decrypting the next snapshot, the operator independently verifies the
 complete acquisition transition, signed 4.1+ compatibility at both endpoints
 (while reporting exact fingerprint changes), exact changed,
 reconciliation, and deleted source-set classifications, the previous archive,
-and its baseline fingerprint. An incremental snapshot is restored into an
+and its baseline fingerprint. Format-4 transitions additionally require the
+same integrity-bound selected-account evidence at both endpoints. An incremental snapshot is restored into an
 owner-only temporary fragment, independently audited, merged by source identity
 into a new atomic publication archive, and audited again. If a changed database
 is unavailable, the merge retains that source set's prior records, marks them

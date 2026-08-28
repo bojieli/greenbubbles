@@ -43,6 +43,17 @@ The auditor fails closed unless all of these checks pass:
 - message logical-type, subtype, semantic-gap, direction, ordering,
   relationship, and artifact-reference counts reproduce both `coverage.json`
   and `report.json`;
+- archive report format 6 carries one valid opaque account-holder participant
+  and binding provenance; every sender-bearing message is outgoing exactly
+  when its sender equals that participant and incoming otherwise, sender-less
+  rows use only an explicit source flag, and every sender/flag conflict is
+  independently reproduced and counted rather than hidden by aggregate
+  direction counts. A legitimate conflict keeps direction completion false but
+  does not, by itself, abort the aggregate audit;
+- Pat sender fallback is independently re-extracted from bounded retained XML;
+  blank/identical duplicates may agree on one identity, differing nonempty
+  values remain unresolved, and an archived sender that disagrees with the
+  unambiguous XML identity is rejected;
 - every present merged-history or Finder/channel `normalized_xml` projection is
   regenerated from its retained `raw_xml` and must match exactly; complete
   records must carry the reproducible projection with no gap, while legacy
@@ -111,6 +122,9 @@ coverage-gap counts, database freshness/unavailable/stale counts, and booleans.
 It emits no message body, identifier,
 filesystem path, source fingerprint, file digest, table name, or failure-row
 identity. Errors name the failed invariant but not the sensitive record.
+The aggregate additionally reports whether the account holder was bound and
+the independently reproduced direction-conflict count; it never emits the
+participant identity itself.
 
 Audit-report format 2 includes `completionEvidence`, an independently derived
 component verdict rather than a copy of the writer's top-level flag. It reports

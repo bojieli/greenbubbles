@@ -499,6 +499,10 @@ Status: **in progress**
 
 - [x] Define a snapshot manifest containing source fingerprint, file identity,
   size, modification time, and cryptographic digest.
+- [x] Bind each new snapshot to exactly one account directory, include that
+  evidence in the source fingerprint, and reject mixed account/database/WAL/SHM
+  roots or incremental baselines without the same integrity-bound
+  selected-account evidence.
 - [x] Copy database/WAL/SHM sets into an owner-only temporary directory.
 - [x] Detect mutation during copying and retry or reject inconsistent snapshots.
 - [x] Prove with tests that the source tree is never opened for writing.
@@ -563,7 +567,7 @@ they do not prove that every variant in a real compatible corpus has been observ
 so the logical-type completion item remains unchecked.
 
 Real-corpus diagnostics are now incremental rather than an opaque decrypt-only
-wait. Progress-event format 2 exposes snapshot bytes, existing-key
+wait. Progress-event format 3 exposes snapshot bytes, existing-key
 authentication, available/unavailable counts, per-database decrypt and WAL
 work, table/row planning, per-table restoration records, cached-surface work,
 ledger finalization, and independent audit. Human output shows workflow,
@@ -572,6 +576,17 @@ record counts, gaps, and elapsed time. It coalesces repetitive tiny-table
 chatter while the create-new owner-only NDJSON stream retains every event;
 private JSON summary files support a UI or supervisor without exposing row
 values.
+
+Restoration now completes row planning with a fail-fast disk budget before any
+archive file is created. It reports selected source, estimated archive,
+compressed staging, peak, available, and required bytes; tracks actual staging,
+compression, free-space, and published-archive bytes during the run; and stores
+aggregate storage evidence in the final report. Canonical NDJSON remains
+uncompressed and streamable. Only the private ordering spool uses per-record
+Zstandard level-1 compression, with tested byte-for-byte round trips and a guard
+that removes only its ephemeral directory on completion or propagated error.
+The independent archive audit remeasures the complete archive and rejects
+inconsistent storage equations or a retained ordering spool.
 
 The completed privacy-safe aggregate establishes that the selected corpus
 contains legitimate structured data rather than empty or nonsensical schemas.
@@ -598,19 +613,21 @@ from source-preserving decoded XML, 511 are genuinely absent from that XML, and
 already decoded XML while keeping original-column provenance unchanged.
 
 This evidence still does not check the three Phase 1 real-source items. The
-already written aggregate is a diagnostic subset, the run is not disposable-
-scenario synchronization evidence, and media was intentionally deferred. The
-observed signed 4.1.13 build now belongs to the supported passive-restoration
-family, and one unavailable database no longer blocks healthy restoration or
-replica synchronization: a new run records `partialDatabaseCoverage` and
-preserves prior records for unavailable changed sets as explicitly stale.
-Those improvements permit partial publication but do not turn the old
-diagnostic archive into production input or establish full-restoration,
+aggregate is a diagnostic subset, the run is not disposable-scenario
+synchronization evidence, and media was intentionally deferred. The observed
+signed 4.1.13 build belongs to the supported passive-restoration family, and
+one unavailable database no longer blocks healthy restoration or replica
+synchronization. Those improvements permit partial publication but do not turn
+the diagnostic archive into production input or establish full-restoration,
 active-read, or action evidence.
-The diagnostic run also lacked a verified local-account identity for group
-direction inference, leaving 1,389,480 directions unknown, and the already
-written diagnostic archive predates the quote-link correction. Neither gap is
-silently promoted to complete evidence.
+
+Snapshot format 4 now integrity-binds the selected account during export, and
+restoration format 6 consumes that binding without an `--account-root`
+argument. A corrected account-bound real-corpus rerun and its independent audit
+remain pending; no account-bound direction counts are treated as evidence until
+that run emits its create-new privacy-safe summary successfully. Direct peers,
+contact names, message frequency, conversation shape, and group ownership are
+never self heuristics.
 
 ### 1E. Incoming event reconciler
 
@@ -769,17 +786,18 @@ real-corpus audits. See `docs/REPLICA_AUDIT.md`.
 Pre-migration backup creation now converts each encrypted recovery database to
 a self-contained rollback-journal file, closes it, and runs a schema-aware
 read-only content audit before migration begins. The same aggregate-only
-`audit-replica-backup` command lets an operator recheck retained schemas 1–3;
+`audit-replica-backup` command lets an operator recheck retained schemas 1–4;
 wrong keys, unsafe file identities, current schemas, migration drift, record or
 projection corruption, link/coverage inconsistency, and available
 checkpoint/FTS/change-stream damage fail closed without rewriting the backup.
 See `docs/REPLICA_BACKUP_AUDIT.md`.
 
 A non-destructive `prepare-replica-recovery` transaction now turns a passing
-schema-1 through schema-3 backup into a separate current-schema candidate. It
+schema-1 through schema-4 backup into a separate current-schema candidate. It
 refuses existing or SQLite-namespace-overlapping output, makes a consistent
 same-key encrypted copy, audits before and after migration, and preserves the
-source backup and serving replica. Schema-1 migration now backfills FTS,
+source backup and serving replica. Schema-4 cached Moments/interactions remain
+fully audited and count-preserved; schema-1 migration backfills FTS,
 checkpoint, synchronization, and initial change-stream state so the recovered
 candidate passes the deep serving audit. Automated active cutover remains
 intentionally out of scope. See `docs/REPLICA_RECOVERY.md`.
@@ -825,6 +843,9 @@ refresh()
   normalized conversation, contact, message, relationship, and safe attachment
   JSONL plus a hashed manifest; expose record/file/percentage progress and never
   publish a mixed-generation bundle.
+- [x] Bind AI-context v2 and replica schema 5 to the opaque account-holder
+  participant, distinguish `groupOwnerParticipantId`, label self as `You`, and
+  verify sender-versus-account direction while retaining v1 bundle readers.
 - [x] Add an aggregate-only `audit-ai-context` verifier for permissions, exact
   inventory, schemas, hashes/counts, identities, references, freshness, and
   bundle/checkpoint/policy binding.

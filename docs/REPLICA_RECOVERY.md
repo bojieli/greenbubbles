@@ -21,7 +21,7 @@ manager.
 
 The command performs these fail-closed stages:
 
-1. audit the schema-1 through schema-3 source backup read-only;
+1. audit the schema-1 through schema-4 source backup read-only;
    descriptor-hash its complete database/WAL/SHM/journal namespace before and
    after audit and copying so mutation or sidecar appearance fails closed;
 2. reserve a new mode-`0600`, no-follow candidate file;
@@ -32,14 +32,19 @@ The command performs these fail-closed stages:
 5. apply the exact compiled migrations and migration-identity records;
 6. switch the candidate to the serving WAL/full-synchronous configuration and
    run the complete current-schema `audit-replica` transaction;
-7. require initialized state and every canonical/link count to remain identical
-   across the migration.
+7. require initialized state and every canonical/link/cached-surface count to
+   remain identical across the migration.
 
 Schema-1 migration backfills FTS from canonical message text and creates a
 checkpoint, matching reconciliation run, and initial checkpoint change event
 from the already committed identity and canonical counts. This prevents a
 populated older database from acquiring a current schema number while retaining
 empty operational indexes or history.
+
+Schema-4 recovery additionally audits and preserves every cached Moment,
+interaction, and cached-surface coverage record. Migration to schema 5 leaves
+the new account-holder participant field null because an older backup contains
+no integrity-bound selected-account evidence; recovery never guesses that identity.
 
 Success emits a format-1 aggregate report containing only schema versions,
 verification verdicts, initialization state, and canonical counts. It omits

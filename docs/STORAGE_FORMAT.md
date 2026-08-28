@@ -32,9 +32,10 @@ synthetic fixtures are classified separately as `legacySyntheticFixture` and
 never establish production support.
 
 An unsupported or missing build may still be parsed to retain authorized raw
-evidence, but format-2 output cannot set `fullRestorationAchieved` and no future
-active-read or write adapter may be enabled from it. Malformed fingerprints are
-rejected before database preparation.
+evidence, but an archive produced from that snapshot cannot set
+`fullRestorationAchieved` and no future active-read or write adapter may be
+enabled from it. Malformed fingerprints are rejected before database
+preparation.
 
 ## Supported encrypted database family
 
@@ -102,6 +103,28 @@ window, selected sets, deleted sets, and a verified SHA-256 for every current
 source file. Rust validates that the selected entries exactly match this
 inventory before opening a database.
 
+Snapshot manifest format 4 is the current exporter contract. Before copying,
+the exporter resolves the one account directory containing every supplied
+database and sidecar beneath `db_storage`. It derives the source account
+identifier from that selected directory, records it only in the private
+manifest, and exposes a SHA-256 account identity derived from the canonical
+account-root path. Common `wxid_*_XXXX` directory suffixes are removed
+deterministically; a non-`wxid` suffix is removed only when the independent
+`all_users/login/<candidate>` directory confirms it. Contact names, message
+contents, group ownership, and traffic patterns are never used.
+Moving the selected account root changes this path-derived opaque account ID
+and therefore requires a fresh bootstrap rather than an incremental chain.
+The selected account directory itself must be a real directory, not a symbolic
+link; this is checked before its canonical path is used for the account digest.
+
+The complete format-4 account binding is included in the inventory source
+fingerprint. Incremental planning rejects a format-3 predecessor without a
+binding and any predecessor whose binding differs. It also rejects a database
+outside the chosen account root, mixed account roots, or a WAL/SHM sidecar from
+another root. Restoration converts the private source identifier to one
+account-scoped opaque `selfParticipantId`; the raw identifier does not enter
+ordinary reports or AI bundles.
+
 On APFS, the snapshotter opens each source with `O_RDONLY`, `O_NOFOLLOW`, and
 `O_CLOEXEC`, then passes that descriptor to `fclonefileat`. The copy-on-write
 clone captures one file atomically without widening the capture window while a
@@ -123,7 +146,7 @@ metadata is part of the manifest, not inferred from filesystem wake-up hints.
 ## Restoration progress contract
 
 Long-running GreenBubbles restoration is observable from snapshot verification
-through independent archive audit. Progress-event format 2 reports seven named
+through independent archive audit. Progress-event format 3 reports seven named
 phases where applicable: snapshot verification, key validation, database
 preparation, record planning, record restoration, archive finalization, and
 archive audit. Each event carries a monotonic workflow-stage position plus
@@ -139,6 +162,28 @@ sizes, storage family, table role/schema metadata, restored/rejected counts,
 semantic gaps, and elapsed milliseconds. Finalization reserves explicit work
 for entities, cached surfaces, coverage, and the archive report, so the visible
 phase cannot round to `100.0%` while material work remains.
+
+After row planning and before creating an archive file, restoration emits a
+storage preflight containing selected source bytes, message and observed-table
+record counts, estimated archive bytes, estimated compressed-spool bytes,
+estimated peak bytes, free bytes, and required free bytes. The estimate uses
+documented saturating expansion allowances for lossless JSON/base64 projections,
+per-record metadata, indexes, and a ten-percent (minimum 64 MiB) operating
+reserve. Insufficient space fails before the output directory is created.
+Progress then reports the actual SQLite spool size, compressed and source-JSON
+payload bytes, current free/required bytes, and published archive bytes.
+
+The ordering spool is an owner-only, archive-local temporary SQLite database;
+each canonical JSON envelope is compressed independently with Zstandard level
+1 so ordered emission remains streaming and corruption is row-local. Its guard
+removes only the `.staging-*` directory on normal completion or any propagated
+error. It never deletes partially published archive evidence or another path.
+Synthetic large-spool tests verify byte-for-byte decompression, measured disk
+reduction, and this cleanup boundary. `report.json.storage` records the initial
+estimate and free-space evidence, peak measured spool bytes, compressed versus
+uncompressed payload totals, and the exact final archive byte count. Independent
+audit remeasures the archive and rejects inconsistent storage equations, unsafe
+files, a retained ordering spool, or a final byte-count mismatch.
 
 Human progress is written to standard error by default. The same schema is
 available as NDJSON through `--progress-json` or a create-new owner-only file
@@ -243,8 +288,8 @@ exact reproducible projection.
 ## Uncertainty and completion
 
 Observed-but-unknown message types, generic app subtypes, nested XML that fails
-bounded structural normalization, unresolved sender directions, failed group
-protobufs, ambiguous relationships, and unavailable media decoders remain
-machine-readable coverage gaps. They do not prevent raw retention, but they
-keep `fullRestorationAchieved` false until the exact observed corpus is
-understood.
+bounded structural normalization, sender-less rows with no explicit direction,
+sender/account conflicts with explicit direction flags, failed group protobufs,
+ambiguous relationships, and unavailable media decoders remain machine-readable
+coverage gaps. They do not prevent raw retention, but they keep
+`fullRestorationAchieved` false until the exact observed corpus is understood.

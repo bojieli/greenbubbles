@@ -23,7 +23,7 @@ prompt.
 
 ## Verification contract
 
-The command accepts only a supported, non-empty older schema (currently 1–3).
+The command accepts only a supported, non-empty older schema (currently 1–4).
 It rejects an uninitialized schema-0 file and the current or a future schema so
 that an ordinary serving replica cannot be mislabeled as a migration backup.
 The database and any existing WAL/SHM entries must be single-link, owner-only
@@ -43,11 +43,16 @@ in that historical schema:
   exact FTS projection, and a contiguous valid change stream;
 - for schema 3 and later, replica-generation identity and empty reconciliation
   staging.
+- for schema 4, every cached Moment/interaction record, its indexed
+  projections, aggregate counts, and cached-surface coverage state.
 
-Cached Moments were introduced only in the current schema 4 and are therefore
-not expected in a valid pre-migration backup. When a feature did not yet exist,
-its corresponding report verdict means that the schema-aware absence was
-accepted, not that newer serving state was reconstructed.
+Cached Moments were introduced in schema 4. They are absent by contract from
+schema-1 through schema-3 backups and are fully verified and preserved when a
+schema-4 backup is migrated to current schema 5. The opaque account-holder
+participant column is new in schema 5, so migration of a historical backup
+leaves it null rather than inventing an identity. A later synchronization may
+bind that replica from an independently audited, account-bound archive, but a non-null
+binding can never be changed or downgraded to null.
 
 Success emits format-1 aggregate counts and boolean verdicts only. It omits the
 account, source fingerprint, replica identity, paths, record contents, search

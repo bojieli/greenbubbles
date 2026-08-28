@@ -25,9 +25,10 @@ accept it as a command argument, or silently fall back to plaintext.
 
 ## Schema and provenance
 
-Replica schema version 4 stores:
+Replica schema version 5 stores:
 
-- the account and current source fingerprint;
+- the account, current source fingerprint, and opaque account-holder
+  participant identity;
 - canonical conversations, participants, memberships, messages, artifacts,
   message-artifact links, and message relationships;
 - each full canonical JSON record and its SHA-256 digest;
@@ -95,7 +96,7 @@ newer schema number alone is not evidence of a usable serving replica.
 Synthetic tests prove that plaintext headers, message text, and stable artifact
 paths do not appear in the database bytes; unkeyed and wrong-key reads fail;
 cross-account bootstrap fails; same-checkpoint bootstrap is idempotent; and a
-schema-1 database is backed up in encrypted form before migration to schema 4.
+schema-1 database is backed up in encrypted form before migration to schema 5.
 They also prove that changed migration digests, invalid format versions, and
 malformed migration timestamps are rejected without creating a misleading new
 backup.
@@ -108,7 +109,7 @@ history, SQLite integrity, foreign keys, and empty staging. It returns only
 aggregate counts and verdicts and performs no repair. See `REPLICA_AUDIT.md`.
 
 `audit-replica-backup` applies the historical subset of those invariants to a
-retained, non-empty schema-1 through schema-3 recovery database. It verifies
+retained, non-empty schema-1 through schema-4 recovery database. It verifies
 canonical records, projections, links, coverage/completion, and every
 checkpoint/FTS/change/staging feature present in that schema without migrating
 or rewriting it. It rejects current-schema serving replicas and emits only
@@ -156,12 +157,27 @@ this stream to know which stable entities require refresh.
 ## Change-proportional acquisition
 
 Snapshot manifest format 3 carries a complete inventory of database/WAL/SHM
-sets while copying only sets selected for the current run. A bootstrap and an
+sets while copying only sets selected for the current run. Format 4 retains
+that inventory and additionally binds every new acquisition to the one account
+directory containing all selected databases and sidecars. It stores the source
+account identifier only in the private manifest, exposes only account-scoped
+opaque identities downstream, and includes the binding in the source
+fingerprint. A bootstrap and an
 explicit integrity scan select every current set. A normal incremental plan
 selects sets whose file identity changed, plus unchanged sets modified inside a
 bounded reconciliation window; it also records source sets that disappeared.
 The planner verifies the whole inventory before and after copying so a source
 outside the selected subset cannot mutate unnoticed.
+
+An incremental format-4 snapshot must carry exactly the same integrity-bound
+selected-account evidence as its predecessor. A missing legacy binding, a changed account
+directory, a database outside that account's `db_storage`, or a database/WAL/SHM
+set spanning multiple account roots fails before copying. A symbolic selected-account
+directory also fails before canonicalization can obscure that evidence. Legacy format-3
+snapshots remain readable but cannot silently become a bound incremental chain.
+Because the opaque account ID is derived from the canonical selected-account
+path, moving that account root changes the ID and requires a fresh bootstrap;
+GreenBubbles never treats a path move as an incremental continuation.
 
 An unchanged file's SHA-256 may be carried forward only when its device, inode,
 size, modification seconds, and modification nanoseconds are all unchanged.
@@ -228,7 +244,8 @@ never deletes them. Interrupted quarantine and restore renames reconcile from
 the exact original/deterministic locations and archive seal. See
 `ARCHIVE_RETENTION.md`.
 
-`restore-publish` is the upstream offline transaction for format-3 snapshots.
+`restore-publish` is the upstream offline transaction for acquisition-aware
+format-3 and account-bound format-4 snapshots.
 It validates the signed 4.1+ client family, proves non-bootstrap acquisition
 continuity against both the retained prior snapshot and replica-eligible
 archive, audits a restored incremental fragment, merges it by source identity,
