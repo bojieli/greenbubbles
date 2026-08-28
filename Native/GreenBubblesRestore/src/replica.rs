@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader, Read};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use rusqlite::backup::Backup;
@@ -14,10 +14,14 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::archive::{ensure_private_directory, ensure_private_regular_file, load_report};
-use crate::audit::{audit_archive, validate_canonical_artifact, verify_recorded_artifact_files};
+use crate::audit::{
+    audit_archive_with_progress, validate_canonical_artifact, verify_recorded_artifact_files,
+};
+use crate::restore::available_free_bytes;
 use crate::schema::{validate_cached_coverage_schema, validate_restoration_coverage_schema};
 use crate::{
-    CanonicalArtifact, CanonicalConversation, CanonicalMessage, CanonicalParticipant, ReplicaKey,
+    CanonicalArtifact, CanonicalConversation, CanonicalMessage, CanonicalParticipant, NoProgress,
+    ProgressEvent, ProgressObserver, ProgressPhase, ProgressState, ProgressUnit, ReplicaKey,
     RestorationCoverage, RestorationReport, RestoreError, TypedPayload,
 };
 
@@ -285,6 +289,13 @@ pub struct ReplicaMessagePage {
     pub checkpoint_revision: String,
     pub items: Vec<CanonicalMessage>,
     pub next_cursor: Option<String>,
+    /// Rows that matched the query but could not be decoded or whose stored
+    /// identity disagreed with their indexed identity. These rows are never
+    /// released, but they also do not make healthy rows unavailable.
+    #[serde(default)]
+    pub omitted_item_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -369,6 +380,18 @@ struct ImportCounts {
     cached_moment_interactions: u64,
 }
 
+#[derive(Clone, Copy)]
+struct ReplicaApplicationPlan {
+    archive_byte_count: u64,
+    estimated_peak_byte_count: u64,
+    required_free_byte_count: u64,
+    available_free_byte_count_at_start: u64,
+    total_work_record_count: u64,
+    source_record_count: u64,
+    file_count: usize,
+    database_coverage: DatabaseCoverageSummary,
+}
+
 #[derive(Default)]
 struct SyncCounts {
     added: u64,
@@ -423,90 +446,132 @@ pub fn bootstrap_replica(
     replica_path: &Path,
     key: &ReplicaKey,
 ) -> Result<ReplicaBootstrapReport, RestoreError> {
+    bootstrap_replica_with_progress(archive_directory, replica_path, key, &NoProgress)
+}
+
+pub fn bootstrap_replica_with_progress(
+    archive_directory: &Path,
+    replica_path: &Path,
+    key: &ReplicaKey,
+    progress: &dyn ProgressObserver,
+) -> Result<ReplicaBootstrapReport, RestoreError> {
     ensure_private_directory(archive_directory)?;
     let report = load_report(archive_directory)?;
-    require_authoritative_archive(&report)?;
+    require_serving_archive(&report)?;
     if report.format_version >= 3 {
-        audit_archive(archive_directory)?;
+        audit_archive_with_progress(archive_directory, progress)?;
     }
-    let mut opened = open_replica(replica_path, key)?;
-    let existing_identity: Option<(String, Option<String>)> = opened
-        .connection
-        .query_row(
-            "SELECT account_id, self_participant_id FROM replica_identity WHERE singleton = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    if existing_identity
-        .as_ref()
-        .is_some_and(|(account, _)| account != &report.account_id)
-    {
-        return Err(RestoreError::Integrity(
-            "replica belongs to a different account".to_string(),
-        ));
-    }
-    if let Some((_, existing_self)) = existing_identity.as_ref() {
-        require_compatible_self_participant(
-            existing_self.as_deref(),
-            report.self_participant_id.as_deref(),
-        )?;
-    }
-    let existing_checkpoint: Option<String> = opened
-        .connection
-        .query_row(
-            "SELECT source_fingerprint FROM source_checkpoint WHERE account_id = ?1",
-            [&report.account_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    if existing_checkpoint.as_deref() == Some(&report.source_fingerprint) {
-        if existing_identity.as_ref().map(|identity| &identity.1)
-            != Some(&report.self_participant_id)
+    bootstrap_audited_replica_with_progress(archive_directory, replica_path, key, &report, progress)
+}
+
+/// Applies an archive that the caller has already audited while holding the
+/// publication identity stable. This avoids reading multi-gigabyte ledgers a
+/// second time in the follower path; public entry points always audit first.
+pub(crate) fn bootstrap_audited_replica_with_progress(
+    archive_directory: &Path,
+    replica_path: &Path,
+    key: &ReplicaKey,
+    report: &RestorationReport,
+    progress: &dyn ProgressObserver,
+) -> Result<ReplicaBootstrapReport, RestoreError> {
+    ensure_private_directory(archive_directory)?;
+    require_serving_archive(report)?;
+    let replica_namespace_was_absent = replica_namespace_is_absent(replica_path)?;
+    let result = (|| {
+        let mut opened = open_replica(replica_path, key)?;
+        let existing_identity: Option<(String, Option<String>)> = opened
+            .connection
+            .query_row(
+                "SELECT account_id, self_participant_id FROM replica_identity WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if existing_identity
+            .as_ref()
+            .is_some_and(|(account, _)| account != &report.account_id)
         {
             return Err(RestoreError::Integrity(
-                "an existing checkpoint cannot acquire a new account-holder binding through idempotent bootstrap; use synchronization"
+                "replica belongs to a different account".to_string(),
+            ));
+        }
+        if let Some((_, existing_self)) = existing_identity.as_ref() {
+            require_compatible_self_participant(
+                existing_self.as_deref(),
+                report.self_participant_id.as_deref(),
+            )?;
+        }
+        let existing_checkpoint: Option<String> = opened
+            .connection
+            .query_row(
+                "SELECT source_fingerprint FROM source_checkpoint WHERE account_id = ?1",
+                [&report.account_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing_checkpoint.as_deref() == Some(&report.source_fingerprint) {
+            if existing_identity.as_ref().map(|identity| &identity.1)
+                != Some(&report.self_participant_id)
+            {
+                return Err(RestoreError::Integrity(
+                    "an existing checkpoint cannot acquire a new account-holder binding through idempotent bootstrap; use synchronization"
+                        .to_string(),
+                ));
+            }
+            emit_idempotent_replica_progress(report, archive_directory, replica_path, progress)?;
+            return bootstrap_report(&opened, report, true);
+        }
+        if existing_checkpoint.is_some() {
+            return Err(RestoreError::Integrity(
+                "replica is already bootstrapped from another checkpoint; use synchronization"
                     .to_string(),
             ));
         }
-        return bootstrap_report(&opened, &report, true);
-    }
-    if existing_checkpoint.is_some() {
-        return Err(RestoreError::Integrity(
-            "replica is already bootstrapped from another checkpoint; use synchronization"
-                .to_string(),
-        ));
-    }
 
-    let counts =
-        import_archive_transactionally(&mut opened.connection, archive_directory, &report)?;
-    checkpoint_and_secure(&opened.connection, replica_path)?;
-    let database_coverage = database_coverage_summary(&report);
-    Ok(ReplicaBootstrapReport {
-        format_version: REPLICA_FORMAT_VERSION,
-        schema_version: CURRENT_SCHEMA_VERSION,
-        account_id: report.account_id,
-        self_participant_id: report.self_participant_id,
-        source_fingerprint: report.source_fingerprint,
-        cipher_version: opened.cipher_version,
-        encrypted_at_rest: true,
-        idempotent: false,
-        archive_scope: report.archive_scope,
-        authoritative_database_coverage: database_coverage.authoritative,
-        total_database_count: database_coverage.total,
-        restored_database_count: database_coverage.restored,
-        unavailable_database_count: database_coverage.unavailable,
-        preserved_stale_database_count: database_coverage.preserved_stale,
-        conversation_count: counts.conversations,
-        participant_count: counts.participants,
-        message_count: counts.messages,
-        artifact_count: counts.artifacts,
-        cached_moment_count: counts.cached_moments,
-        cached_moment_interaction_count: counts.cached_moment_interactions,
-        relationship_count: counts.relationships,
-        message_artifact_count: counts.message_artifacts,
-        pre_migration_backup_file_name: opened.pre_migration_backup_file_name,
-    })
+        let plan =
+            preflight_replica_application(archive_directory, replica_path, report, progress)?;
+        let counts = import_archive_transactionally(
+            &mut opened.connection,
+            archive_directory,
+            report,
+            &plan,
+            replica_path,
+            progress,
+        )?;
+        emit_replica_checkpoint_progress(&plan, replica_path, ProgressState::Started, progress)?;
+        checkpoint_and_secure(&opened.connection, replica_path)?;
+        emit_replica_checkpoint_progress(&plan, replica_path, ProgressState::Completed, progress)?;
+        let database_coverage = database_coverage_summary(report);
+        Ok(ReplicaBootstrapReport {
+            format_version: REPLICA_FORMAT_VERSION,
+            schema_version: CURRENT_SCHEMA_VERSION,
+            account_id: report.account_id.clone(),
+            self_participant_id: report.self_participant_id.clone(),
+            source_fingerprint: report.source_fingerprint.clone(),
+            cipher_version: opened.cipher_version,
+            encrypted_at_rest: true,
+            idempotent: false,
+            archive_scope: report.archive_scope,
+            authoritative_database_coverage: database_coverage.authoritative,
+            total_database_count: database_coverage.total,
+            restored_database_count: database_coverage.restored,
+            unavailable_database_count: database_coverage.unavailable,
+            preserved_stale_database_count: database_coverage.preserved_stale,
+            conversation_count: counts.conversations,
+            participant_count: counts.participants,
+            message_count: counts.messages,
+            artifact_count: counts.artifacts,
+            cached_moment_count: counts.cached_moments,
+            cached_moment_interaction_count: counts.cached_moment_interactions,
+            relationship_count: counts.relationships,
+            message_artifact_count: counts.message_artifacts,
+            pre_migration_backup_file_name: opened.pre_migration_backup_file_name,
+        })
+    })();
+    if result.is_err() && replica_namespace_was_absent {
+        remove_failed_replica_files(replica_path);
+    }
+    result
 }
 
 pub fn replica_status(
@@ -1076,71 +1141,120 @@ pub fn synchronize_replica(
     replica_path: &Path,
     key: &ReplicaKey,
 ) -> Result<ReplicaSyncReport, RestoreError> {
+    synchronize_replica_with_progress(archive_directory, replica_path, key, &NoProgress)
+}
+
+pub fn synchronize_replica_with_progress(
+    archive_directory: &Path,
+    replica_path: &Path,
+    key: &ReplicaKey,
+    progress: &dyn ProgressObserver,
+) -> Result<ReplicaSyncReport, RestoreError> {
     ensure_private_directory(archive_directory)?;
     let report = load_report(archive_directory)?;
     require_authoritative_archive(&report)?;
-    let mut opened = open_replica(replica_path, key)?;
-    let identity: Option<(String, Option<String>, Option<String>)> = opened
-        .connection
-        .query_row(
-            "SELECT account_id, current_source_fingerprint, self_participant_id
-             FROM replica_identity WHERE singleton = 1",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()?;
-    let Some((account_id, previous_fingerprint, existing_self_participant_id)) = identity else {
-        return Err(RestoreError::Integrity(
-            "replica must be bootstrapped before synchronization".to_string(),
-        ));
-    };
-    require_account(&report.account_id, &account_id)?;
-    require_compatible_self_participant(
-        existing_self_participant_id.as_deref(),
-        report.self_participant_id.as_deref(),
-    )?;
-    let previous_fingerprint = previous_fingerprint.ok_or_else(|| {
-        RestoreError::Integrity("replica has no authoritative source checkpoint".to_string())
-    })?;
-    let incoming_coverage = load_archive_coverage(archive_directory)?;
-    let stored_state = load_coverage_state(&opened.connection, &account_id)?;
-    if let Some((stored_report, stored_coverage)) = stored_state.as_ref() {
-        ensure_partial_database_transition_is_lossless(stored_report, stored_coverage, &report)?;
+    if report.format_version >= 3 {
+        audit_archive_with_progress(archive_directory, progress)?;
     }
-    let unchanged_revision =
-        stored_state
-            .as_ref()
-            .is_some_and(|(stored_report, stored_coverage)| {
-                archive_revision_digest(stored_report, stored_coverage)
-                    == archive_revision_digest(&report, &incoming_coverage)
-            });
-    if previous_fingerprint == report.source_fingerprint && unchanged_revision {
-        return sync_report(
+    synchronize_audited_replica_with_progress(
+        archive_directory,
+        replica_path,
+        key,
+        &report,
+        progress,
+    )
+}
+
+/// Synchronizes from a publication that the caller has already audited and
+/// sealed. Public callers use `synchronize_replica_with_progress`, which
+/// performs its own audit before any replica mutation.
+pub(crate) fn synchronize_audited_replica_with_progress(
+    archive_directory: &Path,
+    replica_path: &Path,
+    key: &ReplicaKey,
+    report: &RestorationReport,
+    progress: &dyn ProgressObserver,
+) -> Result<ReplicaSyncReport, RestoreError> {
+    ensure_private_directory(archive_directory)?;
+    require_authoritative_archive(report)?;
+    let replica_namespace_was_absent = replica_namespace_is_absent(replica_path)?;
+    let result = (|| {
+        let mut opened = open_replica(replica_path, key)?;
+        let identity: Option<(String, Option<String>, Option<String>)> = opened
+            .connection
+            .query_row(
+                "SELECT account_id, current_source_fingerprint, self_participant_id
+                 FROM replica_identity WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((account_id, previous_fingerprint, existing_self_participant_id)) = identity
+        else {
+            return Err(RestoreError::Integrity(
+                "replica must be bootstrapped before synchronization".to_string(),
+            ));
+        };
+        require_account(&report.account_id, &account_id)?;
+        require_compatible_self_participant(
+            existing_self_participant_id.as_deref(),
+            report.self_participant_id.as_deref(),
+        )?;
+        let previous_fingerprint = previous_fingerprint.ok_or_else(|| {
+            RestoreError::Integrity("replica has no authoritative source checkpoint".to_string())
+        })?;
+        let incoming_coverage = load_archive_coverage(archive_directory)?;
+        let stored_state = load_coverage_state(&opened.connection, &account_id)?;
+        if let Some((stored_report, stored_coverage)) = stored_state.as_ref() {
+            ensure_partial_database_transition_is_lossless(stored_report, stored_coverage, report)?;
+        }
+        let unchanged_revision =
+            stored_state
+                .as_ref()
+                .is_some_and(|(stored_report, stored_coverage)| {
+                    archive_revision_digest(stored_report, stored_coverage)
+                        == archive_revision_digest(report, &incoming_coverage)
+                });
+        if previous_fingerprint == report.source_fingerprint && unchanged_revision {
+            emit_idempotent_replica_progress(report, archive_directory, replica_path, progress)?;
+            return sync_report(
+                &opened.connection,
+                &account_id,
+                &previous_fingerprint,
+                report,
+                true,
+                SyncCounts::default(),
+                None,
+            );
+        }
+        let plan =
+            preflight_replica_application(archive_directory, replica_path, report, progress)?;
+        let (counts, committed) = reconcile_archive_transactionally(
+            &mut opened.connection,
+            archive_directory,
+            report,
+            &previous_fingerprint,
+            &plan,
+            replica_path,
+            progress,
+        )?;
+        emit_replica_checkpoint_progress(&plan, replica_path, ProgressState::Started, progress)?;
+        checkpoint_and_secure(&opened.connection, replica_path)?;
+        emit_replica_checkpoint_progress(&plan, replica_path, ProgressState::Completed, progress)?;
+        sync_report(
             &opened.connection,
             &account_id,
             &previous_fingerprint,
-            &report,
-            true,
-            SyncCounts::default(),
-            None,
-        );
+            report,
+            false,
+            counts,
+            Some(committed),
+        )
+    })();
+    if result.is_err() && replica_namespace_was_absent {
+        remove_failed_replica_files(replica_path);
     }
-    let (counts, committed) = reconcile_archive_transactionally(
-        &mut opened.connection,
-        archive_directory,
-        &report,
-        &previous_fingerprint,
-    )?;
-    checkpoint_and_secure(&opened.connection, replica_path)?;
-    sync_report(
-        &opened.connection,
-        &account_id,
-        &previous_fingerprint,
-        &report,
-        false,
-        counts,
-        Some(committed),
-    )
+    result
 }
 
 pub fn replica_matches_authoritative_archive(
@@ -1321,9 +1435,15 @@ pub fn search_replica_messages(
     let logical_type = filter.logical_type.map(i64::from);
     let sub_type = filter.sub_type.map(i64::from);
     let limit = requested_limit.clamp(1, 1_000);
-    let query_limit = checked_usize_i64(limit.saturating_add(1))?;
+    // Scan beyond the requested healthy-item limit so malformed rows do not
+    // shrink a page unnecessarily. The bounded multiplier prevents a damaged
+    // shard from turning one request into an unbounded scan; a cursor still
+    // advances across every inspected row.
+    let scan_limit = limit.saturating_mul(8).saturating_add(1).min(8_001);
+    let query_limit = checked_usize_i64(scan_limit)?;
     let mut statement = opened.connection.prepare(
-        "SELECT m.record_json
+        "SELECT m.created_at_unix, m.conversation_id, m.conversation_ordinal,
+                m.canonical_id, m.record_json
          FROM message AS m
          WHERE m.account_id = :account
            AND (:conversation IS NULL OR m.conversation_id = :conversation)
@@ -1399,32 +1519,82 @@ pub fn search_replica_messages(
             ":after_canonical": after_canonical,
             ":limit": query_limit,
         },
-        |row| row.get::<_, Vec<u8>>(0),
+        |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Vec<u8>>(4)?,
+            ))
+        },
     )?;
-    let mut items = rows
-        .map(|row| -> Result<CanonicalMessage, RestoreError> {
-            let message: CanonicalMessage = serde_json::from_slice(&row?)?;
-            require_account(&message.account_id, &account_id)?;
-            Ok(message)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let has_more = items.len() > limit;
-    items.truncate(limit);
+    let mut items = Vec::new();
+    let mut omitted_item_count = 0_u64;
+    let mut last_scanned_identity = None;
+    let mut has_more = false;
+    let mut scanned_count = 0_usize;
+    for row in rows {
+        scanned_count = scanned_count.saturating_add(1);
+        let (indexed_created_at, indexed_conversation_id, indexed_ordinal, indexed_id, bytes) =
+            match row {
+                Ok(value) => value,
+                Err(_) => {
+                    omitted_item_count = omitted_item_count.saturating_add(1);
+                    continue;
+                }
+            };
+        let indexed_ordinal = u64::try_from(indexed_ordinal).unwrap_or_default();
+        last_scanned_identity = Some((
+            indexed_created_at.unwrap_or(i64::MIN),
+            indexed_conversation_id.clone(),
+            indexed_ordinal,
+            indexed_id.clone(),
+        ));
+        let Ok(message) = serde_json::from_slice::<CanonicalMessage>(&bytes) else {
+            omitted_item_count = omitted_item_count.saturating_add(1);
+            continue;
+        };
+        if message.account_id != account_id
+            || message.canonical_id != indexed_id
+            || message.conversation_id != indexed_conversation_id
+            || message.conversation_ordinal != indexed_ordinal
+            || message.created_at_unix != indexed_created_at
+        {
+            omitted_item_count = omitted_item_count.saturating_add(1);
+            continue;
+        }
+        items.push(message);
+        if items.len() == limit {
+            has_more = true;
+            break;
+        }
+    }
+    if items.len() < limit && scanned_count == scan_limit && last_scanned_identity.is_some() {
+        has_more = true;
+    }
     let next_cursor = if has_more {
-        items.last().map(|message| {
-            encode_message_cursor(&ReplicaMessageCursor {
-                format_version: 2,
-                account_id: account_id.clone(),
-                replica_id: generation,
-                source_fingerprint: source_fingerprint.clone(),
-                checkpoint_revision: checkpoint_revision.clone(),
-                filter_sha256,
-                after_sort_time: message.created_at_unix.unwrap_or(i64::MIN),
-                after_conversation_id: message.conversation_id.clone(),
-                after_conversation_ordinal: message.conversation_ordinal,
-                after_canonical_id: message.canonical_id.clone(),
-            })
-        })
+        last_scanned_identity.map(
+            |(
+                after_sort_time,
+                after_conversation_id,
+                after_conversation_ordinal,
+                after_canonical_id,
+            )| {
+                encode_message_cursor(&ReplicaMessageCursor {
+                    format_version: 2,
+                    account_id: account_id.clone(),
+                    replica_id: generation,
+                    source_fingerprint: source_fingerprint.clone(),
+                    checkpoint_revision: checkpoint_revision.clone(),
+                    filter_sha256,
+                    after_sort_time,
+                    after_conversation_id,
+                    after_conversation_ordinal,
+                    after_canonical_id,
+                })
+            },
+        )
     } else {
         None
     };
@@ -1434,6 +1604,11 @@ pub fn search_replica_messages(
         checkpoint_revision,
         items,
         next_cursor,
+        omitted_item_count,
+        limitation_codes: (omitted_item_count > 0)
+            .then_some("malformedReplicaMessageOmitted".to_string())
+            .into_iter()
+            .collect(),
     })
 }
 
@@ -2619,7 +2794,7 @@ fn verify_replica_checkpoint_and_coverage(
         || report.self_participant_id != stored_self_participant_id
         || !account_binding_valid
         || report.source_fingerprint != identity.1
-        || require_authoritative_archive(&report).is_err()
+        || require_serving_archive(&report).is_err()
         || report.completion.full_restoration_achieved != identity.2
         || stored_complete != identity.2
         || serde_json::to_vec(&recomputed_completion)? != serde_json::to_vec(&report.completion)?
@@ -3459,10 +3634,342 @@ fn create_pre_migration_backup(
     result.map(|()| file_name)
 }
 
+impl ReplicaApplicationPlan {
+    fn prepare(
+        archive_directory: &Path,
+        replica_path: &Path,
+        report: &RestorationReport,
+    ) -> Result<Self, RestoreError> {
+        let archive_byte_count = report
+            .storage
+            .as_ref()
+            .map(|storage| storage.actual_archive_byte_count)
+            .filter(|value| *value > 0)
+            .map_or_else(|| archive_input_byte_count(archive_directory, report), Ok)?;
+        let estimated_peak_byte_count = archive_byte_count.saturating_mul(4);
+        let reserve_byte_count = (archive_byte_count / 10).max(64 * 1024 * 1024);
+        let required_free_byte_count = estimated_peak_byte_count.saturating_add(reserve_byte_count);
+        let parent = replica_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let available_free_byte_count_at_start = available_free_bytes(parent)?;
+        let integrity = &report.integrity;
+        let source_record_count = integrity
+            .conversation_count
+            .saturating_add(integrity.participant_count)
+            .saturating_add(integrity.restored_row_count)
+            .saturating_add(integrity.unique_artifact_count)
+            .saturating_add(integrity.cached_moment_count)
+            .saturating_add(integrity.cached_moment_interaction_count);
+        let total_work_record_count = source_record_count
+            .saturating_add(integrity.conversation_count)
+            .saturating_add(1);
+        let cached_file_count = usize::from(report.cached_moments_path.is_some())
+            + usize::from(report.cached_moment_interactions_path.is_some());
+        Ok(Self {
+            archive_byte_count,
+            estimated_peak_byte_count,
+            required_free_byte_count,
+            available_free_byte_count_at_start,
+            total_work_record_count,
+            source_record_count,
+            file_count: 5 + cached_file_count,
+            database_coverage: database_coverage_summary(report),
+        })
+    }
+}
+
+fn preflight_replica_application(
+    archive_directory: &Path,
+    replica_path: &Path,
+    report: &RestorationReport,
+    progress: &dyn ProgressObserver,
+) -> Result<ReplicaApplicationPlan, RestoreError> {
+    let plan = ReplicaApplicationPlan::prepare(archive_directory, replica_path, report)?;
+    let mut planned = ProgressEvent::new(
+        ProgressPhase::ReplicaApplication,
+        ProgressState::Planned,
+        "preflightReplicaStorage",
+        ProgressUnit::Bytes,
+        plan.available_free_byte_count_at_start
+            .min(plan.required_free_byte_count),
+        plan.required_free_byte_count,
+        0,
+        plan.total_work_record_count,
+    );
+    attach_replica_application_evidence(&mut planned, &plan, replica_path)?;
+    progress.observe(planned);
+    if plan.available_free_byte_count_at_start < plan.required_free_byte_count {
+        return Err(RestoreError::InsufficientReplicaDiskSpace {
+            available_byte_count: plan.available_free_byte_count_at_start,
+            required_free_byte_count: plan.required_free_byte_count,
+            estimated_peak_byte_count: plan.estimated_peak_byte_count,
+        });
+    }
+    let mut completed = ProgressEvent::new(
+        ProgressPhase::ReplicaApplication,
+        ProgressState::Completed,
+        "preflightReplicaStorage",
+        ProgressUnit::Bytes,
+        plan.required_free_byte_count,
+        plan.required_free_byte_count,
+        0,
+        plan.total_work_record_count,
+    );
+    attach_replica_application_evidence(&mut completed, &plan, replica_path)?;
+    progress.observe(completed);
+    Ok(plan)
+}
+
+fn emit_idempotent_replica_progress(
+    report: &RestorationReport,
+    archive_directory: &Path,
+    replica_path: &Path,
+    progress: &dyn ProgressObserver,
+) -> Result<(), RestoreError> {
+    let plan = ReplicaApplicationPlan::prepare(archive_directory, replica_path, report)?;
+    let mut event = ProgressEvent::new(
+        ProgressPhase::ReplicaApplication,
+        ProgressState::Completed,
+        "reuseReplicaCheckpoint",
+        ProgressUnit::Records,
+        plan.source_record_count,
+        plan.source_record_count,
+        plan.total_work_record_count,
+        plan.total_work_record_count,
+    );
+    event.restored_record_count = Some(plan.source_record_count);
+    attach_replica_application_evidence(&mut event, &plan, replica_path)?;
+    progress.observe(event);
+    Ok(())
+}
+
+fn emit_replica_checkpoint_progress(
+    plan: &ReplicaApplicationPlan,
+    replica_path: &Path,
+    state: ProgressState,
+    progress: &dyn ProgressObserver,
+) -> Result<(), RestoreError> {
+    let completed = u64::from(state == ProgressState::Completed);
+    let mut event = ProgressEvent::new(
+        ProgressPhase::ReplicaApplication,
+        state,
+        "checkpointEncryptedReplica",
+        ProgressUnit::Items,
+        completed,
+        1,
+        plan.total_work_record_count.saturating_sub(1) + completed,
+        plan.total_work_record_count,
+    );
+    event.restored_record_count = Some(plan.source_record_count);
+    attach_replica_application_evidence(&mut event, plan, replica_path)?;
+    progress.observe(event);
+    Ok(())
+}
+
+fn attach_replica_application_evidence(
+    event: &mut ProgressEvent,
+    plan: &ReplicaApplicationPlan,
+    replica_path: &Path,
+) -> Result<(), RestoreError> {
+    let parent = replica_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    event.archive_byte_count = Some(plan.archive_byte_count);
+    event.replica_file_byte_count = Some(replica_namespace_byte_count(replica_path)?);
+    event.estimated_peak_byte_count = Some(plan.estimated_peak_byte_count);
+    event.required_free_byte_count = Some(plan.required_free_byte_count);
+    event.available_free_byte_count = Some(available_free_bytes(parent)?);
+    event.database_count = Some(plan.database_coverage.total);
+    event.available_database_count = Some(plan.database_coverage.restored);
+    event.unavailable_database_count = Some(plan.database_coverage.unavailable);
+    event.source_record_count = Some(plan.source_record_count);
+    Ok(())
+}
+
+fn archive_input_byte_count(
+    archive_directory: &Path,
+    report: &RestorationReport,
+) -> Result<u64, RestoreError> {
+    let mut relative_paths = vec![
+        "messages.ndjson",
+        "artifacts.ndjson",
+        "conversations.ndjson",
+        "participants.ndjson",
+        "coverage.json",
+        "report.json",
+    ];
+    if report.cached_moments_path.is_some() {
+        relative_paths.push("cached-moments.ndjson");
+    }
+    if report.cached_moment_interactions_path.is_some() {
+        relative_paths.push("cached-moment-interactions.ndjson");
+    }
+    if report.cached_surfaces_path.is_some() {
+        relative_paths.push("cached-surfaces.json");
+    }
+    let mut total = 0_u64;
+    for relative in relative_paths {
+        let path = archive_directory.join(relative);
+        ensure_private_regular_file(&path)?;
+        total = total.saturating_add(fs::metadata(path)?.len());
+    }
+    Ok(total)
+}
+
+fn replica_namespace_byte_count(replica_path: &Path) -> Result<u64, RestoreError> {
+    let mut total = 0_u64;
+    for path in sqlite_file_namespace(replica_path) {
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.nlink() != 1
+                {
+                    return Err(RestoreError::Integrity(
+                        "replica storage contains an unsafe file identity".to_string(),
+                    ));
+                }
+                total = total.saturating_add(metadata.len());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(total)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn for_each_ndjson_with_replica_progress<T: DeserializeOwned + Serialize>(
+    path: &Path,
+    operation: &str,
+    file_index: usize,
+    expected_record_count: u64,
+    phase_start: u64,
+    restored_before: u64,
+    counts_as_restored: bool,
+    plan: &ReplicaApplicationPlan,
+    replica_path: &Path,
+    progress: &dyn ProgressObserver,
+    mut body: impl FnMut(T, Vec<u8>) -> Result<(), RestoreError>,
+) -> Result<u64, RestoreError> {
+    let file_byte_count = fs::metadata(path)?.len();
+    let started_at = Instant::now();
+    let mut started = ProgressEvent::new(
+        ProgressPhase::ReplicaApplication,
+        ProgressState::Started,
+        operation,
+        ProgressUnit::Records,
+        0,
+        expected_record_count,
+        phase_start,
+        plan.total_work_record_count,
+    );
+    started.file_index = Some(file_index);
+    started.file_count = Some(plan.file_count);
+    started.file_completed_byte_count = Some(0);
+    started.file_byte_count = Some(file_byte_count);
+    started.logical_path = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    started.restored_record_count = Some(restored_before);
+    attach_replica_application_evidence(&mut started, plan, replica_path)?;
+    progress.observe(started);
+
+    let mut reader = BufReader::new(File::open(path)?);
+    let mut line = Vec::new();
+    let mut processed = 0_u64;
+    let mut completed_bytes = 0_u64;
+    loop {
+        line.clear();
+        let read = reader.read_until(b'\n', &mut line)?;
+        if read == 0 {
+            break;
+        }
+        completed_bytes = completed_bytes.saturating_add(read as u64);
+        if line.last() == Some(&b'\n') {
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+        }
+        if line.is_empty() {
+            continue;
+        }
+        let value: T = serde_json::from_slice(&line)?;
+        let canonical = serde_json::to_vec(&value)?;
+        body(value, canonical)?;
+        processed = processed.saturating_add(1);
+        if processed == 1 || processed.is_multiple_of(1_000) {
+            let mut advanced = ProgressEvent::new(
+                ProgressPhase::ReplicaApplication,
+                ProgressState::Advanced,
+                operation,
+                ProgressUnit::Records,
+                processed,
+                expected_record_count,
+                phase_start.saturating_add(processed),
+                plan.total_work_record_count,
+            );
+            advanced.file_index = Some(file_index);
+            advanced.file_count = Some(plan.file_count);
+            advanced.file_completed_byte_count = Some(completed_bytes.min(file_byte_count));
+            advanced.file_byte_count = Some(file_byte_count);
+            advanced.logical_path = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned());
+            advanced.restored_record_count = Some(if counts_as_restored {
+                restored_before.saturating_add(processed)
+            } else {
+                restored_before
+            });
+            attach_replica_application_evidence(&mut advanced, plan, replica_path)?;
+            progress.observe(advanced);
+        }
+    }
+    if processed != expected_record_count || completed_bytes != file_byte_count {
+        return Err(RestoreError::Integrity(format!(
+            "replica import inventory changed for {}: expected {expected_record_count} records/{file_byte_count} bytes, observed {processed} records/{completed_bytes} bytes",
+            path.file_name()
+                .map_or_else(|| "archive ledger".into(), |name| name.to_string_lossy())
+        )));
+    }
+    let mut completed = ProgressEvent::new(
+        ProgressPhase::ReplicaApplication,
+        ProgressState::Completed,
+        operation,
+        ProgressUnit::Records,
+        processed,
+        expected_record_count,
+        phase_start.saturating_add(processed),
+        plan.total_work_record_count,
+    );
+    completed.file_index = Some(file_index);
+    completed.file_count = Some(plan.file_count);
+    completed.file_completed_byte_count = Some(file_byte_count);
+    completed.file_byte_count = Some(file_byte_count);
+    completed.logical_path = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    completed.restored_record_count = Some(if counts_as_restored {
+        restored_before.saturating_add(processed)
+    } else {
+        restored_before
+    });
+    completed.elapsed_milliseconds =
+        Some(u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX));
+    attach_replica_application_evidence(&mut completed, plan, replica_path)?;
+    progress.observe(completed);
+    Ok(processed)
+}
+
 fn import_archive_transactionally(
     connection: &mut Connection,
     archive_directory: &Path,
     report: &RestorationReport,
+    plan: &ReplicaApplicationPlan,
+    replica_path: &Path,
+    progress: &dyn ProgressObserver,
 ) -> Result<ImportCounts, RestoreError> {
     let conversations_path = archive_directory.join("conversations.ndjson");
     let participants_path = archive_directory.join("participants.ndjson");
@@ -3494,162 +4001,269 @@ fn import_archive_transactionally(
         ],
     )?;
     let mut counts = ImportCounts::default();
+    let mut phase_cursor = 0_u64;
+    let mut restored_record_count = 0_u64;
+    let mut file_index = 1_usize;
 
-    for_each_ndjson::<CanonicalConversation>(&conversations_path, |conversation, bytes| {
-        require_account(&conversation.account_id, &report.account_id)?;
-        transaction.execute(
-            "INSERT INTO conversation VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                report.account_id,
-                conversation.conversation_id,
-                json_enum(&conversation.kind)?,
-                json_enum(&conversation.entity_decode_state)?,
-                checked_usize_i64(conversation.participant_ids.len())?,
-                sha256(&bytes),
-                bytes,
-            ],
-        )?;
-        counts.conversations += 1;
-        Ok(())
-    })?;
-    for_each_ndjson::<CanonicalParticipant>(&participants_path, |participant, bytes| {
-        require_account(&participant.account_id, &report.account_id)?;
-        transaction.execute(
-            "INSERT INTO participant VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                report.account_id,
-                participant.participant_id,
-                json_enum(&participant.local_profile_state)?,
-                sha256(&bytes),
-                bytes,
-            ],
-        )?;
-        counts.participants += 1;
-        Ok(())
-    })?;
-    for_each_ndjson::<CanonicalConversation>(&conversations_path, |conversation, _| {
-        for membership in conversation.memberships {
+    let processed = for_each_ndjson_with_replica_progress::<CanonicalConversation>(
+        &conversations_path,
+        "applyReplicaConversations",
+        file_index,
+        report.integrity.conversation_count,
+        phase_cursor,
+        restored_record_count,
+        true,
+        plan,
+        replica_path,
+        progress,
+        |conversation, bytes| {
+            require_account(&conversation.account_id, &report.account_id)?;
             transaction.execute(
-                "INSERT INTO conversation_participant VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO conversation VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     report.account_id,
                     conversation.conversation_id,
-                    membership.participant_id,
-                    json_enum(&membership.role)?,
-                    membership.display_name_base64,
-                ],
-            )?;
-        }
-        Ok(())
-    })?;
-    for_each_ndjson::<CanonicalArtifact>(&artifacts_path, |artifact, bytes| {
-        transaction.execute(
-            "INSERT INTO artifact VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                report.account_id,
-                artifact.artifact_id,
-                json_enum(&artifact.kind)?,
-                json_enum(&artifact.role)?,
-                json_enum(&artifact.availability)?,
-                artifact.source_sha256,
-                artifact.decoded_sha256,
-                sha256(&bytes),
-                bytes,
-            ],
-        )?;
-        counts.artifacts += 1;
-        Ok(())
-    })?;
-    for_each_ndjson::<CanonicalMessage>(&messages_path, |message, bytes| {
-        require_account(&message.account_id, &report.account_id)?;
-        let search_text = message_search_text(&message);
-        let record_sha = sha256(&bytes);
-        transaction.execute(
-            "INSERT INTO message VALUES (
-               ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
-             )",
-            params![
-                report.account_id,
-                message.canonical_id,
-                message.conversation_id,
-                message.sender_id,
-                checked_i64(message.conversation_ordinal)?,
-                message.created_at_unix,
-                json_enum(&message.direction)?,
-                message.logical_type,
-                message.sub_type,
-                json_enum(&message.semantic_decode_state)?,
-                search_text,
-                record_sha,
-                bytes,
-            ],
-        )?;
-        transaction.execute(
-            "INSERT INTO message_fts(account_id, canonical_id, conversation_id, search_text)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                report.account_id,
-                message.canonical_id,
-                message.conversation_id,
-                search_text,
-            ],
-        )?;
-        for (ordinal, relationship) in message.relationships.into_iter().enumerate() {
-            transaction.execute(
-                "INSERT INTO message_relationship VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    report.account_id,
-                    message.canonical_id,
-                    checked_usize_i64(ordinal)?,
-                    json_enum(&relationship.kind)?,
-                    relationship.target_canonical_id,
-                    relationship.resolved,
-                    serde_json::to_vec(&relationship)?,
-                ],
-            )?;
-            counts.relationships += 1;
-        }
-        for (ordinal, reference) in message.artifact_references.into_iter().enumerate() {
-            transaction.execute(
-                "INSERT INTO message_artifact VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    report.account_id,
-                    message.canonical_id,
-                    checked_usize_i64(ordinal)?,
-                    reference.artifact_id,
-                    json_enum(&reference.role)?,
-                    reference.preferred,
-                ],
-            )?;
-            counts.message_artifacts += 1;
-        }
-        counts.messages += 1;
-        Ok(())
-    })?;
-
-    if let Some(cached) = cached.as_ref() {
-        for_each_ndjson::<crate::CanonicalCachedMoment>(&cached.moments_path, |moment, bytes| {
-            require_account(&moment.account_id, &report.account_id)?;
-            transaction.execute(
-                "INSERT INTO cached_moment VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    report.account_id,
-                    moment.canonical_id,
-                    moment.author_id,
-                    moment.created_at_unix,
-                    moment.content_type,
+                    json_enum(&conversation.kind)?,
+                    json_enum(&conversation.entity_decode_state)?,
+                    checked_usize_i64(conversation.participant_ids.len())?,
                     sha256(&bytes),
                     bytes,
                 ],
             )?;
-            counts.cached_moments += 1;
+            counts.conversations += 1;
             Ok(())
-        })?;
-        for_each_ndjson::<crate::CanonicalCachedMomentInteraction>(
-            &cached.interactions_path,
-            |interaction, bytes| {
-                require_account(&interaction.account_id, &report.account_id)?;
+        },
+    )?;
+    phase_cursor = phase_cursor.saturating_add(processed);
+    restored_record_count = restored_record_count.saturating_add(processed);
+    file_index += 1;
+
+    let processed = for_each_ndjson_with_replica_progress::<CanonicalParticipant>(
+        &participants_path,
+        "applyReplicaParticipants",
+        file_index,
+        report.integrity.participant_count,
+        phase_cursor,
+        restored_record_count,
+        true,
+        plan,
+        replica_path,
+        progress,
+        |participant, bytes| {
+            require_account(&participant.account_id, &report.account_id)?;
+            transaction.execute(
+                "INSERT INTO participant VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    report.account_id,
+                    participant.participant_id,
+                    json_enum(&participant.local_profile_state)?,
+                    sha256(&bytes),
+                    bytes,
+                ],
+            )?;
+            counts.participants += 1;
+            Ok(())
+        },
+    )?;
+    phase_cursor = phase_cursor.saturating_add(processed);
+    restored_record_count = restored_record_count.saturating_add(processed);
+    file_index += 1;
+
+    let processed = for_each_ndjson_with_replica_progress::<CanonicalConversation>(
+        &conversations_path,
+        "applyReplicaConversationMemberships",
+        file_index,
+        report.integrity.conversation_count,
+        phase_cursor,
+        restored_record_count,
+        false,
+        plan,
+        replica_path,
+        progress,
+        |conversation, _| {
+            for membership in conversation.memberships {
                 transaction.execute(
+                    "INSERT INTO conversation_participant VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        report.account_id,
+                        conversation.conversation_id,
+                        membership.participant_id,
+                        json_enum(&membership.role)?,
+                        membership.display_name_base64,
+                    ],
+                )?;
+            }
+            Ok(())
+        },
+    )?;
+    phase_cursor = phase_cursor.saturating_add(processed);
+    file_index += 1;
+
+    let processed = for_each_ndjson_with_replica_progress::<CanonicalArtifact>(
+        &artifacts_path,
+        "applyReplicaArtifacts",
+        file_index,
+        report.integrity.unique_artifact_count,
+        phase_cursor,
+        restored_record_count,
+        true,
+        plan,
+        replica_path,
+        progress,
+        |artifact, bytes| {
+            transaction.execute(
+                "INSERT INTO artifact VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    report.account_id,
+                    artifact.artifact_id,
+                    json_enum(&artifact.kind)?,
+                    json_enum(&artifact.role)?,
+                    json_enum(&artifact.availability)?,
+                    artifact.source_sha256,
+                    artifact.decoded_sha256,
+                    sha256(&bytes),
+                    bytes,
+                ],
+            )?;
+            counts.artifacts += 1;
+            Ok(())
+        },
+    )?;
+    phase_cursor = phase_cursor.saturating_add(processed);
+    restored_record_count = restored_record_count.saturating_add(processed);
+    file_index += 1;
+
+    let processed = for_each_ndjson_with_replica_progress::<CanonicalMessage>(
+        &messages_path,
+        "applyReplicaMessages",
+        file_index,
+        report.integrity.restored_row_count,
+        phase_cursor,
+        restored_record_count,
+        true,
+        plan,
+        replica_path,
+        progress,
+        |message, bytes| {
+            require_account(&message.account_id, &report.account_id)?;
+            let search_text = message_search_text(&message);
+            let record_sha = sha256(&bytes);
+            transaction.execute(
+                "INSERT INTO message VALUES (
+                   ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+                 )",
+                params![
+                    report.account_id,
+                    message.canonical_id,
+                    message.conversation_id,
+                    message.sender_id,
+                    checked_i64(message.conversation_ordinal)?,
+                    message.created_at_unix,
+                    json_enum(&message.direction)?,
+                    message.logical_type,
+                    message.sub_type,
+                    json_enum(&message.semantic_decode_state)?,
+                    search_text,
+                    record_sha,
+                    bytes,
+                ],
+            )?;
+            transaction.execute(
+                "INSERT INTO message_fts(account_id, canonical_id, conversation_id, search_text)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    report.account_id,
+                    message.canonical_id,
+                    message.conversation_id,
+                    search_text,
+                ],
+            )?;
+            for (ordinal, relationship) in message.relationships.into_iter().enumerate() {
+                transaction.execute(
+                    "INSERT INTO message_relationship VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        report.account_id,
+                        message.canonical_id,
+                        checked_usize_i64(ordinal)?,
+                        json_enum(&relationship.kind)?,
+                        relationship.target_canonical_id,
+                        relationship.resolved,
+                        serde_json::to_vec(&relationship)?,
+                    ],
+                )?;
+                counts.relationships += 1;
+            }
+            for (ordinal, reference) in message.artifact_references.into_iter().enumerate() {
+                transaction.execute(
+                    "INSERT INTO message_artifact VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        report.account_id,
+                        message.canonical_id,
+                        checked_usize_i64(ordinal)?,
+                        reference.artifact_id,
+                        json_enum(&reference.role)?,
+                        reference.preferred,
+                    ],
+                )?;
+                counts.message_artifacts += 1;
+            }
+            counts.messages += 1;
+            Ok(())
+        },
+    )?;
+    phase_cursor = phase_cursor.saturating_add(processed);
+    restored_record_count = restored_record_count.saturating_add(processed);
+    file_index += 1;
+
+    if let Some(cached) = cached.as_ref() {
+        let processed = for_each_ndjson_with_replica_progress::<crate::CanonicalCachedMoment>(
+            &cached.moments_path,
+            "applyReplicaCachedMoments",
+            file_index,
+            report.integrity.cached_moment_count,
+            phase_cursor,
+            restored_record_count,
+            true,
+            plan,
+            replica_path,
+            progress,
+            |moment, bytes| {
+                require_account(&moment.account_id, &report.account_id)?;
+                transaction.execute(
+                    "INSERT INTO cached_moment VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        report.account_id,
+                        moment.canonical_id,
+                        moment.author_id,
+                        moment.created_at_unix,
+                        moment.content_type,
+                        sha256(&bytes),
+                        bytes,
+                    ],
+                )?;
+                counts.cached_moments += 1;
+                Ok(())
+            },
+        )?;
+        phase_cursor = phase_cursor.saturating_add(processed);
+        restored_record_count = restored_record_count.saturating_add(processed);
+        file_index += 1;
+
+        let processed =
+            for_each_ndjson_with_replica_progress::<crate::CanonicalCachedMomentInteraction>(
+                &cached.interactions_path,
+                "applyReplicaCachedMomentInteractions",
+                file_index,
+                report.integrity.cached_moment_interaction_count,
+                phase_cursor,
+                restored_record_count,
+                true,
+                plan,
+                replica_path,
+                progress,
+                |interaction, bytes| {
+                    require_account(&interaction.account_id, &report.account_id)?;
+                    transaction.execute(
                     "INSERT INTO cached_moment_interaction VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![
                         report.account_id,
@@ -3662,10 +4276,13 @@ fn import_archive_transactionally(
                         bytes,
                     ],
                 )?;
-                counts.cached_moment_interactions += 1;
-                Ok(())
-            },
-        )?;
+                    counts.cached_moment_interactions += 1;
+                    Ok(())
+                },
+            )?;
+        phase_cursor = phase_cursor.saturating_add(processed);
+        restored_record_count = restored_record_count.saturating_add(processed);
+        file_index += 1;
         transaction.execute(
             "INSERT INTO cached_surface_state VALUES (?1, ?2, ?3)",
             params![
@@ -3674,6 +4291,15 @@ fn import_archive_transactionally(
                 serde_json::to_vec(&cached.coverage)?,
             ],
         )?;
+    }
+
+    if phase_cursor != plan.total_work_record_count.saturating_sub(1)
+        || restored_record_count != plan.source_record_count
+        || file_index.saturating_sub(1) != plan.file_count
+    {
+        return Err(RestoreError::Integrity(
+            "replica import progress inventory differs from the audited archive".to_string(),
+        ));
     }
 
     let committed = unix_nanoseconds()?;
@@ -3758,18 +4384,28 @@ fn require_authoritative_archive(report: &RestorationReport) -> Result<(), Resto
     if report.replica_mutation_eligible() {
         return Ok(());
     }
-    {
-        let scope = match report.archive_scope {
-            crate::RestorationArchiveScope::Authoritative
-            | crate::RestorationArchiveScope::PartialDatabaseCoverage => "invalidDatabaseCoverage",
-            crate::RestorationArchiveScope::IncrementalFragment => "incrementalFragment",
-            crate::RestorationArchiveScope::DiagnosticSubset => "diagnosticSubset",
-        };
-        Err(RestoreError::Integrity(
-            format!(
-                "replica mutation requires an independently audited replica-eligible archive; archive scope is {scope}"
-            ),
-        ))
+    let scope = replica_ineligible_scope(report);
+    Err(RestoreError::Integrity(format!(
+        "replica mutation requires an independently audited replica-eligible archive; archive scope is {scope}"
+    )))
+}
+
+fn require_serving_archive(report: &RestorationReport) -> Result<(), RestoreError> {
+    if report.replica_serving_eligible() {
+        return Ok(());
+    }
+    let scope = replica_ineligible_scope(report);
+    Err(RestoreError::Integrity(format!(
+        "replica bootstrap requires an audited archive that accounts for every source database as fresh or explicitly unavailable; archive scope is {scope}"
+    )))
+}
+
+fn replica_ineligible_scope(report: &RestorationReport) -> &'static str {
+    match report.archive_scope {
+        crate::RestorationArchiveScope::Authoritative
+        | crate::RestorationArchiveScope::PartialDatabaseCoverage => "invalidDatabaseCoverage",
+        crate::RestorationArchiveScope::IncrementalFragment => "incrementalFragment",
+        crate::RestorationArchiveScope::DiagnosticSubset => "diagnosticSubset",
     }
 }
 
@@ -3830,6 +4466,9 @@ fn reconcile_archive_transactionally(
     archive_directory: &Path,
     report: &RestorationReport,
     previous_fingerprint: &str,
+    plan: &ReplicaApplicationPlan,
+    replica_path: &Path,
+    progress: &dyn ProgressObserver,
 ) -> Result<(SyncCounts, u128), RestoreError> {
     let conversations_path = archive_directory.join("conversations.ndjson");
     let participants_path = archive_directory.join("participants.ndjson");
@@ -3852,273 +4491,372 @@ fn reconcile_archive_transactionally(
     transaction.execute("DELETE FROM sync_seen", [])?;
     let mut counts = SyncCounts::default();
     let mut changed_conversations = HashSet::new();
+    let mut phase_cursor = 0_u64;
+    let mut restored_record_count = 0_u64;
+    let mut file_index = 1_usize;
 
-    for_each_ndjson::<CanonicalConversation>(&conversations_path, |conversation, bytes| {
-        require_account(&conversation.account_id, &report.account_id)?;
-        mark_seen(&transaction, "conversation", &conversation.conversation_id)?;
-        let digest = sha256(&bytes);
-        let existing: Option<String> = transaction
-            .query_row(
-                "SELECT record_sha256 FROM conversation
+    let processed = for_each_ndjson_with_replica_progress::<CanonicalConversation>(
+        &conversations_path,
+        "reconcileReplicaConversations",
+        file_index,
+        report.integrity.conversation_count,
+        phase_cursor,
+        restored_record_count,
+        true,
+        plan,
+        replica_path,
+        progress,
+        |conversation, bytes| {
+            require_account(&conversation.account_id, &report.account_id)?;
+            mark_seen(&transaction, "conversation", &conversation.conversation_id)?;
+            let digest = sha256(&bytes);
+            let existing: Option<String> = transaction
+                .query_row(
+                    "SELECT record_sha256 FROM conversation
                  WHERE account_id = ?1 AND conversation_id = ?2",
-                params![report.account_id, conversation.conversation_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let change_kind = match existing.as_deref() {
-            None => {
-                transaction.execute(
-                    "INSERT INTO conversation VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        report.account_id,
-                        conversation.conversation_id,
-                        json_enum(&conversation.kind)?,
-                        json_enum(&conversation.entity_decode_state)?,
-                        checked_usize_i64(conversation.participant_ids.len())?,
-                        digest,
-                        bytes,
-                    ],
-                )?;
-                Some("added")
-            }
-            Some(value) if value != digest => {
-                transaction.execute(
-                    "UPDATE conversation SET
+                    params![report.account_id, conversation.conversation_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let change_kind = match existing.as_deref() {
+                None => {
+                    transaction.execute(
+                        "INSERT INTO conversation VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            report.account_id,
+                            conversation.conversation_id,
+                            json_enum(&conversation.kind)?,
+                            json_enum(&conversation.entity_decode_state)?,
+                            checked_usize_i64(conversation.participant_ids.len())?,
+                            digest,
+                            bytes,
+                        ],
+                    )?;
+                    Some("added")
+                }
+                Some(value) if value != digest => {
+                    transaction.execute(
+                        "UPDATE conversation SET
                        kind = ?3, entity_decode_state = ?4, participant_count = ?5,
                        record_sha256 = ?6, record_json = ?7
                      WHERE account_id = ?1 AND conversation_id = ?2",
+                        params![
+                            report.account_id,
+                            conversation.conversation_id,
+                            json_enum(&conversation.kind)?,
+                            json_enum(&conversation.entity_decode_state)?,
+                            checked_usize_i64(conversation.participant_ids.len())?,
+                            digest,
+                            bytes,
+                        ],
+                    )?;
+                    Some("changed")
+                }
+                Some(_) => None,
+            };
+            if let Some(kind) = change_kind {
+                changed_conversations.insert(conversation.conversation_id.clone());
+                record_change(
+                    &transaction,
+                    &mut counts,
+                    &report.account_id,
+                    &report.source_fingerprint,
+                    kind,
+                    "conversation",
+                    &conversation.conversation_id,
+                    Some(&conversation.conversation_id),
+                    Some(&digest),
+                    started,
+                )?;
+            }
+            Ok(())
+        },
+    )?;
+    phase_cursor = phase_cursor.saturating_add(processed);
+    restored_record_count = restored_record_count.saturating_add(processed);
+    file_index += 1;
+
+    let processed = for_each_ndjson_with_replica_progress::<CanonicalParticipant>(
+        &participants_path,
+        "reconcileReplicaParticipants",
+        file_index,
+        report.integrity.participant_count,
+        phase_cursor,
+        restored_record_count,
+        true,
+        plan,
+        replica_path,
+        progress,
+        |participant, bytes| {
+            require_account(&participant.account_id, &report.account_id)?;
+            mark_seen(&transaction, "participant", &participant.participant_id)?;
+            let digest = sha256(&bytes);
+            let existing: Option<String> = transaction
+                .query_row(
+                    "SELECT record_sha256 FROM participant
+                 WHERE account_id = ?1 AND participant_id = ?2",
+                    params![report.account_id, participant.participant_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let change_kind = match existing.as_deref() {
+                None => {
+                    transaction.execute(
+                        "INSERT INTO participant VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            report.account_id,
+                            participant.participant_id,
+                            json_enum(&participant.local_profile_state)?,
+                            digest,
+                            bytes,
+                        ],
+                    )?;
+                    Some("added")
+                }
+                Some(value) if value != digest => {
+                    transaction.execute(
+                        "UPDATE participant SET local_profile_state = ?3,
+                       record_sha256 = ?4, record_json = ?5
+                     WHERE account_id = ?1 AND participant_id = ?2",
+                        params![
+                            report.account_id,
+                            participant.participant_id,
+                            json_enum(&participant.local_profile_state)?,
+                            digest,
+                            bytes,
+                        ],
+                    )?;
+                    Some("changed")
+                }
+                Some(_) => None,
+            };
+            if let Some(kind) = change_kind {
+                record_change(
+                    &transaction,
+                    &mut counts,
+                    &report.account_id,
+                    &report.source_fingerprint,
+                    kind,
+                    "participant",
+                    &participant.participant_id,
+                    None,
+                    Some(&digest),
+                    started,
+                )?;
+            }
+            Ok(())
+        },
+    )?;
+    phase_cursor = phase_cursor.saturating_add(processed);
+    restored_record_count = restored_record_count.saturating_add(processed);
+    file_index += 1;
+
+    let processed = for_each_ndjson_with_replica_progress::<CanonicalConversation>(
+        &conversations_path,
+        "reconcileReplicaConversationMemberships",
+        file_index,
+        report.integrity.conversation_count,
+        phase_cursor,
+        restored_record_count,
+        false,
+        plan,
+        replica_path,
+        progress,
+        |conversation, _| {
+            if !changed_conversations.contains(&conversation.conversation_id) {
+                return Ok(());
+            }
+            transaction.execute(
+                "DELETE FROM conversation_participant
+                 WHERE account_id = ?1 AND conversation_id = ?2",
+                params![report.account_id, conversation.conversation_id],
+            )?;
+            for membership in conversation.memberships {
+                transaction.execute(
+                    "INSERT INTO conversation_participant VALUES (?1, ?2, ?3, ?4, ?5)",
                     params![
                         report.account_id,
                         conversation.conversation_id,
-                        json_enum(&conversation.kind)?,
-                        json_enum(&conversation.entity_decode_state)?,
-                        checked_usize_i64(conversation.participant_ids.len())?,
-                        digest,
-                        bytes,
+                        membership.participant_id,
+                        json_enum(&membership.role)?,
+                        membership.display_name_base64,
                     ],
                 )?;
-                Some("changed")
             }
-            Some(_) => None,
-        };
-        if let Some(kind) = change_kind {
-            changed_conversations.insert(conversation.conversation_id.clone());
-            record_change(
-                &transaction,
-                &mut counts,
-                &report.account_id,
-                &report.source_fingerprint,
-                kind,
-                "conversation",
-                &conversation.conversation_id,
-                Some(&conversation.conversation_id),
-                Some(&digest),
-                started,
-            )?;
-        }
-        Ok(())
-    })?;
+            Ok(())
+        },
+    )?;
+    phase_cursor = phase_cursor.saturating_add(processed);
+    file_index += 1;
 
-    for_each_ndjson::<CanonicalParticipant>(&participants_path, |participant, bytes| {
-        require_account(&participant.account_id, &report.account_id)?;
-        mark_seen(&transaction, "participant", &participant.participant_id)?;
-        let digest = sha256(&bytes);
-        let existing: Option<String> = transaction
-            .query_row(
-                "SELECT record_sha256 FROM participant
-                 WHERE account_id = ?1 AND participant_id = ?2",
-                params![report.account_id, participant.participant_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let change_kind = match existing.as_deref() {
-            None => {
-                transaction.execute(
-                    "INSERT INTO participant VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        report.account_id,
-                        participant.participant_id,
-                        json_enum(&participant.local_profile_state)?,
-                        digest,
-                        bytes,
-                    ],
-                )?;
-                Some("added")
-            }
-            Some(value) if value != digest => {
-                transaction.execute(
-                    "UPDATE participant SET local_profile_state = ?3,
-                       record_sha256 = ?4, record_json = ?5
-                     WHERE account_id = ?1 AND participant_id = ?2",
-                    params![
-                        report.account_id,
-                        participant.participant_id,
-                        json_enum(&participant.local_profile_state)?,
-                        digest,
-                        bytes,
-                    ],
-                )?;
-                Some("changed")
-            }
-            Some(_) => None,
-        };
-        if let Some(kind) = change_kind {
-            record_change(
-                &transaction,
-                &mut counts,
-                &report.account_id,
-                &report.source_fingerprint,
-                kind,
-                "participant",
-                &participant.participant_id,
-                None,
-                Some(&digest),
-                started,
-            )?;
-        }
-        Ok(())
-    })?;
-
-    for_each_ndjson::<CanonicalConversation>(&conversations_path, |conversation, _| {
-        if !changed_conversations.contains(&conversation.conversation_id) {
-            return Ok(());
-        }
-        transaction.execute(
-            "DELETE FROM conversation_participant
-             WHERE account_id = ?1 AND conversation_id = ?2",
-            params![report.account_id, conversation.conversation_id],
-        )?;
-        for membership in conversation.memberships {
-            transaction.execute(
-                "INSERT INTO conversation_participant VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    report.account_id,
-                    conversation.conversation_id,
-                    membership.participant_id,
-                    json_enum(&membership.role)?,
-                    membership.display_name_base64,
-                ],
-            )?;
-        }
-        Ok(())
-    })?;
-
-    for_each_ndjson::<CanonicalArtifact>(&artifacts_path, |artifact, bytes| {
-        mark_seen(&transaction, "artifact", &artifact.artifact_id)?;
-        let digest = sha256(&bytes);
-        let existing: Option<String> = transaction
-            .query_row(
-                "SELECT record_sha256 FROM artifact
+    let processed = for_each_ndjson_with_replica_progress::<CanonicalArtifact>(
+        &artifacts_path,
+        "reconcileReplicaArtifacts",
+        file_index,
+        report.integrity.unique_artifact_count,
+        phase_cursor,
+        restored_record_count,
+        true,
+        plan,
+        replica_path,
+        progress,
+        |artifact, bytes| {
+            mark_seen(&transaction, "artifact", &artifact.artifact_id)?;
+            let digest = sha256(&bytes);
+            let existing: Option<String> = transaction
+                .query_row(
+                    "SELECT record_sha256 FROM artifact
                  WHERE account_id = ?1 AND artifact_id = ?2",
-                params![report.account_id, artifact.artifact_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if existing.as_deref() != Some(digest.as_str()) {
-            validate_canonical_artifact(&artifact, &coverage)?;
-            if report.format_version >= 3 {
-                verify_recorded_artifact_files(archive_directory, &artifact)?;
+                    params![report.account_id, artifact.artifact_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if existing.as_deref() != Some(digest.as_str()) {
+                validate_canonical_artifact(&artifact, &coverage)?;
+                if report.format_version >= 3 {
+                    verify_recorded_artifact_files(archive_directory, &artifact)?;
+                }
             }
-        }
-        let change_kind = match existing.as_deref() {
-            None => {
-                transaction.execute(
-                    "INSERT INTO artifact VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    params![
-                        report.account_id,
-                        artifact.artifact_id,
-                        json_enum(&artifact.kind)?,
-                        json_enum(&artifact.role)?,
-                        json_enum(&artifact.availability)?,
-                        artifact.source_sha256,
-                        artifact.decoded_sha256,
-                        digest,
-                        bytes,
-                    ],
-                )?;
-                Some("added")
-            }
-            Some(value) if value != digest => {
-                transaction.execute(
-                    "UPDATE artifact SET kind = ?3, role = ?4, availability = ?5,
+            let change_kind = match existing.as_deref() {
+                None => {
+                    transaction.execute(
+                        "INSERT INTO artifact VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        params![
+                            report.account_id,
+                            artifact.artifact_id,
+                            json_enum(&artifact.kind)?,
+                            json_enum(&artifact.role)?,
+                            json_enum(&artifact.availability)?,
+                            artifact.source_sha256,
+                            artifact.decoded_sha256,
+                            digest,
+                            bytes,
+                        ],
+                    )?;
+                    Some("added")
+                }
+                Some(value) if value != digest => {
+                    transaction.execute(
+                        "UPDATE artifact SET kind = ?3, role = ?4, availability = ?5,
                        source_sha256 = ?6, decoded_sha256 = ?7,
                        record_sha256 = ?8, record_json = ?9
                      WHERE account_id = ?1 AND artifact_id = ?2",
-                    params![
-                        report.account_id,
-                        artifact.artifact_id,
-                        json_enum(&artifact.kind)?,
-                        json_enum(&artifact.role)?,
-                        json_enum(&artifact.availability)?,
-                        artifact.source_sha256,
-                        artifact.decoded_sha256,
-                        digest,
-                        bytes,
-                    ],
+                        params![
+                            report.account_id,
+                            artifact.artifact_id,
+                            json_enum(&artifact.kind)?,
+                            json_enum(&artifact.role)?,
+                            json_enum(&artifact.availability)?,
+                            artifact.source_sha256,
+                            artifact.decoded_sha256,
+                            digest,
+                            bytes,
+                        ],
+                    )?;
+                    Some("changed")
+                }
+                Some(_) => None,
+            };
+            if let Some(kind) = change_kind {
+                record_change(
+                    &transaction,
+                    &mut counts,
+                    &report.account_id,
+                    &report.source_fingerprint,
+                    kind,
+                    "artifact",
+                    &artifact.artifact_id,
+                    None,
+                    Some(&digest),
+                    started,
                 )?;
-                Some("changed")
             }
-            Some(_) => None,
-        };
-        if let Some(kind) = change_kind {
-            record_change(
-                &transaction,
-                &mut counts,
-                &report.account_id,
-                &report.source_fingerprint,
-                kind,
-                "artifact",
-                &artifact.artifact_id,
-                None,
-                Some(&digest),
-                started,
-            )?;
-        }
-        Ok(())
-    })?;
+            Ok(())
+        },
+    )?;
+    phase_cursor = phase_cursor.saturating_add(processed);
+    restored_record_count = restored_record_count.saturating_add(processed);
+    file_index += 1;
 
-    for_each_ndjson::<CanonicalMessage>(&messages_path, |message, bytes| {
-        require_account(&message.account_id, &report.account_id)?;
-        mark_seen(&transaction, "message", &message.canonical_id)?;
-        let digest = sha256(&bytes);
-        let existing: Option<String> = transaction
-            .query_row(
-                "SELECT record_sha256 FROM message
+    let processed = for_each_ndjson_with_replica_progress::<CanonicalMessage>(
+        &messages_path,
+        "reconcileReplicaMessages",
+        file_index,
+        report.integrity.restored_row_count,
+        phase_cursor,
+        restored_record_count,
+        true,
+        plan,
+        replica_path,
+        progress,
+        |message, bytes| {
+            require_account(&message.account_id, &report.account_id)?;
+            mark_seen(&transaction, "message", &message.canonical_id)?;
+            let digest = sha256(&bytes);
+            let existing: Option<String> = transaction
+                .query_row(
+                    "SELECT record_sha256 FROM message
                  WHERE account_id = ?1 AND canonical_id = ?2",
-                params![report.account_id, message.canonical_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let change_kind = match existing.as_deref() {
-            None => {
-                insert_message(&transaction, report, &message, &bytes, &digest)?;
-                Some("added")
+                    params![report.account_id, message.canonical_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let change_kind = match existing.as_deref() {
+                None => {
+                    insert_message(&transaction, report, &message, &bytes, &digest)?;
+                    Some("added")
+                }
+                Some(value) if value != digest => {
+                    update_message(&transaction, report, &message, &bytes, &digest)?;
+                    Some("changed")
+                }
+                Some(_) => None,
+            };
+            if let Some(kind) = change_kind {
+                replace_message_links(&transaction, report, &message)?;
+                record_change(
+                    &transaction,
+                    &mut counts,
+                    &report.account_id,
+                    &report.source_fingerprint,
+                    kind,
+                    "message",
+                    &message.canonical_id,
+                    Some(&message.conversation_id),
+                    Some(&digest),
+                    started,
+                )?;
             }
-            Some(value) if value != digest => {
-                update_message(&transaction, report, &message, &bytes, &digest)?;
-                Some("changed")
-            }
-            Some(_) => None,
-        };
-        if let Some(kind) = change_kind {
-            replace_message_links(&transaction, report, &message)?;
-            record_change(
-                &transaction,
-                &mut counts,
-                &report.account_id,
-                &report.source_fingerprint,
-                kind,
-                "message",
-                &message.canonical_id,
-                Some(&message.conversation_id),
-                Some(&digest),
-                started,
-            )?;
-        }
-        Ok(())
-    })?;
+            Ok(())
+        },
+    )?;
+    phase_cursor = phase_cursor.saturating_add(processed);
+    restored_record_count = restored_record_count.saturating_add(processed);
+    file_index += 1;
 
-    reconcile_cached_surfaces(&transaction, report, cached.as_ref(), &mut counts, started)?;
+    reconcile_cached_surfaces(
+        &transaction,
+        report,
+        cached.as_ref(),
+        &mut counts,
+        started,
+        plan,
+        replica_path,
+        progress,
+        &mut phase_cursor,
+        &mut restored_record_count,
+        &mut file_index,
+    )?;
+
+    if phase_cursor != plan.total_work_record_count.saturating_sub(1)
+        || restored_record_count != plan.source_record_count
+        || file_index.saturating_sub(1) != plan.file_count
+    {
+        return Err(RestoreError::Integrity(
+            "replica reconciliation progress inventory differs from the audited archive"
+                .to_string(),
+        ));
+    }
 
     remove_missing_messages(&transaction, report, &mut counts, started)?;
     remove_missing_entities(
@@ -4394,81 +5132,113 @@ fn replace_message_links(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn reconcile_cached_surfaces(
     transaction: &Transaction<'_>,
     report: &RestorationReport,
     cached: Option<&CachedArchiveInputs>,
     counts: &mut SyncCounts,
     observed_at: u128,
+    plan: &ReplicaApplicationPlan,
+    replica_path: &Path,
+    progress: &dyn ProgressObserver,
+    phase_cursor: &mut u64,
+    restored_record_count: &mut u64,
+    file_index: &mut usize,
 ) -> Result<(), RestoreError> {
     let Some(cached) = cached else {
         return Ok(());
     };
-    for_each_ndjson::<crate::CanonicalCachedMoment>(&cached.moments_path, |moment, bytes| {
-        require_account(&moment.account_id, &report.account_id)?;
-        mark_seen(transaction, "cachedMoment", &moment.canonical_id)?;
-        let digest = sha256(&bytes);
-        let existing: Option<String> = transaction
-            .query_row(
-                "SELECT record_sha256 FROM cached_moment
-                 WHERE account_id = ?1 AND canonical_id = ?2",
-                params![report.account_id, moment.canonical_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let kind = match existing.as_deref() {
-            None => {
-                transaction.execute(
-                    "INSERT INTO cached_moment VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        report.account_id,
-                        moment.canonical_id,
-                        moment.author_id,
-                        moment.created_at_unix,
-                        moment.content_type,
-                        digest,
-                        bytes,
-                    ],
-                )?;
-                Some("added")
-            }
-            Some(value) if value != digest => {
-                transaction.execute(
-                    "UPDATE cached_moment SET author_id = ?3, created_at_unix = ?4,
-                       content_type = ?5, record_sha256 = ?6, record_json = ?7
+    let processed = for_each_ndjson_with_replica_progress::<crate::CanonicalCachedMoment>(
+        &cached.moments_path,
+        "reconcileReplicaCachedMoments",
+        *file_index,
+        report.integrity.cached_moment_count,
+        *phase_cursor,
+        *restored_record_count,
+        true,
+        plan,
+        replica_path,
+        progress,
+        |moment, bytes| {
+            require_account(&moment.account_id, &report.account_id)?;
+            mark_seen(transaction, "cachedMoment", &moment.canonical_id)?;
+            let digest = sha256(&bytes);
+            let existing: Option<String> = transaction
+                .query_row(
+                    "SELECT record_sha256 FROM cached_moment
                      WHERE account_id = ?1 AND canonical_id = ?2",
-                    params![
-                        report.account_id,
-                        moment.canonical_id,
-                        moment.author_id,
-                        moment.created_at_unix,
-                        moment.content_type,
-                        digest,
-                        bytes,
-                    ],
+                    params![report.account_id, moment.canonical_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let kind = match existing.as_deref() {
+                None => {
+                    transaction.execute(
+                        "INSERT INTO cached_moment VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            report.account_id,
+                            moment.canonical_id,
+                            moment.author_id,
+                            moment.created_at_unix,
+                            moment.content_type,
+                            digest,
+                            bytes,
+                        ],
+                    )?;
+                    Some("added")
+                }
+                Some(value) if value != digest => {
+                    transaction.execute(
+                        "UPDATE cached_moment SET author_id = ?3, created_at_unix = ?4,
+                           content_type = ?5, record_sha256 = ?6, record_json = ?7
+                         WHERE account_id = ?1 AND canonical_id = ?2",
+                        params![
+                            report.account_id,
+                            moment.canonical_id,
+                            moment.author_id,
+                            moment.created_at_unix,
+                            moment.content_type,
+                            digest,
+                            bytes,
+                        ],
+                    )?;
+                    Some("changed")
+                }
+                Some(_) => None,
+            };
+            if let Some(kind) = kind {
+                record_change(
+                    transaction,
+                    counts,
+                    &report.account_id,
+                    &report.source_fingerprint,
+                    kind,
+                    "cachedMoment",
+                    &moment.canonical_id,
+                    None,
+                    Some(&digest),
+                    observed_at,
                 )?;
-                Some("changed")
             }
-            Some(_) => None,
-        };
-        if let Some(kind) = kind {
-            record_change(
-                transaction,
-                counts,
-                &report.account_id,
-                &report.source_fingerprint,
-                kind,
-                "cachedMoment",
-                &moment.canonical_id,
-                None,
-                Some(&digest),
-                observed_at,
-            )?;
-        }
-        Ok(())
-    })?;
-    for_each_ndjson::<crate::CanonicalCachedMomentInteraction>(
+            Ok(())
+        },
+    )?;
+    *phase_cursor = phase_cursor.saturating_add(processed);
+    *restored_record_count = restored_record_count.saturating_add(processed);
+    *file_index += 1;
+
+    let processed = for_each_ndjson_with_replica_progress::<crate::CanonicalCachedMomentInteraction>(
         &cached.interactions_path,
+        "reconcileReplicaCachedMomentInteractions",
+        *file_index,
+        report.integrity.cached_moment_interaction_count,
+        *phase_cursor,
+        *restored_record_count,
+        true,
+        plan,
+        replica_path,
+        progress,
         |interaction, bytes| {
             require_account(&interaction.account_id, &report.account_id)?;
             mark_seen(
@@ -4541,6 +5311,9 @@ fn reconcile_cached_surfaces(
             Ok(())
         },
     )?;
+    *phase_cursor = phase_cursor.saturating_add(processed);
+    *restored_record_count = restored_record_count.saturating_add(processed);
+    *file_index += 1;
     Ok(())
 }
 
@@ -4973,22 +5746,6 @@ fn bootstrap_report(
     })
 }
 
-fn for_each_ndjson<T: DeserializeOwned + Serialize>(
-    path: &Path,
-    mut body: impl FnMut(T, Vec<u8>) -> Result<(), RestoreError>,
-) -> Result<(), RestoreError> {
-    for line in BufReader::new(File::open(path)?).lines() {
-        let line = line?;
-        if line.is_empty() {
-            continue;
-        }
-        let value: T = serde_json::from_str(&line)?;
-        let canonical = serde_json::to_vec(&value)?;
-        body(value, canonical)?;
-    }
-    Ok(())
-}
-
 fn message_search_text(message: &CanonicalMessage) -> String {
     let mut values = Vec::new();
     if let TypedPayload::Decoded(value) = &message.typed_payload {
@@ -5337,6 +6094,17 @@ fn ensure_replica_namespace_absent(path: &Path, label: &str) -> Result<(), Resto
         }
     }
     Ok(())
+}
+
+fn replica_namespace_is_absent(path: &Path) -> Result<bool, RestoreError> {
+    for candidate in sqlite_file_namespace(path) {
+        match fs::symlink_metadata(candidate) {
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(true)
 }
 
 fn sqlite_file_namespace(path: &Path) -> Vec<PathBuf> {

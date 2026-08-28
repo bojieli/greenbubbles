@@ -581,6 +581,21 @@ impl RestorationReport {
             | RestorationArchiveScope::DiagnosticSubset => false,
         }
     }
+
+    /// Whether an independently audited archive is safe to bootstrap a
+    /// read-serving replica. A full-inventory diagnostic restoration may be
+    /// useful for search/export even though it is not safe as a later
+    /// synchronization authority: every source database must still be
+    /// explicitly accounted for as fresh or unavailable.
+    pub fn replica_serving_eligible(&self) -> bool {
+        self.replica_mutation_eligible()
+            || (self.archive_scope == RestorationArchiveScope::DiagnosticSubset
+                && self.format_version >= 5
+                && self.database_coverage.as_ref().is_some_and(|coverage| {
+                    coverage.is_valid()
+                        && coverage.attempted_source_set_ids == coverage.snapshot_source_set_ids
+                }))
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -845,6 +860,21 @@ pub struct TableSchemaCoverage {
     pub schema_fingerprint: Option<String>,
     pub role: TableCoverageRole,
     pub classification_reason: String,
+    /// An unavailable table is isolated from restoration. Healthy tables stay
+    /// queryable and the gap remains explicit in coverage evidence.
+    #[serde(default)]
+    pub availability: TableCoverageAvailability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limitation_code: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TableCoverageAvailability {
+    #[default]
+    Complete,
+    Partial,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -956,6 +986,13 @@ mod tests {
             .as_mut()
             .unwrap()
             .attempted_database_count = 1;
+        assert!(!report.replica_mutation_eligible());
+
+        let coverage = report.database_coverage.as_mut().unwrap();
+        coverage.attempted_source_set_ids = coverage.snapshot_source_set_ids.clone();
+        coverage.attempted_database_count = coverage.total_database_count;
+        report.archive_scope = RestorationArchiveScope::DiagnosticSubset;
+        assert!(report.replica_serving_eligible());
         assert!(!report.replica_mutation_eligible());
     }
 }

@@ -81,14 +81,31 @@ pub(crate) fn restore_cached_surfaces_with_progress(
         .filter(|(_, database)| is_sns_database_path(&database.logical_path))
     {
         source_database_present = true;
-        let connection =
-            Connection::open_with_flags(&database.path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        connection.execute_batch("PRAGMA query_only = ON")?;
+        let connection = (|| -> Result<Connection, RestoreError> {
+            let connection =
+                Connection::open_with_flags(&database.path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            connection.execute_batch("PRAGMA query_only = ON")?;
+            Ok(connection)
+        })();
+        let Ok(connection) = connection else {
+            semantic_gap_count = semantic_gap_count.saturating_add(1);
+            continue;
+        };
         for table in &database.tables {
-            let columns = table_columns(&connection, table)?;
-            let schema_fingerprint = table_schema_fingerprint(&connection, table)?;
+            let inspection = (|| -> Result<_, RestoreError> {
+                let columns = table_columns(&connection, table)?;
+                let schema_fingerprint = table_schema_fingerprint(&connection, table)?;
+                let source_row_count = table_row_count(&connection, table)?;
+                Ok((columns, schema_fingerprint, source_row_count))
+            })();
+            let (columns, schema_fingerprint, source_row_count) = match inspection {
+                Ok(inspection) => inspection,
+                Err(_) => {
+                    semantic_gap_count = semantic_gap_count.saturating_add(1);
+                    continue;
+                }
+            };
             let source_table_id = opaque_id(table.as_bytes());
-            let source_row_count = table_row_count(&connection, table)?;
             let (role, reason) = classify_table(table, &columns);
             progress.begin_table(database, database_index, table, role, source_row_count);
             let restored_row_count = match role {
@@ -119,7 +136,7 @@ pub(crate) fn restore_cached_surfaces_with_progress(
                     account_id,
                     &catalog.manifest.created_at,
                     &mut interactions_writer,
-                    semantic_gap_count,
+                    &mut semantic_gap_count,
                     &mut progress,
                     database,
                     database_index,
@@ -222,11 +239,31 @@ fn restore_moments(
         "SELECT rowid, * FROM {} ORDER BY rowid",
         quote_identifier(table)
     );
-    let mut statement = connection.prepare(&sql)?;
-    let mut rows = statement.query([])?;
+    let mut statement = match connection.prepare(&sql) {
+        Ok(statement) => statement,
+        Err(_) => {
+            *semantic_gap_count = semantic_gap_count.saturating_add(1);
+            return Ok(0);
+        }
+    };
+    let mut rows = match statement.query([]) {
+        Ok(rows) => rows,
+        Err(_) => {
+            *semantic_gap_count = semantic_gap_count.saturating_add(1);
+            return Ok(0);
+        }
+    };
     let mut count = 0_u64;
     let mut throttle = CachedProgressThrottle::new(source_row_count);
-    while let Some(row) = rows.next()? {
+    loop {
+        let row = match rows.next() {
+            Ok(Some(row)) => row,
+            Ok(None) => break,
+            Err(_) => {
+                *semantic_gap_count = semantic_gap_count.saturating_add(1);
+                break;
+            }
+        };
         let source_row_id = row_i64(row, 0).unwrap_or_default();
         let timeline_id = column_raw(row, columns, &["tid"]).unwrap_or(RawSQLiteValue::Null);
         let user_name = column_bytes(row, columns, &["user_name", "username"]);
@@ -345,7 +382,7 @@ fn restore_interactions(
     account_id: &str,
     observed_at: &str,
     writer: &mut BufWriter<File>,
-    semantic_gap_count: u64,
+    semantic_gap_count: &mut u64,
     progress: &mut CachedSurfaceProgress<'_>,
     database: &PreparedDatabase,
     database_index: usize,
@@ -356,11 +393,31 @@ fn restore_interactions(
         "SELECT rowid, * FROM {} ORDER BY rowid",
         quote_identifier(table)
     );
-    let mut statement = connection.prepare(&sql)?;
-    let mut rows = statement.query([])?;
+    let mut statement = match connection.prepare(&sql) {
+        Ok(statement) => statement,
+        Err(_) => {
+            *semantic_gap_count = semantic_gap_count.saturating_add(1);
+            return Ok(0);
+        }
+    };
+    let mut rows = match statement.query([]) {
+        Ok(rows) => rows,
+        Err(_) => {
+            *semantic_gap_count = semantic_gap_count.saturating_add(1);
+            return Ok(0);
+        }
+    };
     let mut count = 0_u64;
     let mut throttle = CachedProgressThrottle::new(source_row_count);
-    while let Some(row) = rows.next()? {
+    loop {
+        let row = match rows.next() {
+            Ok(Some(row)) => row,
+            Ok(None) => break,
+            Err(_) => {
+                *semantic_gap_count = semantic_gap_count.saturating_add(1);
+                break;
+            }
+        };
         let source_row_id = row_i64(row, 0).unwrap_or_default();
         let raw_type = column_i64(row, columns, &["type"]);
         let from = column_bytes(row, columns, &["from_username"]).filter(|value| !value.is_empty());
@@ -416,7 +473,7 @@ fn restore_interactions(
                 role,
                 count,
                 source_row_count,
-                semantic_gap_count,
+                *semantic_gap_count,
             );
         }
     }
@@ -430,16 +487,26 @@ fn cached_surface_row_count(catalog: &PreparedCatalog) -> Result<u64, RestoreErr
         .iter()
         .filter(|database| is_sns_database_path(&database.logical_path))
     {
-        let connection =
-            Connection::open_with_flags(&database.path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        connection.execute_batch("PRAGMA query_only = ON")?;
+        let connection = (|| -> Result<Connection, RestoreError> {
+            let connection =
+                Connection::open_with_flags(&database.path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            connection.execute_batch("PRAGMA query_only = ON")?;
+            Ok(connection)
+        })();
+        let Ok(connection) = connection else {
+            continue;
+        };
         for table in &database.tables {
-            let columns = table_columns(&connection, table)?;
+            let Ok(columns) = table_columns(&connection, table) else {
+                continue;
+            };
             if matches!(
                 classify_table(table, &columns).0,
                 CachedSurfaceTableRole::MomentTimeline | CachedSurfaceTableRole::MomentInteraction
             ) {
-                total = total.saturating_add(table_row_count(&connection, table)?);
+                if let Ok(count) = table_row_count(&connection, table) {
+                    total = total.saturating_add(count);
+                }
             }
         }
     }

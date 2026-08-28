@@ -171,7 +171,7 @@ pub fn restore_catalog_with_progress(
     options: &RestorationOptions,
     progress: &dyn ProgressObserver,
 ) -> Result<RestorationReport, RestoreError> {
-    let progress_plan = plan_restoration(catalog, progress)?;
+    let mut progress_plan = plan_restoration(catalog, progress)?;
     let storage_plan = preflight_restoration_storage(
         catalog,
         &progress_plan,
@@ -197,7 +197,11 @@ pub fn restore_catalog_with_progress(
     let account_binding = resolve_account_binding(catalog, options.account_root.as_deref())?;
     let account_id = account_binding.account_id.clone();
     let mut integrity = RestorationIntegrity {
-        database_count: catalog.databases.len() as u64,
+        database_count: catalog
+            .databases
+            .len()
+            .saturating_sub(progress_plan.unavailable_databases.len())
+            as u64,
         observed_table_row_count: progress_plan.total_observed_table_rows,
         ..Default::default()
     };
@@ -210,6 +214,7 @@ pub fn restore_catalog_with_progress(
         let database_plan = progress_plan
             .databases
             .get(&database.source_set_id)
+            .cloned()
             .ok_or_else(|| {
                 RestoreError::Integrity("record progress plan lost a prepared database".to_string())
             })?;
@@ -230,14 +235,138 @@ pub fn restore_catalog_with_progress(
         database_start.table_count = Some(database.table_count);
         database_start.message_table_count = Some(database_plan.message_table_count);
         progress.observe(database_start);
-        let connection =
-            Connection::open_with_flags(&database.path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        connection.execute_batch("PRAGMA query_only = ON")?;
+        if progress_plan
+            .unavailable_databases
+            .contains(&database.source_set_id)
+        {
+            let mut database_finished = restoration_database_event(
+                ProgressPhase::RecordRestoration,
+                ProgressState::Completed,
+                "omitUnavailableDatabase",
+                0,
+                0,
+                overall_processed_rows,
+                progress_plan.total_message_rows,
+                database_index,
+                catalog.databases.len(),
+                database,
+            );
+            database_finished.table_count = Some(database.table_count);
+            database_finished.message_table_count = Some(0);
+            database_finished.elapsed_milliseconds = Some(elapsed_milliseconds(database_started));
+            progress.observe(database_finished);
+            continue;
+        }
+        let connection = (|| -> Result<Connection, RestoreError> {
+            let connection =
+                Connection::open_with_flags(&database.path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            connection.execute_batch("PRAGMA query_only = ON")?;
+            Ok(connection)
+        })();
+        let connection = match connection {
+            Ok(connection) => connection,
+            Err(_) => {
+                progress_plan
+                    .unavailable_databases
+                    .insert(database.source_set_id.clone());
+                integrity.database_count = integrity.database_count.saturating_sub(1);
+                let observed_rows = database_plan
+                    .table_rows
+                    .values()
+                    .fold(0_u64, |total, count| total.saturating_add(*count));
+                integrity.observed_table_row_count = integrity
+                    .observed_table_row_count
+                    .saturating_sub(observed_rows);
+                overall_processed_rows =
+                    overall_processed_rows.saturating_add(database_plan.message_rows);
+                let mut database_finished = restoration_database_event(
+                    ProgressPhase::RecordRestoration,
+                    ProgressState::Completed,
+                    "omitUnavailableDatabase",
+                    database_plan.message_rows,
+                    database_plan.message_rows,
+                    overall_processed_rows,
+                    progress_plan.total_message_rows,
+                    database_index,
+                    catalog.databases.len(),
+                    database,
+                );
+                database_finished.table_count = Some(database.table_count);
+                database_finished.message_table_count = Some(database_plan.message_table_count);
+                database_finished.elapsed_milliseconds =
+                    Some(elapsed_milliseconds(database_started));
+                progress.observe(database_finished);
+                continue;
+            }
+        };
         let names = load_name_map(&connection).unwrap_or_default();
 
         for table in &database.tables {
-            let columns = table_columns(&connection, table)?;
-            let schema_fingerprint = table_schema_fingerprint(&connection, table)?;
+            if progress_plan
+                .unavailable_tables
+                .contains(&(database.source_set_id.clone(), table.clone()))
+            {
+                let classification_reason =
+                    "table schema or row count was unavailable and the table was omitted";
+                *integrity
+                    .table_role_counts
+                    .entry("unhandledMessageCandidate".to_string())
+                    .or_default() += 1;
+                *integrity
+                    .table_classification_reason_counts
+                    .entry(classification_reason.to_string())
+                    .or_default() += 1;
+                integrity.message_candidate_gap_count =
+                    integrity.message_candidate_gap_count.saturating_add(1);
+                all_table_coverage.push(TableSchemaCoverage {
+                    source_set_id: database.source_set_id.clone(),
+                    source_logical_path: database.logical_path.clone(),
+                    source_table_id: opaque_id(table.as_bytes()),
+                    source_table_name: table.clone(),
+                    columns: Vec::new(),
+                    source_row_count: None,
+                    schema_fingerprint: None,
+                    role: TableCoverageRole::UnhandledMessageCandidate,
+                    classification_reason: classification_reason.to_string(),
+                    availability: crate::TableCoverageAvailability::Unavailable,
+                    limitation_code: Some("unavailableSourceTableOmitted".to_string()),
+                });
+                continue;
+            }
+            let table_inspection = (|| -> Result<_, RestoreError> {
+                Ok((
+                    table_columns(&connection, table)?,
+                    table_schema_fingerprint(&connection, table)?,
+                ))
+            })();
+            let (columns, schema_fingerprint) = match table_inspection {
+                Ok(inspection) => inspection,
+                Err(_) => {
+                    let planned_rows = database_plan.table_rows.get(table).copied().unwrap_or(0);
+                    integrity.observed_table_row_count = integrity
+                        .observed_table_row_count
+                        .saturating_sub(planned_rows);
+                    integrity.message_candidate_gap_count =
+                        integrity.message_candidate_gap_count.saturating_add(1);
+                    overall_processed_rows = overall_processed_rows.saturating_add(planned_rows);
+                    all_table_coverage.push(TableSchemaCoverage {
+                        source_set_id: database.source_set_id.clone(),
+                        source_logical_path: database.logical_path.clone(),
+                        source_table_id: opaque_id(table.as_bytes()),
+                        source_table_name: table.clone(),
+                        columns: Vec::new(),
+                        source_row_count: None,
+                        schema_fingerprint: None,
+                        role: TableCoverageRole::UnhandledMessageCandidate,
+                        classification_reason:
+                            "table became unavailable during restoration and was omitted"
+                                .to_string(),
+                        availability: crate::TableCoverageAvailability::Unavailable,
+                        limitation_code: Some("unavailableSourceTableOmitted".to_string()),
+                    });
+                    continue;
+                }
+            };
             let table_id = opaque_id(table.as_bytes());
             let (role, classification_reason) = classify_table(table, &columns);
             *integrity
@@ -261,6 +390,8 @@ pub fn restore_catalog_with_progress(
                 schema_fingerprint: Some(schema_fingerprint.clone()),
                 role,
                 classification_reason: classification_reason.to_string(),
+                availability: crate::TableCoverageAvailability::Complete,
+                limitation_code: None,
             });
             if role != TableCoverageRole::Message {
                 continue;
@@ -273,8 +404,44 @@ pub fn restore_catalog_with_progress(
                 .or_default() += 1;
             let quoted = quote_identifier(table);
             let count_sql = format!("SELECT count(*) FROM {quoted}");
-            let row_count: i64 = connection.query_row(&count_sql, [], |row| row.get(0))?;
+            let row_count: i64 = match connection.query_row(&count_sql, [], |row| row.get(0)) {
+                Ok(row_count) => row_count,
+                Err(_) => {
+                    omit_runtime_table(
+                        &mut integrity,
+                        all_table_coverage.last_mut(),
+                        database_plan.table_rows.get(table).copied().unwrap_or(0),
+                        &mut overall_processed_rows,
+                    );
+                    continue;
+                }
+            };
             let row_count = row_count.max(0) as u64;
+            let select_sql = format!("SELECT rowid, * FROM {quoted} ORDER BY rowid");
+            let mut statement = match connection.prepare(&select_sql) {
+                Ok(statement) => statement,
+                Err(_) => {
+                    omit_runtime_table(
+                        &mut integrity,
+                        all_table_coverage.last_mut(),
+                        row_count,
+                        &mut overall_processed_rows,
+                    );
+                    continue;
+                }
+            };
+            let mut rows = match statement.query([]) {
+                Ok(rows) => rows,
+                Err(_) => {
+                    omit_runtime_table(
+                        &mut integrity,
+                        all_table_coverage.last_mut(),
+                        row_count,
+                        &mut overall_processed_rows,
+                    );
+                    continue;
+                }
+            };
             integrity.source_row_count += row_count;
             table_coverage.push(MessageTableCoverage {
                 source_set_id: database.source_set_id.clone(),
@@ -285,10 +452,6 @@ pub fn restore_catalog_with_progress(
                 columns: columns.clone(),
                 schema_fingerprint: Some(schema_fingerprint),
             });
-
-            let select_sql = format!("SELECT rowid, * FROM {quoted} ORDER BY rowid");
-            let mut statement = connection.prepare(&select_sql)?;
-            let mut rows = statement.query([])?;
             let table_started = Instant::now();
             let mut table_processed_rows = 0_u64;
             let report_increment = (row_count / 100).max(1_000).max(1);
@@ -307,7 +470,16 @@ pub fn restore_catalog_with_progress(
             );
             table_start.table_name = Some(table.clone());
             progress.observe(table_start);
-            while let Some(row) = rows.next()? {
+            let mut table_read_failed = false;
+            loop {
+                let row = match rows.next() {
+                    Ok(Some(row)) => row,
+                    Ok(None) => break,
+                    Err(_) => {
+                        table_read_failed = true;
+                        break;
+                    }
+                };
                 let context = RowRestorationContext {
                     set_id: &database.source_set_id,
                     logical_path: &database.logical_path,
@@ -320,6 +492,32 @@ pub fn restore_catalog_with_progress(
                 };
                 match restore_row(row, &columns, &context) {
                     Ok(mut message) => {
+                        let duplicate_exists: bool = staging.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM staged_message WHERE canonical_id = ?1)",
+                            [&message.canonical_id],
+                            |row| row.get(0),
+                        )?;
+                        if duplicate_exists {
+                            serde_json::to_writer(
+                                &mut rejections,
+                                &RejectedRow {
+                                    source_set_id: message.source_set_id.clone(),
+                                    source_table_id: message.source_table_id.clone(),
+                                    source_row_id: Some(message.source_row_id),
+                                    reason:
+                                        "canonical message identity collision; later row omitted"
+                                            .to_string(),
+                                },
+                            )?;
+                            rejections.write_all(b"\n")?;
+                            integrity.duplicate_canonical_id_count =
+                                integrity.duplicate_canonical_id_count.saturating_add(1);
+                            integrity.rejected_row_count =
+                                integrity.rejected_row_count.saturating_add(1);
+                            table_processed_rows = table_processed_rows.saturating_add(1);
+                            overall_processed_rows = overall_processed_rows.saturating_add(1);
+                            continue;
+                        }
                         if message.direction_evidence
                             == DirectionEvidence::SenderAccountConflictWithExplicitSourceColumn
                         {
@@ -398,11 +596,22 @@ pub fn restore_catalog_with_progress(
                         )?;
                         if inserted != 1 {
                             integrity.duplicate_canonical_id_count += 1;
-                            return Err(RestoreError::Integrity(
-                                "canonical message identity collision".to_string(),
-                            ));
+                            serde_json::to_writer(
+                                &mut rejections,
+                                &RejectedRow {
+                                    source_set_id: message.source_set_id.clone(),
+                                    source_table_id: message.source_table_id.clone(),
+                                    source_row_id: Some(message.source_row_id),
+                                    reason: "canonical message identity collision; row omitted"
+                                        .to_string(),
+                                },
+                            )?;
+                            rejections.write_all(b"\n")?;
+                            integrity.rejected_row_count =
+                                integrity.rejected_row_count.saturating_add(1);
+                        } else {
+                            integrity.restored_row_count += 1;
                         }
-                        integrity.restored_row_count += 1;
                     }
                     Err(rejection) => {
                         serde_json::to_writer(&mut rejections, &rejection)?;
@@ -439,6 +648,24 @@ pub fn restore_catalog_with_progress(
                     )?;
                     progress.observe(event);
                     next_report = table_processed_rows.saturating_add(report_increment);
+                }
+            }
+            if table_read_failed {
+                let omitted_rows = row_count.saturating_sub(table_processed_rows);
+                integrity.source_row_count =
+                    integrity.source_row_count.saturating_sub(omitted_rows);
+                integrity.observed_table_row_count = integrity
+                    .observed_table_row_count
+                    .saturating_sub(omitted_rows);
+                integrity.message_candidate_gap_count =
+                    integrity.message_candidate_gap_count.saturating_add(1);
+                if let Some(coverage) = table_coverage.last_mut() {
+                    coverage.source_row_count = table_processed_rows;
+                }
+                if let Some(coverage) = all_table_coverage.last_mut() {
+                    coverage.source_row_count = Some(table_processed_rows);
+                    coverage.availability = crate::TableCoverageAvailability::Partial;
+                    coverage.limitation_code = Some("unreadableSourceRowsOmitted".to_string());
                 }
             }
             let mut table_finished = restoration_database_event(
@@ -989,7 +1216,8 @@ pub fn restore_catalog_with_progress(
     progress.observe(coverage_finished);
 
     let client_build_compatibility = catalog.manifest.client_build_compatibility();
-    let database_coverage = restoration_database_coverage(catalog);
+    let database_coverage =
+        restoration_database_coverage(catalog, &progress_plan.unavailable_databases);
     let mut completion = RestorationCompletion::evaluate(&integrity);
     if options.defer_media {
         completion.full_restoration_achieved = false;
@@ -1038,6 +1266,9 @@ pub fn restore_catalog_with_progress(
         published_after_coverage,
     )?;
     progress.observe(report_started);
+    let mut storage_evidence = storage_plan.evidence(staging_storage, 0);
+    storage_evidence.message_record_count = integrity.source_row_count;
+    storage_evidence.observed_table_record_count = integrity.observed_table_row_count;
     let mut report = RestorationReport {
         format_version: if account_binding.self_participant_id.is_some() {
             6
@@ -1047,7 +1278,7 @@ pub fn restore_catalog_with_progress(
         account_id,
         self_participant_id: account_binding.self_participant_id,
         account_binding_evidence: account_binding.evidence,
-        storage: Some(storage_plan.evidence(staging_storage, 0)),
+        storage: Some(storage_evidence),
         source_fingerprint: catalog.manifest.source_fingerprint.clone(),
         client_build_compatibility,
         acquisition: catalog.manifest.acquisition.clone(),
@@ -1125,7 +1356,30 @@ pub fn restore_catalog_with_progress(
     Ok(report)
 }
 
-fn restoration_database_coverage(catalog: &PreparedCatalog) -> RestorationDatabaseCoverage {
+fn omit_runtime_table(
+    integrity: &mut RestorationIntegrity,
+    coverage: Option<&mut TableSchemaCoverage>,
+    planned_rows: u64,
+    overall_processed_rows: &mut u64,
+) {
+    integrity.observed_table_row_count = integrity
+        .observed_table_row_count
+        .saturating_sub(planned_rows);
+    integrity.message_candidate_gap_count = integrity.message_candidate_gap_count.saturating_add(1);
+    *overall_processed_rows = overall_processed_rows.saturating_add(planned_rows);
+    if let Some(coverage) = coverage {
+        coverage.source_row_count = None;
+        coverage.availability = crate::TableCoverageAvailability::Unavailable;
+        coverage.limitation_code = Some("unavailableSourceTableOmitted".to_string());
+        coverage.classification_reason =
+            "message table became unavailable during restoration and was omitted".to_string();
+    }
+}
+
+fn restoration_database_coverage(
+    catalog: &PreparedCatalog,
+    runtime_unavailable_source_set_ids: &BTreeSet<String>,
+) -> RestorationDatabaseCoverage {
     let snapshot_source_set_ids = catalog
         .manifest
         .acquisition
@@ -1153,9 +1407,10 @@ fn restoration_database_coverage(catalog: &PreparedCatalog) -> RestorationDataba
     let fresh_source_set_ids = catalog
         .databases
         .iter()
+        .filter(|database| !runtime_unavailable_source_set_ids.contains(&database.source_set_id))
         .map(|database| database.source_set_id.clone())
         .collect::<BTreeSet<_>>();
-    let unavailable_source_set_ids = catalog
+    let mut unavailable_source_set_ids = catalog
         .available_database_selection
         .as_ref()
         .map(|selection| {
@@ -1166,7 +1421,8 @@ fn restoration_database_coverage(catalog: &PreparedCatalog) -> RestorationDataba
                 .collect::<BTreeSet<_>>()
         })
         .unwrap_or_default();
-    let unavailable_databases = catalog
+    unavailable_source_set_ids.extend(runtime_unavailable_source_set_ids.iter().cloned());
+    let mut unavailable_databases = catalog
         .available_database_selection
         .as_ref()
         .map(|selection| {
@@ -1188,6 +1444,26 @@ fn restoration_database_coverage(catalog: &PreparedCatalog) -> RestorationDataba
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    unavailable_databases.extend(
+        catalog
+            .databases
+            .iter()
+            .filter(|database| runtime_unavailable_source_set_ids.contains(&database.source_set_id))
+            .map(|database| RestorationUnavailableDatabase {
+                source_set_id: database.source_set_id.clone(),
+                logical_path: database.logical_path.clone(),
+                storage_family: match database.storage_family {
+                    crate::StorageFamily::SQLite => "sqlite",
+                    crate::StorageFamily::WcdbSqlcipher4 => "wcdbSqlcipher4",
+                }
+                .to_string(),
+                database_byte_count: database.database_byte_count,
+                write_ahead_log_byte_count: database.write_ahead_log_byte_count,
+                reason: "database became unavailable during restoration and was omitted"
+                    .to_string(),
+            }),
+    );
+    unavailable_databases.sort_by(|left, right| left.source_set_id.cmp(&right.source_set_id));
     let attempted_source_set_ids = fresh_source_set_ids
         .union(&unavailable_source_set_ids)
         .cloned()
@@ -1213,6 +1489,8 @@ fn restoration_database_coverage(catalog: &PreparedCatalog) -> RestorationDataba
 
 struct RestorationProgressPlan {
     databases: HashMap<String, DatabaseProgressPlan>,
+    unavailable_databases: BTreeSet<String>,
+    unavailable_tables: BTreeSet<(String, String)>,
     total_table_count: usize,
     total_message_table_count: u64,
     total_message_rows: u64,
@@ -1453,7 +1731,7 @@ fn attach_finalization_storage(
     Ok(())
 }
 
-fn available_free_bytes(path: &Path) -> Result<u64, RestoreError> {
+pub(crate) fn available_free_bytes(path: &Path) -> Result<u64, RestoreError> {
     let probe_path = nearest_existing_ancestor(path)?;
     let path_bytes = probe_path.as_os_str().as_bytes();
     let c_path = CString::new(path_bytes).map_err(|_| {
@@ -1532,6 +1810,7 @@ fn archive_file_byte_count(output_path: &Path) -> Result<u64, RestoreError> {
     Ok(total)
 }
 
+#[derive(Clone)]
 struct DatabaseProgressPlan {
     message_table_count: u64,
     message_rows: u64,
@@ -1607,6 +1886,8 @@ fn plan_restoration(
     let mut total_message_rows = 0_u64;
     let mut total_observed_table_rows = 0_u64;
     let mut total_cached_surface_rows = 0_u64;
+    let mut unavailable_databases = BTreeSet::new();
+    let mut unavailable_tables = BTreeSet::new();
     let mut planned = ProgressEvent::new(
         ProgressPhase::RecordPlanning,
         ProgressState::Planned,
@@ -1637,9 +1918,51 @@ fn plan_restoration(
         start_event.table_count = Some(database.table_count);
         progress.observe(start_event);
 
-        let connection =
-            Connection::open_with_flags(&database.path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        connection.execute_batch("PRAGMA query_only = ON")?;
+        let connection = (|| -> Result<Connection, RestoreError> {
+            let connection =
+                Connection::open_with_flags(&database.path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            connection.execute_batch("PRAGMA query_only = ON")?;
+            Ok(connection)
+        })();
+        let connection = match connection {
+            Ok(connection) => connection,
+            Err(_) => {
+                unavailable_databases.insert(database.source_set_id.clone());
+                unavailable_tables.extend(
+                    database
+                        .tables
+                        .iter()
+                        .cloned()
+                        .map(|table| (database.source_set_id.clone(), table)),
+                );
+                total_table_count = total_table_count.saturating_add(database.table_count);
+                databases.insert(
+                    database.source_set_id.clone(),
+                    DatabaseProgressPlan {
+                        message_table_count: 0,
+                        message_rows: 0,
+                        table_rows: HashMap::new(),
+                    },
+                );
+                let mut finished = restoration_database_event(
+                    ProgressPhase::RecordPlanning,
+                    ProgressState::Completed,
+                    "omitUnavailableDatabase",
+                    database.table_count as u64,
+                    database.table_count as u64,
+                    database_index as u64 + 1,
+                    catalog.databases.len() as u64,
+                    database_index,
+                    catalog.databases.len(),
+                    database,
+                );
+                finished.table_count = Some(database.table_count);
+                finished.message_table_count = Some(0);
+                finished.elapsed_milliseconds = Some(elapsed_milliseconds(database_started));
+                progress.observe(finished);
+                continue;
+            }
+        };
         let mut message_table_count = 0_u64;
         let mut message_rows = 0_u64;
         let mut table_rows = HashMap::new();
@@ -1659,11 +1982,37 @@ fn plan_restoration(
             table_started.table_name = Some(table.clone());
             table_started.table_count = Some(database.table_count);
             progress.observe(table_started);
-            let columns = table_columns(&connection, table)?;
-            let schema_fingerprint = table_schema_fingerprint(&connection, table)?;
-            let (role, _) = classify_table(table, &columns);
-            let sql = format!("SELECT count(*) FROM {}", quote_identifier(table));
-            let count: i64 = connection.query_row(&sql, [], |row| row.get(0))?;
+            let inspection = (|| -> Result<_, RestoreError> {
+                let columns = table_columns(&connection, table)?;
+                let schema_fingerprint = table_schema_fingerprint(&connection, table)?;
+                let (role, _) = classify_table(table, &columns);
+                let sql = format!("SELECT count(*) FROM {}", quote_identifier(table));
+                let count: i64 = connection.query_row(&sql, [], |row| row.get(0))?;
+                Ok((columns, schema_fingerprint, role, count))
+            })();
+            let (columns, schema_fingerprint, role, count) = match inspection {
+                Ok(inspection) => inspection,
+                Err(_) => {
+                    unavailable_tables.insert((database.source_set_id.clone(), table.clone()));
+                    let mut table_finished = restoration_database_event(
+                        ProgressPhase::RecordPlanning,
+                        ProgressState::Completed,
+                        "omitUnavailableTable",
+                        table_index as u64 + 1,
+                        database.table_count as u64,
+                        database_index as u64,
+                        catalog.databases.len() as u64,
+                        database_index,
+                        catalog.databases.len(),
+                        database,
+                    );
+                    table_finished.table_name = Some(table.clone());
+                    table_finished.table_role = Some("unavailable".to_string());
+                    table_finished.table_count = Some(database.table_count);
+                    progress.observe(table_finished);
+                    continue;
+                }
+            };
             let source_rows = count.max(0) as u64;
             total_observed_table_rows = total_observed_table_rows.saturating_add(source_rows);
             if crate::cached::is_sns_database_path(&database.logical_path)
@@ -1748,6 +2097,8 @@ fn plan_restoration(
     progress.observe(finished);
     Ok(RestorationProgressPlan {
         databases,
+        unavailable_databases,
+        unavailable_tables,
         total_table_count,
         total_message_table_count,
         total_message_rows,

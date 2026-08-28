@@ -131,6 +131,15 @@ pub struct AiContextManifest {
     pub exported_message_count: u64,
     pub exported_artifact_count: u64,
     pub artifact_resolution_error_count: u64,
+    /// Authorized conversations that could not be read from this checkpoint.
+    #[serde(default)]
+    pub omitted_conversation_count: u64,
+    /// Matching message rows that were deliberately withheld because their
+    /// record could not be decoded, validated, or paged safely.
+    #[serde(default)]
+    pub omitted_message_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
     pub export_complete: bool,
     pub files: Vec<AiContextFile>,
 }
@@ -163,6 +172,8 @@ pub struct AiContextConversation {
     pub message_fields: BTreeSet<ToolMessageField>,
     pub not_before_unix: Option<i64>,
     pub not_after_unix: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -266,6 +277,9 @@ pub struct AiContextAuditReport {
     pub artifact_count: u64,
     pub artifact_resolution_error_count: u64,
     pub preserved_stale_message_count: u64,
+    pub omitted_conversation_count: u64,
+    pub omitted_message_count: u64,
+    pub content_complete: bool,
 }
 
 #[derive(Default)]
@@ -395,19 +409,23 @@ pub fn export_ai_context(
     let policy = load_tool_policy(policy_path)?;
     let policy_sha256 = hex::encode(Sha256::digest(fs::read(policy_path)?));
 
-    let message_scopes = list
-        .conversations
+    let message_scopes = policy
+        .conversation_scopes
         .iter()
-        .filter(|conversation| {
-            conversation
+        .filter(|(_, scope)| {
+            scope
                 .capabilities
                 .contains(&ToolCapability::ReadRecentMessages)
+                && scope
+                    .capabilities
+                    .contains(&ToolCapability::ListConversations)
+                && (destination == ConnectorDestination::Local || scope.allow_remote_model)
         })
-        .map(|conversation| {
+        .map(|(conversation_id, scope)| {
             (
-                conversation.conversation_id.clone(),
-                conversation.not_before_unix,
-                conversation.not_after_unix,
+                conversation_id.clone(),
+                scope.not_before_unix,
+                scope.not_after_unix,
             )
         })
         .collect::<Vec<_>>();
@@ -420,14 +438,32 @@ pub fn export_ai_context(
     let mut message_writer = NdjsonWriter::create(staging.path(), "messages", "messages.jsonl")?;
     let mut artifact_writer = NdjsonWriter::create(staging.path(), "artifacts", "artifacts.jsonl")?;
 
+    let mut limitation_codes = list
+        .limitation_codes
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let omitted_conversation_count = list.omitted_conversation_count;
     let mut resolved_conversations = BTreeMap::<String, ResolvedConversation>::new();
     let mut contacts = BTreeMap::<String, ContactAccumulator>::new();
     for listed in &list.conversations {
-        let mut resolved = expect_resolved_conversation(reader.call(
-            ConnectorOperation::ResolveConversation {
+        let response = reader.raw_call(ConnectorOperation::ResolveConversation {
+            conversation_id: listed.conversation_id.clone(),
+        });
+        let mut resolved = match response.result {
+            Some(ConnectorResult::Conversation(resolved)) if response.ok => resolved,
+            _ => ResolvedConversation {
                 conversation_id: listed.conversation_id.clone(),
+                kind: listed.kind,
+                human_label: listed.human_label.clone(),
+                participant_count: listed.participant_count,
+                participants: Vec::new(),
+                owner_participant_id: None,
+                entity_decode_state: listed.entity_decode_state,
+                source_database_freshness: listed.source_database_freshness,
+                limitation_codes: vec!["conversationResolutionUnavailable".to_string()],
             },
-        )?)?;
+        };
         mark_self_participant(&mut resolved, &start_health);
         conversation_writer.write(&AiContextConversation {
             format_version: AI_CONTEXT_FORMAT_VERSION,
@@ -443,7 +479,9 @@ pub fn export_ai_context(
             message_fields: listed.message_fields.clone(),
             not_before_unix: listed.not_before_unix,
             not_after_unix: listed.not_after_unix,
+            limitation_codes: resolved.limitation_codes.clone(),
         })?;
+        limitation_codes.extend(resolved.limitation_codes.iter().cloned());
         for participant in &resolved.participants {
             contacts
                 .entry(participant.participant_id.clone())
@@ -470,6 +508,7 @@ pub fn export_ai_context(
         started,
     );
 
+    let mut exported_contact_ids = BTreeSet::new();
     for (participant_id, mut accumulated) in contacts {
         accumulated.profiles.sort_by(|left, right| {
             (&left.conversation_id, &left.role, &left.display_name).cmp(&(
@@ -518,6 +557,7 @@ pub fn export_ai_context(
             ),
         };
         let is_self = start_health.self_participant_id.as_deref() == Some(participant_id.as_str());
+        exported_contact_ids.insert(participant_id.clone());
         contact_writer.write(&AiContextContact {
             format_version: AI_CONTEXT_FORMAT_VERSION,
             participant_id,
@@ -547,6 +587,7 @@ pub fn export_ai_context(
 
     let mut artifact_conversations = BTreeMap::<String, BTreeSet<String>>::new();
     let mut exported_message_count = 0_u64;
+    let mut observed_omitted_message_count = 0_u64;
     for conversation in &list.conversations {
         if !conversation
             .capabilities
@@ -573,16 +614,26 @@ pub fn export_ai_context(
             .collect::<BTreeMap<_, _>>();
         let mut cursor = None;
         loop {
-            let page = expect_messages(reader.call(ConnectorOperation::GetMessages {
+            let response = reader.raw_call(ConnectorOperation::GetMessages {
                 conversation_id: conversation.conversation_id.clone(),
                 cursor: cursor.clone(),
                 limit: Some(EXPORT_PAGE_SIZE),
-            })?)?;
+            });
+            let page = match response.result {
+                Some(ConnectorResult::Messages(page)) if response.ok => page,
+                _ => {
+                    limitation_codes.insert("unavailableConversationMessagesOmitted".to_string());
+                    break;
+                }
+            };
             if page.source_fingerprint != start_health.source_fingerprint {
                 return Err(RestoreError::Integrity(
                     "replica changed while the AI context bundle was being exported".to_string(),
                 ));
             }
+            observed_omitted_message_count =
+                observed_omitted_message_count.saturating_add(page.omitted_message_count);
+            limitation_codes.extend(page.limitation_codes.iter().cloned());
             for mut message in page.messages {
                 normalize_message_identity(&mut message, &start_health);
                 let sender_display_name = message.sender_id.as_deref().and_then(|identifier| {
@@ -592,6 +643,36 @@ pub fn export_ai_context(
                         sender_names.get(identifier).copied().map(str::to_string)
                     }
                 });
+                if let Some(sender_id) = message.sender_id.as_ref() {
+                    if !exported_contact_ids.contains(sender_id) {
+                        let is_self =
+                            start_health.self_participant_id.as_deref() == Some(sender_id.as_str());
+                        let display_name = if is_self {
+                            "You".to_string()
+                        } else {
+                            sender_display_name
+                                .clone()
+                                .unwrap_or_else(|| short_identifier(sender_id))
+                        };
+                        contact_writer.write(&AiContextContact {
+                            format_version: AI_CONTEXT_FORMAT_VERSION,
+                            participant_id: sender_id.clone(),
+                            display_name: display_name.clone(),
+                            local_profile_available: false,
+                            source_database_freshness: ToolSourceDatabaseFreshness::Derived,
+                            enabled_conversation_ids: vec![conversation.conversation_id.clone()],
+                            conversation_profiles: vec![AiContactConversationProfile {
+                                conversation_id: conversation.conversation_id.clone(),
+                                conversation_label: resolved.human_label.clone(),
+                                display_name,
+                                role: "MessageSender".to_string(),
+                            }],
+                            resolution_error_code: Some(ConnectorErrorCode::NotFound),
+                        })?;
+                        exported_contact_ids.insert(sender_id.clone());
+                        limitation_codes.insert("missingSenderProfileSynthesized".to_string());
+                    }
+                }
                 for artifact in &message.artifact_references {
                     artifact_conversations
                         .entry(artifact.artifact_id.clone())
@@ -626,17 +707,17 @@ pub fn export_ai_context(
                 break;
             };
             if cursor.as_deref() == Some(next_cursor.as_str()) {
-                return Err(RestoreError::Integrity(
-                    "AI context message cursor did not advance".to_string(),
-                ));
+                limitation_codes.insert("nonAdvancingMessageCursorOmitted".to_string());
+                break;
             }
             cursor = Some(next_cursor);
         }
     }
+    let omitted_message_count = expected_message_count
+        .saturating_sub(exported_message_count)
+        .max(observed_omitted_message_count);
     if exported_message_count != expected_message_count {
-        return Err(RestoreError::Integrity(format!(
-            "AI context export planned {expected_message_count} messages but read {exported_message_count}"
-        )));
+        limitation_codes.insert("messageCountMismatchOmitted".to_string());
     }
 
     let artifact_count = artifact_conversations.len() as u64;
@@ -715,11 +796,17 @@ pub fn export_ai_context(
         policy_sha256,
         policy_source_fingerprint: policy.created_from_source_fingerprint,
         context: final_health,
-        enabled_conversation_count: list.conversations.len(),
+        enabled_conversation_count: list
+            .conversations
+            .len()
+            .saturating_add(usize::try_from(omitted_conversation_count).unwrap_or(usize::MAX)),
         exported_contact_count: files[1].record_count,
         exported_message_count,
         exported_artifact_count: files[3].record_count,
         artifact_resolution_error_count: artifact_error_count,
+        omitted_conversation_count,
+        omitted_message_count,
+        limitation_codes: limitation_codes.into_iter().collect(),
         export_complete: true,
         files,
     };
@@ -834,7 +921,11 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
                 "AI context conversations repeat an identity".to_string(),
             ));
         }
-        if conversation.participant_count != conversation.participants.len()
+        if (conversation.participant_count != conversation.participants.len()
+            && !conversation
+                .limitation_codes
+                .iter()
+                .any(|code| code == "conversationResolutionUnavailable"))
             || conversation
                 .not_before_unix
                 .zip(conversation.not_after_unix)
@@ -934,12 +1025,6 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
         }
         Ok(())
     })?;
-    if contact_ids != required_contact_ids {
-        return Err(RestoreError::Integrity(
-            "AI context contacts do not exactly cover conversation participants".to_string(),
-        ));
-    }
-
     let mut artifact_ids = BTreeSet::new();
     let mut artifact_error_count = 0_u64;
     let artifact_file = files["artifacts"];
@@ -985,6 +1070,7 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
 
     let mut message_ids = BTreeSet::new();
     let mut referenced_artifact_ids = BTreeSet::new();
+    let mut referenced_sender_ids = BTreeSet::new();
     let mut stale_message_count = 0_u64;
     let message_file = files["messages"];
     audit_ai_messages(bundle_directory, message_file, |message| {
@@ -1011,6 +1097,9 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
             return Err(RestoreError::Integrity(
                 "AI context message references an absent contact".to_string(),
             ));
+        }
+        if let Some(sender_id) = message.message.sender_id.as_ref() {
+            referenced_sender_ids.insert(sender_id.clone());
         }
         if manifest.format_version == AI_CONTEXT_FORMAT_VERSION {
             let self_participant_id =
@@ -1081,8 +1170,18 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
             "AI context artifacts do not exactly match message references".to_string(),
         ));
     }
+    required_contact_ids.extend(referenced_sender_ids);
+    if contact_ids != required_contact_ids {
+        return Err(RestoreError::Integrity(
+            "AI context contacts do not exactly cover conversation participants and message senders"
+                .to_string(),
+        ));
+    }
 
-    if manifest.enabled_conversation_count as u64 != conversation_file.record_count
+    if manifest.enabled_conversation_count as u64
+        != conversation_file
+            .record_count
+            .saturating_add(manifest.omitted_conversation_count)
         || manifest.exported_contact_count != contact_file.record_count
         || manifest.exported_message_count != message_file.record_count
         || manifest.exported_artifact_count != artifact_file.record_count
@@ -1123,7 +1222,40 @@ pub fn audit_ai_context(bundle_directory: &Path) -> Result<AiContextAuditReport,
         artifact_count: artifact_file.record_count,
         artifact_resolution_error_count: artifact_error_count,
         preserved_stale_message_count: stale_message_count,
+        omitted_conversation_count: manifest.omitted_conversation_count,
+        omitted_message_count: manifest.omitted_message_count,
+        content_complete: manifest.omitted_conversation_count == 0
+            && manifest.omitted_message_count == 0
+            && artifact_error_count == 0,
     })
+}
+
+/// Loads the small identity manifest for a downstream projection. Callers must
+/// still verify every referenced file digest before publishing derived data.
+/// Keeping this check here ensures all consumers use the same checkpoint,
+/// policy, account-holder, and format binding rules as `audit-ai-context`.
+pub(crate) fn load_validated_ai_context_manifest(
+    bundle_directory: &Path,
+) -> Result<AiContextManifest, RestoreError> {
+    ensure_private_directory(bundle_directory)?;
+    let manifest_path = bundle_directory.join("manifest.json");
+    ensure_private_regular_file(&manifest_path)?;
+    let manifest_bytes = read_bounded_file(&manifest_path, 4 * 1024 * 1024)?;
+    let manifest: AiContextManifest = serde_json::from_slice(&manifest_bytes)?;
+    validate_ai_manifest(&manifest)?;
+    let expected_bundle_id = context_bundle_id(
+        manifest.format_version,
+        &manifest.context,
+        &manifest.policy_sha256,
+        manifest.destination,
+        &manifest.policy_source_fingerprint,
+    )?;
+    if manifest.bundle_id != expected_bundle_id {
+        return Err(RestoreError::Integrity(
+            "AI context bundle identity does not match its checkpoint and policy".to_string(),
+        ));
+    }
+    Ok(manifest)
 }
 
 fn validate_ai_manifest(manifest: &AiContextManifest) -> Result<(), RestoreError> {
@@ -1663,24 +1795,6 @@ fn expect_conversations(
     match result {
         ConnectorResult::Conversations(value) => Ok(value),
         _ => Err(unexpected_connector_result("conversations")),
-    }
-}
-
-fn expect_resolved_conversation(
-    result: ConnectorResult,
-) -> Result<ResolvedConversation, RestoreError> {
-    match result {
-        ConnectorResult::Conversation(value) => Ok(value),
-        _ => Err(unexpected_connector_result("resolved conversation")),
-    }
-}
-
-fn expect_messages(
-    result: ConnectorResult,
-) -> Result<crate::connector::ConnectorMessagePage, RestoreError> {
-    match result {
-        ConnectorResult::Messages(value) => Ok(value),
-        _ => Err(unexpected_connector_result("messages")),
     }
 }
 

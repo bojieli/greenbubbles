@@ -11,9 +11,10 @@ use sha2::{Digest, Sha256};
 use crate::archive::{ensure_private_directory, ensure_private_regular_file, load_report};
 use crate::audit::audit_archive;
 use crate::replica::{
-    bootstrap_replica, replica_matches_authoritative_archive, replica_status, synchronize_replica,
+    bootstrap_audited_replica_with_progress, replica_matches_authoritative_archive, replica_status,
+    synchronize_audited_replica_with_progress,
 };
-use crate::{ReplicaKey, RestoreError};
+use crate::{NoProgress, ReplicaKey, RestoreError};
 
 const HANDOFF_FORMAT_VERSION: u32 = 3;
 const FOLLOW_STATE_FORMAT_VERSION: u32 = 1;
@@ -662,7 +663,13 @@ pub fn follow_replica_once(
     }
 
     let (outcome, idempotent, added, changed, removed) = if before.account_id.is_none() {
-        let bootstrap = bootstrap_replica(&archive_directory, replica_path, key)?;
+        let bootstrap = bootstrap_audited_replica_with_progress(
+            &archive_directory,
+            replica_path,
+            key,
+            &report,
+            &NoProgress,
+        )?;
         (
             ReplicaFollowOutcome::Bootstrapped,
             bootstrap.idempotent,
@@ -685,7 +692,13 @@ pub fn follow_replica_once(
         }
         (ReplicaFollowOutcome::Synchronized, true, 0, 0, 0)
     } else {
-        let sync = synchronize_replica(&archive_directory, replica_path, key)?;
+        let sync = synchronize_audited_replica_with_progress(
+            &archive_directory,
+            replica_path,
+            key,
+            &report,
+            &NoProgress,
+        )?;
         (
             ReplicaFollowOutcome::Synchronized,
             sync.idempotent,

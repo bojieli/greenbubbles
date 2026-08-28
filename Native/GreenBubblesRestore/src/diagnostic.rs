@@ -982,6 +982,8 @@ mod tests {
                 schema_fingerprint: Some("fingerprint".to_string()),
                 role: TableCoverageRole::Other,
                 classification_reason: "unclassified".to_string(),
+                availability: crate::TableCoverageAvailability::Complete,
+                limitation_code: None,
             }],
             logical_type_counts: BTreeMap::new(),
             logical_sub_type_counts: BTreeMap::new(),

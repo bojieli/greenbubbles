@@ -593,21 +593,34 @@ fn verify_coverage(
         {
             return Err(integrity("coverage contains a duplicate table identity"));
         }
-        if table
-            .schema_fingerprint
-            .as_deref()
-            .is_none_or(|value| !is_lower_hex(value, 64))
+        let unavailable = table.availability == crate::TableCoverageAvailability::Unavailable;
+        if (!unavailable
+            && table
+                .schema_fingerprint
+                .as_deref()
+                .is_none_or(|value| !is_lower_hex(value, 64)))
+            || (unavailable
+                && (table.role != TableCoverageRole::UnhandledMessageCandidate
+                    || table.limitation_code.as_deref().is_none_or(str::is_empty)))
         {
             return Err(integrity(
                 "coverage table lacks a complete schema fingerprint",
             ));
         }
         if coverage.format_version >= 4 {
-            observed_table_rows = observed_table_rows.saturating_add(
-                table
-                    .source_row_count
-                    .ok_or_else(|| integrity("coverage table lacks its observed row count"))?,
-            );
+            if unavailable {
+                if table.source_row_count.is_some() {
+                    return Err(integrity(
+                        "unavailable coverage table claims a complete observed row count",
+                    ));
+                }
+            } else {
+                observed_table_rows = observed_table_rows.saturating_add(
+                    table
+                        .source_row_count
+                        .ok_or_else(|| integrity("coverage table lacks its observed row count"))?,
+                );
+            }
         }
         let role_name = match table.role {
             TableCoverageRole::Message => "message",
@@ -619,6 +632,14 @@ fn verify_coverage(
         *table_classification_reason_counts
             .entry(table.classification_reason.clone())
             .or_default() += 1;
+        if table.availability == crate::TableCoverageAvailability::Partial {
+            if table.limitation_code.as_deref().is_none_or(str::is_empty) {
+                return Err(integrity(
+                    "partially readable coverage table lacks a limitation code",
+                ));
+            }
+            candidate_gaps = candidate_gaps.saturating_add(1);
+        }
         match table.role {
             TableCoverageRole::Message => {
                 message_table_ids.insert(identity);
@@ -633,7 +654,11 @@ fn verify_coverage(
                     .entry(table.schema_fingerprint.clone().unwrap())
                     .or_default() += 1;
             }
-            TableCoverageRole::UnhandledMessageCandidate => candidate_gaps += 1,
+            TableCoverageRole::UnhandledMessageCandidate => {
+                if table.availability != crate::TableCoverageAvailability::Partial {
+                    candidate_gaps = candidate_gaps.saturating_add(1);
+                }
+            }
             TableCoverageRole::KnownAuxiliary | TableCoverageRole::Other => {}
         }
     }

@@ -10,6 +10,7 @@ pub enum ProgressPhase {
     RecordRestoration,
     ArchiveFinalization,
     ArchiveAudit,
+    ReplicaApplication,
     ContextExport,
 }
 
@@ -60,6 +61,8 @@ pub struct ProgressEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_completed_byte_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub file_byte_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_byte_count: Option<u64>,
@@ -81,6 +84,10 @@ pub struct ProgressEvent {
     pub staged_compressed_byte_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub published_archive_byte_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_byte_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replica_file_byte_count: Option<u64>,
     #[serde(rename = "sourceSetID", skip_serializing_if = "Option::is_none")]
     pub source_set_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -156,6 +163,7 @@ impl ProgressEvent {
             database_count: None,
             file_index: None,
             file_count: None,
+            file_completed_byte_count: None,
             file_byte_count: None,
             source_byte_count: None,
             estimated_archive_byte_count: None,
@@ -167,6 +175,8 @@ impl ProgressEvent {
             staged_uncompressed_byte_count: None,
             staged_compressed_byte_count: None,
             published_archive_byte_count: None,
+            archive_byte_count: None,
+            replica_file_byte_count: None,
             source_set_id: None,
             logical_path: None,
             storage_family: None,

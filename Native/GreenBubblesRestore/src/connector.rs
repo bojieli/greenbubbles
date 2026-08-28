@@ -261,6 +261,10 @@ pub struct ConnectorConversationView {
 pub struct ConnectorConversationList {
     pub account_id: String,
     pub conversations: Vec<ConnectorConversationView>,
+    #[serde(default)]
+    pub omitted_conversation_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,6 +274,10 @@ pub struct ConnectorMessagePage {
     pub source_fingerprint: String,
     pub messages: Vec<MinimizedMessage>,
     pub next_cursor: Option<String>,
+    #[serde(default)]
+    pub omitted_message_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -355,6 +363,8 @@ pub struct ResolvedConversation {
     pub owner_participant_id: Option<String>,
     pub entity_decode_state: EntityDecodeState,
     pub source_database_freshness: ToolSourceDatabaseFreshness,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limitation_codes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1184,6 +1194,7 @@ impl<'a> ConnectorService<'a> {
             .account_id
             .ok_or_else(|| unavailable("replicaUninitialized", "Replica is not initialized"))?;
         let mut conversations = Vec::new();
+        let mut omitted_conversation_count = 0_u64;
         for (conversation_id, scope) in &self.policy.conversation_scopes {
             if !scope
                 .capabilities
@@ -1193,10 +1204,20 @@ impl<'a> ConnectorService<'a> {
                 continue;
             }
             let conversation =
-                get_replica_conversation(&self.replica_path, self.key, conversation_id)
-                    .map_err(integrity_error)?
-                    .ok_or_else(|| conflict("policy conversation disappeared from the replica"))?;
-            let resolved = self.resolve_conversation(&conversation)?;
+                match get_replica_conversation(&self.replica_path, self.key, conversation_id) {
+                    Ok(Some(conversation)) => conversation,
+                    Ok(None) | Err(_) => {
+                        omitted_conversation_count = omitted_conversation_count.saturating_add(1);
+                        continue;
+                    }
+                };
+            let resolved = match self.resolve_conversation(&conversation) {
+                Ok(resolved) => resolved,
+                Err(_) => {
+                    omitted_conversation_count = omitted_conversation_count.saturating_add(1);
+                    continue;
+                }
+            };
             conversations.push(ConnectorConversationView {
                 conversation_id: conversation.conversation_id,
                 kind: conversation.kind,
@@ -1225,6 +1246,11 @@ impl<'a> ConnectorService<'a> {
         Ok(ConnectorConversationList {
             account_id,
             conversations,
+            omitted_conversation_count,
+            limitation_codes: (omitted_conversation_count > 0)
+                .then_some("unavailableConversationOmitted".to_string())
+                .into_iter()
+                .collect(),
         })
     }
 
@@ -1279,6 +1305,8 @@ impl<'a> ConnectorService<'a> {
             source_fingerprint: page.source_fingerprint,
             messages,
             next_cursor: page.next_cursor,
+            omitted_message_count: page.omitted_item_count,
+            limitation_codes: page.limitation_codes,
         })
     }
 
@@ -1347,6 +1375,8 @@ impl<'a> ConnectorService<'a> {
                 source_fingerprint: page.source_fingerprint,
                 messages,
                 next_cursor: page.next_cursor,
+                omitted_message_count: page.omitted_item_count,
+                limitation_codes: page.limitation_codes,
             });
         }
 
@@ -1362,6 +1392,8 @@ impl<'a> ConnectorService<'a> {
         })?;
         let destination = ToolDataDestination::from(request.destination);
         let mut messages = Vec::new();
+        let mut omitted_message_count = 0_u64;
+        let mut limitation_codes = BTreeSet::new();
         for (identifier, scope) in &self.policy.conversation_scopes {
             if !scope.capabilities.contains(&ToolCapability::SearchMessages)
                 || (destination == ToolDataDestination::RemoteModel && !scope.allow_remote_model)
@@ -1375,8 +1407,17 @@ impl<'a> ConnectorService<'a> {
                 full_text_query: Some(query.to_string()),
                 ..Default::default()
             };
-            let page = search_replica_messages(&self.replica_path, self.key, &filter, None, limit)
-                .map_err(integrity_error)?;
+            let page =
+                match search_replica_messages(&self.replica_path, self.key, &filter, None, limit) {
+                    Ok(page) => page,
+                    Err(_) => {
+                        limitation_codes
+                            .insert("unavailableConversationMessagesOmitted".to_string());
+                        continue;
+                    }
+                };
+            omitted_message_count = omitted_message_count.saturating_add(page.omitted_item_count);
+            limitation_codes.extend(page.limitation_codes);
             messages.extend(page.items.into_iter().map(|message| {
                 minimize_message(
                     message,
@@ -1418,6 +1459,8 @@ impl<'a> ConnectorService<'a> {
             source_fingerprint,
             messages,
             next_cursor: None,
+            omitted_message_count,
+            limitation_codes: limitation_codes.into_iter().collect(),
         })
     }
 
@@ -1734,9 +1777,16 @@ impl<'a> ConnectorService<'a> {
             })
             .collect::<BTreeMap<_, _>>();
         let mut participants = Vec::new();
+        let mut limitation_codes = BTreeSet::new();
         for participant_id in &conversation.participant_ids {
-            let participant = get_replica_participant(&self.replica_path, self.key, participant_id)
-                .map_err(integrity_error)?;
+            let participant =
+                match get_replica_participant(&self.replica_path, self.key, participant_id) {
+                    Ok(participant) => participant,
+                    Err(_) => {
+                        limitation_codes.insert("unavailableParticipantProfile".to_string());
+                        None
+                    }
+                };
             let (role, scoped_name) = membership_roles
                 .get(participant_id.as_str())
                 .cloned()
@@ -1786,6 +1836,7 @@ impl<'a> ConnectorService<'a> {
                     .map(|record| record.source_set_id.clone()),
                 &self.preserved_stale_source_set_ids,
             ),
+            limitation_codes: limitation_codes.into_iter().collect(),
         })
     }
 

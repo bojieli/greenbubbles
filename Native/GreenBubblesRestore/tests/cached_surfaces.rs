@@ -25,6 +25,7 @@ use greenbubbles_restore::{
 use rusqlite::Connection;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use walkdir::WalkDir;
 
 #[test]
 fn restores_cached_moments_and_interactions_without_claiming_cache_completeness() {
@@ -287,11 +288,7 @@ fn restores_cached_moments_and_interactions_without_claiming_cache_completeness(
         serde_json::from_slice(&fs::read(output.join("report.json")).unwrap()).unwrap();
     changed_report.source_fingerprint = "cached-surface-fixture-2".to_string();
     changed_report.integrity.cached_surface_semantic_gap_count = semantic_gap_count;
-    fs::write(
-        output.join("report.json"),
-        serde_json::to_vec_pretty(&changed_report).unwrap(),
-    )
-    .unwrap();
+    write_report_with_refreshed_storage(&output, &mut changed_report);
     let synchronized = synchronize_replica(&output, &replica, &key).unwrap();
     assert_eq!(synchronized.added_count, 1);
     assert_eq!(synchronized.changed_count, 1);
@@ -493,4 +490,26 @@ fn write_ndjson<T: serde::Serialize>(path: &std::path::Path, values: &[T]) {
         bytes.push(b'\n');
     }
     fs::write(path, bytes).unwrap();
+}
+
+fn write_report_with_refreshed_storage(archive: &std::path::Path, report: &mut RestorationReport) {
+    let report_path = archive.join("report.json");
+    let other_bytes = WalkDir::new(archive)
+        .into_iter()
+        .map(Result::unwrap)
+        .filter(|entry| entry.file_type().is_file() && entry.path() != report_path)
+        .map(|entry| entry.metadata().unwrap().len())
+        .sum::<u64>();
+    for _ in 0..8 {
+        let mut bytes = serde_json::to_vec_pretty(report).unwrap();
+        bytes.push(b'\n');
+        let exact = other_bytes.saturating_add(bytes.len() as u64);
+        let storage = report.storage.as_mut().unwrap();
+        if storage.actual_archive_byte_count == exact {
+            fs::write(&report_path, bytes).unwrap();
+            return;
+        }
+        storage.actual_archive_byte_count = exact;
+    }
+    panic!("synthetic restoration report size did not converge");
 }

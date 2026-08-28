@@ -43,6 +43,12 @@ pub enum RestoreError {
         required_free_byte_count: u64,
         estimated_peak_byte_count: u64,
     },
+    #[error("insufficient free space for encrypted replica application: {available_byte_count} bytes available, {required_free_byte_count} bytes required for an estimated {estimated_peak_byte_count}-byte additional peak")]
+    InsufficientReplicaDiskSpace {
+        available_byte_count: u64,
+        required_free_byte_count: u64,
+        estimated_peak_byte_count: u64,
+    },
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]

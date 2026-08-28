@@ -3,9 +3,12 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use greenbubbles_restore::merge::merge_incremental_archive;
-use greenbubbles_restore::replica::{bootstrap_replica, synchronize_replica};
+use greenbubbles_restore::replica::{
+    bootstrap_replica, bootstrap_replica_with_progress, synchronize_replica_with_progress,
+};
 use greenbubbles_restore::tools::{
     create_tool_policy, ConversationToolScope, LocalToolService, ToolCapability,
     ToolDataDestination, ToolMessageField, ToolSourceDatabaseFreshness,
@@ -17,9 +20,9 @@ use greenbubbles_restore::{
     CanonicalMessage, CanonicalParticipant, ConversationKind, ConversationMembership,
     ConversationMembershipRole, DirectionEvidence, EntityDecodeState, LocalProfileState,
     MessageArtifactReference, MessageDirection, MessageOrderingBasis, MessageRelationship,
-    MessageRelationshipKind, RawSQLiteValue, RelationshipResolutionState, ReplicaKey,
-    RestorationArchiveScope, RestorationCompletion, RestorationCoverage,
-    RestorationDatabaseCoverage, RestorationIntegrity, RestorationReport,
+    MessageRelationshipKind, ProgressEvent, ProgressObserver, ProgressPhase, RawSQLiteValue,
+    RelationshipResolutionState, ReplicaKey, RestorationArchiveScope, RestorationCompletion,
+    RestorationCoverage, RestorationDatabaseCoverage, RestorationIntegrity, RestorationReport,
     RestorationUnavailableDatabase, SemanticDecodeState, SnapshotAcquisitionEvidence,
     SnapshotAcquisitionMode, SnapshotSourceSetInventory, TableCoverageRole, TableSchemaCoverage,
     TypedPayload,
@@ -33,6 +36,15 @@ const PREVIOUS_FINGERPRINT: &str =
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const CURRENT_FINGERPRINT: &str =
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+#[derive(Default)]
+struct CapturedProgress(Mutex<Vec<ProgressEvent>>);
+
+impl ProgressObserver for CapturedProgress {
+    fn observe(&self, event: ProgressEvent) {
+        self.0.lock().unwrap().push(event);
+    }
+}
 
 #[test]
 fn merges_selected_source_sets_reorders_globally_and_resolves_cross_shard_relationships() {
@@ -260,15 +272,44 @@ fn unavailable_incremental_database_preserves_prior_records_and_still_synchroniz
 
     let key = ReplicaKey::from_bytes([0x45; 32]);
     let replica = private.join("partial-replica.db");
-    let bootstrapped = bootstrap_replica(&output, &replica, &key).unwrap();
+    let bootstrap_progress = CapturedProgress::default();
+    let bootstrapped =
+        bootstrap_replica_with_progress(&output, &replica, &key, &bootstrap_progress).unwrap();
     assert!(!bootstrapped.authoritative_database_coverage);
     assert_eq!(bootstrapped.unavailable_database_count, 1);
     assert_eq!(bootstrapped.preserved_stale_database_count, 1);
-    let synchronized = synchronize_replica(&output, &replica, &key).unwrap();
+    let application_events = bootstrap_progress
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|event| event.phase == ProgressPhase::ReplicaApplication)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(!application_events.is_empty());
+    assert!(application_events.iter().all(|event| {
+        event.database_count == Some(2)
+            && event.available_database_count == Some(1)
+            && event.unavailable_database_count == Some(1)
+    }));
+    let sync_progress = CapturedProgress::default();
+    let synchronized =
+        synchronize_replica_with_progress(&output, &replica, &key, &sync_progress).unwrap();
     assert_eq!(synchronized.message_count, 2);
     assert!(synchronized.idempotent);
     assert!(!synchronized.authoritative_database_coverage);
     assert_eq!(synchronized.unavailable_database_count, 1);
+    let sync_events = sync_progress.0.lock().unwrap();
+    let final_application = sync_events
+        .iter()
+        .rev()
+        .find(|event| event.phase == ProgressPhase::ReplicaApplication)
+        .unwrap();
+    assert_eq!(final_application.unavailable_database_count, Some(1));
+    assert_eq!(
+        final_application.phase_completed,
+        final_application.phase_total
+    );
 
     let conversation_id = scoped_id(ACCOUNT, b"conversation");
     let policy = private.join("partial-policy.json");
@@ -419,6 +460,8 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
             schema_fingerprint: table.schema_fingerprint.clone(),
             role: TableCoverageRole::Message,
             classification_reason: "synthetic".to_string(),
+            availability: greenbubbles_restore::TableCoverageAvailability::Complete,
+            limitation_code: None,
         })
         .collect::<Vec<_>>();
     all_tables.extend(source_sets.iter().map(|source_set| TableSchemaCoverage {
@@ -437,6 +480,8 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
         )))),
         role: TableCoverageRole::Other,
         classification_reason: "synthetic cached table".to_string(),
+        availability: greenbubbles_restore::TableCoverageAvailability::Complete,
+        limitation_code: None,
     }));
     all_tables.push(TableSchemaCoverage {
         source_set_id: "set-a".to_string(),
@@ -448,6 +493,8 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
         schema_fingerprint: Some(hex::encode(sha2::Sha256::digest("voice-schema"))),
         role: TableCoverageRole::KnownAuxiliary,
         classification_reason: "synthetic voice payload table".to_string(),
+        availability: greenbubbles_restore::TableCoverageAvailability::Complete,
+        limitation_code: None,
     });
     let coverage = RestorationCoverage {
         format_version: 2,
