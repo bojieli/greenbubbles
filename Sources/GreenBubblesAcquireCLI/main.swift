@@ -169,11 +169,23 @@ private func printNote(_ message: String) {
   FileHandle.standardError.write(Data("note: \(message)\n".utf8))
 }
 
+// Under sudo the effective home is /var/root, but the WeChat data lives in the
+// invoking user's home; SUDO_USER tells us who that is.
+private func invokingUserHomeDirectory() -> URL {
+  if geteuid() == 0, let sudoUser = ProcessInfo.processInfo.environment["SUDO_USER"],
+    let entry = getpwnam(sudoUser), let directory = entry.pointee.pw_dir
+  {
+    return URL(fileURLWithPath: String(cString: directory)).standardizedFileURL
+  }
+  return FileManager.default.homeDirectoryForCurrentUser
+}
+
 private func resolveDatabaseRoot(_ option: URL?) throws -> URL {
   if let option {
     return option.standardizedFileURL
   }
-  let roots = WeChatAccountDiscovery().databaseRoots()
+  let roots = WeChatAccountDiscovery(homeDirectory: invokingUserHomeDirectory())
+    .databaseRoots()
   if roots.count == 1 { return roots[0] }
   if roots.isEmpty { throw CLIError.noDatabaseRootDiscovered }
   // Several accounts are present: the running client is logged into exactly
@@ -232,7 +244,7 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
   var clientReSigned = false
   var clientMarketingVersion: String?
   var clientBuildVersion: String?
-  let buildInspector = WeChatClientBuildInspector()
+  let buildInspector = WeChatClientBuildInspector(homeDirectory: invokingUserHomeDirectory())
   if let application = buildInspector.defaultApplicationURL() {
     clientInstalled = true
     if let build = try? buildInspector.inspect(application: application) {
