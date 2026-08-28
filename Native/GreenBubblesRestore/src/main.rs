@@ -51,8 +51,20 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let mut arguments = env::args().skip(1);
+    let mut arguments = env::args().skip(1).peekable();
     let command = arguments.next().unwrap_or_else(|| "help".to_string());
+    if matches!(arguments.peek().map(String::as_str), Some("--help" | "-h")) {
+        if let Some(help) = ai_command_help(&command) {
+            println!("{help}");
+            return Ok(());
+        }
+    }
+    if command == "help" {
+        if let Some(help) = arguments.next().as_deref().and_then(ai_command_help) {
+            println!("{help}");
+            return Ok(());
+        }
+    }
     match command.as_str() {
         "synthetic-benchmark" => {
             let work_directory = required_path(arguments.next(), "private work directory")?;
@@ -938,6 +950,46 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+fn ai_command_help(command: &str) -> Option<&'static str> {
+    match command {
+        "ai-query" => Some(concat!(
+            "Usage:\n",
+            "  greenbubbles-restore ai-query <replica-path> <policy-file> <connector-audit-log> <private-request-json> --replica-key-stdin\n\n",
+            "Runs one policy-scoped, read-only JSON request against the encrypted replica.\n",
+            "The request file must be an owner-only regular file. The replica key is read only\n",
+            "from standard input; query text and keys must not be supplied as arguments.\n",
+            "The JSON response is written to standard output.\n\n",
+            "Options:\n",
+            "  --replica-key-stdin  Require the replica key on standard input\n",
+            "  -h, --help           Show this help\n",
+        )),
+        "ai-export" => Some(concat!(
+            "Usage:\n",
+            "  greenbubbles-restore ai-export <replica-path> <policy-file> <connector-audit-log> <new-output-directory> --replica-key-stdin --requester <id> [--destination local|remote] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
+            "Exports one atomic, checkpoint-consistent, policy-scoped AI context bundle.\n",
+            "The output directory must not already exist. Progress is written to standard error,\n",
+            "and the final manifest is written as JSON to standard output.\n\n",
+            "Options:\n",
+            "  --replica-key-stdin       Require the replica key on standard input\n",
+            "  --requester <id>          Stable local requester identity\n",
+            "  --destination <target>    local (default) or remote\n",
+            "  --progress-file <path>    Create an owner-only NDJSON progress log\n",
+            "  --progress-json           Emit NDJSON progress on standard error\n",
+            "  --quiet-progress          Suppress human progress on standard error\n",
+            "  -h, --help                Show this help\n",
+        )),
+        "audit-ai-context" => Some(concat!(
+            "Usage:\n",
+            "  greenbubbles-restore audit-ai-context <AI-context-bundle-directory>\n\n",
+            "Verifies the bundle inventory, permissions, schemas, hashes, counts, identities,\n",
+            "references, freshness, checkpoint, and policy binding without printing content.\n\n",
+            "Options:\n",
+            "  -h, --help  Show this help\n",
+        )),
+        _ => None,
+    }
 }
 
 enum OwnedDatabaseUnlock {
