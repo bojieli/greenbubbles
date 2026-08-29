@@ -829,6 +829,11 @@ impl SendAdapter {
                 != draft.rendered_text_sha256
             || draft.recipient.conversation_id != draft.conversation_id
             || draft.recipient.human_label.is_empty()
+            // Threading is not implemented. A draft the owner approved as a
+            // reply to one message would be posted as a standalone message,
+            // which is not the action they approved, so it is refused rather
+            // than silently downgraded.
+            || draft.reply_target.is_some()
             || now_unix_nanoseconds >= draft.expires_at_unix_nanoseconds
         {
             failures.insert(SendFailureCode::DraftInvalid);
@@ -3266,6 +3271,43 @@ mod tests {
                 .unwrap_or(0),
             0
         );
+    }
+
+    #[test]
+    fn a_draft_approved_as_a_reply_is_refused_rather_than_sent_unthreaded() {
+        // Threading is unimplemented, so this draft would post as a standalone
+        // message. The body and recipient would be right and the action would
+        // still be the wrong one.
+        let now = 10_000_000_000_000_u128;
+        let fixture = fixture(SendRolloutStage::SelfSend, false);
+        let mut draft = draft(now);
+        draft.reply_target = Some(crate::connector::DraftReplyTarget {
+            canonical_id: sha('e'),
+            canonical_record_sha256: sha('f'),
+            sender_id: None,
+            created_at_unix: None,
+        });
+        let approval = approval_for(&fixture.adapter, &draft, now, '1');
+        let profile = verified_profile(SendTrustTier::Development);
+        let dispatcher =
+            ScriptedDispatcher::new(Some(ready_status()), Err(SendFailureCode::EngineStall));
+        let report = fixture
+            .adapter
+            .execute_with_artifacts(
+                &draft,
+                &approval,
+                &profile,
+                &supported_decision(),
+                &dispatcher,
+                None,
+                now,
+            )
+            .unwrap();
+        assert!(report
+            .precheck
+            .failures
+            .contains(&SendFailureCode::DraftInvalid));
+        assert_eq!(*dispatcher.execute_calls.borrow(), 0);
     }
 
     #[test]

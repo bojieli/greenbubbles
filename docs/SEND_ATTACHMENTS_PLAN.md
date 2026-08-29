@@ -783,3 +783,27 @@ The lesson is the one from §18, sharpened: an allow list is only as good as the
 binding between what it names and what the mechanism actually obeys. Worth
 asking of the rest of the system wherever an opaque identifier is authorized but
 something human-readable does the routing.
+
+## 20. Third pass: what the recipient binding exposed
+
+Binding policy to the title raised the obvious next question — how exactly is
+that title compared, and can anyone else control it?
+
+Comparison is sound: exact equality after whitespace folding, never a prefix or
+substring, so `Mike` cannot satisfy a gate expecting `Mike Chen`. But titles are
+display names, and a remote party controls their own. GATE 1 proves the open
+conversation is *titled* what was authorized, not that it is the conversation
+whose identifier was authorized. That gap cannot be closed with a string.
+
+What bounds it is that reconciliation queries only the approved
+`conversationId`. A message delivered to a lookalike is never found there, so
+the entry reaches `observedFailed` at grace expiry instead of being confirmed.
+The system cannot currently prevent a title collision, but it never lies about
+one, and that is the property worth protecting. It is documented as a limitation
+rather than fixed, because fixing it needs an identity signal the remote party
+does not control, and that is a design decision rather than a patch.
+
+The pass also found `replyTarget` unenforced. `replySend` was already refused
+outright, but a `textSend` draft carrying a reply target was accepted and would
+have posted as a standalone message — the right body to the right recipient, and
+not the action the owner approved. Now refused as `draftInvalid`.

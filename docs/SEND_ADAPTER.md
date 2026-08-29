@@ -241,6 +241,26 @@ delivered. A conversation with no authorized title configured cannot be sent to
 at all: an allow list that does not cover its conversations exactly, or that
 maps one to a blank title, is rejected as `configurationInvalid`.
 
+**Known limitation — a title can collide.** Titles are display names, and a
+remote party controls their own. GATE 1 proves the open conversation is *titled*
+what was authorized; it cannot prove it is the conversation whose identifier was
+authorized. A contact who renames themselves to an allow-listed title, and who
+happens to be the open conversation when a send runs, would pass the recipient
+gate. Two properties bound this. Title comparison is exact after whitespace
+folding, never a prefix or substring, so a lookalike must be an exact
+impersonation rather than a near miss. And reconciliation queries only the
+approved `conversationId`, so a message delivered elsewhere is never observed
+there: the entry reaches `observedFailed` at grace expiry rather than being
+confirmed. Misdelivery is therefore detected and never falsely reported as
+sent — but it is not prevented, and preventing it needs an identity signal the
+remote party does not control. Keep the allow list to conversations whose titles
+you control, and treat an `observedFailed` on a send you believed succeeded as a
+recipient question, not a transport one.
+
+A draft carrying a `replyTarget` is refused as `draftInvalid`. Threading is not
+implemented, so such a draft would post as a standalone message: the right body
+to the right recipient, but not the action that was approved.
+
 ## 9. Operator runbook
 
 ```sh
