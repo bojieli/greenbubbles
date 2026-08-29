@@ -250,6 +250,20 @@ journal, and total SQLite storage bytes. It returns no absolute paths or
 content. This distinguishes the compact source corpus from JSON field/base64
 expansion, staging databases, indexes, and eager media derivatives.
 
+Developers can run the complete bounded live-source sanity sequence against
+installed owner data with one privacy-safe command:
+
+```sh
+swift scripts/check-live-database.swift
+```
+
+The checker accepts only account roots returned by local GreenBubbles discovery;
+it has no plaintext or caller-supplied source mode and never creates a fixture
+database. It verifies status, conversation and message cursor pages, exact
+message hydration, a positive source-derived search, and exact search-hit
+hydration while emitting aggregate JSON only. See
+[docs/LIVE_DATABASE_SANITY_CHECK.md](docs/LIVE_DATABASE_SANITY_CHECK.md).
+
 `--decrypted` explicitly permits the same commands against plaintext fixture or
 export databases. For a GreenBubbles recoverable snapshot, prefer
 the app's macOS Keychain unlock or `--snapshot-local-credential <file>` for
