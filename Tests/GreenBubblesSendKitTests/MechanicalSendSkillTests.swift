@@ -9,11 +9,13 @@ import Testing
 /// forbids sending must never produce an attempted outcome.
 struct MechanicalSendSkillTests {
   private enum Region {
-    case title, compose, newestOutgoing, composeAttachment, confirmSheet, unknown
+    case search, title, compose, newestOutgoing, composeAttachment, confirmSheet,
+      unknown
   }
 
   private final class FakePerception: ScreenPerception {
     var frame: WindowFrame
+    var searchResult: Result<RecognizedRegionText, SendFailure>?
     var titleResult: Result<RecognizedRegionText, SendFailure>
     var composeResult: Result<RecognizedRegionText, SendFailure>
     var composeAfterSendResult: Result<RecognizedRegionText, SendFailure>?
@@ -24,6 +26,8 @@ struct MechanicalSendSkillTests {
     private(set) var captures: UInt32 = 0
     private var composeReads = 0
     private let profile: CalibrationProfileBody
+    /// What the search field echoes back by default: the key the skill pasted.
+    var lastPastedSearchKey = "File Transfer"
 
     init(profile: CalibrationProfileBody, frame: WindowFrame) {
       self.profile = profile
@@ -45,6 +49,12 @@ struct MechanicalSendSkillTests {
     func recognizeText(in rect: CGRect) throws(SendFailure) -> RecognizedRegionText {
       captures &+= 1
       switch classify(rect) {
+      case .search:
+        return try
+          (searchResult
+          ?? .success(
+            RecognizedRegionText(text: lastPastedSearchKey, confidencePartsPerMillion: 1_000_000)))
+          .get()
       case .title: return try titleResult.get()
       case .compose:
         composeReads += 1
@@ -66,6 +76,7 @@ struct MechanicalSendSkillTests {
 
     private func classify(_ rect: CGRect) -> Region {
       var candidates: [(WindowRelativeRect, Region)] = [
+        (profile.ocrRegions.search, .search),
         (profile.ocrRegions.title, .title),
         (profile.ocrRegions.compose, .compose),
         (profile.ocrRegions.newestOutgoing, .newestOutgoing),
@@ -154,6 +165,12 @@ struct MechanicalSendSkillTests {
         composeBox: WindowRelativePoint(xPartsPerMillion: 715_000, yPartsPerMillion: 870_000)
       ),
       ocrRegions: CalibrationOCRRegions(
+        search: WindowRelativeRect(
+          xPartsPerMillion: 40_000,
+          yPartsPerMillion: 15_000,
+          widthPartsPerMillion: 200_000,
+          heightPartsPerMillion: 35_000
+        ),
         title: WindowRelativeRect(
           xPartsPerMillion: 440_000,
           yPartsPerMillion: 20_000,
@@ -723,5 +740,50 @@ extension MechanicalSendSkillTests {
       .execute(capability(permitSend: true, capability: .imageSend, attachment: escaping))
     #expect(outcome.failure == .attachmentInvalid)
     #expect(effector.actions.filter { $0 != "restoreClipboard" }.isEmpty)
+  }
+}
+
+extension MechanicalSendSkillTests {
+  @Test("a search box that does not echo the key aborts before anything destructive")
+  func addressingFocusGateAborts() {
+    // The live failure mode: the click does not move focus, so the paste lands
+    // in whatever the person was using. GATE 0 catches it there.
+    let profile = profile()
+    let effector = FakeEffector()
+    let perception = perception(profile)
+    perception.searchResult = .success(
+      RecognizedRegionText(text: "Search", confidencePartsPerMillion: 1_000_000)
+    )
+    let outcome = makeSkill(profile: profile, effector: effector, perception: perception)
+      .execute(capability(permitSend: true))
+    #expect(outcome.failure == .addressingFocusFailed)
+    #expect(outcome.stageReached == .address)
+    #expect(!outcome.evidence.searchKeyEchoed)
+    #expect(!outcome.attempted)
+    // Nothing destructive: no select-all and no delete were ever sent, so an
+    // unsent draft in whatever field held focus survives untouched.
+    #expect(!effector.actions.contains("press(selectAll)"))
+    #expect(!effector.actions.contains("press(delete)"))
+    #expect(!effector.actions.contains("press(returnKey)"))
+    #expect(effector.actions.last == "restoreClipboard")
+  }
+
+  @Test("addressing never clears the field it pastes into")
+  func addressingIsNonDestructive() {
+    let profile = profile()
+    let effector = FakeEffector()
+    let outcome = makeSkill(
+      profile: profile,
+      effector: effector,
+      perception: perception(profile)
+    ).execute(capability(permitSend: false))
+    #expect(outcome.failure == nil)
+    // The first destructive keys in a successful run belong to the compose
+    // step, which only happens after GATE 1 has proven the recipient.
+    let firstClear = effector.actions.firstIndex(of: "press(selectAll)")
+    let searchPaste = effector.actions.firstIndex(of: "clipboard(File Transfer)")
+    #expect(searchPaste != nil)
+    #expect(firstClear != nil)
+    #expect((searchPaste ?? 0) < (firstClear ?? 0))
   }
 }

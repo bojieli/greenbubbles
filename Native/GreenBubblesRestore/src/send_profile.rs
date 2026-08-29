@@ -91,6 +91,9 @@ pub struct CalibrationAnchors {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CalibrationOcrRegions {
+    /// GATE 0: the search field, read back to prove the click actually took
+    /// focus before anything destructive is typed anywhere.
+    pub search: WindowRelativeRect,
     /// GATE 1: the opened conversation's title.
     pub title: WindowRelativeRect,
     /// GATE 2: the compose box, read back after pasting the body.
@@ -401,6 +404,7 @@ pub fn calibration_profile_signing_bytes(body: &CalibrationProfileBody) -> Optio
         body.anchors.first_result_row,
     );
     push_point(&mut writer, "anchor.composeBox", body.anchors.compose_box);
+    push_rect(&mut writer, "region.search", body.ocr_regions.search);
     push_rect(&mut writer, "region.title", body.ocr_regions.title);
     push_rect(&mut writer, "region.compose", body.ocr_regions.compose);
     push_rect(
@@ -481,6 +485,7 @@ fn structurally_valid_profile(body: &CalibrationProfileBody) -> bool {
         && body.anchors.search_box.valid()
         && body.anchors.first_result_row.valid()
         && body.anchors.compose_box.valid()
+        && body.ocr_regions.search.valid()
         && body.ocr_regions.title.valid()
         && body.ocr_regions.compose.valid()
         && body.ocr_regions.newest_outgoing.valid()
@@ -782,6 +787,12 @@ mod tests {
                 },
             },
             ocr_regions: CalibrationOcrRegions {
+                search: WindowRelativeRect {
+                    x_parts_per_million: 40_000,
+                    y_parts_per_million: 15_000,
+                    width_parts_per_million: 200_000,
+                    height_parts_per_million: 35_000,
+                },
                 title: WindowRelativeRect {
                     x_parts_per_million: 440_000,
                     y_parts_per_million: 20_000,

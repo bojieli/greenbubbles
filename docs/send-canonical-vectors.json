@@ -112,6 +112,12 @@
           "xPartsPerMillion": 620000,
           "yPartsPerMillion": 700000
         },
+        "search": {
+          "heightPartsPerMillion": 35000,
+          "widthPartsPerMillion": 200000,
+          "xPartsPerMillion": 40000,
+          "yPartsPerMillion": 15000
+        },
         "title": {
           "heightPartsPerMillion": 50000,
           "widthPartsPerMillion": 300000,
@@ -129,7 +135,7 @@
       "wechatBundleIdentifier": "com.tencent.xinWeChat",
       "wechatMarketingVersion": "4.1.13"
     },
-    "canonicalSha256": "c16981c625a76d2ecb3c40f0af16cade068a910d53a3b3484eda4084e4490767"
+    "canonicalSha256": "bf9c467850d443cb0d1139745391c4b8a8c4d3e1416e098a73a03afa9f3c73fc"
   },
   "compatibilityMatrix": {
     "body": {
@@ -219,6 +225,12 @@
           "xPartsPerMillion": 620000,
           "yPartsPerMillion": 700000
         },
+        "search": {
+          "heightPartsPerMillion": 35000,
+          "widthPartsPerMillion": 200000,
+          "xPartsPerMillion": 40000,
+          "yPartsPerMillion": 15000
+        },
         "title": {
           "heightPartsPerMillion": 50000,
           "widthPartsPerMillion": 300000,
@@ -232,7 +244,7 @@
         "focusIndicator": "search_caret",
         "minimumTitleConfidencePartsPerMillion": 900000
       },
-      "signature": "ce3635708aa35c8885071b91880aa27f8ec9cabf92ebcbaf1303d19ea3cf5a0cc9931597e8d2d06d450ec27be5aa2ab772e99e453352d6b0d6fd50cb5b7bdd09",
+      "signature": "1aae10e6f39e42f49b7f52fb1b7debea63a553bb02e732eaa89bd53b366ba39b6add506fa7ad21cf645bb7f7c25dd28c097f060dcc8eb897c48132a5bfcab703",
       "wechatBuild": "4.1.13.269579",
       "wechatBundleIdentifier": "com.tencent.xinWeChat",
       "wechatMarketingVersion": "4.1.13"

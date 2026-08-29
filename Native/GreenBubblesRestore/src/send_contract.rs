@@ -172,6 +172,7 @@ pub enum SendFailureCode {
     CalibrationDrift,
     RecipientVerifyFailed,
     ContentVerifyFailed,
+    AddressingFocusFailed,
     AttachmentInvalid,
     AttachmentStagingFailed,
     AttachmentDigestMismatch,
@@ -220,6 +221,9 @@ impl SendFailureCode {
             }
             SendFailureCode::ContentVerifyFailed => {
                 "The composed text did not match the approved body; approve a new draft."
+            }
+            SendFailureCode::AddressingFocusFailed => {
+                "The search box did not take focus, so the recipient was never addressed; nothing destructive was typed and the run stopped."
             }
             SendFailureCode::AttachmentInvalid => {
                 "The draft's attachment is malformed, too large, or names a path outside its staging directory."
@@ -513,6 +517,9 @@ impl ActionCapabilityEnvelope {
 pub struct HelperGateEvidence {
     pub title_confidence_parts_per_million: u32,
     pub title_matched: bool,
+    /// GATE 0: the search key was read back out of the search field, proving
+    /// the click took focus there and not somewhere the user was working.
+    pub search_key_echoed: bool,
     pub compose_matched: bool,
     /// GATE 2a: the staged attachment's display name was read back in the
     /// compose region. False for a text send.
@@ -738,6 +745,7 @@ mod tests {
             evidence: HelperGateEvidence {
                 title_confidence_parts_per_million: 1_000_000,
                 title_matched: true,
+                search_key_echoed: true,
                 compose_matched: true,
                 attachment_name_matched: false,
                 attachment_staged: false,

@@ -4941,6 +4941,10 @@ fn send_profile_template() -> Result<String, Box<dyn std::error::Error>> {
             "composeBox": {"xPartsPerMillion": 715000, "yPartsPerMillion": 870000}
         },
         "ocrRegions": {
+            "search": {
+                "xPartsPerMillion": 40000, "yPartsPerMillion": 15000,
+                "widthPartsPerMillion": 200000, "heightPartsPerMillion": 35000
+            },
             "title": {
                 "xPartsPerMillion": 440000, "yPartsPerMillion": 20000,
                 "widthPartsPerMillion": 300000, "heightPartsPerMillion": 50000

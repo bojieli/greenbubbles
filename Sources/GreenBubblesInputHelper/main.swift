@@ -121,6 +121,61 @@ case "collision-probe":
   ]
   let data = try! JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
   print(String(decoding: data, as: UTF8.self))
+case "keys":
+  // Diagnostic only: posts a fixed sequence of the five reviewed keys to the
+  // target. Used to clean up after a failed addressing attempt and to answer
+  // whether a keyboard shortcut can move focus where a click cannot.
+  guard let target = WeChatTarget.locate(bundleIdentifier: "com.tencent.xinWeChat") else {
+    FileHandle.standardError.write(Data("WeChat is not running\n".utf8))
+    exit(2)
+  }
+  let effector = MacOSInputEffector(processIdentifier: target.processIdentifier)
+  guard !effector.humanActivityObserved() else {
+    FileHandle.standardError.write(Data("refused: the machine is not idle\n".utf8))
+    exit(2)
+  }
+  // Diagnostic-only escape hatch, deliberately not a reviewed SendKey: answers
+  // whether a keyboard shortcut can move focus where a background click cannot.
+  if arguments.dropFirst().first == "pasteSearchKey" {
+    let effector = MacOSInputEffector(processIdentifier: target.processIdentifier)
+    try? effector.writeClipboard("File Transfer")
+    try? effector.press(.paste)
+    Thread.sleep(forTimeInterval: 0.4)
+    effector.restoreClipboard()
+    print("pasted the search key into whatever holds focus")
+    exit(0)
+  }
+  if arguments.dropFirst().first == "searchShortcut" {
+    if let source = CGEventSource(stateID: .privateState) {
+      for isDown in [true, false] {
+        if let event = CGEvent(keyboardEventSource: source, virtualKey: 0x03, keyDown: isDown) {
+          event.flags = .maskCommand
+          event.postToPid(target.processIdentifier)
+        }
+      }
+    }
+    print("posted the search shortcut")
+    exit(0)
+  }
+  for name in arguments.dropFirst() {
+    let key: SendKey? =
+      switch name {
+      case "selectAll": .selectAll
+      case "delete": .delete
+      case "escape": .escape
+      case "paste": .paste
+      case "goToFolder": .goToFolder
+      case "returnKey": .returnKey
+      default: nil
+      }
+    guard let key else {
+      FileHandle.standardError.write(Data("unsupported key: \(name)\n".utf8))
+      exit(2)
+    }
+    try? effector.press(key)
+    Thread.sleep(forTimeInterval: 0.15)
+  }
+  print("posted \(arguments.count - 1) keys")
 case "onboarding":
   let plan = OnboardingPlan.make(from: service.currentStatus())
   for step in plan.steps where !step.granted {

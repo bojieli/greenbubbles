@@ -402,3 +402,75 @@ distinguish image-as-image from image-as-file; is there a confirmation sheet)
 remain unanswered, because answering them requires driving the live client and
 the machine has been in use. They need one quiet window on an idle machine,
 targeting File Transfer only.
+
+---
+
+## 14. Mechanism findings that change the picture (2026-08-29, second live session)
+
+A second live session, on an idle machine, answered the question the incident
+raised and produced a harder result than expected. All runs were dry runs;
+nothing was sent.
+
+### Background clicks do not move keyboard focus
+
+`CGEvent.postToPid` delivers **keystrokes** to whatever field the target already
+has focused, but a posted **click does not move that focus**. Measured
+directly: the skill clicked the search box and pasted, and the text landed in
+the compose box of the conversation that was already open.
+
+This falsifies the design's stated methodology — "mouse focuses, keyboard acts"
+(`SEND_INTEGRATION_DESIGN.md` §3) — for background operation on WeChat
+4.1.13 / macOS 26. The earlier spike's claim that a background click focuses the
+Qt search and compose boxes does not reproduce.
+
+The consequence is severe and is exactly what the incident was: **every
+keystroke the skill sends goes wherever the person last put the caret.** A
+select-all plus delete there destroys their unsent text.
+
+### GATE 0 makes the failure non-destructive
+
+Addressing now pastes **without clearing first**, then reads the search field
+back and requires the search key to appear in it. A click that missed is caught
+before anything destructive happens, and the worst case degrades from "the
+person's draft is deleted" to "a few stray words appear in a field they can
+clear". Verified live: the run aborts with `addressingFocusFailed`, having
+touched nothing else.
+
+### A keyboard shortcut *does* move focus
+
+Posting **Cmd+F** to the target moves focus to the search field in the
+background — no raise, no cursor movement, focus ring and caret confirmed by
+capture. Pasting then lands in the search field, as intended.
+
+This is a strictly better addressing primitive than clicking: it has no
+coordinate to mis-aim, so it cannot land in the wrong field at all. If
+background addressing is pursued further, it should be keyboard-only and the
+`searchBox` anchor should be deleted rather than re-measured.
+
+### But the search does not execute while the client is inactive
+
+With "File Transfer" sitting in the focused search field, **the results list
+never filtered**. WeChat appears to run the search only when its window is key.
+Waiting did not help.
+
+So background addressing can focus the field and enter the text, but cannot
+complete: there is no result to select, and GATE 1 therefore never sees the
+right title.
+
+### Where that leaves the send path
+
+On this build, **a fully background send cannot complete.** The options are:
+
+1. **Keep it closed.** Current behaviour, and the honest default: GATE 0 and
+   GATE 1 both refuse, non-destructively.
+2. **Accept a brief foreground activation** for the addressing step only — the
+   "burst" model of `AI_DESKTOP_AGENT_HANDOFF.md` §4.5. This trades the
+   zero-interference property for a working path and needs an explicit owner
+   decision, because it is a different product.
+3. **Address without the search box**, if a conversation can be opened by some
+   other route that works while inactive. Unexplored.
+
+None of these is a code change to make unilaterally. Attachments are unaffected
+as a capability — the staging, gates, and reconciliation all stand — but they
+inherit this limitation, because every attachment send has to address a
+recipient first.

@@ -247,6 +247,7 @@ elif subcommand == "execute-send":
         "evidence": {
             "titleConfidencePartsPerMillion": 1000000,
             "titleMatched": True,
+            "searchKeyEchoed": True,
             "composeMatched": True,
             "attachmentNameMatched": False,
             "attachmentStaged": False,

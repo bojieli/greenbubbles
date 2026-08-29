@@ -328,6 +328,27 @@ allow list and denies, which is the fail-closed answer.
 costs in privilege, and which questions a read-only spike must answer first.
 `GATE_READINESS.md` P4-FILE keeps it a separate gate.
 
+## 11b. A background send cannot currently complete on this build
+
+Measured live on 2026-08-29 (WeChat 4.1.13.269579, macOS 26): posted keystrokes
+reach whatever field the client already has focused, but **a posted click does
+not move that focus**. The methodology in `SEND_INTEGRATION_DESIGN.md` §3
+("mouse focuses, keyboard acts") does not hold for background operation here.
+
+Two consequences, both now handled:
+
+* **GATE 0** was added. Addressing pastes without clearing first, then reads the
+  search field back and requires the search key to appear. A click that missed
+  is caught before anything destructive happens.
+* **The path stays closed.** Cmd+F *does* move focus in the background, but
+  WeChat does not run the search while its window is inactive, so no result can
+  be selected and GATE 1 never sees the right title.
+
+Opening it would require accepting a brief foreground activation for addressing
+— a different product from the one this design describes — and that is an owner
+decision, not a code change. `SEND_ATTACHMENTS_PLAN.md` §14 records the full
+measurement.
+
 ## 12. What is still gated
 
 The adapter is built and closed. Opening it needs, in order: a provisioned

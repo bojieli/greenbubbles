@@ -132,6 +132,7 @@ public enum SendFailureCode: String, Codable, Sendable, CaseIterable {
   case calibrationDrift
   case recipientVerifyFailed
   case contentVerifyFailed
+  case addressingFocusFailed
   case attachmentInvalid
   case attachmentStagingFailed
   case attachmentDigestMismatch
@@ -172,6 +173,8 @@ public enum SendFailureCode: String, Codable, Sendable, CaseIterable {
     case .recipientVerifyFailed:
       "The opened conversation did not match the approved recipient."
     case .contentVerifyFailed: "The composed text did not match the approved body."
+    case .addressingFocusFailed:
+      "The search box did not take focus, so the recipient was never addressed; nothing destructive was typed and the run stopped."
     case .attachmentInvalid:
       "The attachment is malformed, too large, or names a path outside its staging directory."
     case .attachmentStagingFailed:
@@ -425,6 +428,9 @@ public struct ActionCapabilityEnvelope: Codable, Equatable, Sendable {
 public struct HelperGateEvidence: Codable, Equatable, Sendable {
   public var titleConfidencePartsPerMillion: UInt32
   public var titleMatched: Bool
+  /// GATE 0: the search key was read back out of the search field, proving the
+  /// click took focus there and not somewhere the user was working.
+  public var searchKeyEchoed: Bool
   public var composeMatched: Bool
   /// GATE 2a: the staged attachment's display name was read back.
   public var attachmentNameMatched: Bool
@@ -443,6 +449,7 @@ public struct HelperGateEvidence: Codable, Equatable, Sendable {
   public init(
     titleConfidencePartsPerMillion: UInt32 = 0,
     titleMatched: Bool = false,
+    searchKeyEchoed: Bool = false,
     composeMatched: Bool = false,
     attachmentNameMatched: Bool = false,
     attachmentStaged: Bool = false,
@@ -457,6 +464,7 @@ public struct HelperGateEvidence: Codable, Equatable, Sendable {
   ) {
     self.titleConfidencePartsPerMillion = titleConfidencePartsPerMillion
     self.titleMatched = titleMatched
+    self.searchKeyEchoed = searchKeyEchoed
     self.composeMatched = composeMatched
     self.attachmentNameMatched = attachmentNameMatched
     self.attachmentStaged = attachmentStaged

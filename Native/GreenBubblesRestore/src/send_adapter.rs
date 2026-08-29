@@ -2184,6 +2184,7 @@ mod tests {
                 compose_box: point,
             },
             ocr_regions: CalibrationOcrRegions {
+                search: rect,
                 title: rect,
                 compose: rect,
                 newest_outgoing: rect,
@@ -2387,6 +2388,7 @@ mod tests {
             evidence: HelperGateEvidence {
                 title_confidence_parts_per_million: 1_000_000,
                 title_matched: failure != Some(SendFailureCode::RecipientVerifyFailed),
+                search_key_echoed: true,
                 compose_matched: failure != Some(SendFailureCode::ContentVerifyFailed),
                 attachment_name_matched: false,
                 attachment_staged: false,
@@ -3131,6 +3133,7 @@ mod tests {
                 evidence: HelperGateEvidence {
                     title_confidence_parts_per_million: 1_000_000,
                     title_matched: true,
+                    search_key_echoed: true,
                     compose_matched: true,
                     attachment_name_matched: true,
                     attachment_staged: true,

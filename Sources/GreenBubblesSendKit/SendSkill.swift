@@ -259,8 +259,26 @@ public struct MechanicalSendSkill {
 
       stage = .address
       try yieldToHuman(&evidence)
-      try clearAndPaste(capability.searchKey, at: profile.anchors.searchBox, in: frame)
+      // Addressing pastes *without* clearing first. A click that fails to take
+      // focus leaves the caret wherever the person left it, and a select-all
+      // plus delete there would destroy their unsent text. Pasting only ever
+      // adds, and GATE 0 below catches the miss before anything else happens.
+      try focusAndPaste(capability.searchKey, at: profile.anchors.searchBox, in: frame)
       effector.settle(milliseconds: pacing.afterSearchMilliseconds)
+
+      // GATE 0: prove the click actually focused the search field by reading
+      // the key back out of it. Without this, a failed focus silently sends the
+      // rest of the skill's keystrokes into whatever the person was using.
+      let echoed = try recognize(profile.ocrRegions.search, in: frame)
+      evidence.searchKeyEchoed = SendText.normalized(echoed.text)
+        .localizedCaseInsensitiveContains(SendText.normalized(capability.searchKey))
+      guard evidence.searchKeyEchoed else {
+        throw SendFailure(
+          .addressingFocusFailed,
+          detail: "the search field did not echo the search key, so the click missed its target"
+        )
+      }
+
       try yieldToHuman(&evidence)
       try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
       try effector.click(at: WindowGeometry.point(profile.anchors.firstResultRow, in: frame))
@@ -482,6 +500,29 @@ public struct MechanicalSendSkill {
       failure: failure,
       observedAtUnixNanoseconds: clock()
     )
+  }
+
+  /// Focuses a field and pastes into it without clearing it first.
+  ///
+  /// Used for addressing, where a mis-aimed click must never be destructive.
+  /// The search field is transient, so an appended paste is recoverable and is
+  /// caught immediately by GATE 0.
+  private func focusAndPaste(
+    _ text: String,
+    at anchor: WindowRelativePoint,
+    in frame: WindowFrame
+  ) throws(SendFailure) {
+    guard !effector.humanActivityObserved() else {
+      throw SendFailure(.humanCollision, detail: "user activity observed before taking focus")
+    }
+    try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
+    try effector.click(at: WindowGeometry.point(anchor, in: frame))
+    effector.settle(milliseconds: pacing.afterClickMilliseconds)
+    try manifest.authorize(.clipboardWrite, bundleIdentifier: targetBundleIdentifier)
+    try effector.writeClipboard(text)
+    try manifest.authorize(.hotkey, bundleIdentifier: targetBundleIdentifier)
+    try effector.press(.paste)
+    effector.settle(milliseconds: pacing.afterPasteMilliseconds)
   }
 
   private func clearAndPaste(

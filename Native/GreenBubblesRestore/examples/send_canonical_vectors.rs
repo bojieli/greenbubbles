@@ -48,6 +48,12 @@ fn main() {
             },
         },
         ocr_regions: CalibrationOcrRegions {
+            search: WindowRelativeRect {
+                x_parts_per_million: 40_000,
+                y_parts_per_million: 15_000,
+                width_parts_per_million: 200_000,
+                height_parts_per_million: 35_000,
+            },
             title: WindowRelativeRect {
                 x_parts_per_million: 440_000,
                 y_parts_per_million: 20_000,

@@ -81,15 +81,20 @@ public struct CalibrationAnchors: Codable, Equatable, Sendable {
 
 /// The three capture regions the on-screen gates read with Apple Vision.
 public struct CalibrationOCRRegions: Codable, Equatable, Sendable {
+  /// GATE 0: the search field, read back to prove the click took focus there
+  /// before anything destructive is typed anywhere.
+  public let search: WindowRelativeRect
   public let title: WindowRelativeRect
   public let compose: WindowRelativeRect
   public let newestOutgoing: WindowRelativeRect
 
   public init(
+    search: WindowRelativeRect,
     title: WindowRelativeRect,
     compose: WindowRelativeRect,
     newestOutgoing: WindowRelativeRect
   ) {
+    self.search = search
     self.title = title
     self.compose = compose
     self.newestOutgoing = newestOutgoing
@@ -226,6 +231,7 @@ public struct CalibrationProfileBody: Codable, Equatable, Sendable {
     Self.append(&writer, "anchor.searchBox", anchors.searchBox)
     Self.append(&writer, "anchor.firstResultRow", anchors.firstResultRow)
     Self.append(&writer, "anchor.composeBox", anchors.composeBox)
+    Self.append(&writer, "region.search", ocrRegions.search)
     Self.append(&writer, "region.title", ocrRegions.title)
     Self.append(&writer, "region.compose", ocrRegions.compose)
     Self.append(&writer, "region.newestOutgoing", ocrRegions.newestOutgoing)
@@ -258,6 +264,7 @@ public struct CalibrationProfileBody: Codable, Equatable, Sendable {
       && anchors.searchBox.isValid
       && anchors.firstResultRow.isValid
       && anchors.composeBox.isValid
+      && ocrRegions.search.isValid
       && ocrRegions.title.isValid
       && ocrRegions.compose.isValid
       && ocrRegions.newestOutgoing.isValid
