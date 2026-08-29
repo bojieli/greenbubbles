@@ -1,7 +1,7 @@
 .DS_Store
 /.build
 /.swiftpm
-/Native/GreenBubblesRestore/target
+/Native/GreenBubbles/target
 *.xcuserstate
 DerivedData/
 

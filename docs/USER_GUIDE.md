@@ -63,7 +63,7 @@ From the repository root, build the native query tool and the History app:
 
 ```sh
 cargo build --release \
-  --manifest-path Native/GreenBubblesRestore/Cargo.toml
+  --manifest-path Native/GreenBubbles/Cargo.toml
 swift build --product greenbubbles-history
 swift run greenbubbles-history
 ```
@@ -71,7 +71,7 @@ swift run greenbubbles-history
 When the app asks for the local CLI, choose:
 
 ```text
-Native/GreenBubblesRestore/target/release/greenbubbles
+Native/GreenBubbles/target/release/greenbubbles
 ```
 
 The app may find a previously built debug CLI automatically. Selecting the
@@ -170,7 +170,7 @@ Creation verifies the snapshot before reporting success. Also test the recovery
 copy after moving the snapshot or kit to its intended backup location:
 
 ```sh
-Native/GreenBubblesRestore/target/release/greenbubbles \
+Native/GreenBubbles/target/release/greenbubbles \
   snapshot verify <snapshot-directory> \
   --snapshot-recovery-kit <owner-only-recovery-kit-file>
 ```
@@ -197,7 +197,7 @@ an owner-only [query profile](QUERY_PROFILES.md). With a default profile, the
 common commands need neither a source path nor a key/passphrase option:
 
 ```sh
-GB_CLI="Native/GreenBubblesRestore/target/release/greenbubbles"
+GB_CLI="Native/GreenBubbles/target/release/greenbubbles"
 
 "$GB_CLI" profile validate
 "$GB_CLI" source status
@@ -216,7 +216,7 @@ For one-off queries and scripts that intentionally supply every input, set
 private paths in the shell session and keep the key in an owner-only file:
 
 ```sh
-GB_CLI="Native/GreenBubblesRestore/target/release/greenbubbles"
+GB_CLI="Native/GreenBubbles/target/release/greenbubbles"
 GB_SOURCE="<WeChat-db_storage-root>"
 GB_KEY_FILE="<owner-only-WeChat-key-file>"
 ```

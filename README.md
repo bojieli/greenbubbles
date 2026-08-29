@@ -121,7 +121,7 @@ git clone https://github.com/bojieli/greenbubbles.git
 cd greenbubbles
 
 cargo build --locked --release \
-  --manifest-path Native/GreenBubblesRestore/Cargo.toml
+  --manifest-path Native/GreenBubbles/Cargo.toml
 swift build --product greenbubbles-history
 swift run greenbubbles-history
 ```
@@ -130,7 +130,7 @@ In the app:
 
 1. Choose **Browse Live or Snapshot…**.
 2. Select
-   <code>Native/GreenBubblesRestore/target/release/greenbubbles</code>.
+   <code>Native/GreenBubbles/target/release/greenbubbles</code>.
 3. Select the account's <code>db_storage</code> directory.
 4. Supply the matching key locally and connect.
 
@@ -231,15 +231,15 @@ action boundary, see
 
 ## Project map
 
-| Path                                           | Purpose                                                                      |
-| ---------------------------------------------- | ---------------------------------------------------------------------------- |
-| <code>Sources/</code>                          | Swift discovery, acquisition, history UI, and closed send-helper components  |
-| <code>Native/GreenBubblesRestore/</code>       | Rust live-query, snapshot, restoration, replica, connector, and audit engine |
-| <code>Tests/</code>                            | Swift synthetic and contract tests                                           |
-| <code>Native/GreenBubblesRestore/tests/</code> | Rust end-to-end synthetic tests                                              |
-| <code>skills/greenbubbles-context/</code>      | Bounded AI-agent usage instructions                                          |
-| <code>docs/</code>                             | Architecture, formats, operations, validation evidence, and research notes   |
-| <code>Packaging/</code>                        | macOS bundle metadata and entitlements                                       |
+| Path                                      | Purpose                                                                      |
+| ----------------------------------------- | ---------------------------------------------------------------------------- |
+| <code>Sources/</code>                     | Swift discovery, acquisition, history UI, and closed send-helper components  |
+| <code>Native/GreenBubbles/</code>         | Rust live-query, snapshot, restoration, replica, connector, and audit engine |
+| <code>Tests/</code>                       | Swift synthetic and contract tests                                           |
+| <code>Native/GreenBubbles/tests/</code>   | Rust end-to-end synthetic tests                                              |
+| <code>skills/greenbubbles-context/</code> | Bounded AI-agent usage instructions                                          |
+| <code>docs/</code>                        | Architecture, formats, operations, validation evidence, and research notes   |
+| <code>Packaging/</code>                   | macOS bundle metadata and entitlements                                       |
 
 Useful deep dives:
 
@@ -267,7 +267,7 @@ swift scripts/check-distribution-inventory.swift
 swift scripts/check-secret-hygiene.swift
 swift scripts/check-pinned-build-profile.swift
 
-cd Native/GreenBubblesRestore
+cd Native/GreenBubbles
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets

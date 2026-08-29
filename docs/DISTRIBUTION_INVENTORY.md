@@ -19,7 +19,7 @@ or jurisdiction.
 - `THIRD_PARTY_NOTICES.md` is the complete reviewed notice bundle for the
   macOS arm64 target. It is generated from the locked runtime graph and
   augmented with SQLCipher, SILK, Zstandard, and derived-code notices.
-- `Native/GreenBubblesRestore/about.toml` pins the target license policy and
+- `Native/GreenBubbles/about.toml` pins the target license policy and
   anchors the `wx-*` MIT clarification to the exact upstream LICENSE digest.
 - Public release covers repository source, documentation, synthetic fixtures,
   hosted metadata, and the described binaries. It never authorizes publishing

@@ -190,7 +190,7 @@ private let scriptURL = URL(fileURLWithPath: #filePath).standardizedFileURL
 private let repositoryRoot = scriptURL.deletingLastPathComponent().deletingLastPathComponent()
 private let discoveryExecutable = repositoryRoot.appending(path: ".build/release/greenbubbles-discover")
 private let queryExecutable = repositoryRoot.appending(
-  path: "Native/GreenBubblesRestore/target/release/greenbubbles"
+  path: "Native/GreenBubbles/target/release/greenbubbles"
 )
 
 private func privateFileURL(_ value: String) -> URL {
@@ -987,7 +987,7 @@ private func run(_ options: Options) throws -> CheckReport {
       "cargo",
       [
         "build", "--release", "--locked", "--manifest-path",
-        "Native/GreenBubblesRestore/Cargo.toml",
+        "Native/GreenBubbles/Cargo.toml",
       ],
       stage: "Building the current native query CLI..."
     )

@@ -6,9 +6,18 @@ browser. Its built-in help is the canonical syntax reference:
 
 ```sh
 greenbubbles help
-greenbubbles help ai
+greenbubbles help ai-query
 greenbubbles send --help
 ```
+
+Help topics exist for <code>profile</code>, <code>source</code>,
+<code>conversations</code>, <code>messages</code>, <code>message</code>,
+<code>attachment</code>, <code>snapshot</code>, <code>send</code>, the three
+<code>connector-*-direct</code> commands, <code>audit-replica</code>,
+<code>audit-replica-backup</code>, <code>ai-query</code>,
+<code>ai-export</code>, <code>ai-memory-export</code>,
+<code>audit-ai-context</code>, and <code>audit-ai-memory</code>. An unrecognized
+topic falls back to the full usage listing rather than reporting an error.
 
 This page maps command families to their intended workflow. It does not turn
 advanced forensic or action commands into a recommended first-run path. For
@@ -27,9 +36,9 @@ From the repository root:
 
 ```sh
 cargo build --locked --release \
-  --manifest-path Native/GreenBubblesRestore/Cargo.toml
+  --manifest-path Native/GreenBubbles/Cargo.toml
 
-GB_CLI="Native/GreenBubblesRestore/target/release/greenbubbles"
+GB_CLI="Native/GreenBubbles/target/release/greenbubbles"
 "$GB_CLI" help
 ```
 

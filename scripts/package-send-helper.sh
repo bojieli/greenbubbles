@@ -34,7 +34,7 @@ cd "$repository_root"
 
 signing_identity="${GREENBUBBLES_SIGNING_IDENTITY:-}"
 team_identifier="${GREENBUBBLES_TEAM_IDENTIFIER:-}"
-version="${GREENBUBBLES_VERSION:-$(awk -F '"' '/^version[[:space:]]*=/ { print $2; exit }' Native/GreenBubblesRestore/Cargo.toml)}"
+version="${GREENBUBBLES_VERSION:-$(awk -F '"' '/^version[[:space:]]*=/ { print $2; exit }' Native/GreenBubbles/Cargo.toml)}"
 skip_build="${GREENBUBBLES_SKIP_BUILD:-0}"
 release_public_keys="${GREENBUBBLES_SEND_RELEASE_PUBLIC_KEYS:-}"
 notary_profile="${GREENBUBBLES_NOTARY_PROFILE:-}"
@@ -85,7 +85,7 @@ if [ "$skip_build" == "1" ]; then
     .build/release/greenbubbles-history \
     .build/release/greenbubbles-send \
     .build/release/greenbubbles-input-helper \
-    Native/GreenBubblesRestore/target/release/greenbubbles; do
+    Native/GreenBubbles/target/release/greenbubbles; do
     [ -x "$executable" ] || fail "prebuilt executable is missing: $executable"
   done
 else
@@ -94,7 +94,7 @@ else
   swift build -c release --product greenbubbles-send
   swift build -c release --product greenbubbles-input-helper
   (
-    cd Native/GreenBubblesRestore
+    cd Native/GreenBubbles
     if [ -n "$release_public_keys" ]; then
       GREENBUBBLES_SEND_RELEASE_PUBLIC_KEYS="$release_public_keys" cargo build --locked --release
     else
@@ -120,7 +120,7 @@ cp Packaging/GreenBubblesInputHelper/me.greenbubbles.InputHelper.plist \
   "$app_bundle/Contents/Library/LaunchAgents/"
 cp .build/release/greenbubbles-history "$app_bundle/Contents/MacOS/"
 cp .build/release/greenbubbles-send "$app_bundle/Contents/MacOS/"
-cp Native/GreenBubblesRestore/target/release/greenbubbles "$app_bundle/Contents/MacOS/"
+cp Native/GreenBubbles/target/release/greenbubbles "$app_bundle/Contents/MacOS/"
 cp .build/release/greenbubbles-input-helper "$helper_bundle/Contents/MacOS/"
 cp LICENSE NOTICE.md THIRD_PARTY_NOTICES.md "$app_bundle/Contents/Resources/"
 

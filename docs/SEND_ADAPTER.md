@@ -43,7 +43,7 @@ high-level — three methods, no raw "type anywhere" primitive.
 The helper never receives a key, a replica handle, a policy, or any message
 history. It receives one single-use capability
 (`Sources/GreenBubblesSendKit/SendContract.swift`,
-`Native/GreenBubblesRestore/src/send_contract.rs`):
+`Native/GreenBubbles/src/send_contract.rs`):
 
 ```jsonc
 {
@@ -149,7 +149,7 @@ also carries a local `globalKillSwitchEngaged`; either one closes the path.
 
 ## 5. The durable outbox
 
-`Native/GreenBubblesRestore/src/send_outbox.rs` is the adapter-owned atomic
+`Native/GreenBubbles/src/send_outbox.rs` is the adapter-owned atomic
 reservation store. It is single-flight, and every mutation runs inside one
 exclusive `flock` transaction persisted with write-temporary, `fsync`,
 `rename`, `fsync`-directory.

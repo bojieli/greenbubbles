@@ -96,7 +96,7 @@ func canonicalJSON(_ profile: PinnedBuildProfile) throws -> String {
 let swiftSource = try read(
   "Sources/GreenBubblesCore/WeChatIntegrationSurfaceInspector.swift"
 )
-let rustSource = try read("Native/GreenBubblesRestore/src/manifest.rs")
+let rustSource = try read("Native/GreenBubbles/src/manifest.rs")
 
 let swiftBlock = try oneCapture(
   #"(?s)static let pinnedWeChat4113 = WeChatClientBuildFingerprint\((.*?)\n  \)"#,

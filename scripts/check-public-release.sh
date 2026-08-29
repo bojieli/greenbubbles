@@ -23,10 +23,10 @@ require_file NOTICE.md
 require_file CHANGELOG.md
 require_file docs/DISTRIBUTION_INVENTORY.md
 require_file docs/PUBLIC_RELEASE_CHECKLIST.md
-require_file Native/GreenBubblesRestore/about.toml
-require_file Native/GreenBubblesRestore/about.hbs
+require_file Native/GreenBubbles/about.toml
+require_file Native/GreenBubbles/about.hbs
 
-if ! grep -Eq '^license[[:space:]]*=[[:space:]]*"MIT"' Native/GreenBubblesRestore/Cargo.toml; then
+if ! grep -Eq '^license[[:space:]]*=[[:space:]]*"MIT"' Native/GreenBubbles/Cargo.toml; then
   fail "Rust package metadata must declare MIT"
 fi
 
@@ -91,7 +91,7 @@ if (( $# > 0 )); then
 fi
 
 if [[ -n "$release_tag" ]]; then
-  cargo_version=$(awk -F '"' '/^version[[:space:]]*=/ { print $2; exit }' Native/GreenBubblesRestore/Cargo.toml)
+  cargo_version=$(awk -F '"' '/^version[[:space:]]*=/ { print $2; exit }' Native/GreenBubbles/Cargo.toml)
   if [[ "$release_tag" != "v$cargo_version" ]]; then
     fail "release tag $release_tag does not match Cargo version v$cargo_version"
   fi

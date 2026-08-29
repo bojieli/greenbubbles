@@ -138,7 +138,7 @@ func buildInventory() throws -> [String: Any] {
       "cargo",
       [
         "metadata", "--locked", "--format-version", "1", "--manifest-path",
-        "Native/GreenBubblesRestore/Cargo.toml",
+        "Native/GreenBubbles/Cargo.toml",
       ]
     ),
     source: "cargo metadata"

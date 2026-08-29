@@ -43,7 +43,7 @@ swift scripts/check-distribution-inventory.swift
 swift scripts/check-secret-hygiene.swift
 swift scripts/check-pinned-build-profile.swift
 
-cd Native/GreenBubblesRestore
+cd Native/GreenBubbles
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets

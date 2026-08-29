@@ -6,7 +6,7 @@ baseline:
 
 ```sh
 cargo run --locked \
-  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --manifest-path Native/GreenBubbles/Cargo.toml \
   --bin greenbubbles -- \
   audit-acquisition-chain <previous-snapshot> <current-snapshot>
 ```

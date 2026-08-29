@@ -10,7 +10,7 @@ synchronization:
 
 ```sh
 cargo run --locked \
-  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --manifest-path Native/GreenBubbles/Cargo.toml \
   --bin greenbubbles -- \
   audit-archive <owner-only-restoration-archive>
 ```

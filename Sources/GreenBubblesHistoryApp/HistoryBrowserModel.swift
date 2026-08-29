@@ -156,7 +156,7 @@ final class HistoryBrowserModel {
       Bundle.main.executableURL?.deletingLastPathComponent().appending(
         path: "greenbubbles"),
       URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        .appending(path: "Native/GreenBubblesRestore/target/debug/greenbubbles"),
+        .appending(path: "Native/GreenBubbles/target/debug/greenbubbles"),
     ].compactMap { $0 }
     if let executable = candidates.first(where: {
       FileManager.default.isExecutableFile(atPath: $0.path)

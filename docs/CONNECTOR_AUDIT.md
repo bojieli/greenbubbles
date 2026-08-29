@@ -14,7 +14,7 @@ An independent content-free audit is available:
 
 ```sh
 cargo run --locked \
-  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --manifest-path Native/GreenBubbles/Cargo.toml \
   --bin greenbubbles -- \
   audit-connector-log <owner-only-connector-audit.ndjson>
 ```
@@ -54,7 +54,7 @@ policy and verifies the dedicated connector draft directory:
 
 ```sh
 cargo run --locked \
-  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --manifest-path Native/GreenBubbles/Cargo.toml \
   --bin greenbubbles -- \
   audit-connector-state <replica> <policy> <audit-log> <draft-directory> \
   --replica-key-stdin

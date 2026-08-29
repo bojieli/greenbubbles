@@ -97,7 +97,7 @@ jobs:
           cargo --version
           swift build -c release
           cargo build --locked --release \
-            --manifest-path Native/GreenBubblesRestore/Cargo.toml
+            --manifest-path Native/GreenBubbles/Cargo.toml
 
       - name: Assemble the unsigned CLI distribution
         id: archive
@@ -119,7 +119,7 @@ jobs:
           done
 
           for product in greenbubbles greenbubbles-change-consumer; do
-            cp "Native/GreenBubblesRestore/target/release/$product" "$staging/bin/"
+            cp "Native/GreenBubbles/target/release/$product" "$staging/bin/"
           done
 
           cp README.md CHANGELOG.md LICENSE NOTICE.md THIRD_PARTY_NOTICES.md "$staging/"

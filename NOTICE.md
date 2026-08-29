@@ -19,10 +19,10 @@ native source. The complete target-specific notices are reproduced in
 - the resolved Rust package inventory and every applicable upstream license
   text, preserving package-specific copyright statements.
 
-`Native/GreenBubblesRestore/about.toml` records the reviewed macOS arm64
+`Native/GreenBubbles/about.toml` records the reviewed macOS arm64
 license policy and fail-closed clarification for the `wx-*` package-metadata
 omission. Regenerate the notice bundle with `cargo-about 0.9.2` and
-`Native/GreenBubblesRestore/about.hbs` whenever the locked dependency graph or
+`Native/GreenBubbles/about.hbs` whenever the locked dependency graph or
 release target changes. The dependency boundary is independently checked by
 `scripts/check-distribution-inventory.swift`.
 

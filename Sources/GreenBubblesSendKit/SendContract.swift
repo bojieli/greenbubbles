@@ -1,7 +1,7 @@
 import Foundation
 
 /// The vocabulary shared with the Rust control plane. Every declaration here
-/// mirrors `Native/GreenBubblesRestore/src/send_contract.rs`; the encodings are
+/// mirrors `Native/GreenBubbles/src/send_contract.rs`; the encodings are
 /// pinned in both languages by `docs/send-canonical-vectors.json`.
 public enum SendContract {
   /// Format version of every envelope in this module.

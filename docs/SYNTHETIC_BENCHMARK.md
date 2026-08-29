@@ -4,7 +4,7 @@ GreenBubbles includes a bounded, reproducible benchmark and fault harness for
 the encrypted canonical replica:
 
 ```text
-cargo run --release --locked --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+cargo run --release --locked --manifest-path Native/GreenBubbles/Cargo.toml \
   --bin greenbubbles -- \
   synthetic-benchmark private/benchmark-work \
   --samples 7 --small-messages 100 --large-messages 5000 --burst-messages 100

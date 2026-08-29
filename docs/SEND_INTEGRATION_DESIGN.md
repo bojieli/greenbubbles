@@ -355,7 +355,7 @@ without out-of-band verification.
 
 | Component | Process / identity | Grants | Toolchain | Responsibility |
 | --- | --- | --- | --- | --- |
-| **Main control plane** | main app (existing identity) | **none** | Rust (`Native/GreenBubblesRestore`) + Swift host (`Sources/GreenBubblesHistoryApp`) | policy, approval PRECHECK, DB/keys, mint the bound action capability, reconcile, audit, XPC **client** |
+| **Main control plane** | main app (existing identity) | **none** | Rust (`Native/GreenBubbles`) + Swift host (`Sources/GreenBubblesHistoryApp`) | policy, approval PRECHECK, DB/keys, mint the bound action capability, reconcile, audit, XPC **client** |
 | **`GreenBubblesInputHelper`** | login-item process (own identity, `SMAppService`) | Accessibility + Screen Recording | Swift/AppKit login item linking the **vendored cua-driver Rust engine** (static lib, C ABI) + **Apple Vision** | XPC **server**; execute the mechanical send-skill in `bounded` mode scoped to WeChat; capture + OCR; enforce on-screen gates against the capability |
 
 New Rust module `send_adapter` (extends `action.rs`): PRECHECK integration,

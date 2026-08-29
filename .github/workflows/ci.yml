@@ -84,13 +84,13 @@ jobs:
         run: rustc --version && cargo --version
 
       - name: Audit Rust dependencies
-        working-directory: Native/GreenBubblesRestore
+        working-directory: Native/GreenBubbles
         run: |
           cargo install cargo-audit --locked --version 0.22.2
           cargo audit --file Cargo.lock
 
       - name: Reproduce the third-party notice bundle
-        working-directory: Native/GreenBubblesRestore
+        working-directory: Native/GreenBubbles
         run: |
           cargo install cargo-about --locked --features cli --version 0.9.2
           cargo about generate --locked --fail \
@@ -98,19 +98,19 @@ jobs:
           diff -u ../../THIRD_PARTY_NOTICES.md "$RUNNER_TEMP/THIRD_PARTY_NOTICES.md"
 
       - name: Check Rust formatting
-        working-directory: Native/GreenBubblesRestore
+        working-directory: Native/GreenBubbles
         run: cargo fmt --check
 
       - name: Lint restoration engine
-        working-directory: Native/GreenBubblesRestore
+        working-directory: Native/GreenBubbles
         run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Run restoration-engine tests
-        working-directory: Native/GreenBubblesRestore
+        working-directory: Native/GreenBubbles
         run: cargo test --locked --all-targets
 
       - name: Check the cross-language send vectors are current
-        working-directory: Native/GreenBubblesRestore
+        working-directory: Native/GreenBubbles
         run: |
           cargo run --locked --quiet --example send_canonical_vectors \
             >/tmp/send-canonical-vectors.json

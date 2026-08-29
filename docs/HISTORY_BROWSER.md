@@ -226,14 +226,14 @@ Build or run the native SwiftUI executable from the repository root:
 
 ```sh
 cargo build --release \
-  --manifest-path Native/GreenBubblesRestore/Cargo.toml
+  --manifest-path Native/GreenBubbles/Cargo.toml
 swift build --product greenbubbles-history
 swift run greenbubbles-history
 swift run greenbubbles-history --bundle /absolute/path/to/ai-context-bundle
 ```
 
 For direct browsing or snapshot creation, select
-`Native/GreenBubblesRestore/target/release/greenbubbles` as the local
+`Native/GreenBubbles/target/release/greenbubbles` as the local
 CLI and choose **Browse Live or Snapshot…** or **Create Recoverable Snapshot…**.
 
 For exported-history mode, open a new output directory produced by
