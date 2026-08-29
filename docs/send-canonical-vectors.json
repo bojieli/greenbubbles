@@ -3,11 +3,12 @@
     "accountId": "canonical-account",
     "actionId": "2222222222222222222222222222222222222222222222222222222222222222",
     "approvalId": "4444444444444444444444444444444444444444444444444444444444444444",
-    "bindingSha256": "11abfd3a75261f0c2d5ada36a6ab6c6b26fd61d016e0978dc5f58db6bf29f620",
+    "bindingSha256": "feb0ce71954d57a7850d1080d45a65f18e7605e0aa03ddda2fda120e6dd52422",
     "body": "hello  from\nthe adapter ",
     "bodySha256": "19ad208b47df6099573a7afce2161695c4b380c9233d00220005b51880ed7f23",
     "calibrationProfileId": "wechat-4.1.13.269579-macos-26",
     "calibrationProfileSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+    "capability": "textSend",
     "capabilityId": "1111111111111111111111111111111111111111111111111111111111111111",
     "clientBuildProfileId": "wechat-macos-4.1.13-269579",
     "conversationId": "filehelper",
@@ -17,6 +18,38 @@
     "idempotencyKey": "5555555555555555555555555555555555555555555555555555555555555555",
     "issuedAtUnixNanoseconds": 1756000000000000000,
     "normalizedBodySha256": "bb74b462efad67a7ae1f409cfedfee276a58c3ee3c27f1dcfa387cce235b86e3",
+    "permitSend": true,
+    "rolloutStage": "selfSend",
+    "searchKey": "File Transfer",
+    "validUntilUnixNanoseconds": 1756000120000000000
+  },
+  "attachmentCapability": {
+    "accountId": "canonical-account",
+    "actionId": "2222222222222222222222222222222222222222222222222222222222222222",
+    "approvalId": "4444444444444444444444444444444444444444444444444444444444444444",
+    "attachment": {
+      "byteCount": 182931,
+      "displayFileName": "photo.png",
+      "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "stagedPath": "/Users/owner/.greenbubbles/send/staging/0f1e2d3c/photo.png",
+      "stagingDirectory": "/Users/owner/.greenbubbles/send/staging/0f1e2d3c",
+      "uniformTypeIdentifier": "public.png"
+    },
+    "bindingSha256": "55547cc649f3899d073949c72427cf0df6e718766c7bad84862d499fb1ae413b",
+    "body": "",
+    "bodySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "calibrationProfileId": "wechat-4.1.13.269579-macos-26",
+    "calibrationProfileSha256": "6666666666666666666666666666666666666666666666666666666666666666",
+    "capability": "imageSend",
+    "capabilityId": "1111111111111111111111111111111111111111111111111111111111111111",
+    "clientBuildProfileId": "wechat-macos-4.1.13-269579",
+    "conversationId": "filehelper",
+    "draftId": "3333333333333333333333333333333333333333333333333333333333333333",
+    "expectedTitle": "File Transfer",
+    "formatVersion": 1,
+    "idempotencyKey": "5555555555555555555555555555555555555555555555555555555555555555",
+    "issuedAtUnixNanoseconds": 1756000000000000000,
+    "normalizedBodySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "permitSend": true,
     "rolloutStage": "selfSend",
     "searchKey": "File Transfer",
@@ -37,6 +70,30 @@
           "xPartsPerMillion": 235000,
           "yPartsPerMillion": 36000
         }
+      },
+      "attachments": {
+        "attachControl": {
+          "xPartsPerMillion": 470000,
+          "yPartsPerMillion": 800000
+        },
+        "composeAcceptsPastedFile": true,
+        "composeAttachment": {
+          "heightPartsPerMillion": 120000,
+          "widthPartsPerMillion": 560000,
+          "xPartsPerMillion": 400000,
+          "yPartsPerMillion": 820000
+        },
+        "confirmSendButton": {
+          "xPartsPerMillion": 640000,
+          "yPartsPerMillion": 620000
+        },
+        "confirmSheet": {
+          "heightPartsPerMillion": 300000,
+          "widthPartsPerMillion": 320000,
+          "xPartsPerMillion": 340000,
+          "yPartsPerMillion": 340000
+        },
+        "presentsConfirmationSheet": true
       },
       "clientBuildProfileId": "wechat-macos-4.1.13-269579",
       "expiresAtUnixSeconds": 1788000000,
@@ -72,7 +129,7 @@
       "wechatBundleIdentifier": "com.tencent.xinWeChat",
       "wechatMarketingVersion": "4.1.13"
     },
-    "canonicalSha256": "78fcf380a43d73a82e3eb955cfcfaf09af618de99268364c53117b8ec9fe3919"
+    "canonicalSha256": "c16981c625a76d2ecb3c40f0af16cade068a910d53a3b3484eda4084e4490767"
   },
   "compatibilityMatrix": {
     "body": {
@@ -121,6 +178,30 @@
           "yPartsPerMillion": 36000
         }
       },
+      "attachments": {
+        "attachControl": {
+          "xPartsPerMillion": 470000,
+          "yPartsPerMillion": 800000
+        },
+        "composeAcceptsPastedFile": true,
+        "composeAttachment": {
+          "heightPartsPerMillion": 120000,
+          "widthPartsPerMillion": 560000,
+          "xPartsPerMillion": 400000,
+          "yPartsPerMillion": 820000
+        },
+        "confirmSendButton": {
+          "xPartsPerMillion": 640000,
+          "yPartsPerMillion": 620000
+        },
+        "confirmSheet": {
+          "heightPartsPerMillion": 300000,
+          "widthPartsPerMillion": 320000,
+          "xPartsPerMillion": 340000,
+          "yPartsPerMillion": 340000
+        },
+        "presentsConfirmationSheet": true
+      },
       "clientBuildProfileId": "wechat-macos-4.1.13-269579",
       "expiresAtUnixSeconds": 1788000000,
       "issuedAtUnixSeconds": 1756000000,
@@ -151,7 +232,7 @@
         "focusIndicator": "search_caret",
         "minimumTitleConfidencePartsPerMillion": 900000
       },
-      "signature": "8136e6f9bc964e66ab04dac9fdbba19bf8fa3e3ed35dfb377ccb9b3583e85b1d51168dad3c127a85d03e53d1b47894394d9bbb359a90ea024b3f457bc902d905",
+      "signature": "ce3635708aa35c8885071b91880aa27f8ec9cabf92ebcbaf1303d19ea3cf5a0cc9931597e8d2d06d450ec27be5aa2ab772e99e453352d6b0d6fd50cb5b7bdd09",
       "wechatBuild": "4.1.13.269579",
       "wechatBundleIdentifier": "com.tencent.xinWeChat",
       "wechatMarketingVersion": "4.1.13"

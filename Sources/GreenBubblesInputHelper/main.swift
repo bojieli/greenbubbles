@@ -1,3 +1,5 @@
+import AppKit
+import CoreGraphics
 import Foundation
 import GreenBubblesSendKit
 
@@ -50,6 +52,75 @@ case "probe":
     FileHandle.standardError.write(Data("could not encode the capability status\n".utf8))
     exit(2)
   }
+case "capture":
+  guard arguments.count >= 2 else {
+    FileHandle.standardError.write(Data("usage: capture <output.png>\n".utf8))
+    exit(2)
+  }
+  do {
+    try SpikeHarness.capture(to: arguments[1], bundleIdentifier: "com.tencent.xinWeChat")
+  } catch {
+    FileHandle.standardError.write(Data("capture failed: \(error)\n".utf8))
+    exit(2)
+  }
+case "spike":
+  func option(_ name: String) -> String? {
+    guard let index = arguments.firstIndex(of: name), index + 1 < arguments.count else {
+      return nil
+    }
+    return arguments[index + 1]
+  }
+  guard let profile = option("--profile"), let capability = option("--capability") else {
+    FileHandle.standardError.write(
+      Data("usage: spike --profile <file> --capability <file> [--trust-root <file>]\n".utf8)
+    )
+    exit(2)
+  }
+  do {
+    try SpikeHarness.spike(
+      profilePath: profile,
+      capabilityPath: capability,
+      trustRootPath: option("--trust-root")
+    )
+  } catch {
+    FileHandle.standardError.write(Data("spike failed: \(error)\n".utf8))
+    exit(2)
+  }
+case "collision-probe":
+  // Answers one question that decides whether the human-collision guard is
+  // usable at all: do our own synthesized events register as hardware input?
+  guard let target = WeChatTarget.locate(bundleIdentifier: "com.tencent.xinWeChat") else {
+    FileHandle.standardError.write(Data("WeChat is not running\n".utf8))
+    exit(2)
+  }
+  let effector = MacOSInputEffector(processIdentifier: target.processIdentifier)
+  func idleSeconds() -> [String: Double] {
+    [
+      "keyDown": CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown),
+      "leftMouseDown": CGEventSource.secondsSinceLastEventType(
+        .hidSystemState, eventType: .leftMouseDown),
+      "flagsChanged": CGEventSource.secondsSinceLastEventType(
+        .hidSystemState, eventType: .flagsChanged),
+    ]
+  }
+  let before = idleSeconds()
+  try? effector.press(.escape)
+  Thread.sleep(forTimeInterval: 0.3)
+  let afterKey = idleSeconds()
+  let report: [String: Any] = [
+    "beforeIdleSeconds": before,
+    "afterSynthesizedKeyIdleSeconds": afterKey,
+    "synthesizedEventsCountAsHumanInput": afterKey["keyDown"]! < before["keyDown"]!,
+    "humanActivityObserved": effector.humanActivityObserved(),
+    "targetIsFrontmost": NSWorkspace.shared.frontmostApplication?.processIdentifier
+      == target.processIdentifier,
+    "collisionIfTargetWereFrontmost": MacOSInputEffector(
+      processIdentifier: target.processIdentifier,
+      frontmostProcessIdentifier: { target.processIdentifier }
+    ).humanActivityObserved(),
+  ]
+  let data = try! JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
+  print(String(decoding: data, as: UTF8.self))
 case "onboarding":
   let plan = OnboardingPlan.make(from: service.currentStatus())
   for step in plan.steps where !step.granted {

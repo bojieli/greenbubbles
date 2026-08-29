@@ -10,6 +10,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::action::ActionCapability;
 use crate::archive::{ensure_private_directory, ensure_private_regular_file};
 use crate::audit::{verify_recorded_artifact_files, RecordedArtifactFileVerifier};
 use crate::replica::{
@@ -447,6 +448,12 @@ pub struct ActionDraft {
     pub rendered_text: String,
     pub rendered_text_sha256: String,
     pub attachments: Vec<DraftAttachment>,
+    /// Which reviewed capability an attachment draft exercises. Present exactly
+    /// when `attachments` is non-empty, because the client sends an image and a
+    /// file differently and the difference is visible to the recipient — so the
+    /// draft states it rather than letting the adapter infer it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_intent: Option<ActionCapability>,
     pub connector_version: String,
     pub api_version: String,
     pub source_fingerprint: String,
@@ -664,6 +671,111 @@ impl<'a> ConnectorService<'a> {
             resolved_conversation_cache: Mutex::new(BTreeMap::new()),
             preserved_stale_source_set_ids: Mutex::new(preserved_stale_source_set_ids),
         })
+    }
+
+    /// Creates a draft for one **local** file the owner named.
+    ///
+    /// This is deliberately not a connector operation and is not reachable
+    /// through `handle`: an AI caller must never be able to name a path on the
+    /// owner's disk. It is a local, owner-run command that reuses the
+    /// connector's own recipient resolution, so the human label GATE 1 compares
+    /// against is produced by exactly the same code path as for a text draft.
+    pub fn create_owner_attachment_draft(
+        &self,
+        conversation_id: &str,
+        attachment: DraftAttachment,
+        intent: ActionCapability,
+        requester_id: &str,
+        expiry_seconds: u64,
+    ) -> Result<ActionDraft, RestoreError> {
+        if !intent.carries_attachment() {
+            return Err(RestoreError::Integrity(
+                "an attachment draft must state an image or file intent".to_string(),
+            ));
+        }
+        if requester_id.is_empty() || requester_id.len() > MAX_REQUESTER_ID_BYTES {
+            return Err(RestoreError::Integrity(
+                "an attachment draft requires a bounded requester identity".to_string(),
+            ));
+        }
+        if expiry_seconds == 0 || expiry_seconds > MAX_DRAFT_EXPIRY_SECONDS {
+            return Err(RestoreError::Integrity(
+                "draft expiry is outside the supported range".to_string(),
+            ));
+        }
+        let conversation = get_replica_conversation(&self.replica_path, self.key, conversation_id)?
+            .ok_or_else(|| {
+                RestoreError::Integrity("conversation was not found in the replica".to_string())
+            })?;
+        let recipient = self
+            .resolve_conversation(&conversation)
+            .map_err(|error| RestoreError::Integrity(error.message.clone()))?;
+        let status = replica_status(&self.replica_path, self.key)?;
+        let source_fingerprint = status.current_source_fingerprint.ok_or_else(|| {
+            RestoreError::Integrity("replica has no authoritative checkpoint".to_string())
+        })?;
+        let created = unix_nanoseconds()?;
+        let expires = created
+            .checked_add(u128::from(expiry_seconds) * 1_000_000_000)
+            .ok_or_else(|| {
+                RestoreError::Integrity("draft expiry exceeds the supported range".to_string())
+            })?;
+        let mut decision = Sha256::new();
+        for value in [
+            "greenbubbles.send.owner-attachment-decision.v1",
+            self.policy_sha256.as_str(),
+            self.policy.account_id.as_str(),
+            conversation_id,
+            attachment.sha256.as_str(),
+            source_fingerprint.as_str(),
+            requester_id,
+        ] {
+            decision.update(value.as_bytes());
+            decision.update([0]);
+        }
+        let policy_decision_id = hex::encode(decision.finalize());
+        let attachments = vec![attachment];
+        let text_sha256 = hex::encode(Sha256::digest(b""));
+        let draft_id = draft_identity(
+            &self.policy.account_id,
+            conversation_id,
+            &recipient,
+            None,
+            &text_sha256,
+            &attachments,
+            &source_fingerprint,
+            &policy_decision_id,
+            requester_id,
+            CONNECTOR_VERSION,
+            CONNECTOR_API_VERSION,
+            Some(intent),
+            created,
+            expires,
+        );
+        let draft = ActionDraft {
+            format_version: 1,
+            draft_id: draft_id.clone(),
+            state: DraftState::DraftOnly,
+            account_id: self.policy.account_id.clone(),
+            conversation_id: conversation_id.to_string(),
+            recipient,
+            reply_target: None,
+            rendered_text: String::new(),
+            rendered_text_sha256: text_sha256,
+            attachments,
+            attachment_intent: Some(intent),
+            connector_version: CONNECTOR_VERSION.to_string(),
+            api_version: CONNECTOR_API_VERSION.to_string(),
+            source_fingerprint,
+            policy_decision_id,
+            requester_id: requester_id.to_string(),
+            created_at_unix_nanoseconds: created,
+            expires_at_unix_nanoseconds: expires,
+        };
+        validate_draft_structure(&draft)?;
+        let path = self.draft_directory.join(format!("{draft_id}.json"));
+        write_owner_only_json(&path, &draft)?;
+        Ok(draft)
     }
 
     pub fn audit_state(&self) -> Result<ConnectorStateAuditReport, RestoreError> {
@@ -2622,6 +2734,11 @@ impl<'a> ConnectorService<'a> {
             &request.requester_id,
             CONNECTOR_VERSION,
             CONNECTOR_API_VERSION,
+            // The connector never mints an attachment intent: a caller reached
+            // through the tool boundary cannot name a local file, so any draft
+            // it produces is a text draft or a forwarding draft the send
+            // adapter will refuse for lack of an intent.
+            None,
             created,
             expires,
         );
@@ -2636,6 +2753,7 @@ impl<'a> ConnectorService<'a> {
             rendered_text: rendered_text.to_string(),
             rendered_text_sha256: text_sha256.clone(),
             attachments,
+            attachment_intent: None,
             connector_version: CONNECTOR_VERSION.to_string(),
             api_version: CONNECTOR_API_VERSION.to_string(),
             source_fingerprint,
@@ -3299,9 +3417,24 @@ fn validate_draft_structure(draft: &ActionDraft) -> Result<(), RestoreError> {
         &draft.requester_id,
         &draft.connector_version,
         &draft.api_version,
+        draft.attachment_intent,
         draft.created_at_unix_nanoseconds,
         draft.expires_at_unix_nanoseconds,
     );
+    let intent_valid = match draft.attachment_intent {
+        // A connector draft states no intent. It may still carry forwarded
+        // artifacts alongside text, which remains valid here — the send adapter
+        // is what refuses it, because an attachment send requires an intent the
+        // connector cannot mint.
+        None => true,
+        // One attachment per send, no caption: a caption is a further
+        // capability, and two attachments are two sends.
+        Some(intent) => {
+            intent.carries_attachment()
+                && draft.attachments.len() == 1
+                && draft.rendered_text.is_empty()
+        }
+    };
     if draft.format_version != 1
         || draft.state != DraftState::DraftOnly
         || !valid_sha256(&draft.draft_id)
@@ -3324,6 +3457,7 @@ fn validate_draft_structure(draft: &ActionDraft) -> Result<(), RestoreError> {
         || draft.recipient.conversation_id != draft.conversation_id
         || draft.recipient.human_label.is_empty()
         || draft.recipient.participant_count != draft.recipient.participants.len()
+        || !intent_valid
         || !participants_valid
         || !attachments_valid
         || !reply_valid
@@ -3349,6 +3483,7 @@ fn draft_identity(
     requester_id: &str,
     connector_version: &str,
     api_version: &str,
+    attachment_intent: Option<ActionCapability>,
     created: u128,
     expires: u128,
 ) -> String {
@@ -3375,6 +3510,12 @@ fn draft_identity(
     hasher.update(
         serde_json::to_vec(attachments).expect("attachment draft evidence always serializes"),
     );
+    // Only mixed in when present, so a text draft's identity is byte-identical
+    // to the one this function produced before attachments existed.
+    if let Some(intent) = attachment_intent {
+        hasher.update(serde_json::to_vec(&intent).expect("attachment intent always serializes"));
+        hasher.update([0]);
+    }
     hasher.update(created.to_le_bytes());
     hasher.update(expires.to_le_bytes());
     hex::encode(hasher.finalize())
@@ -3523,6 +3664,7 @@ pub fn action_draft_identity(draft: &ActionDraft) -> String {
         &draft.requester_id,
         &draft.connector_version,
         &draft.api_version,
+        draft.attachment_intent,
         draft.created_at_unix_nanoseconds,
         draft.expires_at_unix_nanoseconds,
     )

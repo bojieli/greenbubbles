@@ -184,6 +184,7 @@ fn workspace(rollout_stage: &str) -> Workspace {
     config["outboxDirectory"] = Value::from(root.path().join("outbox").to_str().unwrap());
     config["auditLogPath"] = Value::from(root.path().join("audit.ndjson").to_str().unwrap());
     config["draftDirectory"] = Value::from(drafts.to_str().unwrap());
+    config["stagingRoot"] = Value::from(root.path().join("staging").to_str().unwrap());
     config["helper"]["dispatcherExecutable"] =
         Value::from(write_stub_dispatcher(root.path()).to_str().unwrap());
     let config_path = root.path().join("send-config.json");
@@ -247,6 +248,9 @@ elif subcommand == "execute-send":
             "titleConfidencePartsPerMillion": 1000000,
             "titleMatched": True,
             "composeMatched": True,
+            "attachmentNameMatched": False,
+            "attachmentStaged": False,
+            "confirmationSheetConfirmed": False,
             "composeCleared": True,
             "newestOutgoingMatched": False,
             "ambiguousSearchResult": False,

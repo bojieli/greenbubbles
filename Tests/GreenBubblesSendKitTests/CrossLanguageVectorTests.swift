@@ -33,6 +33,7 @@ struct CrossLanguageVectorTests {
     let calibrationProfile: Signed<CalibrationProfileBody>
     let compatibilityMatrix: Signed<CompatibilityMatrixBody>
     let actionCapability: ActionCapabilityEnvelope
+    let attachmentCapability: ActionCapabilityEnvelope
     let normalizedText: [NormalizationCase]
     let developmentSigning: DevelopmentSigning
   }
@@ -69,6 +70,20 @@ struct CrossLanguageVectorTests {
     let capability = try loadVectors().actionCapability
     #expect(capability.computedBindingSHA256 == capability.bindingSHA256)
     try capability.validate(nowUnixNanoseconds: capability.issuedAtUnixNanoseconds + 1)
+  }
+
+  @Test("the attachment capability binding matches the shared fixture")
+  func attachmentCapabilityBinding() throws {
+    let capability = try loadVectors().attachmentCapability
+    #expect(capability.computedBindingSHA256 == capability.bindingSHA256)
+    #expect(capability.capability == .imageSend)
+    #expect(capability.body.isEmpty)
+    let attachment = try #require(capability.attachment)
+    #expect(attachment.displayFileName == "photo.png")
+    #expect(attachment.uniformTypeIdentifier == "public.png")
+    try capability.validate(nowUnixNanoseconds: capability.issuedAtUnixNanoseconds + 1)
+    // The image capability records that the recipient gets a derivative.
+    #expect(!capability.capability.preservesBytes)
   }
 
   @Test("the text normalizer matches the shared fixture")

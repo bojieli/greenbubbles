@@ -12,6 +12,83 @@ public enum SendContract {
   public static let maximumSearchKeyBytes = 256
   /// Largest recipient title the recipient gate may compare.
   public static let maximumExpectedTitleBytes = 256
+  /// Largest attachment the adapter will stage and send.
+  public static let maximumAttachmentBytes: UInt64 = 100 * 1024 * 1024
+  /// Largest display file name a staged attachment may carry.
+  public static let maximumDisplayFileNameBytes = 255
+}
+
+/// The reviewed capabilities. Text carries a body; image and file carry an
+/// attachment. Mirrors `ActionCapability` in `action.rs`.
+public enum ActionCapability: String, Codable, Sendable, CaseIterable {
+  case textSend
+  case replySend
+  case imageSend
+  case fileSend
+
+  /// Whether this capability carries a file rather than text.
+  public var carriesAttachment: Bool { self == .imageSend || self == .fileSend }
+
+  /// Whether the client transmits the approved bytes unchanged. False for
+  /// images, which the client re-encodes, so no record may call the result a
+  /// byte-for-byte match.
+  public var preservesBytes: Bool { self != .imageSend }
+}
+
+/// One staged local attachment. The control plane copied the approved file into
+/// a single-use directory and hashed *that copy*, so this digest describes the
+/// exact bytes about to be handed over.
+///
+/// The helper never reads the file: it writes a *reference* to the pasteboard,
+/// so the bytes travel from the filesystem to WeChat without passing through
+/// the process that holds the input and capture grants.
+public struct ActionAttachment: Codable, Equatable, Sendable {
+  public let stagingDirectory: String
+  public let stagedPath: String
+  public let displayFileName: String
+  public let byteCount: UInt64
+  public let sha256: String
+  public let uniformTypeIdentifier: String
+
+  public init(
+    stagingDirectory: String,
+    stagedPath: String,
+    displayFileName: String,
+    byteCount: UInt64,
+    sha256: String,
+    uniformTypeIdentifier: String
+  ) {
+    self.stagingDirectory = stagingDirectory
+    self.stagedPath = stagedPath
+    self.displayFileName = displayFileName
+    self.byteCount = byteCount
+    self.sha256 = sha256
+    self.uniformTypeIdentifier = uniformTypeIdentifier
+  }
+
+  /// The containment check is what stops a compromised control plane from
+  /// pointing the helper at an arbitrary file: the staged path must be exactly
+  /// the approved name inside the directory minted for this one action.
+  public func validate() throws(SendFailure) {
+    let nameValid =
+      !displayFileName.isEmpty
+      && displayFileName.utf8.count <= SendContract.maximumDisplayFileNameBytes
+      && !displayFileName.contains("/")
+      && !displayFileName.contains("\0")
+      && displayFileName != "." && displayFileName != ".."
+    guard
+      nameValid,
+      SendDigest.isSHA256Hex(sha256),
+      byteCount > 0,
+      byteCount <= SendContract.maximumAttachmentBytes,
+      !uniformTypeIdentifier.isEmpty,
+      stagingDirectory.hasPrefix("/"),
+      !stagingDirectory.contains("/.."),
+      stagedPath == "\(stagingDirectory)/\(displayFileName)"
+    else {
+      throw SendFailure(.attachmentInvalid, detail: "the staged attachment is not self-consistent")
+    }
+  }
 }
 
 /// How far the phased rollout has been opened. Only the control plane decides
@@ -55,6 +132,12 @@ public enum SendFailureCode: String, Codable, Sendable, CaseIterable {
   case calibrationDrift
   case recipientVerifyFailed
   case contentVerifyFailed
+  case attachmentInvalid
+  case attachmentStagingFailed
+  case attachmentDigestMismatch
+  case attachmentVerifyFailed
+  case attachPanelNotPresented
+  case unsupportedAttachmentType
   case sendUnconfirmed
   case engineStall
   case engineUnavailable
@@ -89,6 +172,18 @@ public enum SendFailureCode: String, Codable, Sendable, CaseIterable {
     case .recipientVerifyFailed:
       "The opened conversation did not match the approved recipient."
     case .contentVerifyFailed: "The composed text did not match the approved body."
+    case .attachmentInvalid:
+      "The attachment is malformed, too large, or names a path outside its staging directory."
+    case .attachmentStagingFailed:
+      "The approved file could not be staged; check that it is an owner-only regular file."
+    case .attachmentDigestMismatch:
+      "The file no longer matches the digest the draft approved; approve a new draft."
+    case .attachmentVerifyFailed:
+      "The staged attachment's name was not read back from the compose area; nothing was sent."
+    case .attachPanelNotPresented:
+      "The attach control did not open a file panel; the click was abandoned."
+    case .unsupportedAttachmentType:
+      "This attachment type is not in the reviewed set for the active calibration profile."
     case .sendUnconfirmed:
       "Return was pressed but the result is unproven; reconcile before retrying."
     case .engineStall: "The input helper stalled and was abandoned."
@@ -141,6 +236,8 @@ public struct ActionCapabilityEnvelope: Codable, Equatable, Sendable {
   public let idempotencyKey: String
   public let accountID: String
   public let conversationID: String
+  /// Which reviewed capability this action exercises.
+  public let capability: ActionCapability
   public let searchKey: String
   public let expectedTitle: String
   public let body: String
@@ -149,6 +246,8 @@ public struct ActionCapabilityEnvelope: Codable, Equatable, Sendable {
   public let clientBuildProfileID: String
   public let calibrationProfileID: String
   public let calibrationProfileSHA256: String
+  /// Present exactly when `capability` carries an attachment.
+  public let attachment: ActionAttachment?
   public let rolloutStage: SendRolloutStage
   public let permitSend: Bool
   public let issuedAtUnixNanoseconds: UInt64
@@ -172,6 +271,8 @@ public struct ActionCapabilityEnvelope: Codable, Equatable, Sendable {
     case clientBuildProfileID = "clientBuildProfileId"
     case calibrationProfileID = "calibrationProfileId"
     case calibrationProfileSHA256 = "calibrationProfileSha256"
+    case capability
+    case attachment
     case rolloutStage
     case permitSend
     case issuedAtUnixNanoseconds
@@ -188,6 +289,7 @@ public struct ActionCapabilityEnvelope: Codable, Equatable, Sendable {
     idempotencyKey: String,
     accountID: String,
     conversationID: String,
+    capability: ActionCapability,
     searchKey: String,
     expectedTitle: String,
     body: String,
@@ -196,6 +298,7 @@ public struct ActionCapabilityEnvelope: Codable, Equatable, Sendable {
     clientBuildProfileID: String,
     calibrationProfileID: String,
     calibrationProfileSHA256: String,
+    attachment: ActionAttachment?,
     rolloutStage: SendRolloutStage,
     permitSend: Bool,
     issuedAtUnixNanoseconds: UInt64,
@@ -210,6 +313,7 @@ public struct ActionCapabilityEnvelope: Codable, Equatable, Sendable {
     self.idempotencyKey = idempotencyKey
     self.accountID = accountID
     self.conversationID = conversationID
+    self.capability = capability
     self.searchKey = searchKey
     self.expectedTitle = expectedTitle
     self.body = body
@@ -218,6 +322,7 @@ public struct ActionCapabilityEnvelope: Codable, Equatable, Sendable {
     self.clientBuildProfileID = clientBuildProfileID
     self.calibrationProfileID = calibrationProfileID
     self.calibrationProfileSHA256 = calibrationProfileSHA256
+    self.attachment = attachment
     self.rolloutStage = rolloutStage
     self.permitSend = permitSend
     self.issuedAtUnixNanoseconds = issuedAtUnixNanoseconds
@@ -237,6 +342,7 @@ public struct ActionCapabilityEnvelope: Codable, Equatable, Sendable {
     writer.text(idempotencyKey)
     writer.text(accountID)
     writer.text(conversationID)
+    writer.text(capability.rawValue)
     writer.text(searchKey)
     writer.text(expectedTitle)
     writer.text(bodySHA256)
@@ -244,6 +350,15 @@ public struct ActionCapabilityEnvelope: Codable, Equatable, Sendable {
     writer.text(clientBuildProfileID)
     writer.text(calibrationProfileID)
     writer.text(calibrationProfileSHA256)
+    writer.flag(attachment != nil)
+    if let attachment {
+      writer.text(attachment.stagingDirectory)
+      writer.text(attachment.stagedPath)
+      writer.text(attachment.displayFileName)
+      writer.number(attachment.byteCount)
+      writer.text(attachment.sha256)
+      writer.text(attachment.uniformTypeIdentifier)
+    }
     writer.text(rolloutStage.rawValue)
     writer.flag(permitSend)
     writer.number(issuedAtUnixNanoseconds)
@@ -274,7 +389,6 @@ public struct ActionCapabilityEnvelope: Codable, Equatable, Sendable {
       && searchKey.utf8.count <= SendContract.maximumSearchKeyBytes
       && !expectedTitle.isEmpty
       && expectedTitle.utf8.count <= SendContract.maximumExpectedTitleBytes
-      && !body.isEmpty
       && body.utf8.count <= SendContract.maximumBodyBytes
       && issuedAtUnixNanoseconds < validUntilUnixNanoseconds
       && SendDigest.sha256Hex(Data(body.utf8)) == bodySHA256
@@ -284,6 +398,18 @@ public struct ActionCapabilityEnvelope: Codable, Equatable, Sendable {
     guard structurallyValid else {
       throw SendFailure(
         .capabilityMismatch, detail: "the capability envelope is not self-consistent")
+    }
+    // A capability carries a body or an attachment, never both and never
+    // neither. A caption is a further capability, so an attachment send has no
+    // text at all.
+    switch (capability.carriesAttachment, attachment) {
+    case (false, nil) where !body.isEmpty:
+      break
+    case (true, .some(let attachment)) where body.isEmpty:
+      try attachment.validate()
+    default:
+      throw SendFailure(
+        .capabilityMismatch, detail: "the payload is neither text nor an attachment")
     }
     guard
       nowUnixNanoseconds >= issuedAtUnixNanoseconds,
@@ -300,6 +426,12 @@ public struct HelperGateEvidence: Codable, Equatable, Sendable {
   public var titleConfidencePartsPerMillion: UInt32
   public var titleMatched: Bool
   public var composeMatched: Bool
+  /// GATE 2a: the staged attachment's display name was read back.
+  public var attachmentNameMatched: Bool
+  /// Whether the compose region showed a staged attachment at all.
+  public var attachmentStaged: Bool
+  /// Whether a send-confirmation sheet was observed and confirmed.
+  public var confirmationSheetConfirmed: Bool
   public var composeCleared: Bool
   public var newestOutgoingMatched: Bool
   public var ambiguousSearchResult: Bool
@@ -312,6 +444,9 @@ public struct HelperGateEvidence: Codable, Equatable, Sendable {
     titleConfidencePartsPerMillion: UInt32 = 0,
     titleMatched: Bool = false,
     composeMatched: Bool = false,
+    attachmentNameMatched: Bool = false,
+    attachmentStaged: Bool = false,
+    confirmationSheetConfirmed: Bool = false,
     composeCleared: Bool = false,
     newestOutgoingMatched: Bool = false,
     ambiguousSearchResult: Bool = false,
@@ -323,6 +458,9 @@ public struct HelperGateEvidence: Codable, Equatable, Sendable {
     self.titleConfidencePartsPerMillion = titleConfidencePartsPerMillion
     self.titleMatched = titleMatched
     self.composeMatched = composeMatched
+    self.attachmentNameMatched = attachmentNameMatched
+    self.attachmentStaged = attachmentStaged
+    self.confirmationSheetConfirmed = confirmationSheetConfirmed
     self.composeCleared = composeCleared
     self.newestOutgoingMatched = newestOutgoingMatched
     self.ambiguousSearchResult = ambiguousSearchResult

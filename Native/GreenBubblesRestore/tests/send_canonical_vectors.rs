@@ -66,6 +66,26 @@ fn the_action_capability_binding_matches_the_shared_fixture() {
 }
 
 #[test]
+fn the_attachment_capability_binding_matches_the_shared_fixture() {
+    let vectors = vectors();
+    let capability: ActionCapabilityEnvelope =
+        serde_json::from_value(vectors["attachmentCapability"].clone()).unwrap();
+    assert_eq!(
+        capability_binding_sha256(&capability).as_deref(),
+        Some(capability.binding_sha256.as_str())
+    );
+    let attachment = capability
+        .attachment
+        .as_ref()
+        .expect("an attachment vector");
+    assert!(capability.body.is_empty());
+    assert_eq!(attachment.display_file_name, "photo.png");
+    assert!(capability
+        .validate(capability.issued_at_unix_nanoseconds + 1)
+        .is_ok());
+}
+
+#[test]
 fn the_text_normalizer_matches_the_shared_fixture() {
     let vectors = vectors();
     for case in vectors["normalizedText"].as_array().unwrap() {

@@ -10,7 +10,27 @@ pub const ACTION_SAFETY_CONTRACT_VERSION: u32 = 1;
 pub enum ActionCapability {
     TextSend,
     ReplySend,
+    /// Send one local image, which the client re-encodes: the recipient does
+    /// not receive the approved bytes, only a client-produced derivative.
+    ImageSend,
+    /// Send one local file byte-for-byte.
     FileSend,
+}
+
+impl ActionCapability {
+    /// Whether this capability carries a file rather than text.
+    pub fn carries_attachment(self) -> bool {
+        matches!(
+            self,
+            ActionCapability::ImageSend | ActionCapability::FileSend
+        )
+    }
+
+    /// Whether the client transmits the approved bytes unchanged. False for
+    /// images, so no audit record can claim a byte-for-byte match.
+    pub fn preserves_bytes(self) -> bool {
+        !matches!(self, ActionCapability::ImageSend)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -324,6 +344,7 @@ fn action_capability_name(capability: ActionCapability) -> &'static str {
     match capability {
         ActionCapability::TextSend => "textSend",
         ActionCapability::ReplySend => "replySend",
+        ActionCapability::ImageSend => "imageSend",
         ActionCapability::FileSend => "fileSend",
     }
 }

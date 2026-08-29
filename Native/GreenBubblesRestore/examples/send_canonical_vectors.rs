@@ -10,16 +10,17 @@
 //! cargo run --example send_canonical_vectors > ../../docs/send-canonical-vectors.json
 //! ```
 
+use greenbubbles_restore::action::ActionCapability;
 use greenbubbles_restore::send_contract::{
-    capability_binding_sha256, normalized_send_text, normalized_send_text_sha256,
+    capability_binding_sha256, normalized_send_text, normalized_send_text_sha256, ActionAttachment,
     ActionCapabilityEnvelope, SendRolloutStage, SEND_CONTRACT_VERSION,
 };
 use greenbubbles_restore::send_profile::{
     calibration_profile_signing_bytes, compatibility_matrix_signing_bytes,
     sign_calibration_profile, sign_compatibility_matrix, signing_key_public_hex,
-    CalibrationAnchors, CalibrationOcrRegions, CalibrationProfileBody, CalibrationSelfTest,
-    CompatibilityEntry, CompatibilityMatrixBody, CompatibilityState, WindowRelativePoint,
-    WindowRelativeRect,
+    CalibrationAnchors, CalibrationAttachments, CalibrationOcrRegions, CalibrationProfileBody,
+    CalibrationSelfTest, CompatibilityEntry, CompatibilityMatrixBody, CompatibilityState,
+    WindowRelativePoint, WindowRelativeRect,
 };
 use sha2::{Digest, Sha256};
 
@@ -70,6 +71,30 @@ fn main() {
             focus_indicator: "search_caret".to_string(),
             minimum_title_confidence_parts_per_million: 900_000,
         },
+        attachments: Some(CalibrationAttachments {
+            attach_control: WindowRelativePoint {
+                x_parts_per_million: 470_000,
+                y_parts_per_million: 800_000,
+            },
+            confirm_send_button: WindowRelativePoint {
+                x_parts_per_million: 640_000,
+                y_parts_per_million: 620_000,
+            },
+            compose_attachment: WindowRelativeRect {
+                x_parts_per_million: 400_000,
+                y_parts_per_million: 820_000,
+                width_parts_per_million: 560_000,
+                height_parts_per_million: 120_000,
+            },
+            confirm_sheet: WindowRelativeRect {
+                x_parts_per_million: 340_000,
+                y_parts_per_million: 340_000,
+                width_parts_per_million: 320_000,
+                height_parts_per_million: 300_000,
+            },
+            presents_confirmation_sheet: true,
+            compose_accepts_pasted_file: true,
+        }),
         issued_at_unix_seconds: 1_756_000_000,
         expires_at_unix_seconds: 1_788_000_000,
     };
@@ -110,6 +135,7 @@ fn main() {
         idempotency_key: "55".repeat(32),
         account_id: "canonical-account".to_string(),
         conversation_id: "filehelper".to_string(),
+        capability: ActionCapability::TextSend,
         search_key: "File Transfer".to_string(),
         expected_title: "File Transfer".to_string(),
         body_sha256: hex::encode(Sha256::digest(body.as_bytes())),
@@ -118,6 +144,7 @@ fn main() {
         client_build_profile_id: "wechat-macos-4.1.13-269579".to_string(),
         calibration_profile_id: "wechat-4.1.13.269579-macos-26".to_string(),
         calibration_profile_sha256: "66".repeat(32),
+        attachment: None,
         rollout_stage: SendRolloutStage::SelfSend,
         permit_send: true,
         issued_at_unix_nanoseconds: 1_756_000_000_000_000_000,
@@ -125,6 +152,27 @@ fn main() {
         binding_sha256: String::new(),
     };
     capability.binding_sha256 = capability_binding_sha256(&capability).unwrap();
+
+    // A second vector for the attachment payload, so the attachment block's
+    // contribution to the binding digest is pinned across both languages too.
+    let mut attachment_capability = ActionCapabilityEnvelope {
+        capability: ActionCapability::ImageSend,
+        body: String::new(),
+        body_sha256: hex::encode(Sha256::digest(b"")),
+        normalized_body_sha256: normalized_send_text_sha256(""),
+        attachment: Some(ActionAttachment {
+            staging_directory: "/Users/owner/.greenbubbles/send/staging/0f1e2d3c".to_string(),
+            staged_path: "/Users/owner/.greenbubbles/send/staging/0f1e2d3c/photo.png".to_string(),
+            display_file_name: "photo.png".to_string(),
+            byte_count: 182_931,
+            sha256: "77".repeat(32),
+            uniform_type_identifier: "public.png".to_string(),
+        }),
+        binding_sha256: String::new(),
+        ..capability.clone()
+    };
+    attachment_capability.binding_sha256 =
+        capability_binding_sha256(&attachment_capability).unwrap();
 
     let normalization = [
         "  spaced   out  ",
@@ -165,6 +213,7 @@ fn main() {
             )),
         },
         "actionCapability": capability,
+        "attachmentCapability": attachment_capability,
         "normalizedText": normalization,
         "developmentSigning": {
             "publicKeyHex": signing_key_public_hex(&DEVELOPMENT_SEED),

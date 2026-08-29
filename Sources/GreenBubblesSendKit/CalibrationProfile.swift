@@ -107,6 +107,48 @@ public struct CalibrationSelfTestExpectation: Codable, Equatable, Sendable {
   }
 }
 
+/// The extra anchors and regions an attachment send needs. A profile without
+/// this section cannot stage an attachment on that build, which is how
+/// "attachments are unavailable until someone measures and signs them" is
+/// expressed as data rather than as code.
+public struct CalibrationAttachments: Codable, Equatable, Sendable {
+  /// The compose-toolbar control that opens the file panel. Used only by the
+  /// panel fallback; the pasteboard path needs no anchor at all.
+  public let attachControl: WindowRelativePoint
+  /// The confirm control on the send-confirmation sheet, when one is raised.
+  public let confirmSendButton: WindowRelativePoint
+  /// Where a staged attachment's name appears in the compose area.
+  public let composeAttachment: WindowRelativeRect
+  /// Where the confirmation sheet shows the file it is about to send.
+  public let confirmSheet: WindowRelativeRect
+  /// Whether this build raises a confirmation sheet at all.
+  public let presentsConfirmationSheet: Bool
+  /// Whether the compose box accepts a pasted file reference on this build.
+  /// A profile that says false forces the panel fallback.
+  public let composeAcceptsPastedFile: Bool
+
+  public init(
+    attachControl: WindowRelativePoint,
+    confirmSendButton: WindowRelativePoint,
+    composeAttachment: WindowRelativeRect,
+    confirmSheet: WindowRelativeRect,
+    presentsConfirmationSheet: Bool,
+    composeAcceptsPastedFile: Bool
+  ) {
+    self.attachControl = attachControl
+    self.confirmSendButton = confirmSendButton
+    self.composeAttachment = composeAttachment
+    self.confirmSheet = confirmSheet
+    self.presentsConfirmationSheet = presentsConfirmationSheet
+    self.composeAcceptsPastedFile = composeAcceptsPastedFile
+  }
+
+  var isValid: Bool {
+    attachControl.isValid && confirmSendButton.isValid && composeAttachment.isValid
+      && confirmSheet.isValid
+  }
+}
+
 /// Everything the release key signs.
 public struct CalibrationProfileBody: Codable, Equatable, Sendable {
   public let schema: UInt32
@@ -119,6 +161,8 @@ public struct CalibrationProfileBody: Codable, Equatable, Sendable {
   public let anchors: CalibrationAnchors
   public let ocrRegions: CalibrationOCRRegions
   public let selftest: CalibrationSelfTestExpectation
+  /// Absent until someone has measured this build's attachment surface.
+  public let attachments: CalibrationAttachments?
   public let issuedAtUnixSeconds: UInt64
   public let expiresAtUnixSeconds: UInt64
 
@@ -133,6 +177,7 @@ public struct CalibrationProfileBody: Codable, Equatable, Sendable {
     case anchors
     case ocrRegions
     case selftest
+    case attachments
     case issuedAtUnixSeconds
     case expiresAtUnixSeconds
   }
@@ -148,6 +193,7 @@ public struct CalibrationProfileBody: Codable, Equatable, Sendable {
     anchors: CalibrationAnchors,
     ocrRegions: CalibrationOCRRegions,
     selftest: CalibrationSelfTestExpectation,
+    attachments: CalibrationAttachments? = nil,
     issuedAtUnixSeconds: UInt64,
     expiresAtUnixSeconds: UInt64
   ) {
@@ -161,6 +207,7 @@ public struct CalibrationProfileBody: Codable, Equatable, Sendable {
     self.anchors = anchors
     self.ocrRegions = ocrRegions
     self.selftest = selftest
+    self.attachments = attachments
     self.issuedAtUnixSeconds = issuedAtUnixSeconds
     self.expiresAtUnixSeconds = expiresAtUnixSeconds
   }
@@ -185,6 +232,15 @@ public struct CalibrationProfileBody: Codable, Equatable, Sendable {
     writer.text("selftest.focusIndicator")
     writer.text(selftest.focusIndicator)
     writer.number(UInt64(selftest.minimumTitleConfidencePartsPerMillion))
+    writer.flag(attachments != nil)
+    if let attachments {
+      Self.append(&writer, "anchor.attachControl", attachments.attachControl)
+      Self.append(&writer, "anchor.confirmSendButton", attachments.confirmSendButton)
+      Self.append(&writer, "region.composeAttachment", attachments.composeAttachment)
+      Self.append(&writer, "region.confirmSheet", attachments.confirmSheet)
+      writer.flag(attachments.presentsConfirmationSheet)
+      writer.flag(attachments.composeAcceptsPastedFile)
+    }
     writer.number(issuedAtUnixSeconds)
     writer.number(expiresAtUnixSeconds)
     return writer.finish()
@@ -208,6 +264,7 @@ public struct CalibrationProfileBody: Codable, Equatable, Sendable {
       && !selftest.focusIndicator.isEmpty
       && selftest.minimumTitleConfidencePartsPerMillion
         <= CalibrationProfileConstants.partsPerMillion
+      && (attachments?.isValid ?? true)
       && issuedAtUnixSeconds < expiresAtUnixSeconds
   }
 

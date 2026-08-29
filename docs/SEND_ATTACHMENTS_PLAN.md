@@ -1,6 +1,8 @@
 # Plan: image and file sending
 
-Status: **plan for review. No implementation.** This document specifies how the
+Status: **implemented (A1–A5); A0 spike partially answered against the live
+client.** The plan below is the design of record; §13 records what the live run
+actually found, including one incident and the fix it forced. This document specifies how the
 send adapter (`SEND_ADAPTER.md`) would gain image and file sending, what it
 would cost in privilege, and which questions must be answered by a read-only
 spike before any code is written. It does not open the capability.
@@ -335,3 +337,68 @@ attachment; video, voice, and sticker sends; forwarding an artifact already in
 the replica; reading any file the owner has not named in an approved draft;
 enumerating directories; and any attachment send that has not passed both the
 text rollout gate and the attachment rollout gate.
+
+---
+
+## 13. Live findings and one incident (2026-08-29)
+
+The A0 spike ran against the owner's own live client, on their explicit
+instruction, in dry-run mode only. No message and no attachment was ever sent:
+all three runs ended `attempted: false`.
+
+### What was confirmed
+
+- **The environment is reachable.** Both TCC grants present, WeChat 4.1.13.269579
+  running and signed in, window located, background capture and Apple Vision
+  recognition working at confidence 1.0.
+- **The client is unsandboxed.** `codesign -d --entitlements` on the installed
+  bundle returns nothing, so an open panel would belong to WeChat's own process
+  (§2, Path B). Still re-detected at runtime rather than assumed.
+- **GATE 1 works exactly as designed.** With the wrong conversation open it read
+  the on-screen title, compared it to the approved recipient, and aborted before
+  touching any compose box. That gate is what kept a misfire from becoming a
+  message.
+- **Synthesized events are not self-detected.** Measured, not assumed:
+  `collision-probe` reports `synthesizedEventsCountAsHumanInput: false`, so the
+  helper's own clicks and keys never trip its own collision guard.
+
+### The incident
+
+While the owner was typing a message to a real contact, three spike runs pasted
+the search key into the client and interleaved with their typing.
+
+**Cause.** The collision guard had been loosened, during this same session, from
+"any recent input aborts" to "only input while the target is frontmost aborts",
+so that a spike could run on a machine that was in use. Two things made that
+wrong:
+
+1. `NSWorkspace.frontmostApplication` is unreliable when sampled from a non-GUI
+   process; it read "not frontmost" while the person was typing in the client.
+2. More fundamentally, **a background click does not merely avoid raising the
+   target — it moves keyboard focus inside it.** A person typing into the
+   compose box can find their next keystrokes arriving in the search box the
+   moment the skill focuses it. Interference does not require a window to come
+   forward, so "the target is not frontmost" was never evidence of safety.
+
+**Fix.** The guard is now stricter than it was originally:
+
+- the machine must be idle for a full window (5 s) before the skill touches
+  anything, rather than merely "no input in the last 1.5 s";
+- the target being frontmost *raises* the requirement (15 s) and can never waive
+  it;
+- the check runs before **every** focus change, not only at stage boundaries,
+  because taking focus is itself the interfering act;
+- the policy is a pure, unit-tested function (`HumanCollisionPolicy`) rather than
+  untestable code inside the effector, and the tests pin both directions.
+
+**Standing lesson.** A safety guard must not be relaxed to make a test run. If
+the guard blocks the test, the environment is telling the truth: the machine is
+in use and the adapter should wait.
+
+### Still open
+
+Q1, Q2, and Q5 (does the compose box accept a pasted file reference; does paste
+distinguish image-as-image from image-as-file; is there a confirmation sheet)
+remain unanswered, because answering them requires driving the live client and
+the machine has been in use. They need one quiet window on an idle machine,
+targeting File Transfer only.

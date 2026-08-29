@@ -15,18 +15,32 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::action::ActionLifecycleState;
+use crate::action::{ActionCapability, ActionLifecycleState};
 
 /// Format version of every envelope in this module.
 pub const SEND_CONTRACT_VERSION: u32 = 1;
 /// Largest body a single text send may carry.
 pub const MAXIMUM_SEND_BODY_BYTES: usize = 4_096;
+/// Largest attachment this adapter will stage and send.
+pub const MAXIMUM_ATTACHMENT_BYTES: u64 = 100 * 1024 * 1024;
+/// Largest display file name a staged attachment may carry.
+pub const MAXIMUM_DISPLAY_FILE_NAME_BYTES: usize = 255;
 /// Largest search key the addressing step may type.
 pub const MAXIMUM_SEARCH_KEY_BYTES: usize = 256;
 /// Largest recipient title the recipient gate may compare.
 pub const MAXIMUM_EXPECTED_TITLE_BYTES: usize = 256;
 
 const ACTION_CAPABILITY_DOMAIN: &str = "greenbubbles.send.action-capability.v1";
+
+/// The canonical name of a reviewed capability, shared with the signed bytes.
+pub(crate) fn action_capability_name(capability: ActionCapability) -> &'static str {
+    match capability {
+        ActionCapability::TextSend => "textSend",
+        ActionCapability::ReplySend => "replySend",
+        ActionCapability::ImageSend => "imageSend",
+        ActionCapability::FileSend => "fileSend",
+    }
+}
 
 /// The single text normalization both the on-screen gates and replica
 /// reconciliation use: trim the ends and fold every run of Unicode whitespace
@@ -158,6 +172,12 @@ pub enum SendFailureCode {
     CalibrationDrift,
     RecipientVerifyFailed,
     ContentVerifyFailed,
+    AttachmentInvalid,
+    AttachmentStagingFailed,
+    AttachmentDigestMismatch,
+    AttachmentVerifyFailed,
+    AttachPanelNotPresented,
+    UnsupportedAttachmentType,
     SendUnconfirmed,
     EngineStall,
     EngineUnavailable,
@@ -200,6 +220,24 @@ impl SendFailureCode {
             }
             SendFailureCode::ContentVerifyFailed => {
                 "The composed text did not match the approved body; approve a new draft."
+            }
+            SendFailureCode::AttachmentInvalid => {
+                "The draft's attachment is malformed, too large, or names a path outside its staging directory."
+            }
+            SendFailureCode::AttachmentStagingFailed => {
+                "The approved file could not be staged; check that it is an owner-only regular file that still exists."
+            }
+            SendFailureCode::AttachmentDigestMismatch => {
+                "The file on disk no longer matches the digest the draft approved; approve a new draft for the current file."
+            }
+            SendFailureCode::AttachmentVerifyFailed => {
+                "The staged attachment's name was not read back from the compose area; nothing was sent."
+            }
+            SendFailureCode::AttachPanelNotPresented => {
+                "The attach control did not open a file panel; the click was abandoned and the compose area left untouched."
+            }
+            SendFailureCode::UnsupportedAttachmentType => {
+                "This attachment type is not in the reviewed set for the active calibration profile."
             }
             SendFailureCode::SendUnconfirmed => {
                 "Return was pressed but the result is unproven; run send reconcile before any further attempt."
@@ -282,6 +320,56 @@ pub enum SendCompletionOutcome {
     AwaitingReconciliation,
 }
 
+/// One staged local attachment. The control plane has already copied the
+/// approved file into a single-use staging directory and re-hashed *that copy*,
+/// so the digest here describes the exact bytes the helper will hand over and
+/// nothing can be swapped underneath it afterwards.
+///
+/// The helper never reads the file. It writes a *reference* to the pasteboard
+/// (or types the path into an open panel), so the bytes travel from the
+/// filesystem to WeChat without passing through the process that holds the
+/// input and capture grants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ActionAttachment {
+    /// The single-use directory the control plane created for this action. It
+    /// is the only path the helper may touch.
+    pub staging_directory: String,
+    /// The staged copy, always `<staging_directory>/<display_file_name>`.
+    pub staged_path: String,
+    pub display_file_name: String,
+    pub byte_count: u64,
+    /// Digest of the staged copy, re-verified from that copy before minting.
+    pub sha256: String,
+    pub uniform_type_identifier: String,
+}
+
+impl ActionAttachment {
+    /// Structural validation performed independently on both sides. The path
+    /// containment check is what keeps a compromised control plane from
+    /// pointing the helper at an arbitrary file.
+    pub fn validate(&self) -> Result<(), SendFailureCode> {
+        let name_valid = !self.display_file_name.is_empty()
+            && self.display_file_name.len() <= MAXIMUM_DISPLAY_FILE_NAME_BYTES
+            && !self.display_file_name.contains('/')
+            && !self.display_file_name.contains('\0')
+            && !matches!(self.display_file_name.as_str(), "." | "..");
+        let expected_path = format!("{}/{}", self.staging_directory, self.display_file_name);
+        if !name_valid
+            || !is_sha256(&self.sha256)
+            || self.byte_count == 0
+            || self.byte_count > MAXIMUM_ATTACHMENT_BYTES
+            || self.uniform_type_identifier.is_empty()
+            || !self.staging_directory.starts_with('/')
+            || self.staging_directory.contains("/..")
+            || self.staged_path != expected_path
+        {
+            return Err(SendFailureCode::AttachmentInvalid);
+        }
+        Ok(())
+    }
+}
+
 /// The single-use, bound action capability handed to the helper. It carries no
 /// key, no replica handle, and no policy: the control plane has already
 /// resolved the recipient, so the helper can enforce the recipient gate with
@@ -297,11 +385,15 @@ pub struct ActionCapabilityEnvelope {
     pub idempotency_key: String,
     pub account_id: String,
     pub conversation_id: String,
+    /// Which reviewed capability this action exercises. Text carries a body;
+    /// image and file carry an attachment. Never both.
+    pub capability: ActionCapability,
     /// What to type into the search box to address the conversation.
     pub search_key: String,
     /// GATE 1: the opened conversation title must equal this.
     pub expected_title: String,
-    /// GATE 2 and GATE 3: the exact text to paste and to confirm.
+    /// GATE 2 and GATE 3: the exact text to paste and to confirm. Empty for an
+    /// attachment send.
     pub body: String,
     pub body_sha256: String,
     /// Digest of the body after `normalized_send_text`; both the on-screen
@@ -311,6 +403,9 @@ pub struct ActionCapabilityEnvelope {
     pub client_build_profile_id: String,
     pub calibration_profile_id: String,
     pub calibration_profile_sha256: String,
+    /// Present exactly when `capability` carries an attachment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment: Option<ActionAttachment>,
     pub rollout_stage: SendRolloutStage,
     /// False in every dry run: the helper must stop before Return.
     pub permit_send: bool,
@@ -331,6 +426,7 @@ pub fn capability_binding_bytes(capability: &ActionCapabilityEnvelope) -> Option
         .text(&capability.idempotency_key)
         .text(&capability.account_id)
         .text(&capability.conversation_id)
+        .text(action_capability_name(capability.capability))
         .text(&capability.search_key)
         .text(&capability.expected_title)
         .text(&capability.body_sha256)
@@ -338,6 +434,17 @@ pub fn capability_binding_bytes(capability: &ActionCapabilityEnvelope) -> Option
         .text(&capability.client_build_profile_id)
         .text(&capability.calibration_profile_id)
         .text(&capability.calibration_profile_sha256)
+        .flag(capability.attachment.is_some());
+    if let Some(attachment) = &capability.attachment {
+        writer
+            .text(&attachment.staging_directory)
+            .text(&attachment.staged_path)
+            .text(&attachment.display_file_name)
+            .number(u128::from(attachment.byte_count))
+            .text(&attachment.sha256)
+            .text(&attachment.uniform_type_identifier);
+    }
+    writer
         .text(capability.rollout_stage.canonical_name())
         .flag(capability.permit_send)
         .number(capability.issued_at_unix_nanoseconds)
@@ -371,7 +478,6 @@ impl ActionCapabilityEnvelope {
             || self.search_key.len() > MAXIMUM_SEARCH_KEY_BYTES
             || self.expected_title.is_empty()
             || self.expected_title.len() > MAXIMUM_EXPECTED_TITLE_BYTES
-            || self.body.is_empty()
             || self.body.len() > MAXIMUM_SEND_BODY_BYTES
             || self.issued_at_unix_nanoseconds >= self.valid_until_unix_nanoseconds
             || hex::encode(Sha256::digest(self.body.as_bytes())) != self.body_sha256
@@ -381,6 +487,14 @@ impl ActionCapabilityEnvelope {
             || (self.permit_send && !self.rollout_stage.permits_return())
         {
             return Err(SendFailureCode::CapabilityMismatch);
+        }
+        // A capability carries a body or an attachment, never both and never
+        // neither. Captions are a separate capability, so an attachment send
+        // has no text at all and a text send has no file.
+        match (self.capability.carries_attachment(), &self.attachment) {
+            (false, None) if !self.body.is_empty() => {}
+            (true, Some(attachment)) if self.body.is_empty() => attachment.validate()?,
+            _ => return Err(SendFailureCode::CapabilityMismatch),
         }
         if now_unix_nanoseconds < self.issued_at_unix_nanoseconds
             || now_unix_nanoseconds >= self.valid_until_unix_nanoseconds
@@ -400,6 +514,13 @@ pub struct HelperGateEvidence {
     pub title_confidence_parts_per_million: u32,
     pub title_matched: bool,
     pub compose_matched: bool,
+    /// GATE 2a: the staged attachment's display name was read back in the
+    /// compose region. False for a text send.
+    pub attachment_name_matched: bool,
+    /// Whether the compose region showed a staged attachment at all.
+    pub attachment_staged: bool,
+    /// Whether a send-confirmation sheet was observed and confirmed.
+    pub confirmation_sheet_confirmed: bool,
     pub compose_cleared: bool,
     pub newest_outgoing_matched: bool,
     pub ambiguous_search_result: bool,
@@ -570,6 +691,7 @@ mod tests {
             idempotency_key: sha('5'),
             account_id: "account".to_string(),
             conversation_id: "filehelper".to_string(),
+            capability: ActionCapability::TextSend,
             search_key: "File Transfer".to_string(),
             expected_title: "File Transfer".to_string(),
             body_sha256: hex::encode(Sha256::digest(body.as_bytes())),
@@ -578,6 +700,7 @@ mod tests {
             client_build_profile_id: "wechat-macos-4.1.13-269579".to_string(),
             calibration_profile_id: "wechat-4.1.13.269579-macos-26".to_string(),
             calibration_profile_sha256: sha('6'),
+            attachment: None,
             rollout_stage: if permit_send {
                 SendRolloutStage::SelfSend
             } else {
@@ -616,6 +739,9 @@ mod tests {
                 title_confidence_parts_per_million: 1_000_000,
                 title_matched: true,
                 compose_matched: true,
+                attachment_name_matched: false,
+                attachment_staged: false,
+                confirmation_sheet_confirmed: false,
                 compose_cleared: attempted,
                 newest_outgoing_matched: attempted,
                 ambiguous_search_result: false,
@@ -655,6 +781,7 @@ mod tests {
             Box::new(|value| value.idempotency_key = sha('a')),
             Box::new(|value| value.account_id.push('x')),
             Box::new(|value| value.conversation_id.push('x')),
+            Box::new(|value| value.capability = ActionCapability::FileSend),
             Box::new(|value| value.search_key.push('x')),
             Box::new(|value| value.expected_title.push('x')),
             Box::new(|value| value.body_sha256 = sha('a')),

@@ -75,6 +75,9 @@ public enum SendKey: String, Equatable, Sendable {
   case selectAll
   case paste
   case escape
+  /// Cmd+Shift+G in an open panel. Used only by the panel fallback, and only
+  /// ever followed by a pasted path, so no text is ever typed key by key.
+  case goToFolder
 }
 
 /// The tools the bounded capability manifest can grant.
@@ -85,6 +88,11 @@ public enum SendTool: String, Equatable, Sendable, CaseIterable {
   case clipboardWrite
   case windowRead
   case windowCapture
+  /// Put a reference to one already-staged file on the pasteboard. The helper
+  /// never reads the file's contents; it hands WeChat a path.
+  case clipboardWriteFileReference
+  /// Navigate an open panel to one already-staged path.
+  case openPanelNavigate
 }
 
 /// The engine's least-privilege confinement: one application, a fixed set of
@@ -143,6 +151,12 @@ public protocol InputEffector: AnyObject {
   func click(at point: CGPoint) throws(SendFailure)
   func press(_ key: SendKey) throws(SendFailure)
   func writeClipboard(_ text: String) throws(SendFailure)
+  /// Places a reference to one file on the pasteboard. The path is always the
+  /// staged copy named by the capability, never a path the helper chose.
+  func writeClipboardFileReference(_ path: String) throws(SendFailure)
+  /// The number of windows the target process currently owns, used to detect
+  /// that an open panel or a confirmation sheet actually appeared.
+  func targetWindowCount() -> Int
   func restoreClipboard()
   /// Whether real user activity has been observed on the target since the run
   /// started. Takeover always wins.
@@ -247,6 +261,7 @@ public struct MechanicalSendSkill {
       try yieldToHuman(&evidence)
       try clearAndPaste(capability.searchKey, at: profile.anchors.searchBox, in: frame)
       effector.settle(milliseconds: pacing.afterSearchMilliseconds)
+      try yieldToHuman(&evidence)
       try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
       try effector.click(at: WindowGeometry.point(profile.anchors.firstResultRow, in: frame))
       effector.settle(milliseconds: pacing.afterClickMilliseconds)
@@ -269,17 +284,40 @@ public struct MechanicalSendSkill {
       }
 
       stage = .compose
-      try clearAndPaste(capability.body, at: profile.anchors.composeBox, in: frame)
+      if let attachment = capability.attachment {
+        try stageAttachment(attachment, in: frame, evidence: &evidence)
+      } else {
+        try clearAndPaste(capability.body, at: profile.anchors.composeBox, in: frame)
+      }
 
       stage = .contentVerify
-      let composed = try recognize(profile.ocrRegions.compose, in: frame)
-      evidence.composeMatched = SendText.matches(composed.text, capability.body)
-      guard evidence.composeMatched else {
-        try clearCompose(in: frame)
-        throw SendFailure(
-          .contentVerifyFailed,
-          detail: "the composed text did not match the approved body"
-        )
+      if let attachment = capability.attachment {
+        // GATE 2a. An attachment's bytes never appear on screen, so this proves
+        // *which* file was staged, not what it contains. The digest half of the
+        // gate already ran in the control plane, against the staged copy.
+        let regions = try requireAttachmentRegions()
+        let staged = try recognize(regions.composeAttachment, in: frame)
+        evidence.attachmentStaged = !SendText.normalized(staged.text).isEmpty
+        evidence.attachmentNameMatched = SendText.normalized(staged.text)
+          .localizedCaseInsensitiveContains(SendText.normalized(attachment.displayFileName))
+        evidence.composeMatched = evidence.attachmentNameMatched
+        guard evidence.attachmentStaged, evidence.attachmentNameMatched else {
+          try clearCompose(in: frame)
+          throw SendFailure(
+            .attachmentVerifyFailed,
+            detail: "the staged attachment's name was not read back from the compose area"
+          )
+        }
+      } else {
+        let composed = try recognize(profile.ocrRegions.compose, in: frame)
+        evidence.composeMatched = SendText.matches(composed.text, capability.body)
+        guard evidence.composeMatched else {
+          try clearCompose(in: frame)
+          throw SendFailure(
+            .contentVerifyFailed,
+            detail: "the composed text did not match the approved body"
+          )
+        }
       }
 
       guard capability.permitSend else {
@@ -305,14 +343,54 @@ public struct MechanicalSendSkill {
       try manifest.authorize(.pressKey, bundleIdentifier: targetBundleIdentifier)
       try effector.press(.returnKey)
       attempted = true
+      if capability.attachment != nil,
+        let attachments = profile.attachments,
+        attachments.presentsConfirmationSheet
+      {
+        // Some builds raise a sheet before an attachment goes out. It is an
+        // extra verification point, not an obstacle: the sheet must name the
+        // same file before it is confirmed.
+        effector.settle(milliseconds: pacing.afterClickMilliseconds)
+        let sheet = try recognize(attachments.confirmSheet, in: frame)
+        let named = SendText.normalized(sheet.text)
+          .localizedCaseInsensitiveContains(
+            SendText.normalized(capability.attachment?.displayFileName ?? "")
+          )
+        if named {
+          try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
+          try effector.click(at: WindowGeometry.point(attachments.confirmSendButton, in: frame))
+          evidence.confirmationSheetConfirmed = true
+        } else {
+          // Refuse to confirm a sheet that names something else, and leave it
+          // on screen for the owner rather than dismissing it blind.
+          effector.restoreClipboard()
+          evidence.captureCount = perception.captureCount
+          evidence.elapsedMilliseconds = elapsedMilliseconds(since: started)
+          return outcome(
+            capability,
+            stage: .sendVerify,
+            attempted: true,
+            confirmation: .unconfirmed,
+            failure: .attachmentVerifyFailed,
+            evidence: evidence
+          )
+        }
+      }
       effector.settle(milliseconds: pacing.afterReturnMilliseconds)
 
       stage = .sendVerify
       let afterCompose = try recognize(profile.ocrRegions.compose, in: frame)
       evidence.composeCleared = SendText.normalized(afterCompose.text).isEmpty
       let bubble = try recognize(profile.ocrRegions.newestOutgoing, in: frame)
-      evidence.newestOutgoingMatched = SendText.normalized(bubble.text)
-        .contains(SendText.normalized(capability.body))
+      if let attachment = capability.attachment {
+        // The bubble shows a name and a size, never the bytes, so this is the
+        // strongest on-screen claim available: the right file appeared.
+        evidence.newestOutgoingMatched = SendText.normalized(bubble.text)
+          .localizedCaseInsensitiveContains(SendText.normalized(attachment.displayFileName))
+      } else {
+        evidence.newestOutgoingMatched = SendText.normalized(bubble.text)
+          .contains(SendText.normalized(capability.body))
+      }
       confirmation =
         evidence.composeCleared && evidence.newestOutgoingMatched ? .confirmed : .unconfirmed
       // The body must not be left sitting in the user's pasteboard once the
@@ -411,6 +489,12 @@ public struct MechanicalSendSkill {
     at anchor: WindowRelativePoint,
     in frame: WindowFrame
   ) throws(SendFailure) {
+    // Checked again here rather than only at the stage boundary: focusing a
+    // field is itself interference, so the machine must still be idle at the
+    // moment we take focus, not merely when the stage began.
+    guard !effector.humanActivityObserved() else {
+      throw SendFailure(.humanCollision, detail: "user activity observed before taking focus")
+    }
     try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
     try effector.click(at: WindowGeometry.point(anchor, in: frame))
     effector.settle(milliseconds: pacing.afterClickMilliseconds)
@@ -423,6 +507,94 @@ public struct MechanicalSendSkill {
     try effector.writeClipboard(text)
     try effector.press(.paste)
     effector.settle(milliseconds: pacing.afterPasteMilliseconds)
+  }
+
+  /// Places the staged file into the compose area.
+  ///
+  /// The pasteboard path is preferred because it is mechanically identical to
+  /// the text send that is already gated: focus the compose box and press
+  /// Cmd+V. The panel fallback is used only when the signed profile says this
+  /// build does not accept a pasted file reference, and it is navigated
+  /// keyboard-first so no coordinate inside the panel is ever guessed.
+  private func stageAttachment(
+    _ attachment: ActionAttachment,
+    in frame: WindowFrame,
+    evidence: inout HelperGateEvidence
+  ) throws(SendFailure) {
+    let attachments = try requireAttachmentRegions()
+    if attachments.composeAcceptsPastedFile {
+      guard !effector.humanActivityObserved() else {
+        throw SendFailure(.humanCollision, detail: "user activity observed before taking focus")
+      }
+      try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
+      try effector.click(at: WindowGeometry.point(profile.anchors.composeBox, in: frame))
+      effector.settle(milliseconds: pacing.afterClickMilliseconds)
+      try manifest.authorize(.hotkey, bundleIdentifier: targetBundleIdentifier)
+      try effector.press(.selectAll)
+      try effector.press(.delete)
+      effector.settle(milliseconds: pacing.afterKeyMilliseconds)
+      try manifest.authorize(
+        .clipboardWriteFileReference,
+        bundleIdentifier: targetBundleIdentifier
+      )
+      try effector.writeClipboardFileReference(attachment.stagedPath)
+      try effector.press(.paste)
+      effector.settle(milliseconds: pacing.afterPasteMilliseconds)
+      return
+    }
+    try stageAttachmentThroughPanel(attachment, in: frame, evidence: &evidence)
+  }
+
+  /// The panel fallback: click attach, prove a panel appeared, then navigate it
+  /// with Go to Folder and a pasted path.
+  private func stageAttachmentThroughPanel(
+    _ attachment: ActionAttachment,
+    in frame: WindowFrame,
+    evidence: inout HelperGateEvidence
+  ) throws(SendFailure) {
+    let attachments = try requireAttachmentRegions()
+    guard !effector.humanActivityObserved() else {
+      throw SendFailure(.humanCollision, detail: "user activity observed before taking focus")
+    }
+    let windowsBefore = effector.targetWindowCount()
+    try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
+    try effector.click(at: WindowGeometry.point(attachments.attachControl, in: frame))
+    effector.settle(milliseconds: pacing.afterSearchMilliseconds)
+    // The click that opens the panel is the dangerous step: a neighbouring
+    // control would do something else entirely. Requiring a new window before
+    // going further turns that into a gate rather than a hope.
+    guard effector.targetWindowCount() > windowsBefore else {
+      try manifest.authorize(.pressKey, bundleIdentifier: targetBundleIdentifier)
+      try? effector.press(.escape)
+      throw SendFailure(
+        .attachPanelNotPresented,
+        detail: "the attach control did not present a file panel"
+      )
+    }
+    try manifest.authorize(.openPanelNavigate, bundleIdentifier: targetBundleIdentifier)
+    try effector.press(.goToFolder)
+    effector.settle(milliseconds: pacing.afterKeyMilliseconds)
+    try manifest.authorize(.clipboardWrite, bundleIdentifier: targetBundleIdentifier)
+    try effector.writeClipboard(attachment.stagedPath)
+    try effector.press(.paste)
+    effector.settle(milliseconds: pacing.afterKeyMilliseconds)
+    try effector.press(.returnKey)
+    effector.settle(milliseconds: pacing.afterSearchMilliseconds)
+    try effector.press(.returnKey)
+    effector.settle(milliseconds: pacing.afterPasteMilliseconds)
+    evidence.attachmentStaged = true
+  }
+
+  /// The attachment section of the active profile, or a refusal. A build whose
+  /// profile has no attachment section cannot send one.
+  private func requireAttachmentRegions() throws(SendFailure) -> CalibrationAttachments {
+    guard let attachments = profile.attachments else {
+      throw SendFailure(
+        .profileInvalid,
+        detail: "the active calibration profile has no attachment section"
+      )
+    }
+    return attachments
   }
 
   private func clearCompose(in frame: WindowFrame) throws(SendFailure) {
@@ -482,5 +654,53 @@ public struct MechanicalSendSkill {
       evidence: evidence,
       observedAtUnixNanoseconds: clock()
     )
+  }
+}
+
+/// When real user activity counts as a collision with an in-flight skill.
+///
+/// This is a policy, not a measurement, so it lives here where it can be tested
+/// rather than inside the effector where it cannot.
+///
+/// The rule is deliberately strict, and it was made stricter after a live
+/// incident: a background click does not merely avoid raising the target, it
+/// *moves keyboard focus inside it*. A person typing into the compose box can
+/// therefore find their keystrokes arriving in the search box the instant the
+/// skill focuses it — interference without any window ever coming forward.
+///
+/// So the machine must be idle before the skill touches anything, and any
+/// input at all during a run aborts it. Scoping the check to "is the target
+/// frontmost" is not sound: that signal is unreliable when sampled from a
+/// non-GUI process, and treating "not frontmost" as permission to act is
+/// exactly what produced the incident. Frontmost is used only to make the
+/// requirement *stricter*, never to waive it.
+public enum HumanCollisionPolicy {
+  /// How long the machine must have been idle before the skill may act.
+  /// A background sender can afford to wait; a person mid-sentence cannot.
+  public static let defaultIdleThresholdSeconds: TimeInterval = 5
+
+  /// The longer idle window required when the target application is frontmost,
+  /// which means the person is most likely working in it right now.
+  public static let frontmostIdleThresholdSeconds: TimeInterval = 15
+
+  /// Whether an in-flight skill must yield.
+  ///
+  /// - Parameters:
+  ///   - targetIsFrontmost: whether the client is frontmost. Only ever raises
+  ///     the bar; it can never lower it.
+  ///   - idleSecondsByEventType: seconds since the last hardware event of each
+  ///     sampled type.
+  ///   - thresholdSeconds: the idle window required on a quiet machine.
+  ///   - frontmostThresholdSeconds: the idle window required when the target is
+  ///     frontmost.
+  public static func mustYield(
+    targetIsFrontmost: Bool,
+    idleSecondsByEventType: [TimeInterval],
+    thresholdSeconds: TimeInterval = defaultIdleThresholdSeconds,
+    frontmostThresholdSeconds: TimeInterval = frontmostIdleThresholdSeconds
+  ) -> Bool {
+    let required =
+      targetIsFrontmost ? max(thresholdSeconds, frontmostThresholdSeconds) : thresholdSeconds
+    return idleSecondsByEventType.contains { $0 < required }
   }
 }

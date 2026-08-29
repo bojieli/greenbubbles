@@ -19,6 +19,9 @@ final class MacOSScreenPerception: ScreenPerception {
   private let captureTimeout: TimeInterval
   private let recognitionLanguages: [String]
   private var captures: UInt32 = 0
+  /// The most recent full-window capture, kept only so the read-only
+  /// measurement harness can write it out. Never transmitted anywhere.
+  private(set) var lastCapturedImage: CGImage?
 
   init(
     processIdentifier: pid_t,
@@ -47,6 +50,7 @@ final class MacOSScreenPerception: ScreenPerception {
   func recognizeText(in rect: CGRect) throws(SendFailure) -> RecognizedRegionText {
     let frame = try windowFrame()
     let image = try captureWindow()
+    lastCapturedImage = image
     captures &+= 1
     guard let cropped = crop(image, to: rect, window: frame) else {
       throw SendFailure(

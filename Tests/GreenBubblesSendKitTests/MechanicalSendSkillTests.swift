@@ -8,7 +8,9 @@ import Testing
 /// closed, every abort must leave the client clean, and a capability that
 /// forbids sending must never produce an attempted outcome.
 struct MechanicalSendSkillTests {
-  private enum Region { case title, compose, newestOutgoing, unknown }
+  private enum Region {
+    case title, compose, newestOutgoing, composeAttachment, confirmSheet, unknown
+  }
 
   private final class FakePerception: ScreenPerception {
     var frame: WindowFrame
@@ -16,6 +18,8 @@ struct MechanicalSendSkillTests {
     var composeResult: Result<RecognizedRegionText, SendFailure>
     var composeAfterSendResult: Result<RecognizedRegionText, SendFailure>?
     var newestOutgoingResult: Result<RecognizedRegionText, SendFailure>
+    var composeAttachmentResult: Result<RecognizedRegionText, SendFailure>?
+    var confirmSheetResult: Result<RecognizedRegionText, SendFailure>?
     var frameFailure: SendFailure?
     private(set) var captures: UInt32 = 0
     private var composeReads = 0
@@ -47,17 +51,31 @@ struct MechanicalSendSkillTests {
         if composeReads > 1, let after = composeAfterSendResult { return try after.get() }
         return try composeResult.get()
       case .newestOutgoing: return try newestOutgoingResult.get()
+      case .composeAttachment:
+        return try
+          (composeAttachmentResult
+          ?? .success(RecognizedRegionText(text: "", confidencePartsPerMillion: 0))).get()
+      case .confirmSheet:
+        return try
+          (confirmSheetResult
+          ?? .success(RecognizedRegionText(text: "", confidencePartsPerMillion: 0))).get()
       case .unknown:
         throw SendFailure(.calibrationDrift, detail: "unclassified region")
       }
     }
 
     private func classify(_ rect: CGRect) -> Region {
-      for (region, kind) in [
-        (profile.ocrRegions.title, Region.title),
-        (profile.ocrRegions.compose, Region.compose),
-        (profile.ocrRegions.newestOutgoing, Region.newestOutgoing),
-      ] where WindowGeometry.rect(region, in: frame).equalTo(rect) {
+      var candidates: [(WindowRelativeRect, Region)] = [
+        (profile.ocrRegions.title, .title),
+        (profile.ocrRegions.compose, .compose),
+        (profile.ocrRegions.newestOutgoing, .newestOutgoing),
+      ]
+      if let attachments = profile.attachments {
+        candidates.append((attachments.composeAttachment, .composeAttachment))
+        candidates.append((attachments.confirmSheet, .confirmSheet))
+      }
+      for (region, kind) in candidates
+      where WindowGeometry.rect(region, in: frame).equalTo(rect) {
         return kind
       }
       return .unknown
@@ -70,10 +88,17 @@ struct MechanicalSendSkillTests {
     var humanActive = false
     var clipboard: String?
     var clickFailure: SendFailure?
+    /// Scripted window count, so a test can decide whether the attach control
+    /// "opened a panel".
+    var windowCount = 1
+    /// When true, every click adds a window, so the attach step observes the
+    /// panel it requires. Off by default, which is the "no panel" case.
+    var clicksOpenAWindow = false
 
     func click(at point: CGPoint) throws(SendFailure) {
       if let clickFailure { throw clickFailure }
       actions.append("click(\(Int(point.x)),\(Int(point.y)))")
+      if clicksOpenAWindow { windowCount += 1 }
     }
 
     func press(_ key: SendKey) throws(SendFailure) {
@@ -90,6 +115,12 @@ struct MechanicalSendSkillTests {
       actions.append("restoreClipboard")
     }
 
+    func writeClipboardFileReference(_ path: String) throws(SendFailure) {
+      actions.append("fileReference(\(path))")
+    }
+
+    func targetWindowCount() -> Int { windowCount }
+
     func humanActivityObserved() -> Bool { humanActive }
 
     func settle(milliseconds: UInt64) {}
@@ -104,7 +135,11 @@ struct MechanicalSendSkillTests {
   private let body = "adapter self-check"
   private let title = "File Transfer"
 
-  private func profile(profileID: String = "test-profile") -> CalibrationProfileBody {
+  private func profile(
+    profileID: String = "test-profile",
+    composeAcceptsPastedFile: Bool = true,
+    presentsConfirmationSheet: Bool = false
+  ) -> CalibrationProfileBody {
     CalibrationProfileBody(
       schema: 1,
       profileID: profileID,
@@ -142,6 +177,27 @@ struct MechanicalSendSkillTests {
         focusIndicator: "search_caret",
         minimumTitleConfidencePartsPerMillion: 900_000
       ),
+      attachments: CalibrationAttachments(
+        attachControl: WindowRelativePoint(xPartsPerMillion: 470_000, yPartsPerMillion: 800_000),
+        confirmSendButton: WindowRelativePoint(
+          xPartsPerMillion: 640_000,
+          yPartsPerMillion: 620_000
+        ),
+        composeAttachment: WindowRelativeRect(
+          xPartsPerMillion: 410_000,
+          yPartsPerMillion: 780_000,
+          widthPartsPerMillion: 540_000,
+          heightPartsPerMillion: 90_000
+        ),
+        confirmSheet: WindowRelativeRect(
+          xPartsPerMillion: 340_000,
+          yPartsPerMillion: 340_000,
+          widthPartsPerMillion: 320_000,
+          heightPartsPerMillion: 300_000
+        ),
+        presentsConfirmationSheet: presentsConfirmationSheet,
+        composeAcceptsPastedFile: composeAcceptsPastedFile
+      ),
       issuedAtUnixSeconds: 1,
       expiresAtUnixSeconds: 4_000_000_000
     )
@@ -151,7 +207,9 @@ struct MechanicalSendSkillTests {
     permitSend: Bool,
     profileID: String = "test-profile",
     issuedAt: UInt64 = 1_000,
-    validUntil: UInt64 = 9_000
+    validUntil: UInt64 = 9_000,
+    capability: ActionCapability = .textSend,
+    attachment: ActionAttachment? = nil
   ) -> ActionCapabilityEnvelope {
     func build(binding: String) -> ActionCapabilityEnvelope {
       ActionCapabilityEnvelope(
@@ -163,14 +221,16 @@ struct MechanicalSendSkillTests {
         idempotencyKey: String(repeating: "5", count: 64),
         accountID: "account",
         conversationID: "filehelper",
+        capability: capability,
         searchKey: title,
         expectedTitle: title,
-        body: body,
-        bodySHA256: SendDigest.sha256Hex(Data(body.utf8)),
-        normalizedBodySHA256: SendText.normalizedSHA256(body),
+        body: attachment == nil ? body : "",
+        bodySHA256: SendDigest.sha256Hex(Data((attachment == nil ? body : "").utf8)),
+        normalizedBodySHA256: SendText.normalizedSHA256(attachment == nil ? body : ""),
         clientBuildProfileID: "wechat-macos-4.1.13-269579",
         calibrationProfileID: profileID,
         calibrationProfileSHA256: String(repeating: "6", count: 64),
+        attachment: attachment,
         rolloutStage: permitSend ? .selfSend : .dryRun,
         permitSend: permitSend,
         issuedAtUnixNanoseconds: issuedAt,
@@ -482,5 +542,186 @@ struct MechanicalSendSkillTests {
     #expect(abs(rect.origin.y - 180) < 0.001)
     #expect(abs(rect.size.width - 300) < 0.001)
     #expect(abs(rect.size.height - 200) < 0.001)
+  }
+}
+
+extension MechanicalSendSkillTests {
+  private var stagedAttachment: ActionAttachment {
+    ActionAttachment(
+      stagingDirectory: "/Users/owner/.greenbubbles/send/staging/0f1e2d3c",
+      stagedPath: "/Users/owner/.greenbubbles/send/staging/0f1e2d3c/photo.png",
+      displayFileName: "photo.png",
+      byteCount: 4_096,
+      sha256: String(repeating: "7", count: 64),
+      uniformTypeIdentifier: "public.png"
+    )
+  }
+
+  @Test("an attachment dry run pastes a file reference and stops before Return")
+  func attachmentDryRunPastesAReference() {
+    let profile = profile()
+    let effector = FakeEffector()
+    let perception = perception(profile)
+    perception.composeAttachmentResult = .success(
+      RecognizedRegionText(text: "photo.png  4 KB", confidencePartsPerMillion: 1_000_000)
+    )
+    let outcome = makeSkill(profile: profile, effector: effector, perception: perception)
+      .execute(
+        capability(permitSend: false, capability: .imageSend, attachment: stagedAttachment)
+      )
+    #expect(outcome.failure == nil)
+    #expect(!outcome.attempted)
+    #expect(outcome.stageReached == .contentVerify)
+    #expect(outcome.evidence.attachmentStaged)
+    #expect(outcome.evidence.attachmentNameMatched)
+    // The helper hands over a reference, never bytes, and never types the body.
+    #expect(
+      effector.actions.contains(
+        "fileReference(/Users/owner/.greenbubbles/send/staging/0f1e2d3c/photo.png)"
+      ))
+    #expect(!effector.actions.contains("press(returnKey)"))
+    #expect(effector.actions.last == "restoreClipboard")
+  }
+
+  @Test("an attachment whose name is not read back aborts and clears the compose area")
+  func attachmentNameGateAborts() {
+    let profile = profile()
+    let effector = FakeEffector()
+    let perception = perception(profile)
+    perception.composeAttachmentResult = .success(
+      RecognizedRegionText(text: "someone-elses-file.pdf", confidencePartsPerMillion: 1_000_000)
+    )
+    let outcome = makeSkill(profile: profile, effector: effector, perception: perception)
+      .execute(
+        capability(permitSend: true, capability: .fileSend, attachment: stagedAttachment)
+      )
+    #expect(outcome.failure == .attachmentVerifyFailed)
+    #expect(!outcome.attempted)
+    #expect(!effector.actions.contains("press(returnKey)"))
+    #expect(effector.actions.last == "restoreClipboard")
+  }
+
+  @Test("an empty compose area after staging is treated as nothing staged")
+  func attachmentStagingProducedNothing() {
+    let profile = profile()
+    let effector = FakeEffector()
+    let perception = perception(profile)
+    perception.composeAttachmentResult = .success(
+      RecognizedRegionText(text: "   ", confidencePartsPerMillion: 1_000_000)
+    )
+    let outcome = makeSkill(profile: profile, effector: effector, perception: perception)
+      .execute(
+        capability(permitSend: true, capability: .fileSend, attachment: stagedAttachment)
+      )
+    #expect(outcome.failure == .attachmentVerifyFailed)
+    #expect(!outcome.evidence.attachmentStaged)
+  }
+
+  @Test("the panel fallback refuses to continue when no panel appears")
+  func panelFallbackRequiresAPanel() {
+    let profile = profile(composeAcceptsPastedFile: false)
+    let effector = FakeEffector()
+    let perception = perception(profile)
+    let outcome = makeSkill(profile: profile, effector: effector, perception: perception)
+      .execute(
+        capability(permitSend: true, capability: .fileSend, attachment: stagedAttachment)
+      )
+    #expect(outcome.failure == .attachPanelNotPresented)
+    #expect(!outcome.attempted)
+    // The stray click is taken back rather than left sitting in the client.
+    #expect(effector.actions.contains("press(escape)"))
+    #expect(!effector.actions.contains("press(returnKey)"))
+  }
+
+  @Test("the panel fallback navigates keyboard-first with the staged path")
+  func panelFallbackNavigatesByPath() {
+    let profile = profile(composeAcceptsPastedFile: false)
+    let effector = FakeEffector()
+    effector.clicksOpenAWindow = true
+    let perception = perception(profile)
+    perception.composeAttachmentResult = .success(
+      RecognizedRegionText(text: "photo.png", confidencePartsPerMillion: 1_000_000)
+    )
+    let outcome = makeSkill(profile: profile, effector: effector, perception: perception)
+      .execute(
+        capability(permitSend: false, capability: .fileSend, attachment: stagedAttachment)
+      )
+    #expect(outcome.failure == nil)
+    #expect(effector.actions.contains("press(goToFolder)"))
+    #expect(
+      effector.actions.contains(
+        "clipboard(/Users/owner/.greenbubbles/send/staging/0f1e2d3c/photo.png)"
+      ))
+  }
+
+  @Test("a confirmation sheet naming another file is never confirmed")
+  func confirmationSheetMustNameTheApprovedFile() {
+    let profile = profile(presentsConfirmationSheet: true)
+    let effector = FakeEffector()
+    let perception = perception(profile)
+    perception.composeAttachmentResult = .success(
+      RecognizedRegionText(text: "photo.png", confidencePartsPerMillion: 1_000_000)
+    )
+    perception.confirmSheetResult = .success(
+      RecognizedRegionText(text: "Send holiday-plans.pdf?", confidencePartsPerMillion: 1_000_000)
+    )
+    let outcome = makeSkill(profile: profile, effector: effector, perception: perception)
+      .execute(
+        capability(permitSend: true, capability: .imageSend, attachment: stagedAttachment)
+      )
+    #expect(outcome.failure == .attachmentVerifyFailed)
+    #expect(!outcome.evidence.confirmationSheetConfirmed)
+    // Return opened the sheet, but the sheet was not confirmed.
+    #expect(outcome.visualConfirmation == .unconfirmed)
+  }
+
+  @Test("a profile with no attachment section cannot send an attachment")
+  func profileWithoutAttachmentsRefuses() {
+    let base = profile()
+    let withoutAttachments = CalibrationProfileBody(
+      schema: base.schema,
+      profileID: base.profileID,
+      wechatBundleIdentifier: base.wechatBundleIdentifier,
+      wechatMarketingVersion: base.wechatMarketingVersion,
+      wechatBuild: base.wechatBuild,
+      clientBuildProfileID: base.clientBuildProfileID,
+      macosMajor: base.macosMajor,
+      anchors: base.anchors,
+      ocrRegions: base.ocrRegions,
+      selftest: base.selftest,
+      attachments: nil,
+      issuedAtUnixSeconds: base.issuedAtUnixSeconds,
+      expiresAtUnixSeconds: base.expiresAtUnixSeconds
+    )
+    let effector = FakeEffector()
+    let outcome = makeSkill(
+      profile: withoutAttachments,
+      effector: effector,
+      perception: perception(withoutAttachments)
+    ).execute(capability(permitSend: true, capability: .fileSend, attachment: stagedAttachment))
+    #expect(outcome.failure == .profileInvalid)
+    #expect(!outcome.attempted)
+  }
+
+  @Test("an attachment capability whose staged path escapes its directory is refused")
+  func stagedPathMustStayInsideItsDirectory() {
+    let escaping = ActionAttachment(
+      stagingDirectory: "/Users/owner/.greenbubbles/send/staging/0f1e2d3c",
+      stagedPath: "/etc/passwd",
+      displayFileName: "photo.png",
+      byteCount: 4_096,
+      sha256: String(repeating: "7", count: 64),
+      uniformTypeIdentifier: "public.png"
+    )
+    let refusal = #expect(throws: SendFailure.self) {
+      try escaping.validate()
+    }
+    #expect(refusal?.code == .attachmentInvalid)
+    let profile = profile()
+    let effector = FakeEffector()
+    let outcome = makeSkill(profile: profile, effector: effector, perception: perception(profile))
+      .execute(capability(permitSend: true, capability: .imageSend, attachment: escaping))
+    #expect(outcome.failure == .attachmentInvalid)
+    #expect(effector.actions.filter { $0 != "restoreClipboard" }.isEmpty)
   }
 }

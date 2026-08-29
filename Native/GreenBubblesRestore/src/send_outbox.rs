@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::action::ActionCapability;
 use crate::archive::ensure_private_directory;
 use crate::send_contract::{
     is_sha256, SendCompletionKind, SendCompletionOutcome, SendFailureCode, SendRolloutStage,
@@ -46,6 +47,12 @@ pub const MAXIMUM_PENDING_RECONCILIATION: usize = 16;
 pub const MAXIMUM_OUTBOX_BYTES: u64 = 8 * 1024 * 1024;
 
 const STATE_FILE_NAME: &str = "outbox.json";
+
+/// Text sends preserve their bytes trivially; the flag only ever goes false for
+/// an image send, so absence in an older document means true.
+fn default_true() -> bool {
+    true
+}
 const LOCK_FILE_NAME: &str = "outbox.lock";
 
 /// Where one reservation stands. The state is persisted before the action it
@@ -76,6 +83,20 @@ pub struct OutboxEntry {
     pub conversation_id: String,
     pub body_sha256: String,
     pub normalized_body_sha256: String,
+    pub capability: ActionCapability,
+    /// Set for an attachment send. The outbox records the digest and the name,
+    /// never the bytes, and remembers the staging directory so a terminal
+    /// state can delete it even after a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_file_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staging_directory: Option<String>,
+    /// False for an image send, whose transmitted bytes are a client-produced
+    /// derivative of the approved file.
+    #[serde(default = "default_true")]
+    pub bytes_preserved_in_transit: bool,
     pub rollout_stage: SendRolloutStage,
     pub permit_send: bool,
     pub state: OutboxEntryState,
@@ -94,6 +115,13 @@ impl OutboxEntry {
             && is_sha256(&self.capability_binding_sha256)
             && is_sha256(&self.body_sha256)
             && is_sha256(&self.normalized_body_sha256)
+            && self
+                .attachment_sha256
+                .as_ref()
+                .is_none_or(|value| is_sha256(value))
+            && (self.capability.carries_attachment() == self.attachment_sha256.is_some())
+            && (self.attachment_sha256.is_some() == self.staging_directory.is_some())
+            && (self.attachment_sha256.is_some() == self.display_file_name.is_some())
             && !self.account_id.is_empty()
             && !self.conversation_id.is_empty()
             && self.reserved_at_unix_nanoseconds < self.deadline_unix_nanoseconds
@@ -114,6 +142,13 @@ pub struct OutboxCompletion {
     pub conversation_id: String,
     pub body_sha256: String,
     pub normalized_body_sha256: String,
+    pub capability: ActionCapability,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_file_name: Option<String>,
+    #[serde(default = "default_true")]
+    pub bytes_preserved_in_transit: bool,
     pub rollout_stage: SendRolloutStage,
     pub attempted: bool,
     pub visual_confirmation: VisualConfirmation,
@@ -531,6 +566,10 @@ fn completion(
         conversation_id: entry.conversation_id,
         body_sha256: entry.body_sha256,
         normalized_body_sha256: entry.normalized_body_sha256,
+        capability: entry.capability,
+        attachment_sha256: entry.attachment_sha256,
+        display_file_name: entry.display_file_name,
+        bytes_preserved_in_transit: entry.bytes_preserved_in_transit,
         rollout_stage: entry.rollout_stage,
         attempted: record.attempted,
         visual_confirmation: record.visual_confirmation,
@@ -732,6 +771,11 @@ mod tests {
             conversation_id: "filehelper".to_string(),
             body_sha256: sha('6'),
             normalized_body_sha256: sha('7'),
+            capability: ActionCapability::TextSend,
+            attachment_sha256: None,
+            display_file_name: None,
+            staging_directory: None,
+            bytes_preserved_in_transit: true,
             rollout_stage: if permit_send {
                 SendRolloutStage::SelfSend
             } else {

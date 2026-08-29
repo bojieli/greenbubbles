@@ -35,6 +35,7 @@ pub mod send_adapter;
 pub mod send_contract;
 pub mod send_outbox;
 pub mod send_profile;
+pub mod send_staging;
 pub mod snapshot_protector;
 pub mod tools;
 pub mod transport;
