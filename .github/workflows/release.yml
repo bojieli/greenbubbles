@@ -125,15 +125,19 @@ jobs:
             cp "Native/GreenBubbles/target/release/$product" "$staging/bin/"
           done
 
-          cp README.md CHANGELOG.md LICENSE NOTICE.md THIRD_PARTY_NOTICES.md "$staging/"
-          for doc in \
-            docs/CLI_REFERENCE.md \
-            docs/USER_GUIDE.md \
-            docs/SEND_ADAPTER.md \
-            docs/AI_TOOL_BOUNDARY.md \
-            docs/PUBLIC_RELEASE_CHECKLIST.md; do
-            cp "$doc" "$staging/docs/"
-          done
+          cp \
+            README.md \
+            CHANGELOG.md \
+            CODE_OF_CONDUCT.md \
+            CONTRIBUTING.md \
+            LICENSE \
+            NOTICE.md \
+            PRIVACY.md \
+            SECURITY.md \
+            THIRD_PARTY_NOTICES.md \
+            "$staging/"
+          cp -R assets skills "$staging/"
+          cp -R docs/. "$staging/docs/"
           swift scripts/check-distribution-inventory.swift --print \
             >"$staging/sbom.json"
 
