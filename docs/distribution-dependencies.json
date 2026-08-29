@@ -21,10 +21,76 @@
         ],
         "kind" : "normal",
         "licenseMetadata" : "MIT OR Apache-2.0",
+        "name" : "argon2",
+        "optional" : false,
+        "requirement" : "^0.5",
+        "resolvedVersion" : "0.5.3",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "MIT OR Apache-2.0",
         "name" : "base64",
         "optional" : false,
         "requirement" : "^0.22",
         "resolvedVersion" : "0.22.1",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+          "zeroize"
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "CC0-1.0",
+        "name" : "bip39",
+        "optional" : false,
+        "requirement" : "^2.2",
+        "resolvedVersion" : "2.2.2",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+          "zeroize"
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "Apache-2.0 OR MIT",
+        "name" : "chacha20poly1305",
+        "optional" : false,
+        "requirement" : "^0.11",
+        "resolvedVersion" : "0.11.0",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+          "std",
+          "zeroize"
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "BSD-3-Clause",
+        "name" : "ed25519-dalek",
+        "optional" : false,
+        "requirement" : "^2",
+        "resolvedVersion" : "2.2.0",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : false
+      },
+      {
+        "features" : [
+
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "MIT OR Apache-2.0",
+        "name" : "getrandom",
+        "optional" : false,
+        "requirement" : "^0.4",
+        "resolvedVersion" : "0.4.3",
         "source" : "registry+https://github.com/rust-lang/crates.io-index",
         "usesDefaultFeatures" : true
       },
@@ -38,6 +104,19 @@
         "optional" : false,
         "requirement" : "^0.4",
         "resolvedVersion" : "0.4.3",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "MIT OR Apache-2.0",
+        "name" : "hkdf",
+        "optional" : false,
+        "requirement" : "^0.12",
+        "resolvedVersion" : "0.12.4",
         "source" : "registry+https://github.com/rust-lang/crates.io-index",
         "usesDefaultFeatures" : true
       },
@@ -96,7 +175,8 @@
       {
         "features" : [
           "backup",
-          "bundled-sqlcipher"
+          "bundled-sqlcipher",
+          "hooks"
         ],
         "kind" : "normal",
         "licenseMetadata" : "MIT",
@@ -191,6 +271,19 @@
         ],
         "kind" : "normal",
         "licenseMetadata" : null,
+        "name" : "wx-context",
+        "optional" : false,
+        "requirement" : "*",
+        "resolvedVersion" : "0.7.4",
+        "source" : "git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : null,
         "name" : "wx-db",
         "optional" : false,
         "requirement" : "*",
@@ -254,6 +347,12 @@
     "gitPackages" : [
       {
         "licenseMetadata" : null,
+        "name" : "wx-context",
+        "source" : "git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74",
+        "version" : "0.7.4"
+      },
+      {
+        "licenseMetadata" : null,
         "name" : "wx-db",
         "source" : "git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74",
         "version" : "0.7.4"
@@ -311,6 +410,11 @@
       "version" : "0.1.0"
     },
     "unknownLicensePackages" : [
+      {
+        "name" : "wx-context",
+        "source" : "git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74",
+        "version" : "0.7.4"
+      },
       {
         "name" : "wx-db",
         "source" : "git+https://github.com/pandorafuture/wx-cli?rev=2abe708f55bfe135539a385df856fdc58f97fc74#2abe708f55bfe135539a385df856fdc58f97fc74",

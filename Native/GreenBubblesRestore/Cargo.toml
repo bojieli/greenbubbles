@@ -31,6 +31,7 @@ wx-db = { git = "https://github.com/pandorafuture/wx-cli", rev = "2abe708f55bfe1
 wx-context = { git = "https://github.com/pandorafuture/wx-cli", rev = "2abe708f55bfe135539a385df856fdc58f97fc74" }
 wx-decrypt = { git = "https://github.com/pandorafuture/wx-cli", rev = "2abe708f55bfe135539a385df856fdc58f97fc74" }
 wx-media = { git = "https://github.com/pandorafuture/wx-cli", rev = "2abe708f55bfe135539a385df856fdc58f97fc74", features = ["audio"] }
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize"] }
 
 [dev-dependencies]
 filetime = "0.2"

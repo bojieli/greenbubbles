@@ -36,6 +36,28 @@ jobs:
       - name: Check cross-language pinned build profile
         run: swift scripts/check-pinned-build-profile.swift
 
+      - name: Check packaging manifests
+        run: |
+          bash -n scripts/package-send-helper.sh
+          plutil -lint Packaging/GreenBubbles/Info.plist
+          plutil -lint Packaging/GreenBubblesInputHelper/Info.plist
+          plutil -lint Packaging/GreenBubblesInputHelper/me.greenbubbles.InputHelper.plist
+          plutil -lint Packaging/GreenBubbles.entitlements
+          plutil -lint Packaging/GreenBubblesInputHelper.entitlements
+
+      - name: Check the send path ships closed
+        run: |
+          # A build with no pinned release verifying key must refuse every
+          # release-signed calibration profile, so the send path cannot leave
+          # the dry-run stage by default.
+          if grep -q 'generatedReleasePublicKeys: \[String\] = \[\]' \
+            Sources/GreenBubblesSendKit/SendReleaseTrust.swift; then
+            echo "release trust root is empty by default"
+          else
+            echo "error: a release verifying key is committed to the repository" >&2
+            exit 1
+          fi
+
       - name: Show Rust version
         run: rustc --version && cargo --version
 
@@ -50,3 +72,10 @@ jobs:
       - name: Run restoration-engine tests
         working-directory: Native/GreenBubblesRestore
         run: cargo test --locked --all-targets
+
+      - name: Check the cross-language send vectors are current
+        working-directory: Native/GreenBubblesRestore
+        run: |
+          cargo run --locked --quiet --example send_canonical_vectors \
+            >/tmp/send-canonical-vectors.json
+          diff -u ../../docs/send-canonical-vectors.json /tmp/send-canonical-vectors.json

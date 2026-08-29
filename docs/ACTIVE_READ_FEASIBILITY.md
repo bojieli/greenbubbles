@@ -71,8 +71,11 @@ all of the following are shown on a disposable account:
 4. an observable, automatic failure mode for unknown client versions;
 5. acceptable supportability, account safety, and legal review.
 
-Those conditions have not been met. Consequently, `load_more_moments`, active
-message reads, and all sends remain unavailable. Passive database restoration
+Those conditions have not been met. Consequently, `load_more_moments` and
+active message reads remain unavailable. Sending is unaffected by this
+inventory: it is not an active read through the client's own network path but
+deterministic UI automation over the already-running client, and it has its own
+independent gates (`SEND_ADAPTER.md`). Passive database restoration
 and passive cached-Moments reads are independent and do not inherit authority
 from this inventory.
 

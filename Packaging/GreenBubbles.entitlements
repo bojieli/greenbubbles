@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The main application requests nothing. Hardened Runtime is enabled at signing
+  time; library validation stays on; there is no JIT, no unsigned-dylib
+  loading, no disabled library validation, and no App Sandbox (Developer-ID
+  direct distribution only, never the Mac App Store).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict/>
+</plist>

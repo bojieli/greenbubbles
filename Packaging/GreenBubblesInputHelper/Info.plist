@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  GreenBubblesInputHelper: the only component that holds Accessibility and
+  Screen Recording. It does input and capture and nothing else — no decryption
+  key, no replica handle, no policy, no message history — so the desktop-wide
+  grants never sit on the process that parses attacker-controlled message
+  content. The usage descriptions below are what the user reads in the TCC
+  prompt, so they name the helper, not the application.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleExecutable</key>
+  <string>greenbubbles-input-helper</string>
+  <key>CFBundleIdentifier</key>
+  <string>me.greenbubbles.InputHelper</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>GreenBubblesInputHelper</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSBackgroundOnly</key>
+  <true/>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>GreenBubblesInputHelper does not send Apple events; this key is present only to make that explicit.</string>
+</dict>
+</plist>

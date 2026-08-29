@@ -33,7 +33,15 @@ security boundaries, measurements, and acceptance evidence.
 
 The project currently implements passive, read-only discovery, consistent
 database snapshots, and an offline restoration engine. That pipeline does
-**not** inject code into WeChat, call private network APIs, or send messages.
+**not** inject code into WeChat and does **not** call private network APIs.
+
+A send adapter now exists alongside it and **ships closed**. It drives the real
+client's user interface from a privilege-separated, first-party helper, behind
+an owner-issued approval, two on-screen verification gates, a durable
+single-flight outbox, and replica reconciliation. A default build cannot leave
+its dry-run stage, because no release calibration-profile verifying key is
+pinned into it. See [docs/SEND_ADAPTER.md](docs/SEND_ADAPTER.md) for what is
+built, how to operate it, and what it deliberately refuses to automate.
 
 Separately, and only under explicit owner authorization, the
 `greenbubbles-acquire` helper can capture the owner's own database passphrase
@@ -1339,12 +1347,39 @@ minimized tool response. Search queries, message bodies, and draft bodies are
 omitted from the append-only audit JSONL. See
 [docs/AI_TOOL_BOUNDARY.md](docs/AI_TOOL_BOUNDARY.md).
 
+## Sending
+
+Sending is not a connector operation and is not reachable from any AI tool
+call. It is an owner-run command sequence — approve, precheck, submit,
+reconcile — over a privilege-separated helper that holds the Accessibility and
+Screen Recording grants and nothing else: no decryption key, no replica handle,
+no policy, no message history.
+
+```sh
+greenbubbles-send install-helper && greenbubbles-send onboarding --open
+greenbubbles-restore send doctor  ~/.greenbubbles/send/config.json
+greenbubbles-restore send selftest ~/.greenbubbles/send/config.json
+greenbubbles-restore send --help
+```
+
+`send doctor` answers "why is send disabled or failing" with a precise cause
+and one action per cause. Every refusal keeps the path shut. `observedSent` is
+created only by reconciling against the account's own encrypted replica; the
+helper's own screen capture is evidence, never a verdict. Read
+[docs/SEND_ADAPTER.md](docs/SEND_ADAPTER.md) before enabling anything.
+
 ## Scope and authorization
 
 Use GreenBubbles only with data and accounts you own or are explicitly
 authorized to access. Group chats contain other people's data even when the
 database belongs to the local user. The connector must enforce per-conversation
 consent and data minimization before any model integration is enabled.
+
+The send adapter must only ever be used to send as the owner's own account,
+from the owner's own device, to recipients the owner has personally approved
+for that exact message. Its allow list, rate window, and rollout stages are
+narrow by construction, and widening them is an owner decision with the
+account-safety consequences that implies.
 
 The `greenbubbles-acquire` capture helper must only ever be used against the
 owner's own WeChat account on the owner's own device, after the owner has

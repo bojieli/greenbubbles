@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use greenbubbles_restore::{
     acquisition_audit::audit_acquisition_chain,
+    action::ExternalApprovalEvidence,
     ai_context::{
         audit_ai_context_with_progress, export_ai_context, load_ai_query_request, query_ai_context,
     },
@@ -23,6 +24,7 @@ use greenbubbles_restore::{
     archive::{create_conversation_policy, read_conversation_page},
     audit::audit_archive_with_progress,
     benchmark::{run_synthetic_benchmark, SyntheticBenchmarkConfig},
+    connector::load_action_draft,
     connector::{audit_connector_log, ConnectorDestination, ConnectorService},
     diagnostic::{profile_archive_payloads_with_progress, profile_archive_schema_with_progress},
     direct_connector::DirectConnectorService,
@@ -71,6 +73,15 @@ use greenbubbles_restore::{
         synchronize_replica_with_progress, ReplicaCachedMomentFilter,
     },
     restore_catalog_with_progress,
+    send_adapter::{
+        observe_send_in_replica, unix_nanoseconds as adapter_unix_nanoseconds,
+        ProcessSendDispatcher, SendAdapter, SendDispatcher, SEND_ADAPTER_ID, SEND_ADAPTER_VERSION,
+    },
+    send_profile::{
+        load_calibration_profile, load_compatibility_matrix, sign_calibration_profile,
+        sign_compatibility_matrix, signing_key_public_hex, CalibrationProfileBody,
+        CompatibilityMatrixBody, SendTrustRoot,
+    },
     snapshot_protector::{SnapshotLocalCredential, SnapshotPassphrase, SnapshotRecoveryWords},
     tools::{
         create_all_conversations_tool_policy_with_cached_moments, create_direct_tool_policy,
@@ -2245,6 +2256,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 service.search_messages(&query, conversation.as_deref(), limit, destination)?;
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
+        "send" => {
+            run_send_command(arguments)?;
+        }
         "tool-draft" => {
             let archive = required_path(arguments.next(), "archive directory")?;
             let policy = required_path(arguments.next(), "tool policy path")?;
@@ -2334,7 +2348,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore tool-list <archive> <policy-file> <audit-log> --requester <id> [--destination local|remote]\n",
                     "  greenbubbles-restore tool-recent <archive> <policy-file> <audit-log> <conversation-id> --requester <id> [--limit <n>] [--destination local|remote]\n",
                     "  greenbubbles-restore tool-search <archive> <policy-file> <audit-log> --requester <id> --query-stdin [--conversation <id>] [--limit <n>] [--destination local|remote]\n",
-                    "  greenbubbles-restore tool-draft <archive> <policy-file> <audit-log> <draft-directory> <conversation-id> --requester <id> --body-stdin"
+                    "  greenbubbles-restore tool-draft <archive> <policy-file> <audit-log> <draft-directory> <conversation-id> --requester <id> --body-stdin\n",
+                    "  greenbubbles-restore send <subcommand>   (run 'greenbubbles-restore send --help')"
                 )
             );
         }
@@ -2786,6 +2801,7 @@ fn ai_command_help(command: &str) -> Option<&'static str> {
         "connector-policy-direct" => Some(connector_policy_direct_help()),
         "connector-query-direct" => Some(connector_query_direct_help()),
         "connector-serve-direct" => Some(connector_serve_direct_help()),
+        "send" => Some(send_command_help()),
         "audit-replica" => Some(concat!(
             "Usage:\n",
             "  greenbubbles-restore audit-replica <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
@@ -3956,6 +3972,485 @@ fn handoff_poll_marker(
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Dispatches the `send` command group: the deterministic UI-automation send
+/// adapter's control plane. Every subcommand is fail-closed, writes only
+/// owner-only files, and never accepts message text or key material in an
+/// argument.
+fn run_send_command(
+    mut arguments: std::iter::Peekable<impl Iterator<Item = String>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let subcommand = arguments
+        .next()
+        .ok_or("missing send subcommand; run 'greenbubbles-restore send --help'")?;
+    if matches!(arguments.peek().map(String::as_str), Some("--help" | "-h")) {
+        println!("{}", send_command_help());
+        return Ok(());
+    }
+    match subcommand.as_str() {
+        "config-template" => {
+            println!("{}", send_config_template()?);
+        }
+        "profile-template" => {
+            println!("{}", send_profile_template()?);
+        }
+        "profile-keygen" => {
+            let output = required_path(arguments.next(), "new private signing-seed file")?;
+            let mut seed = Zeroizing::new([0_u8; 32]);
+            getrandom::fill(seed.as_mut_slice())
+                .map_err(|_| "the operating system refused to provide random bytes")?;
+            write_owner_only_json(
+                &output,
+                &serde_json::json!({
+                    "formatVersion": 1,
+                    "algorithm": "ed25519",
+                    "signingKeySeedHex": hex::encode(seed.as_slice()),
+                    "publicKeyHex": signing_key_public_hex(&seed),
+                }),
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "publicKeyHex": signing_key_public_hex(&seed),
+                    "pinInstruction":
+                        "build the verifying binaries with GREENBUBBLES_SEND_RELEASE_PUBLIC_KEYS set to this value",
+                }))?
+            );
+        }
+        "profile-sign" | "matrix-sign" => {
+            let body_path = required_path(arguments.next(), "unsigned document")?;
+            let output = required_path(arguments.next(), "new signed document")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            validate_command_options(&remaining, &["--signing-key-file"], &[])?;
+            let key_path = PathBuf::from(required_option(&remaining, "--signing-key-file")?);
+            let seed = load_signing_key_seed(&key_path)?;
+            if subcommand == "profile-sign" {
+                let body: CalibrationProfileBody =
+                    serde_json::from_slice(&read_owner_only_document(&body_path)?)?;
+                write_owner_only_json(&output, &sign_calibration_profile(&body, &seed)?)?;
+            } else {
+                let body: CompatibilityMatrixBody =
+                    serde_json::from_slice(&read_owner_only_document(&body_path)?)?;
+                write_owner_only_json(&output, &sign_compatibility_matrix(&body, &seed)?)?;
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "signed": output.display().to_string(),
+                    "publicKeyHex": signing_key_public_hex(&seed),
+                }))?
+            );
+        }
+        "profile-verify" | "matrix-verify" => {
+            let document = required_path(arguments.next(), "signed document")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            validate_command_options(&remaining, &["--development-trust-root"], &[])?;
+            let trust_root = load_send_trust_root(&remaining)?;
+            let now = send_unix_seconds()?;
+            if subcommand == "profile-verify" {
+                let verified = load_calibration_profile(&document, &trust_root, now)?;
+                println!("{}", serde_json::to_string_pretty(&verified)?);
+            } else {
+                let verified = load_compatibility_matrix(&document, &trust_root, now)?;
+                println!("{}", serde_json::to_string_pretty(&verified)?);
+            }
+        }
+        "doctor" => {
+            let config = required_path(arguments.next(), "send configuration")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            validate_command_options(&remaining, &[], &["--no-helper"])?;
+            let adapter = SendAdapter::load(&config)?;
+            let dispatcher = send_dispatcher(&adapter, &remaining)?;
+            let report = adapter.doctor(
+                dispatcher.as_ref().map(|value| value.as_ref()),
+                send_unix_nanoseconds()?,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "selftest" => {
+            let config = required_path(arguments.next(), "send configuration")?;
+            let adapter = SendAdapter::load(&config)?;
+            let dispatcher = ProcessSendDispatcher::new(&adapter.config().helper)?;
+            let report = adapter.calibration_selftest(&dispatcher, send_unix_nanoseconds()?)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "approval-binding" => {
+            let config = required_path(arguments.next(), "send configuration")?;
+            let draft_path = required_path(arguments.next(), "immutable draft")?;
+            let adapter = SendAdapter::load(&config)?;
+            let draft = load_action_draft(&draft_path)?;
+            let binding = adapter
+                .expected_approval_binding(&draft)
+                .ok_or("the draft cannot be bound to this adapter configuration")?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "draftId": draft.draft_id,
+                    "conversationId": draft.conversation_id,
+                    "humanRecipient": draft.recipient.human_label,
+                    "renderedTextSha256": draft.rendered_text_sha256,
+                    "immutableBindingSha256": binding,
+                }))?
+            );
+        }
+        "approve" => {
+            let config = required_path(arguments.next(), "send configuration")?;
+            let draft_path = required_path(arguments.next(), "immutable draft")?;
+            let output = required_path(arguments.next(), "new approval-evidence file")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            validate_command_options(
+                &remaining,
+                &["--approver", "--validity-seconds"],
+                &["--confirm"],
+            )?;
+            if !remaining.iter().any(|value| value == "--confirm") {
+                return Err(
+                    "approval requires an explicit --confirm after reviewing the printed recipient"
+                        .into(),
+                );
+            }
+            let approver = required_option(&remaining, "--approver")?;
+            let validity = option_u64(&remaining, "--validity-seconds")?.unwrap_or(600);
+            if approver.is_empty() || !(60..=3_600).contains(&validity) {
+                return Err("approver must be named and validity must be 60..3600 seconds".into());
+            }
+            let adapter = SendAdapter::load(&config)?;
+            let draft = load_action_draft(&draft_path)?;
+            let binding = adapter
+                .expected_approval_binding(&draft)
+                .ok_or("the draft cannot be bound to this adapter configuration")?;
+            let now = send_unix_nanoseconds()?;
+            let mut nonce = [0_u8; 32];
+            getrandom::fill(&mut nonce)
+                .map_err(|_| "the operating system refused to provide random bytes")?;
+            let approval = ExternalApprovalEvidence {
+                approval_id: hex::encode(<sha2::Sha256 as sha2::Digest>::digest(
+                    [
+                        b"greenbubbles.send.approval-identity.v1".as_slice(),
+                        binding.as_bytes(),
+                        approver.as_bytes(),
+                        &now.to_le_bytes(),
+                        &nonce,
+                    ]
+                    .concat(),
+                )),
+                immutable_binding_sha256: binding,
+                approver_id: approver,
+                approved_at_unix_nanoseconds: now,
+                expires_at_unix_nanoseconds: now
+                    .saturating_add(u128::from(validity).saturating_mul(1_000_000_000)),
+            };
+            eprintln!(
+                "approving a send to \"{}\" ({} bytes, sha256 {})",
+                draft.recipient.human_label,
+                draft.rendered_text.len(),
+                draft.rendered_text_sha256
+            );
+            write_owner_only_json(&output, &approval)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "approvalId": approval.approval_id,
+                    "draftId": draft.draft_id,
+                    "expiresAtUnixNanoseconds": approval.expires_at_unix_nanoseconds,
+                    "idempotencyKey":
+                        adapter.idempotency_key(&draft.draft_id, &approval.approval_id),
+                }))?
+            );
+        }
+        "precheck" | "submit" => {
+            let config = required_path(arguments.next(), "send configuration")?;
+            let draft_path = required_path(arguments.next(), "immutable draft")?;
+            let approval_path = required_path(arguments.next(), "approval evidence")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            validate_command_options(&remaining, &[], &["--no-helper"])?;
+            let adapter = SendAdapter::load(&config)?;
+            let draft = load_action_draft(&draft_path)?;
+            let approval: ExternalApprovalEvidence =
+                serde_json::from_slice(&read_owner_only_document(&approval_path)?)?;
+            let now = send_unix_nanoseconds()?;
+            if subcommand == "precheck" {
+                let dispatcher = send_dispatcher(&adapter, &remaining)?;
+                let report = adapter.precheck_from_disk(
+                    &draft,
+                    &approval,
+                    dispatcher.as_ref().map(|value| value.as_ref()),
+                    now,
+                )?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                let dispatcher = ProcessSendDispatcher::new(&adapter.config().helper)?;
+                let report = adapter.execute(&draft, &approval, &dispatcher, now)?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
+        }
+        "recall-window" => {
+            let config = required_path(arguments.next(), "send configuration")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            validate_command_options(&remaining, &["--idempotency-key"], &[])?;
+            let adapter = SendAdapter::load(&config)?;
+            let key = required_option(&remaining, "--idempotency-key")?;
+            let report = adapter.recall_window(&key, send_unix_nanoseconds()?)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "outbox-status" => {
+            let config = required_path(arguments.next(), "send configuration")?;
+            let adapter = SendAdapter::load(&config)?;
+            let now = send_unix_nanoseconds()?;
+            let (summary, recovery, pending) = adapter.outbox_status(now)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "outbox": summary,
+                    "recovery": recovery,
+                    "pendingReconciliation": pending,
+                }))?
+            );
+        }
+        "reconcile" => {
+            let config = required_path(arguments.next(), "send configuration")?;
+            let draft_path = required_path(arguments.next(), "immutable draft")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            validate_command_options(
+                &remaining,
+                &[
+                    "--idempotency-key",
+                    "--replica",
+                    "--observation",
+                    "--lookback-seconds",
+                ],
+                &["--replica-key-stdin"],
+            )?;
+            let adapter = SendAdapter::load(&config)?;
+            let draft = load_action_draft(&draft_path)?;
+            let key = required_option(&remaining, "--idempotency-key")?;
+            let now = send_unix_nanoseconds()?;
+            let observation = match option_string(&remaining, "--observation")? {
+                Some(path) => {
+                    serde_json::from_slice(&read_owner_only_document(&PathBuf::from(path))?)?
+                }
+                None => {
+                    let replica = PathBuf::from(required_option(&remaining, "--replica")?);
+                    if !remaining.iter().any(|value| value == "--replica-key-stdin") {
+                        return Err("replica reconciliation requires --replica-key-stdin".into());
+                    }
+                    let (_, _, pending) = adapter.outbox_status(now)?;
+                    let entry = pending
+                        .into_iter()
+                        .find(|entry| entry.idempotency_key == key)
+                        .ok_or("no parked attempt matches this idempotency key")?;
+                    let lookback = option_i64(&remaining, "--lookback-seconds")?
+                        .unwrap_or(300)
+                        .max(0);
+                    let replica_key = ReplicaKey::read_stdin()?;
+                    observe_send_in_replica(&replica, &replica_key, &entry, lookback, now)?
+                }
+            };
+            let report = adapter.reconcile(&observation, Some(&draft), now)?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        _ => {
+            return Err(format!(
+                "unsupported send subcommand: {subcommand}; run 'greenbubbles-restore send --help'"
+            )
+            .into())
+        }
+    }
+    Ok(())
+}
+
+/// Builds a process dispatcher unless the caller explicitly opted out. Opting
+/// out never makes the send path *more* permissive: a missing helper status is
+/// itself a PRECHECK failure.
+fn send_dispatcher(
+    adapter: &SendAdapter,
+    remaining: &[String],
+) -> Result<Option<Box<dyn SendDispatcher>>, Box<dyn std::error::Error>> {
+    if remaining.iter().any(|value| value == "--no-helper") {
+        return Ok(None);
+    }
+    Ok(Some(Box::new(ProcessSendDispatcher::new(
+        &adapter.config().helper,
+    )?)))
+}
+
+fn load_send_trust_root(remaining: &[String]) -> Result<SendTrustRoot, Box<dyn std::error::Error>> {
+    match option_string(remaining, "--development-trust-root")? {
+        Some(path) => Ok(SendTrustRoot::load_development(&PathBuf::from(path))?),
+        None => Ok(SendTrustRoot::pinned()
+            .map_err(|_| "the pinned release trust root is malformed in this build")?),
+    }
+}
+
+fn load_signing_key_seed(path: &Path) -> Result<Zeroizing<[u8; 32]>, Box<dyn std::error::Error>> {
+    let document: serde_json::Value = serde_json::from_slice(&read_owner_only_document(path)?)?;
+    let encoded = document
+        .get("signingKeySeedHex")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("signing-key file does not contain signingKeySeedHex")?;
+    let bytes = hex::decode(encoded).map_err(|_| "signing-key seed is not hexadecimal")?;
+    let seed: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| "signing-key seed must be exactly 32 bytes")?;
+    Ok(Zeroizing::new(seed))
+}
+
+fn read_owner_only_document(path: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.permissions().mode() & 0o077 != 0
+        || metadata.nlink() != 1
+        || metadata.len() > 1_048_576
+    {
+        return Err(format!(
+            "{} must be a bounded, owner-only, single-link regular file",
+            path.display()
+        )
+        .into());
+    }
+    Ok(std::fs::read(path)?)
+}
+
+fn send_unix_nanoseconds() -> Result<u128, Box<dyn std::error::Error>> {
+    Ok(adapter_unix_nanoseconds()?)
+}
+
+fn send_unix_seconds() -> Result<u64, Box<dyn std::error::Error>> {
+    Ok((adapter_unix_nanoseconds()? / 1_000_000_000) as u64)
+}
+
+const fn send_command_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore send config-template\n",
+        "  greenbubbles-restore send profile-template\n",
+        "  greenbubbles-restore send profile-keygen <new-private-seed-file>\n",
+        "  greenbubbles-restore send profile-sign <unsigned-profile> <new-signed-profile> --signing-key-file <file>\n",
+        "  greenbubbles-restore send profile-verify <signed-profile> [--development-trust-root <file>]\n",
+        "  greenbubbles-restore send matrix-sign <unsigned-matrix> <new-signed-matrix> --signing-key-file <file>\n",
+        "  greenbubbles-restore send matrix-verify <signed-matrix> [--development-trust-root <file>]\n",
+        "  greenbubbles-restore send doctor <config> [--no-helper]\n",
+        "  greenbubbles-restore send selftest <config>\n",
+        "  greenbubbles-restore send approval-binding <config> <draft-file>\n",
+        "  greenbubbles-restore send approve <config> <draft-file> <new-approval-file> --approver <id> [--validity-seconds <60..3600>] --confirm\n",
+        "  greenbubbles-restore send precheck <config> <draft-file> <approval-file> [--no-helper]\n",
+        "  greenbubbles-restore send submit <config> <draft-file> <approval-file>\n",
+        "  greenbubbles-restore send outbox-status <config>\n",
+        "  greenbubbles-restore send recall-window <config> --idempotency-key <hex>\n",
+        "  greenbubbles-restore send reconcile <config> <draft-file> --idempotency-key <hex> (--replica <path> --replica-key-stdin [--lookback-seconds <n>] | --observation <file>)\n\n",
+        "The send adapter drives the real WeChat client's user interface through a\n",
+        "privilege-separated, first-party input helper. It is fail-closed at every\n",
+        "step: an unsigned or expired calibration profile, an unverified macOS/WeChat\n",
+        "build pair, a missing TCC grant, a recipient whose on-screen title does not\n",
+        "match the approved draft, or an unreconciled earlier attempt all keep the\n",
+        "send path shut. `observedSent` is created only by replica reconciliation.\n\n",
+        "Rollout stages:\n",
+        "  dryRun       Run every step including both verification gates, stop before Return\n",
+        "  selfSend     Send only to the account's own File Transfer conversation\n",
+        "  allowListed  Send to one additional reviewed conversation under volume caps\n\n",
+        "Options:\n",
+        "  --no-helper  Evaluate without contacting the input helper (never permits a send)\n",
+        "  --confirm    Required acknowledgement when recording local approval evidence\n",
+        "  -h, --help   Show this help\n",
+    )
+}
+
+/// A documented configuration skeleton. It is deliberately emitted in the
+/// safest possible state: dry run, kill switch engaged, no gate evidence.
+fn send_config_template() -> Result<String, Box<dyn std::error::Error>> {
+    let home = env::var("HOME").unwrap_or_else(|_| "/Users/you".to_string());
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "formatVersion": 1,
+        "accountId": "REPLACE-WITH-THE-REPLICA-ACCOUNT-ID",
+        "rolloutStage": "dryRun",
+        "globalKillSwitchEngaged": true,
+        "gate": {
+            "gateDecisionId": "0".repeat(64),
+            "acquisitionGatePassed": false,
+            "restorationGatePassed": false,
+            "mechanismApproved": false,
+            "legalReviewApproved": false
+        },
+        "adapter": {
+            "adapterId": SEND_ADAPTER_ID,
+            "adapterVersion": SEND_ADAPTER_VERSION,
+            "clientBuildProfileId": "wechat-macos-4.1.13-269579"
+        },
+        "allowList": {
+            "accountIds": ["REPLACE-WITH-THE-REPLICA-ACCOUNT-ID"],
+            "conversationIds": ["filehelper"],
+            "capabilities": ["textSend"]
+        },
+        "selfSendConversationId": "filehelper",
+        "searchKeyOverrides": {},
+        "attemptWindowSeconds": 3600,
+        "maximumAttemptsPerWindow": 3,
+        "circuitBreakerFailureThreshold": 3,
+        "circuitBreakerCooldownSeconds": 900,
+        "capabilityValiditySeconds": 120,
+        "reconciliationGraceSeconds": 900,
+        "recallWindowSeconds": 120,
+        "expectedMacosBuild": "25G83",
+        "expectedMacosMajor": 26,
+        "expectedWechatBuild": "4.1.13.269579",
+        "calibrationProfilePath": format!("{home}/.greenbubbles/send/calibration-profile.json"),
+        "compatibilityMatrixPath": format!("{home}/.greenbubbles/send/compatibility-matrix.json"),
+        "outboxDirectory": format!("{home}/.greenbubbles/send/outbox"),
+        "auditLogPath": format!("{home}/.greenbubbles/connector-audit.ndjson"),
+        "draftDirectory": format!("{home}/.greenbubbles/drafts"),
+        "helper": {
+            "dispatcherExecutable":
+                "/Applications/GreenBubbles.app/Contents/MacOS/greenbubbles-send",
+            "dispatcherArguments": [],
+            "machServiceName": "me.greenbubbles.InputHelper",
+            "statusTimeoutMilliseconds": 5000,
+            "selftestTimeoutMilliseconds": 20000,
+            "sendTimeoutMilliseconds": 45000
+        }
+    }))?)
+}
+
+/// An unsigned calibration-profile skeleton keyed to the pinned client build.
+/// Anchors and regions are the spike's measured values and must be re-measured
+/// and re-signed for every new WeChat layout.
+fn send_profile_template() -> Result<String, Box<dyn std::error::Error>> {
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "schema": 1,
+        "profileId": "wechat-4.1.13.269579-macos-26",
+        "wechatBundleIdentifier": "com.tencent.xinWeChat",
+        "wechatMarketingVersion": "4.1.13",
+        "wechatBuild": "4.1.13.269579",
+        "clientBuildProfileId": "wechat-macos-4.1.13-269579",
+        "macosMajor": 26,
+        "anchors": {
+            "searchBox": {"xPartsPerMillion": 235000, "yPartsPerMillion": 36000},
+            "firstResultRow": {"xPartsPerMillion": 235000, "yPartsPerMillion": 115000},
+            "composeBox": {"xPartsPerMillion": 715000, "yPartsPerMillion": 870000}
+        },
+        "ocrRegions": {
+            "title": {
+                "xPartsPerMillion": 440000, "yPartsPerMillion": 20000,
+                "widthPartsPerMillion": 300000, "heightPartsPerMillion": 50000
+            },
+            "compose": {
+                "xPartsPerMillion": 400000, "yPartsPerMillion": 830000,
+                "widthPartsPerMillion": 560000, "heightPartsPerMillion": 110000
+            },
+            "newestOutgoing": {
+                "xPartsPerMillion": 620000, "yPartsPerMillion": 700000,
+                "widthPartsPerMillion": 280000, "heightPartsPerMillion": 200000
+            }
+        },
+        "selftest": {
+            "focusIndicator": "search_caret",
+            "minimumTitleConfidencePartsPerMillion": 900000
+        },
+        "issuedAtUnixSeconds": 0,
+        "expiresAtUnixSeconds": 0
+    }))?)
 }
 
 #[cfg(test)]

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The per-user LaunchAgent the application registers with SMAppService. It is
+  never installed by a downloaded installer and never started by hand: the
+  application registers it, and unregistering removes it. `Program` points into
+  the embedded helper bundle so the TCC grants attribute to
+  GreenBubblesInputHelper rather than to a bare executable path.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>me.greenbubbles.InputHelper</string>
+  <key>Program</key>
+  <string>/Applications/GreenBubbles.app/Contents/Library/LoginItems/GreenBubblesInputHelper.app/Contents/MacOS/greenbubbles-input-helper</string>
+  <key>MachServices</key>
+  <dict>
+    <key>me.greenbubbles.InputHelper</key>
+    <true/>
+  </dict>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>AssociatedBundleIdentifiers</key>
+  <array>
+    <string>me.greenbubbles.GreenBubbles</string>
+  </array>
+</dict>
+</plist>

@@ -989,7 +989,7 @@ impl<'a> DirectConnectorService<'a> {
             event_sha256: String::new(),
         };
         append_owner_only_connector_event(&self.audit_path, event)
-            .map_err(|error| crate::connector::integrity_error(error))
+            .map_err(crate::connector::integrity_error)
     }
 
     fn audit_metadata(

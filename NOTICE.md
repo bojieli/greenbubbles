@@ -18,6 +18,12 @@ carrying Meta's BSD license. Cargo wrapper metadata is not a complete
 description of these bundled C sources. A public binary would require the
 applicable source/binary notices and target-specific review.
 
+The send adapter's signed calibration profiles and compatibility matrices are
+verified with `ed25519-dalek` (BSD-3-Clause) in Rust and with Apple's CryptoKit
+in Swift. Its effector uses only public macOS API — CoreGraphics event posting,
+ScreenCaptureKit window capture, and Vision text recognition — and vendors no
+third-party automation engine, so no additional attribution arises from it.
+
 Transitive Rust and Swift dependencies retain their respective licenses. Run
 `cargo metadata --manifest-path Native/GreenBubblesRestore/Cargo.toml` and
 `swift package show-dependencies` to inspect the resolved dependency graphs.

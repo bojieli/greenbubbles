@@ -528,13 +528,16 @@ fn map_live_query_error(error: LiveQueryError) -> LiveAttachmentError {
 }
 
 fn message_matches_kind(message: &MessageItem, kind: AttachmentKind) -> bool {
-    match (kind, message.message_type, message.message_subtype) {
-        (AttachmentKind::Image, 3, _) | (AttachmentKind::Image, 49, 2 | 8) => true,
-        (AttachmentKind::Voice, 34, _) | (AttachmentKind::Voice, 49, 3) => true,
-        (AttachmentKind::Video, 43, _) | (AttachmentKind::Video, 49, 4 | 51 | 63) => true,
-        (AttachmentKind::Document, 49, 6 | 74) => true,
-        _ => false,
-    }
+    matches!(
+        (kind, message.message_type, message.message_subtype),
+        (AttachmentKind::Image, 3, _)
+            | (AttachmentKind::Image, 49, 2 | 8)
+            | (AttachmentKind::Voice, 34, _)
+            | (AttachmentKind::Voice, 49, 3)
+            | (AttachmentKind::Video, 43, _)
+            | (AttachmentKind::Video, 49, 4 | 51 | 63)
+            | (AttachmentKind::Document, 49, 6 | 74)
+    )
 }
 
 fn extract_unique_message_field(value: &Value, requested: &str) -> Option<String> {

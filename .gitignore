@@ -27,3 +27,8 @@ all_keys.json
 wechat-passphrase.json
 *-passphrase.json
 decrypted/
+
+# Send-adapter release signing seeds. The verifying (public) key is pinned into
+# builds; the seed stays on the release machine and never enters the repository.
+*signing-key*.json
+*signing-seed*.json

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The main GreenBubbles application. It holds the encrypted replica, the
+  decryption keys, the policy, and the audit journal, and it holds *no* input
+  or capture grant: the powerful grants live only in the embedded
+  GreenBubblesInputHelper. See docs/SEND_ADAPTER.md.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleExecutable</key>
+  <string>greenbubbles-history</string>
+  <key>CFBundleIdentifier</key>
+  <string>me.greenbubbles.GreenBubbles</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>GreenBubbles</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>14.0</string>
+  <key>NSHumanReadableCopyright</key>
+  <string>See NOTICE.md for third-party attribution.</string>
+</dict>
+</plist>
