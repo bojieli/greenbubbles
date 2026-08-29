@@ -16,6 +16,32 @@ import GreenBubblesSendKit
 ///   service is registered.
 let service = HelperService()
 
+/// Carries one reply across the service's callback boundary.
+final class ReplyBox: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storedPayload: Data?
+  private var storedFailure: String?
+
+  func store(_ payload: Data?, _ failure: String?) {
+    lock.lock()
+    defer { lock.unlock() }
+    storedPayload = payload
+    storedFailure = failure
+  }
+
+  var payload: Data? {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedPayload
+  }
+
+  var failure: String? {
+    lock.lock()
+    defer { lock.unlock() }
+    return storedFailure
+  }
+}
+
 /// Accepts only peers that satisfy the pinned code-signing requirement, which
 /// is what lets the XPC surface stay high level: peer identity is verified by
 /// the platform rather than by a hand-rolled token.
@@ -45,6 +71,28 @@ final class HelperListenerDelegate: NSObject, NSXPCListenerDelegate, @unchecked 
 let arguments = Array(CommandLine.arguments.dropFirst())
 switch arguments.first {
 case "probe":
+  #if DEBUG
+    // A long-lived helper activates its profile once, in the self-test, and
+    // every later status reports it. When the dispatcher spawns a fresh process
+    // per call there is nothing to remember, so this development-only option
+    // performs the same verification-and-activation before reporting, rather
+    // than reporting an activation that never happened.
+    if let index = arguments.firstIndex(of: "--profile"), index + 1 < arguments.count,
+      let data = try? Data(contentsOf: URL(fileURLWithPath: arguments[index + 1]))
+    {
+      let gate = DispatchSemaphore(value: 0)
+      service.runCalibrationSelfTest(signedProfile: data) { payload, failure in
+        if let failure {
+          FileHandle.standardError.write(Data("self-test refused: \(failure)\n".utf8))
+        } else if let payload {
+          FileHandle.standardError.write(
+            Data("self-test: \(String(decoding: payload, as: UTF8.self))\n".utf8))
+        }
+        gate.signal()
+      }
+      _ = gate.wait(timeout: .now() + 60)
+    }
+  #endif
   let status = service.currentStatus()
   if let data = try? SendCodec.encode(status), let text = String(data: data, encoding: .utf8) {
     print(text)
@@ -255,6 +303,110 @@ case "probe":
       FileHandle.standardError.write(Data("focus probe failed: \(error)\n".utf8))
       exit(2)
     }
+  case "execute-send-local":
+    // Development-only. Runs the real HelperService methods in this process so
+    // the control plane's dispatch path can be exercised on a machine where the
+    // launchd agent has no TCC grants of its own. It is the same service object
+    // the XPC listener exports, called directly rather than over the wire, and it
+    // is compiled out of release builds with the other diagnostics.
+    func localOption(_ name: String) -> String? {
+      guard let i = arguments.firstIndex(of: name), i + 1 < arguments.count else { return nil }
+      return arguments[i + 1]
+    }
+    guard let profilePath = localOption("--profile") else {
+      FileHandle.standardError.write(Data("usage: execute-send-local --profile <f>\n".utf8))
+      exit(2)
+    }
+    do {
+      let local = HelperService()
+      let profileData = try Data(contentsOf: URL(fileURLWithPath: profilePath))
+      // The service refuses a capability until a self-test has verified and
+      // activated a profile, exactly as it does over XPC.
+      let selfTestGate = DispatchSemaphore(value: 0)
+      let selfTestBox = ReplyBox()
+      local.runCalibrationSelfTest(signedProfile: profileData) { payload, failure in
+        selfTestBox.store(payload, failure)
+        selfTestGate.signal()
+      }
+      guard selfTestGate.wait(timeout: .now() + 60) == .success else {
+        throw SendFailure(.engineStall, detail: "the calibration self-test did not complete")
+      }
+      if let failure = selfTestBox.failure {
+        FileHandle.standardError.write(Data("self-test refused: \(failure)\n".utf8))
+        exit(2)
+      }
+      let capability = FileHandle.standardInput.readDataToEndOfFile()
+      let sendGate = DispatchSemaphore(value: 0)
+      let sendBox = ReplyBox()
+      local.executeSend(capability: capability) { payload, failure in
+        sendBox.store(payload, failure)
+        sendGate.signal()
+      }
+      guard sendGate.wait(timeout: .now() + 120) == .success else {
+        throw SendFailure(.engineStall, detail: "the send did not complete")
+      }
+      if let failure = sendBox.failure {
+        FileHandle.standardError.write(Data("send refused: \(failure)\n".utf8))
+        exit(2)
+      }
+      guard let payload = sendBox.payload else {
+        throw SendFailure(.engineUnavailable, detail: "no outcome was produced")
+      }
+      print(String(decoding: payload, as: UTF8.self))
+    } catch {
+      FileHandle.standardError.write(Data("local send failed: \(error)\n".utf8))
+      exit(2)
+    }
+  case "windows":
+    // Read-only: what the locator is choosing between.
+    if let target = WeChatTarget.locate(bundleIdentifier: "com.tencent.xinWeChat") {
+      let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
+      let windows =
+        (CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]]) ?? []
+      for window in windows
+      where window[kCGWindowOwnerPID as String] as? pid_t == target.processIdentifier {
+        let bounds = window[kCGWindowBounds as String] as? [String: CGFloat] ?? [:]
+        let report: [String: Any] = [
+          "number": window[kCGWindowNumber as String] as? Int ?? -1,
+          "name": window[kCGWindowName as String] as? String ?? "",
+          "layer": window[kCGWindowLayer as String] as? Int ?? -1,
+          "alpha": window[kCGWindowAlpha as String] as? Double ?? -1,
+          "onScreen": window[kCGWindowIsOnscreen as String] as? Bool ?? false,
+          "width": bounds["Width"] ?? 0, "height": bounds["Height"] ?? 0,
+          "y": bounds["Y"] ?? 0,
+        ]
+        print(
+          String(
+            decoding: try! JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]),
+            as: UTF8.self))
+      }
+    }
+  case "click-at":
+    // Development-only calibration aid: clicks one window-relative point given in
+    // parts-per-million, so anchors can be located without inventing a profile.
+    func clickOption(_ name: String) -> UInt32? {
+      guard let i = arguments.firstIndex(of: name), i + 1 < arguments.count else { return nil }
+      return UInt32(arguments[i + 1])
+    }
+    guard let xPPM = clickOption("--x"), let yPPM = clickOption("--y"),
+      let target = WeChatTarget.locate(bundleIdentifier: "com.tencent.xinWeChat"),
+      let frame = target.frame
+    else {
+      FileHandle.standardError.write(Data("usage: click-at --x <ppm> --y <ppm>\n".utf8))
+      exit(2)
+    }
+    do {
+      let effector = MacOSInputEffector(processIdentifier: target.processIdentifier)
+      let point = WindowGeometry.point(
+        WindowRelativePoint(xPartsPerMillion: xPPM, yPartsPerMillion: yPPM),
+        in: frame
+      )
+      try effector.click(at: point)
+      print("clicked \(Int(point.x)),\(Int(point.y))")
+    } catch {
+      FileHandle.standardError.write(Data("click failed: \(error)\n".utf8))
+      exit(2)
+    }
   case "ocr":
     // Read-only calibration aid: prints what the gates actually read out of one
     // named region of the signed profile.
@@ -316,10 +468,23 @@ case "onboarding":
   print(plan.complete ? "all required grants are present" : "grants are missing")
 case nil:
   let teamIdentifier = ProcessInfo.processInfo.environment["GREENBUBBLES_TEAM_IDENTIFIER"] ?? ""
-  let delegate = HelperListenerDelegate(
-    service: service,
-    requirement: SendHelperIdentity.codeSigningRequirement(teamIdentifier: teamIdentifier)
-  )
+  var requirement = SendHelperIdentity.codeSigningRequirement(teamIdentifier: teamIdentifier)
+  #if DEBUG
+    // Development-only. A Developer-ID build pins an Apple-anchored requirement
+    // that no ad-hoc binary can satisfy, which makes the XPC path impossible to
+    // exercise outside a signed release. This override exists so it can be
+    // exercised, and it is compiled out of release builds along with the other
+    // diagnostics, so a shipped helper cannot be downgraded by an environment
+    // variable.
+    if let override = ProcessInfo.processInfo.environment["GREENBUBBLES_XPC_REQUIREMENT"],
+      !override.isEmpty
+    {
+      FileHandle.standardError.write(
+        Data("using a development XPC requirement override\n".utf8))
+      requirement = override
+    }
+  #endif
+  let delegate = HelperListenerDelegate(service: service, requirement: requirement)
   let listener = NSXPCListener(machServiceName: SendHelperIdentity.machServiceName)
   listener.delegate = delegate
   listener.resume()

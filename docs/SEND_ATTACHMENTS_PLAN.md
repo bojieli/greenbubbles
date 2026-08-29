@@ -649,3 +649,90 @@ both are worth keeping now that the click works:
 passing test. Here it was three live sessions of accumulating theory — clicks
 do not focus, focus cannot be restored, background sending is impossible — on
 top of one missing field in an event. Check the boring explanation first.
+
+---
+
+## 18. Exercising the four blocking gaps (2026-08-29)
+
+The gaps recorded as blocking a merge were worked through. Three are now
+exercised; one is exercised in part, and the remainder is stated precisely.
+
+### Gap 4 — replica-backed paths: **exercised**
+
+`tests/send_replica_integration.rs` builds a synthetic archive, bootstraps a
+real encrypted replica, and runs both paths against it: an owner attachment
+draft created through the connector's own recipient resolution and reloaded
+through the same owner-only loader the send adapter uses, and reconciliation
+resolving a text send by body digest, a file send by the recorded name, and an
+image send by presence only. It also pins the negatives: a body the replica does
+not hold is never matched, a file send never settles on presence alone, and a
+replica for another account is refused.
+
+### Gap 3 — packaging: **exercised** except notarization
+
+`scripts/package-send-helper.sh` ran end to end with an ad-hoc identity. It
+assembled the bundle, wrote provenance and an SBOM, signed inside-out, and built
+and signed the disk image. `codesign --verify --deep --strict` reports the
+bundle valid and satisfying its designated requirement, the helper carries
+`flags=0x10002(adhoc,runtime)`, and library validation is not disabled.
+Notarization is the one step that cannot run without a real Apple ID.
+
+### Gap 2 — XPC: **exercised**
+
+The helper was registered as a launchd agent publishing its Mach service, and
+the client called it over real XPC, receiving a decoded status. The peer
+requirement was checked in both directions: a client signed with the expected
+identifier is served, and one signed as `me.impostor.Client` is refused.
+
+Registering under launchd also demonstrated something the design predicted: the
+agent has **its own TCC identity** and does not inherit the terminal's grants,
+so `accessibilityGranted` and `screenRecordingGranted` both came back false.
+That is the guided-onboarding step, working as described.
+
+### Gap 1 — an actual send: **exercised in two halves**
+
+*The effector half* was exercised live earlier: text, image, and file each
+passed GATE 1 and GATE 2 against the real client and stopped before Return.
+
+*The control-plane half* — everything after Return, which had never run — was
+exercised through the real `send submit`, outbox, and audit journal:
+
+| Step | Result |
+| --- | --- |
+| dispatch | `dispatched: true`, `attempted: true`, `visualConfirmation: confirmed` |
+| settle | **parked**, not completed: a helper's capture is evidence, never a verdict |
+| audit | three chained events; the journal contains no message body |
+| recall window | open, 104 s remaining, four-step procedure |
+| reconcile | `observedSent` — the only path that creates it — and the parked entry cleared |
+| replay | the same approval refused with `approvalInvalid` and `idempotencyConflict` |
+
+What remains unexercised is the two halves joined: a single run in which the
+real effector presses Return and the real control plane settles that outcome.
+Doing it needs the client parked on the approved conversation and the launchd
+agent holding its own TCC grants.
+
+### Four defects the exercise found
+
+1. **The evidence envelope had drifted between languages.** Swift emitted
+   `attachmentRegionChanged`; the Rust contract did not know the field, and with
+   `deny_unknown_fields` the control plane rejected *every* outcome the helper
+   produced. A real send could never have completed. The field is added, and the
+   canonical vectors now pin the outcome envelope so the drift class is caught
+   in CI rather than in the field.
+2. **Window selection was wrong.** The locator chose the largest window; the
+   client keeps untitled shells around, one of which was larger than the chat
+   window and blank, so every calibration region read nothing. It now prefers
+   the titled window.
+3. **Capture and geometry could describe different windows.** The frame came
+   from the locator while the capture independently chose the largest window,
+   so the gates could read one window's pixels against another's coordinates.
+   Both are now bound to one window number.
+4. **The self-test defeated itself.** It clicked the search box and then read
+   the conversation title — harmless while clicks did nothing, and wrong the
+   moment clicks began taking focus, because focusing search blanks the pane it
+   then read. Calibration is a geometry question, so the self-test is now
+   read-only.
+
+Defects 2 and 3 were only visible because the client drifted into a state the
+happy path never produces. That is an argument for exercising against a real
+client in states nobody designed for, not only against fixtures.

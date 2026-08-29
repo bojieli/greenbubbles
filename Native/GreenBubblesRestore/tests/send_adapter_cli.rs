@@ -251,6 +251,7 @@ elif subcommand == "execute-send":
             "composeMatched": True,
             "attachmentNameMatched": False,
             "attachmentStaged": False,
+            "attachmentRegionChanged": False,
             "confirmationSheetConfirmed": False,
             "composeCleared": True,
             "newestOutgoingMatched": False,

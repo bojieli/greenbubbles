@@ -34,6 +34,7 @@ struct CrossLanguageVectorTests {
     let compatibilityMatrix: Signed<CompatibilityMatrixBody>
     let actionCapability: ActionCapabilityEnvelope
     let attachmentCapability: ActionCapabilityEnvelope
+    let helperSendOutcome: HelperSendOutcome
     let normalizedText: [NormalizationCase]
     let developmentSigning: DevelopmentSigning
   }
@@ -84,6 +85,22 @@ struct CrossLanguageVectorTests {
     try capability.validate(nowUnixNanoseconds: capability.issuedAtUnixNanoseconds + 1)
     // The image capability records that the recipient gets a derivative.
     #expect(!capability.capability.preservesBytes)
+  }
+
+  @Test("the helper outcome envelope matches the shared fixture")
+  func helperOutcomeEnvelope() throws {
+    // Both sides decode strictly, so this fails the moment one language gains
+    // an evidence field the other lacks. That drift shipped once: Swift emitted
+    // attachmentRegionChanged, Rust did not know it, and the control plane
+    // rejected every outcome the helper produced.
+    let vectors = try loadVectors()
+    let outcome = vectors.helperSendOutcome
+    #expect(outcome.attempted)
+    #expect(outcome.evidence.composeCleared)
+    #expect(outcome.evidence.newestOutgoingMatched)
+    #expect(!outcome.evidence.attachmentRegionChanged)
+    #expect(outcome.stageReached == .sendVerify)
+    #expect(outcome.capabilityID == vectors.actionCapability.capabilityID)
   }
 
   @Test("the text normalizer matches the shared fixture")

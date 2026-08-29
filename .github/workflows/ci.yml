@@ -55,12 +55,14 @@ jobs:
           # peer check. In a binary holding Accessibility and Screen Recording
           # they would be an unauthenticated bypass of the whole architecture.
           swift build -c release --product greenbubbles-input-helper
-          for command in capture spike keys focus-probe ocr collision-probe; do
-            if strings .build/release/greenbubbles-input-helper | grep -qx "$command"; then
-              echo "error: release helper contains the $command diagnostic" >&2
-              exit 1
-            fi
-          done
+          # Greps for a usage string that exists only inside the debug block.
+          # Checking for subcommand names is unreliable: words like "capture"
+          # and "windows" occur in framework strings.
+          if strings .build/release/greenbubbles-input-helper |
+            grep -q 'focus-probe --profile'; then
+            echo "error: the release helper contains the debug diagnostics" >&2
+            exit 1
+          fi
           echo "release helper contains no diagnostic bypass"
 
       - name: Check the send path ships closed

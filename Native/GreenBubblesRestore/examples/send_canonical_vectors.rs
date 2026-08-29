@@ -13,7 +13,8 @@
 use greenbubbles_restore::action::ActionCapability;
 use greenbubbles_restore::send_contract::{
     capability_binding_sha256, normalized_send_text, normalized_send_text_sha256, ActionAttachment,
-    ActionCapabilityEnvelope, SendAddressingMode, SendRolloutStage, SEND_CONTRACT_VERSION,
+    ActionCapabilityEnvelope, HelperGateEvidence, HelperSendOutcome, SendAddressingMode,
+    SendRolloutStage, SendStage, VisualConfirmation, SEND_CONTRACT_VERSION,
 };
 use greenbubbles_restore::send_profile::{
     calibration_profile_signing_bytes, compatibility_matrix_signing_bytes,
@@ -203,6 +204,41 @@ fn main() {
     let signed_profile = sign_calibration_profile(&profile, &DEVELOPMENT_SEED).unwrap();
     let signed_matrix = sign_compatibility_matrix(&matrix, &DEVELOPMENT_SEED).unwrap();
 
+    // The outcome envelope crosses the same boundary as the capability and is
+    // decoded with `deny_unknown_fields`, so a field added on one side and not
+    // the other makes the control plane reject every send the helper reports.
+    // That happened once; pinning the envelope here is what stops it recurring.
+    let outcome = HelperSendOutcome {
+        format_version: SEND_CONTRACT_VERSION,
+        capability_id: capability.capability_id.clone(),
+        capability_binding_sha256: capability.binding_sha256.clone(),
+        helper_version: "1.0.0".to_string(),
+        engine_version: "1.0.0".to_string(),
+        calibration_profile_id: profile.profile_id.clone(),
+        stage_reached: SendStage::SendVerify,
+        attempted: true,
+        visual_confirmation: VisualConfirmation::Confirmed,
+        failure: None,
+        evidence: HelperGateEvidence {
+            title_confidence_parts_per_million: 1_000_000,
+            title_matched: true,
+            search_key_echoed: false,
+            compose_matched: true,
+            attachment_name_matched: false,
+            attachment_staged: false,
+            attachment_region_changed: false,
+            confirmation_sheet_confirmed: false,
+            compose_cleared: true,
+            newest_outgoing_matched: true,
+            ambiguous_search_result: false,
+            human_activity_observed: false,
+            window_frame_digest: "88".repeat(32),
+            capture_count: 4,
+            elapsed_milliseconds: 1_400,
+        },
+        observed_at_unix_nanoseconds: 1_756_000_002_000_000_000,
+    };
+
     let document = serde_json::json!({
         "formatVersion": 1,
         "purpose":
@@ -221,6 +257,7 @@ fn main() {
         },
         "actionCapability": capability,
         "attachmentCapability": attachment_capability,
+        "helperSendOutcome": outcome,
         "normalizedText": normalization,
         "developmentSigning": {
             "publicKeyHex": signing_key_public_hex(&DEVELOPMENT_SEED),

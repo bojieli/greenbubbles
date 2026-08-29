@@ -507,39 +507,47 @@ public struct MechanicalSendSkill {
     }
   }
 
-  /// Locates and focuses the search box, confirms by capture, and never sends.
-  /// This is the gate every calibration profile passes before first use.
+  /// Validates the calibration profile against the live window, read-only.
+  ///
+  /// It deliberately does **not** click anything. An earlier version clicked
+  /// the search box and then read the conversation title, which was measured
+  /// self-defeating once background clicks began taking focus: focusing search
+  /// changes what the right-hand pane shows, so the very region the test then
+  /// read went blank. Calibration is a geometry question, and geometry is
+  /// answered by looking.
   public func runCalibrationSelfTest() -> CalibrationSelfTestReport {
     var drift: [String] = []
-    var focused = false
     var confidence: UInt32 = 0
     var digest = String(repeating: "0", count: 64)
     var failure: SendFailureCode?
+    var located = false
     do {
       try manifest.authorize(.windowRead, bundleIdentifier: targetBundleIdentifier)
       let frame = try perception.windowFrame()
       digest = frame.digest
-      if !frame.isPlausibleMainWindow {
-        drift.append("window is smaller than a signed-in chat window")
+      guard frame.isPlausibleMainWindow else {
+        drift.append("the located window is smaller than a signed-in chat window")
         throw SendFailure(.windowNotFound)
       }
-      try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
-      try effector.click(at: WindowGeometry.point(profile.anchors.searchBox, in: frame))
-      effector.settle(milliseconds: pacing.afterClickMilliseconds)
+      located = true
+      // The title region must carry the open conversation's name. If it does
+      // not, the profile's coordinates no longer describe this build or this
+      // window, and every later gate would be reading the wrong pixels.
       let title = try recognize(profile.ocrRegions.title, in: frame)
       confidence = title.confidencePartsPerMillion
-      focused = true
-      if confidence < profile.selftest.minimumTitleConfidencePartsPerMillion {
+      if SendText.normalized(title.text).isEmpty {
+        drift.append("the title region recognized no text at the profile's coordinates")
+        failure = .calibrationDrift
+      } else if confidence < profile.selftest.minimumTitleConfidencePartsPerMillion {
         drift.append(
           "title region confidence \(confidence) is below the profile minimum "
             + "\(profile.selftest.minimumTitleConfidencePartsPerMillion)"
         )
         failure = .calibrationDrift
       }
-      if SendText.normalized(title.text).isEmpty {
-        drift.append("title region recognized no text at the profile's coordinates")
-        failure = .calibrationDrift
-      }
+      // The compose region must at least be readable; an unreadable crop means
+      // the region falls outside the window.
+      _ = try recognize(profile.ocrRegions.compose, in: frame)
     } catch let error as SendFailure {
       failure = error.code
       if !error.detail.isEmpty { drift.append(error.detail) }
@@ -549,7 +557,7 @@ public struct MechanicalSendSkill {
     return CalibrationSelfTestReport(
       calibrationProfileID: profile.profileID,
       passed: failure == nil,
-      searchBoxFocused: focused,
+      searchBoxFocused: located,
       titleConfidencePartsPerMillion: confidence,
       windowFrameDigest: digest,
       driftReport: drift,

@@ -569,6 +569,10 @@ pub struct HelperGateEvidence {
     pub attachment_name_matched: bool,
     /// Whether the compose region showed a staged attachment at all.
     pub attachment_staged: bool,
+    /// Whether the compose region's pixels changed when the attachment was
+    /// staged. For an image this is the *only* on-screen evidence available,
+    /// because the thumbnail carries no readable text.
+    pub attachment_region_changed: bool,
     /// Whether a send-confirmation sheet was observed and confirmed.
     pub confirmation_sheet_confirmed: bool,
     pub compose_cleared: bool,
@@ -793,6 +797,7 @@ mod tests {
                 compose_matched: true,
                 attachment_name_matched: false,
                 attachment_staged: false,
+                attachment_region_changed: false,
                 confirmation_sheet_confirmed: false,
                 compose_cleared: attempted,
                 newest_outgoing_matched: attempted,

@@ -281,6 +281,36 @@
     }
   },
   "formatVersion": 1,
+  "helperSendOutcome": {
+    "attempted": true,
+    "calibrationProfileId": "wechat-4.1.13.269579-macos-26",
+    "capabilityBindingSha256": "7b203888de745f2cbd0e9c3778a493dab5cae264570959fe791ae954561aebab",
+    "capabilityId": "1111111111111111111111111111111111111111111111111111111111111111",
+    "engineVersion": "1.0.0",
+    "evidence": {
+      "ambiguousSearchResult": false,
+      "attachmentNameMatched": false,
+      "attachmentRegionChanged": false,
+      "attachmentStaged": false,
+      "captureCount": 4,
+      "composeCleared": true,
+      "composeMatched": true,
+      "confirmationSheetConfirmed": false,
+      "elapsedMilliseconds": 1400,
+      "humanActivityObserved": false,
+      "newestOutgoingMatched": true,
+      "searchKeyEchoed": false,
+      "titleConfidencePartsPerMillion": 1000000,
+      "titleMatched": true,
+      "windowFrameDigest": "8888888888888888888888888888888888888888888888888888888888888888"
+    },
+    "failure": null,
+    "formatVersion": 1,
+    "helperVersion": "1.0.0",
+    "observedAtUnixNanoseconds": 1756000002000000000,
+    "stageReached": "sendVerify",
+    "visualConfirmation": "confirmed"
+  },
   "normalizedText": [
     {
       "input": "  spaced   out  ",

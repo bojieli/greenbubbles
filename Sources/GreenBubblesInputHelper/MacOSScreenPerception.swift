@@ -85,22 +85,33 @@ final class MacOSScreenPerception: ScreenPerception {
     let semaphore = DispatchSemaphore(value: 0)
     let box = CaptureResultBox()
     let processIdentifier = processIdentifier
+    guard let target = WeChatTarget.locate(bundleIdentifier: bundleIdentifier),
+      let targetWindowNumber = target.windowNumber
+    else {
+      throw SendFailure(.windowNotFound, detail: "the client's main window was not found")
+    }
     Task { @Sendable in
       do {
         let content = try await SCShareableContent.excludingDesktopWindows(
           true,
           onScreenWindowsOnly: false
         )
+        // The captured window must be *the same window* the frame describes.
+        // Selecting independently was measured producing a frame from the chat
+        // window and an image from a blank shell, after which every region the
+        // gates read was the wrong pixels. Matching on the window number the
+        // locator chose makes that impossible.
         let candidates = content.windows.filter { window in
           window.owningApplication?.processID == processIdentifier
             && window.frame.width > 0
             && window.frame.height > 0
         }
-        guard
-          let window = candidates.max(by: {
+        let window =
+          candidates.first { CGWindowID($0.windowID) == targetWindowNumber }
+          ?? candidates.max(by: {
             $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height
           })
-        else {
+        guard let window else {
           box.store(.failure(SendFailure(.windowNotFound, detail: "no capturable window")))
           semaphore.signal()
           return

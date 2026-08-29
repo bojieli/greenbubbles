@@ -560,7 +560,9 @@ struct MechanicalSendSkillTests {
     ).runCalibrationSelfTest()
     #expect(!(drifted.passed))
     #expect(drifted.failure == .calibrationDrift)
-    #expect(drifted.driftReport.count == 2)
+    // One line: an unreadable title region is reported once, not twice.
+    #expect(drifted.driftReport.count == 1)
+    #expect(drifted.driftReport[0].contains("recognized no text"))
   }
 
   @Test("window geometry maps parts-per-million onto the live frame")

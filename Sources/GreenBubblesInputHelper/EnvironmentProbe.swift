@@ -79,7 +79,7 @@ struct WeChatTarget {
       ).first
     else { return nil }
     let info = Bundle(url: application.bundleURL ?? URL(fileURLWithPath: "/"))?.infoDictionary
-    let (windowNumber, frame) = largestWindow(ownedBy: application.processIdentifier)
+    let (windowNumber, frame) = mainWindow(ownedBy: application.processIdentifier)
     return WeChatTarget(
       processIdentifier: application.processIdentifier,
       bundleIdentifier: bundleIdentifier,
@@ -90,16 +90,27 @@ struct WeChatTarget {
     )
   }
 
-  /// The largest window the process owns. Window bounds are readable without
-  /// Screen Recording, so this works during onboarding too.
-  private static func largestWindow(ownedBy pid: pid_t) -> (CGWindowID?, WindowFrame?) {
+  /// The process's main chat window.
+  ///
+  /// Choosing the largest window is not sufficient, and was measured failing:
+  /// the client keeps transient untitled shells around, one of which was larger
+  /// than the chat window and blank, so the calibration regions read nothing.
+  /// The chat window is the one that carries the client's own name, so a titled
+  /// window is preferred and size only breaks ties among titled windows.
+  ///
+  /// Window bounds are readable without Screen Recording, so this works during
+  /// onboarding too; only the window *name* needs the capture grant, and its
+  /// absence degrades to the old size-based choice rather than failing.
+  private static func mainWindow(ownedBy pid: pid_t) -> (CGWindowID?, WindowFrame?) {
     let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
     guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]]
     else { return (nil, nil) }
-    var best: (CGWindowID, WindowFrame)?
+    var titled: (CGWindowID, WindowFrame)?
+    var untitled: (CGWindowID, WindowFrame)?
     for window in windows {
       guard
         window[kCGWindowOwnerPID as String] as? pid_t == pid,
+        window[kCGWindowLayer as String] as? Int == 0,
         let number = window[kCGWindowNumber as String] as? CGWindowID,
         let bounds = window[kCGWindowBounds as String] as? [String: CGFloat],
         let x = bounds["X"], let y = bounds["Y"],
@@ -108,9 +119,16 @@ struct WeChatTarget {
       else { continue }
       let frame = WindowFrame(x: x, y: y, width: width, height: height)
       let area = frame.size.width * frame.size.height
-      if let current = best, current.1.size.width * current.1.size.height >= area { continue }
-      best = (number, frame)
+      let named = !((window[kCGWindowName as String] as? String) ?? "").isEmpty
+      if named {
+        if titled.map({ $0.1.size.width * $0.1.size.height < area }) ?? true {
+          titled = (number, frame)
+        }
+      } else if untitled.map({ $0.1.size.width * $0.1.size.height < area }) ?? true {
+        untitled = (number, frame)
+      }
     }
-    return (best?.0, best?.1)
+    let chosen = titled ?? untitled
+    return (chosen?.0, chosen?.1)
   }
 }

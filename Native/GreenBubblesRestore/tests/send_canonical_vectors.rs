@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use greenbubbles_restore::send_contract::{
     capability_binding_sha256, normalized_send_text, normalized_send_text_sha256,
-    ActionCapabilityEnvelope,
+    ActionCapabilityEnvelope, HelperSendOutcome,
 };
 use greenbubbles_restore::send_profile::{
     calibration_profile_signing_bytes, compatibility_matrix_signing_bytes, CalibrationProfileBody,
@@ -83,6 +83,19 @@ fn the_attachment_capability_binding_matches_the_shared_fixture() {
     assert!(capability
         .validate(capability.issued_at_unix_nanoseconds + 1)
         .is_ok());
+}
+
+#[test]
+fn the_helper_outcome_envelope_matches_the_shared_fixture() {
+    // Decoding is strict on both sides, so this fails the moment one language
+    // gains an evidence field the other lacks.
+    let vectors = vectors();
+    let outcome: HelperSendOutcome =
+        serde_json::from_value(vectors["helperSendOutcome"].clone()).unwrap();
+    let capability: ActionCapabilityEnvelope =
+        serde_json::from_value(vectors["actionCapability"].clone()).unwrap();
+    assert!(outcome.attempted);
+    assert!(outcome.validate_against(&capability).is_ok());
 }
 
 #[test]
