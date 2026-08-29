@@ -149,7 +149,9 @@ jobs:
             echo "sbom=dist/$name-sbom.json"
             echo "checksums=dist/SHA256SUMS-${version}.txt"
             echo "app_notary_log=dist/GreenBubbles-${version}-app-notarization.json"
-            echo "cli_notary_log=dist/$name-notarization.json"
+            # GitHub release asset names are effectively case-insensitive.
+            # Keep the CLI log distinct from the branded DMG log.
+            echo "cli_notary_log=dist/$name-cli-notarization.json"
             echo "dmg_notary_log=dist/GreenBubbles-${version}-macos-arm64-notarization.json"
           } >>"$GITHUB_OUTPUT"
 
