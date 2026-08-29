@@ -228,7 +228,7 @@ struct HistoryBundleLoaderTests {
         }
       )
     }
-    #expect(gate.wait() == .success)
+    #expect(await gate.wait() == .success)
     load.cancel()
     await #expect(throws: CancellationError.self) {
       _ = try await load.value
@@ -255,8 +255,22 @@ private final class ProgressGate: @unchecked Sendable {
     semaphore.signal()
   }
 
-  func wait() -> DispatchTimeoutResult {
-    semaphore.wait(timeout: .now() + 5)
+  /// Waits for the first progress signal.
+  ///
+  /// The blocking wait runs on a global queue rather than on the caller's
+  /// thread. The task being waited on runs on Swift's cooperative pool, which
+  /// has only as many threads as the machine has cores, so blocking a
+  /// cooperative thread here — while the rest of the suite runs in parallel —
+  /// can starve the very task that is meant to signal us, and the deadline
+  /// then expires with nothing actually wrong. The budget is generous for the
+  /// same reason: this waits for a scheduling event, not for a performance
+  /// bound the test means to assert.
+  func wait(timeout: TimeInterval = 120) async -> DispatchTimeoutResult {
+    await withCheckedContinuation { continuation in
+      DispatchQueue.global().async { [semaphore] in
+        continuation.resume(returning: semaphore.wait(timeout: .now() + timeout))
+      }
+    }
   }
 }
 

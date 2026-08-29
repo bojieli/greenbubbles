@@ -3,6 +3,9 @@ name: CI
 on:
   push:
   pull_request:
+  # Lets the release workflow gate on exactly these checks instead of
+  # restating them, so the two cannot drift apart.
+  workflow_call:
 
 permissions:
   contents: read
