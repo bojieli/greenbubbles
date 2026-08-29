@@ -33,10 +33,11 @@ public enum SendHelperIdentity {
 }
 
 /// The helper's XPC surface: three high-level methods, no raw "type anywhere"
-/// primitive. A runtime-compromised control plane can only submit capabilities
-/// that pass PRECHECK; it cannot mint approval evidence, cannot target a
-/// recipient the capability is not bound to, and cannot ask the helper to press
-/// a key of its choosing.
+/// primitive. The helper constrains an already-minted capability to its bound
+/// recipient and content, but does not independently attest the owner approval
+/// that preceded it. A peer running as the signed control plane can submit only
+/// this high-level envelope and cannot ask the helper to press a key of its
+/// choosing.
 ///
 /// Payloads cross as JSON `Data` so both sides use the same Codable models the
 /// Rust control plane writes, rather than a second, divergent object graph.

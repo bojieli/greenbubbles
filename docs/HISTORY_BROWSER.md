@@ -201,12 +201,12 @@ The derived index lives under
 search text — no keys and no raw source columns — and must stay private
 regardless.
 
-Media preview additionally asks for the local `greenbubbles` executable, the
-encrypted replica, the tool policy, the connector audit log, and a one-time
-replica key. A release application should bundle the matching signed executable
-rather than asking for its path.
+Media preview additionally needs the encrypted replica, the tool policy, the
+connector audit log, and a one-time replica key. A source build asks for the
+local `greenbubbles` executable; the signed release application discovers its
+matching bundled executable automatically.
 
-## Why native, and what a shipped `.app` still needs
+## Why native, and how the release app is packaged
 
 Swift 6 and SwiftUI, Observation for main-actor state, descriptor-based POSIX
 I/O for bounded JSONL streaming, system SQLite 3 with FTS5 trigram indexing,
@@ -220,19 +220,23 @@ panels, accessibility, media handling, window conventions and security-scoped
 bookmarks. The Rust engine stays the source of truth; the Swift app consumes
 its stable bounded-JSON and explicit JSONL contracts.
 
-The Swift Package executable is the development and test surface. Distributing
-a `.app` still requires an Xcode archive target that embeds the matching
-`greenbubbles` binary as a signed helper; enables Hardened Runtime, signing,
-notarization and deterministic version binding between UI and helper; adopts
-App Sandbox with user-selected security-scoped bookmarks once the embedded
-helper is verified to consume inherited extensions correctly; stores no replica
-or database key in preferences, restoration state, crash reports or analytics;
-disables or redacts state restoration for private message and search fields;
-adds VoiceOver labels, keyboard navigation, reduced-motion and high-contrast
-audits, localization, and UI automation for empty, loading, partial, error and
-large-text states; and applies a retention policy to old derived indexes and
-abnormally-terminated preview directories — without ever deleting a source
-bundle.
+The release uses the same Swift Package executables exercised by the tests.
+`scripts/package-send-helper.sh` assembles them into `GreenBubbles.app`, embeds
+the matching Rust `greenbubbles` CLI and the privilege-separated input helper,
+adds the icon, notices, SBOM and build provenance, then signs every executable
+inside-out with Developer ID and Hardened Runtime. The release workflow submits
+the app, the complete CLI archive and the final disk image to Apple's notary
+service; it staples the accepted tickets to the app and DMG and verifies both
+with Gatekeeper before publishing them.
+
+This is a direct Developer ID distribution, not a Mac App Store build. The app
+is intentionally not sandboxed because the separately signed input helper's
+optional cross-application control cannot operate inside App Sandbox. The main
+history application itself has empty entitlements and no Accessibility or
+Screen Recording grant; those grants belong only to the helper. Source paths
+selected in the UI are still re-opened and validated through GreenBubbles'
+descriptor, ownership, permission, identity and digest checks. Keys are not
+stored in preferences, restoration state, crash reports or analytics.
 
 ## Tests
 

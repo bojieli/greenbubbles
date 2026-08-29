@@ -107,8 +107,8 @@ public struct BoundedCapabilityManifest: Equatable, Sendable {
     self.allowedTools = allowedTools
   }
 
-  /// The only manifest this product ships: WeChat, and only the six tools the
-  /// mechanical send skill actually needs.
+  /// The only manifest this product ships: WeChat, and only the bounded tools
+  /// the mechanical send skill actually needs.
   public static let weChatOnly = BoundedCapabilityManifest(
     allowedBundleIdentifiers: ["com.tencent.xinWeChat"],
     allowedTools: Set(SendTool.allCases)

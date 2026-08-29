@@ -62,13 +62,18 @@ history. It receives one single-use capability
 ```
 
 The control plane has already resolved the recipient from the replica, so the
-helper enforces the recipient gate **without the database**. Consequences: a
-runtime-compromised control plane can only submit capabilities that pass
-PRECHECK; it cannot mint approval evidence, cannot target a recipient the
-capability is not bound to, and the helper refuses if the on-screen title is
-not `expectedTitle`. `permitSend` is false in every dry run, and a capability
-whose stage is `dryRun` but whose `permitSend` is true fails its own
-self-consistency check on both sides of the boundary.
+helper enforces the recipient gate **without the database**. The helper checks
+the capability's internal binding, validity window, rollout consistency and
+on-screen gates; it cannot change the recipient or body after the capability
+arrives, and it exposes no arbitrary-keystroke method. It does **not** attest
+who approved that capability. Approval evidence is an owner-only, hash-bound
+file, not an independently signed credential, so a process that has already
+compromised the owner's account could forge both the evidence and a matching
+capability. That is outside the project's compromised-machine boundary in
+[THREAT_MODEL.md](THREAT_MODEL.md). For an uncompromised control plane,
+PRECHECK remains the mandatory issuer path, the helper refuses if the live
+title is not `expectedTitle`, and a `dryRun` capability with `permitSend: true`
+fails its own self-consistency check on both sides of the boundary.
 
 ## 3. The mechanical skill and its gates
 
@@ -306,7 +311,7 @@ prevent, and one the adapter cannot verify before committing to the click. The
 adapter therefore reports the remaining window and the exact steps rather than
 automating a gesture it cannot gate. This is a deliberate narrowing of
 the archived [integration design](archive/SEND_INTEGRATION_DESIGN.md) §23 M4;
-   see §11.
+see §11.
 
 ## 10. Packaging, distribution, uninstall
 
@@ -317,14 +322,22 @@ GreenBubbles.app/Contents/
   MacOS/{greenbubbles-history,greenbubbles-send,greenbubbles}
   Library/LaunchAgents/me.greenbubbles.InputHelper.plist
   Library/LoginItems/GreenBubblesInputHelper.app/
-  Resources/{build-provenance.json,sbom.json,NOTICE.md}
+  Resources/
+    GreenBubbles.icns
+    LICENSE
+    NOTICE.md
+    THIRD_PARTY_NOTICES.md
+    build-provenance.json
+    sbom.json
 ```
 
 signs inside-out with Developer ID and **Hardened Runtime**, refuses to ship a
 helper that disables library validation, builds a DMG, and notarizes and
-staples it. Nothing is fetched at run time. Distribution is **Developer-ID
-direct only**; the Mac App Store forbids the cross-application control the
-helper needs, and the App Sandbox does too.
+staples it. The mounted DMG contains the complete `GreenBubbles.app` and an
+`Applications` shortcut, not a flattened copy of the bundle contents. Nothing
+is fetched at run time. Distribution is **Developer-ID direct only**; the Mac
+App Store forbids the cross-application control the helper needs, and the App
+Sandbox does too.
 
 The release verifying key is injected at build time from
 `GREENBUBBLES_SEND_RELEASE_PUBLIC_KEYS` (Swift by a reverted source
@@ -364,17 +377,25 @@ third-party was installed, so nothing third-party remains.
 
 ## 11a. Attachments
 
-Text only. Image and file sending are refused rather than absent: PRECHECK
-rejects any draft carrying attachments, the minted capability is hard-coded to
-`textSend`, and the helper has no file primitive at all — its bounded manifest
-grants six tools, none of which can name a path. Allow-listing `fileSend` in the
-configuration enables nothing; the guard then finds `textSend` missing from the
-allow list and denies, which is the fail-closed answer.
+The public configuration starts text-only and closed: `send init-config`
+allow-lists only `textSend`, puts both rollout ladders at `dryRun`, engages the
+global kill switch, and records no gate evidence. The public build also has no
+release verification key, so neither text nor attachment capabilities can be
+opened with a release-signed calibration profile.
 
-The archived [attachments plan](archive/SEND_ATTACHMENTS_PLAN.md) specifies how
-the capability would be added, what it costs in privilege, and which questions a
-read-only spike must answer first. The archived
-[gate readiness](archive/GATE_READINESS.md) record keeps P4-FILE a separate gate.
+Image and file staging primitives do exist in the experimental helper and
+control plane. They accept only one owner-reviewed file copied into a
+single-use staging directory; the capability binds that exact directory,
+display name, type, size and digest. Enabling one would require adding its
+distinct capability to the allow-list, opening the separate attachment rollout
+ladder, and satisfying all of the ordinary send gates. Their presence in the
+binary is not a supported attachment feature and does not make them reachable
+from the default release configuration.
+
+The archived [attachments plan](archive/SEND_ATTACHMENTS_PLAN.md) records the
+design, its additional privilege cost, and the development-spike evidence. The
+archived [gate readiness](archive/GATE_READINESS.md) record keeps P4-FILE a
+separate public-support gate.
 
 ## 11b. Addressing: the conversation already open
 
@@ -398,12 +419,13 @@ usable on this build: the search field does not take focus from a background
 click, and the client does not run its search while its window is inactive.
 GATE 0 catches the first of those non-destructively.
 
-Validated live on 2026-08-29 against File Transfer, autonomously, for all three
-payload kinds — text, image, and file — each passing GATE 1 and GATE 2 and
-stopping before Return. The archived
-[attachments plan](archive/SEND_ATTACHMENTS_PLAN.md) §17 records the measurements,
-including the malformed-click bug that made an earlier session believe
-background sending was impossible.
+The development spike was validated live on 2026-08-29 against File Transfer
+for all three payload kinds — text, image and file — each passing GATE 1 and
+GATE 2 and stopping before Return. That is feasibility evidence, not a public
+support claim and not evidence of a completed send. The archived
+[attachments plan](archive/SEND_ATTACHMENTS_PLAN.md) §17 records the
+measurements, including the malformed-click bug that made an earlier session
+believe background sending was impossible.
 
 ## 12. What is still gated
 
