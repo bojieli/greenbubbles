@@ -25,7 +25,6 @@ require_file PRIVACY.md
 require_file SECURITY.md
 require_file assets/greenbubbles-icon.svg
 require_file assets/how-it-works.svg
-require_file assets/what-the-ai-sees.svg
 require_file docs/README.md
 require_file docs/KNOWN_LIMITATIONS.md
 require_file docs/THREAT_MODEL.md
