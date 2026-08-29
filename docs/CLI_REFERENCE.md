@@ -1,8 +1,8 @@
 # Command-line reference
 
-The native <code>greenbubbles</code> executable is the query, snapshot,
-restoration, replica, connector, and audit engine behind the SwiftUI history
-browser. Its built-in help is the canonical syntax reference:
+The native `greenbubbles` executable is the query, snapshot, restoration,
+replica, connector and audit engine behind the history browser. Its built-in
+help is the canonical syntax:
 
 ```sh
 greenbubbles help
@@ -10,33 +10,24 @@ greenbubbles help ai-query
 greenbubbles send --help
 ```
 
-Help topics exist for <code>profile</code>, <code>source</code>,
-<code>conversations</code>, <code>messages</code>, <code>message</code>,
-<code>attachment</code>, <code>snapshot</code>, <code>send</code>, the three
-<code>connector-*-direct</code> commands, <code>audit-replica</code>,
-<code>audit-replica-backup</code>, <code>ai-query</code>,
-<code>ai-export</code>, <code>ai-memory-export</code>,
-<code>audit-ai-context</code>, and <code>audit-ai-memory</code>. An unrecognized
-topic falls back to the full usage listing rather than reporting an error.
+Help topics exist for `profile`, `source`, `conversations`, `messages`,
+`message`, `attachment`, `snapshot`, `send`, the three `connector-*-direct`
+commands, `audit-replica`, `audit-replica-backup`, `ai-query`, `ai-export`,
+`ai-memory-export`, `audit-ai-context` and `audit-ai-memory`. An unrecognized
+topic falls back to the full usage listing rather than erroring.
 
-This page maps command families to their intended workflow. It does not turn
-advanced forensic or action commands into a recommended first-run path. For
-ordinary use, start with the [user guide](USER_GUIDE.md).
+This page maps command families to the workflow they belong to. It does not
+turn an advanced forensic or action command into a recommended first run — for
+ordinary use start with the [user guide](USER_GUIDE.md).
 
-Do not confuse it with <code>greenbubbles-discover</code>, the small Swift
-helper that locates WeChat installations, accounts, and candidate artifacts
-before any key is supplied. That helper opens no database contents and is
-documented alongside the workflows that use it, such as the
-[live database sanity check](LIVE_DATABASE_SANITY_CHECK.md) and
-[notification hints](NOTIFICATION_HINTS.md).
+Do not confuse it with `greenbubbles-discover`, the small Swift helper that
+locates installations, accounts and candidate artefacts *before* any key is
+supplied. It opens no database contents.
 
 ## Build
 
-From the repository root:
-
 ```sh
-cargo build --locked --release \
-  --manifest-path Native/GreenBubbles/Cargo.toml
+cargo build --locked --release --manifest-path Native/GreenBubbles/Cargo.toml
 
 GB_CLI="Native/GreenBubbles/target/release/greenbubbles"
 "$GB_CLI" help
@@ -44,76 +35,84 @@ GB_CLI="Native/GreenBubbles/target/release/greenbubbles"
 
 ## Command map
 
-| Family                  | Commands                                                                                                                                                 | Use                                                                              |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| Query profiles          | <code>profile path/template/list/show/validate/set-default</code>                                                                                        | Store private source and credential-file references for repeated bounded queries |
-| Direct resources        | <code>source status</code>, <code>conversations list</code>, <code>messages list/search</code>, <code>message get</code>                                 | Read a bounded live or snapshot page without creating a restoration              |
-| Exact attachments       | <code>attachment inspect/materialize</code>                                                                                                              | Inspect one message and copy one selected local artifact to a new private path   |
-| Recoverable snapshots   | <code>snapshot recovery-kit/local-credential/create/create-capture/verify/rewrap/rekey/retention</code>                                                  | Create, reopen, rotate, verify, and retain independently encrypted snapshots     |
-| Offline restoration     | <code>preflight</code>, <code>probe</code>, <code>restore</code>, <code>restore-publish</code>                                                           | Validate and restore an owner-authorized immutable capture                       |
-| Diagnostics             | <code>diagnose-batch</code>, <code>diagnose-available</code>, <code>diagnose-archive-schema</code>, <code>diagnose-archive-payloads</code>               | Produce privacy-minimized structural evidence for incomplete or changing formats |
-| Archive audit and merge | <code>audit-archive</code>, <code>audit-acquisition-chain</code>, <code>reconcile</code>, <code>merge-incremental</code>                                 | Verify archive integrity and combine change-proportional generations             |
-| Replica lifecycle       | <code>replica-bootstrap/status/sync/publish/follow*</code>, <code>audit-replica*</code>, <code>prepare-replica-recovery</code>                           | Maintain and recover the encrypted canonical serving replica                     |
-| Replica reads           | <code>replica-conversations/search/message/coverage/changes/cached-moments</code>                                                                        | Query replica-only enrichment and change surfaces                                |
-| Direct AI connector     | <code>connector-policy-direct</code>, <code>connector-query-direct</code>, <code>connector-serve-direct</code>                                           | Apply source-bound policy and audit directly to live or snapshot queries         |
-| Replica AI connector    | <code>tool-policy/list/recent/search/draft</code>, <code>connector-serve/call</code>                                                                     | Serve policy-scoped replica reads and non-executing drafts                       |
-| AI interchange          | <code>ai-query</code>, <code>ai-export</code>, <code>audit-ai-context</code>, <code>ai-memory-export</code>, <code>audit-ai-memory</code>                | Create and verify minimized, citation-preserving AI context                      |
-| Operational evidence    | <code>synthetic-benchmark</code>, <code>compose-latency-evidence</code>, <code>summarize-latency-evidence</code>, <code>audit-connector-log/state</code> | Generate or verify aggregate release and service evidence                        |
-| Sending                 | <code>send …</code>                                                                                                                                      | Inspect the separate experimental action adapter; public builds remain closed    |
+| Family | Commands | Use |
+| --- | --- | --- |
+| Query profiles | `profile path/template/list/show/validate/set-default` | Store private source and credential references for repeated queries |
+| Direct resources | `source status`, `conversations list`, `messages list/search`, `message get` | Read one bounded live or snapshot page without creating a restoration |
+| Exact attachments | `attachment inspect/materialize` | Inspect one message; copy one selected artefact to a new private path |
+| Recoverable snapshots | `snapshot recovery-kit/local-credential/create/create-capture/verify/rewrap/rekey/retention` | Create, reopen, rotate, verify and retain independently encrypted snapshots |
+| Offline restoration | `preflight`, `probe`, `restore`, `restore-publish` | Validate and restore an owner-authorized immutable capture |
+| Diagnostics | `diagnose-batch`, `diagnose-available`, `diagnose-archive-schema`, `diagnose-archive-payloads` | Produce privacy-minimized structural evidence for incomplete or changing formats |
+| Archive audit and merge | `audit-archive`, `audit-acquisition-chain`, `reconcile`, `merge-incremental` | Verify archive integrity and combine change-proportional generations |
+| Replica lifecycle | `replica-bootstrap/status/sync/publish/follow*`, `audit-replica*`, `prepare-replica-recovery` | Maintain and recover the encrypted serving replica |
+| Replica reads | `replica-conversations/search/message/coverage/changes/cached-moments` | Query replica-only enrichment and change surfaces |
+| Direct AI connector | `connector-policy-direct`, `connector-query-direct`, `connector-serve-direct` | Apply source-bound policy and audit directly to live or snapshot queries |
+| Replica AI connector | `tool-policy/list/recent/search/draft`, `connector-serve/call` | Serve policy-scoped replica reads and non-executing drafts |
+| AI interchange | `ai-query`, `ai-export`, `audit-ai-context`, `ai-memory-export`, `audit-ai-memory` | Create and verify minimized, citation-preserving AI context |
+| Operational evidence | `synthetic-benchmark`, `compose-latency-evidence`, `summarize-latency-evidence`, `audit-connector-log/state` | Generate or verify aggregate release and service evidence |
+| Sending | `send …` | Inspect the separate experimental adapter; public builds stay closed |
 
-## Access modes and secret transport
+## How secrets reach a process
 
-Direct source commands accept exactly one access mode:
+Every direct source command takes exactly one access mode:
 
-| Mode                             | Option                                                | Secret input                                |
-| -------------------------------- | ----------------------------------------------------- | ------------------------------------------- |
-| Live encrypted WeChat            | <code>--passphrase-stdin</code>                       | Key as the first standard-input line        |
-| Recoverable snapshot, portable   | <code>--snapshot-recovery-kit &lt;file&gt;</code>     | Owner-only file; no key on standard input   |
-| Recoverable snapshot, local      | <code>--snapshot-local-credential &lt;file&gt;</code> | Owner-only file; no key on standard input   |
-| Recoverable snapshot, passphrase | <code>--snapshot-passphrase-stdin</code>              | Passphrase as the first standard-input line |
-| Legacy snapshot raw key          | <code>--snapshot-key-stdin</code>                     | Key as the first standard-input line        |
-| Synthetic/plaintext fixture      | <code>--decrypted</code>                              | No secret                                   |
+| Mode | Option | Secret input |
+| --- | --- | --- |
+| Live encrypted WeChat | `--passphrase-stdin` | key as the first stdin line |
+| Snapshot, portable | `--snapshot-recovery-kit <file>` | owner-only file; nothing on stdin |
+| Snapshot, local | `--snapshot-local-credential <file>` | owner-only file; nothing on stdin |
+| Snapshot, passphrase | `--snapshot-passphrase-stdin` | passphrase as the first stdin line |
+| Legacy snapshot raw key | `--snapshot-key-stdin` | key as the first stdin line |
+| Synthetic / plaintext | `--decrypted` | none |
 
-When a search also uses standard input, the key or passphrase is the first line
-and the query is the remaining UTF-8 input. In file-backed and plaintext modes,
-standard input contains only the query.
+When a search also uses stdin, the key or passphrase is the first line and the
+query is the remaining UTF-8 input. In file-backed and plaintext modes, stdin
+contains only the query.
 
-Never place a key, passphrase, recovery phrase, replica key, or private search
-text in shell arguments. Prefer an owner-only file redirected into standard
-input over an interactive shell literal, which may enter shell history.
+**Never put a key, passphrase, recovery phrase, replica key or private search
+text in a shell argument.** Prefer an owner-only file redirected into stdin
+over an interactive shell literal — the literal enters shell history, and
+arguments are visible to every process on the machine.
 
-## Bounds and response semantics
+A [query profile](QUERY_PROFILES.md) removes most of this ceremony from daily
+use.
 
-- Conversation and message lists default to 100 items and have a hard maximum
-  of 500.
-- Search has a hard maximum of 200 results; fallback source scanning examines
-  a bounded window and may require following a continuation through empty
-  result pages.
-- There is no <code>--all</code> direct-query option.
+## Bounds and how to read a response
+
+- Conversation and message lists default to 100 items, hard maximum 500.
+- Search has a hard maximum of 200 results. Fallback source scanning examines a
+  bounded window and may need a continuation followed through *empty* result
+  pages — an empty page is not the end of the search.
+- There is no `--all` direct-query option, and there will not be one.
 - Opaque cursors and message IDs are bound to their source, operation,
-  conversation, and filter. Do not reuse them across those boundaries.
-- Inspect <code>ok</code>, <code>consistency</code>, <code>warnings</code>,
-  <code>coverage</code>, and <code>page</code> before interpreting a result.
-- Missing data under stale, unavailable, or partial coverage is not evidence
-  of deletion or nonexistence.
+  conversation and filters. Do not reuse one across those boundaries; it will
+  be rejected rather than silently reinterpreted.
+- Read `ok`, `consistency`, `warnings`, `coverage` and `page` before
+  interpreting any result.
+- **Missing data under stale, unavailable or partial coverage is not evidence
+  of deletion.** This is the single most important reading rule, and the one an
+  automated caller is most likely to get wrong.
 
-For response envelopes and paging behavior, see
-[AI context CLI](AI_CONTEXT_CLI.md) and
-[live query architecture](LIVE_QUERY_ARCHITECTURE.md).
+Envelope and paging details are in [ARCHITECTURE.md](ARCHITECTURE.md); the AI
+request contract is in [AI_CONTEXT_CLI.md](AI_CONTEXT_CLI.md).
 
-## Advanced workflows
+## Progress output
 
-- [Query profiles](QUERY_PROFILES.md)
-- [Recoverable snapshots](RECOVERABLE_SNAPSHOTS.md)
-- [Offline restoration](OFFLINE_PIPELINE.md)
-- [Replica specification](REPLICA_SPEC.md)
-- [Replica follow mode](REPLICA_FOLLOW.md)
-- [Connector API](CONNECTOR_API.md)
-- [AI context and memory](AI_CONTEXT_CLI.md)
-- [Send adapter](SEND_ADAPTER.md)
+Most restoration, audit, snapshot and export commands accept
+`--progress-json`, `--quiet-progress`, or an owner-only create-new
+`--progress-file`. Progress events omit message content, credentials and source
+paths — but an operational report can still reveal private aggregate facts, so
+treat one as private until you have read it.
 
-Most restoration, audit, snapshot, and export commands accept
-<code>--progress-json</code>, <code>--quiet-progress</code>, or an owner-only
-create-new <code>--progress-file</code>. Progress events deliberately omit
-message content, credentials, and source paths, but operational reports can
-still reveal private aggregate facts and should remain private unless reviewed.
+## Where to go next
+
+| Task | Document |
+| --- | --- |
+| Repeated queries without retyping | [Query profiles](QUERY_PROFILES.md) |
+| Backups and recovery | [Recoverable snapshots](RECOVERABLE_SNAPSHOTS.md) |
+| Offline restoration and publication | [Restoration specification](RESTORATION_SPEC.md) |
+| The serving replica | [Replica specification](REPLICA_SPEC.md) · [operations](REPLICA_OPERATIONS.md) |
+| The local request contract | [Connector API](CONNECTOR_API.md) |
+| Giving an AI access | [AI context CLI](AI_CONTEXT_CLI.md) |
+| Verifying any of the above | [Auditing](AUDITING.md) |
+| The closed send path | [Send adapter](SEND_ADAPTER.md) |

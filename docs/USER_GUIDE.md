@@ -1,181 +1,183 @@
-# GreenBubbles user guide
+# User guide
 
-This guide covers the normal workflow: inspect storage, browse WeChat history
-without restoring it, create an independently recoverable snapshot, and reopen
-that snapshot later. For protector rotation and retention operations, see the
-[recoverable snapshot operator guide](RECOVERABLE_SNAPSHOTS.md).
-For repeated terminal queries without retyping source and credential options,
-see the [query-profile guide](QUERY_PROFILES.md).
+This is the normal path: find your data, browse it without restoring anything,
+make a backup that survives losing WeChat, and reopen that backup later.
 
-GreenBubbles is local software. The query path does not send messages, upload
-history, or copy the full message corpus into JSON. It opens owner-authorized
-SQLite/WCDB files read-only and returns one bounded page at a time.
+Two things to know before you start.
 
-Sending is a separate, owner-run path that ships closed and is never reachable
-from a query or a tool call. If you want to enable it, read
-[the send adapter guide](SEND_ADAPTER.md) first; `greenbubbles send
-doctor` will tell you precisely why it is disabled and what each reason
-requires.
+**GreenBubbles is local software.** The query path sends nothing, uploads
+nothing, and does not copy your corpus into JSON. It opens your files read-only
+and returns one bounded page at a time.
 
-## Choose a workflow
+**Sending is a separate path and it ships closed.** It is never reachable from
+a query or a tool call. If you want to know why, `greenbubbles send doctor`
+will tell you exactly which conditions are unmet, and
+[SEND_ADAPTER.md](SEND_ADAPTER.md) explains each one.
 
-| Need | Recommended workflow |
-|---|---|
-| Browse current history on this Mac | History app → **Browse Live or Snapshot…** → **Live WeChat (read-only)** |
-| Query live and snapshot history repeatedly from a terminal | Configure a private default and named profiles in `~/.greenbubbles/query-profiles.json` |
-| See how much storage WeChat actually uses | Open the live source; read **SQLite files**, **WAL**, and **Total** in Overview |
-| Keep a durable backup independent of WeChat | History app → **Create Recoverable Snapshot…** |
-| Reopen a snapshot routinely on the same Mac | **Snapshot unlock in macOS Keychain** |
-| Recover after losing this Mac, WeChat, or its key | A copied snapshot plus the separately stored 24-word recovery kit |
-| Export the whole corpus for forensics or interchange | Use the explicit restoration/export workflow, not normal browsing |
-
-The recommended arrangement is a portable 24-word recovery kit plus macOS
-Keychain for routine access. A hidden local credential is available when
-Keychain is unsuitable. Neither local convenience option replaces the words.
-
-## Requirements
+## What you need
 
 - macOS 14 or later;
-- Swift 6 and Rust/Cargo installed;
+- Swift 6 and Rust/Cargo, if you are building from source;
 - an owner-authorized WeChat `db_storage` directory;
-- for encrypted live access, the matching 32-byte key or 64-character
-  hexadecimal key;
-- enough free space for a snapshot when creating one.
+- the matching 32-byte (or 64-hex-character) database key, for encrypted live
+  access;
+- free space for a snapshot, if you create one.
 
-The source directory is the directory named `db_storage` that contains at least
-the `contact`, `session`, and `message` subdirectories. Do not select the whole
-WeChat container and do not select an individual `.db` file.
+If you do not have the key yet, capture it first — three commands, about a
+minute, in [PASSPHRASE_ACQUISITION.md](PASSPHRASE_ACQUISITION.md).
 
-If the location is unknown, run this locally:
+**Never paste a key, passphrase, recovery phrase or private message into a
+model prompt, an issue, or a chat.**
+
+## Which workflow do you want?
+
+| If you want to… | Do this |
+| --- | --- |
+| Browse current history on this Mac | History app → **Browse Live or Snapshot…** → **Live WeChat (read-only)** |
+| Query repeatedly from a terminal | Set up a [query profile](QUERY_PROFILES.md) |
+| See how much space WeChat actually uses | Open the live source; read **SQLite files**, **WAL** and **Total** in Overview |
+| Keep a backup independent of WeChat | History app → **Create Recoverable Snapshot…** |
+| Reopen a snapshot routinely on this Mac | Snapshot unlock via macOS Keychain |
+| Recover after losing this Mac, WeChat, or its key | A copied snapshot plus your separately stored 24 words |
+| Export the whole corpus for forensics | The explicit restoration workflow, not normal browsing |
+
+The arrangement to aim for is **24 words stored somewhere else, plus Keychain
+for daily convenience.** Neither local convenience option replaces the words.
+
+## Find your data
+
+The source is the directory named `db_storage` that contains at least
+`contact`, `session` and `message`. Do not select the WeChat container, and do
+not select an individual `.db` file.
+
+If you do not know where it is:
 
 ```sh
 swift run greenbubbles-discover accounts --include-paths
 ```
 
-Path-bearing output may contain a stable account identifier. Keep it private.
-If the database key has not yet been acquired, follow the separate
-[owner-authorized acquisition guide](PASSPHRASE_ACQUISITION.md). Never paste a
-key, passphrase, or recovery phrase into a model prompt, issue, or chat.
+Path-bearing output may contain a stable account identifier — keep it private.
 
-## Build and launch
+## Install or build
 
-From the repository root, build the native query tool and the History app:
+For the signed release, download the `GreenBubbles-*-macos-arm64.dmg` and its
+checksum file from [GitHub Releases](https://github.com/bojieli/greenbubbles/releases),
+verify them as shown in the [repository README](../README.md#install), open the
+disk image, and copy **GreenBubbles** to Applications. The packaged app finds
+the `greenbubbles` CLI inside its own bundle automatically.
+
+To build from source, from the repository root:
 
 ```sh
-cargo build --release \
-  --manifest-path Native/GreenBubbles/Cargo.toml
+cargo build --release --manifest-path Native/GreenBubbles/Cargo.toml
 swift build --product greenbubbles-history
 swift run greenbubbles-history
 ```
 
-When the app asks for the local CLI, choose:
+When the app asks for the local CLI, choose
+`Native/GreenBubbles/target/release/greenbubbles`. It may auto-detect a debug
+build; pointing it at the release binary explicitly is noticeably faster.
 
-```text
-Native/GreenBubbles/target/release/greenbubbles
-```
+## Browse live history
 
-The app may find a previously built debug CLI automatically. Selecting the
-release binary explicitly gives better query performance.
-
-## Browse the live database
-
-1. Launch the History app and choose **Browse Live or Snapshot…**.
-2. Choose the `greenbubbles` executable built above.
+1. **Browse Live or Snapshot…**
+2. Confirm the bundled `greenbubbles` executable, or choose the one you built
+   from source.
 3. Set **Access** to **Live WeChat (read-only)**.
 4. Choose the account's `db_storage` directory.
-5. Enter the matching WeChat database key and choose **Connect**.
+5. Enter the database key and **Connect**.
 
-The key is written only to the local CLI's standard input for this connection.
-It is not placed in process arguments or app preferences.
+The key goes to the CLI's standard input for that connection only. It is not
+placed in process arguments or in app preferences.
 
-The app first authenticates the core databases, measures SQLite storage, and
-loads up to 100 conversations. It does not start restoration. Use:
+The app authenticates the core databases, measures storage, and loads up to 100
+conversations. It does not start a restoration. From there:
 
-- **Overview** for source size and consistency information;
-- **Chats** to load one 100-message page at a time;
-- **Search** for bounded native FTS or a bounded, no-write fallback scan;
-- **Load More** only when another page is needed.
+- **Overview** — source size and consistency information;
+- **Chats** — one 100-message page at a time;
+- **Search** — bounded native FTS, or the bounded no-write fallback;
+- **Load More** — only when you actually need the next page.
 
-Live reads are consistent within each SQLite statement and database. WeChat
-uses several independent databases, so pages are not one global historical
-instant. Use a recoverable snapshot when repeated queries must target a stable
-generation.
+Live reads are consistent within each statement and each database. WeChat uses
+several independent databases, so a page is not one global instant. When
+repeated queries need a stable target, use a snapshot generation.
 
-## Understand the storage numbers
+## Reading the storage numbers
 
 **SQLite files** is the sum of the actual `.db` files. **WAL** and **SHM** are
-SQLite sidecars used by the live application. **Total** includes those files
-and any rollback journals found under the selected root.
+the sidecars the live application uses. **Total** adds those plus any rollback
+journals under the selected root.
 
-This number can be much smaller than an old restored output. A forensic
-restoration may duplicate each row as typed JSON and raw provenance, Base64
-encode binary values, build indexes, create a staging database, and eagerly
-materialize media. Those derivatives can exceed 30 GB even when the source
-SQLite files are only a few gigabytes. Normal GreenBubbles browsing creates
-none of those corpus-sized derivatives.
+That figure is often far smaller than an old restored output, and the
+difference is not an error. A forensic restoration duplicates every row as
+typed JSON plus raw provenance, base64-encodes binary values, builds indexes,
+creates a staging database and materializes media. Those derivatives can exceed
+30 GB from a source of a few gigabytes. Normal browsing creates none of them —
+that is the whole point of the design, and the numbers behind it are in
+[MEASUREMENTS.md](MEASUREMENTS.md).
 
-## Create an independently recoverable snapshot
+## Create a recoverable snapshot
 
-Use the graphical flow unless an automated CLI workflow is required:
+Use the graphical flow unless you need automation.
 
-1. Choose **File → Create Recoverable Snapshot…**.
+1. **File → Create Recoverable Snapshot…**
 2. Select the native CLI and the source `db_storage` directory.
 3. Leave **Source is a complete stable acquisition capture** off for a normal
-   live source. Turn it on only when the selected directory is a complete
-   GreenBubbles acquisition snapshot with its acquisition manifest.
-4. Choose a new snapshot directory and a new recovery-kit file. Neither output
-   may already exist.
-5. Keep **macOS Keychain** selected for convenient reopening, or choose an
-   owner-only hidden credential file. **None** is valid when routine reopening
-   will use the recovery kit or optional passphrase.
-6. Optionally add a distinct snapshot passphrase. It is processed with Argon2id
-   and does not replace the recovery words.
-7. Choose **Create Recovery Words**.
-8. Copy all 24 words, in order, to an independent offline or password-manager
-   location. Never reuse a cryptocurrency wallet phrase.
-9. Answer the four randomly selected word-position checks and confirm that an
+   live source. Turn it on only when the directory is a complete GreenBubbles
+   acquisition snapshot with its manifest.
+4. Choose a new snapshot directory and a new recovery-kit file. Neither may
+   already exist.
+5. Keep **macOS Keychain** for convenient reopening, or choose an owner-only
+   hidden credential file. **None** is valid if you will always use the
+   recovery kit or a passphrase.
+6. Optionally add a snapshot passphrase. It is processed with Argon2id and does
+   **not** replace the recovery words.
+7. **Create Recovery Words.**
+8. Copy all 24 words, in order, somewhere independent — offline or in a
+   password manager. Never reuse a cryptocurrency wallet phrase.
+9. Answer the four randomly chosen word-position checks and confirm an
    independent copy exists.
-10. Choose **Confirm Words and Create Snapshot** and allow conversion to finish.
+10. **Confirm Words and Create Snapshot**, and let the conversion finish.
 
-The recovery-kit file is created before the long conversion and is retained if
-conversion is cancelled or fails. The snapshot receives a new random SQLCipher
-key; the WeChat key is used only to read the source and is not copied into the
-snapshot. Temporary destination databases are encrypted from their first
-SQLite write—there is no plaintext SQLite staging database.
+The recovery kit is written *before* the long conversion and is kept even if
+conversion is cancelled or fails. The snapshot gets a new random SQLCipher key;
+the WeChat key is used only to read the source and never lands in the snapshot.
+Destination databases are encrypted from their first write — there is no
+plaintext staging database at any point.
 
-Do not store the only recovery-kit copy beside the only snapshot copy. A useful
-backup requires both an intact snapshot generation and one working portable
-recovery copy.
+**Do not store the only copy of the recovery kit beside the only copy of the
+snapshot.** A working backup is an intact snapshot generation *and* one
+reachable portable recovery copy, in different places.
 
 ## Reopen a snapshot
 
-Choose **Browse Live or Snapshot…**, select the snapshot directory, then choose
-one access mode:
+**Browse Live or Snapshot…**, select the snapshot directory, then pick an
+access mode:
 
 | Access mode | When to use it |
-|---|---|
-| **Snapshot unlock in macOS Keychain** | Routine access on the Mac that created the Keychain entry |
-| **Snapshot hidden-file unlock** | Routine access with the separately stored owner-only local credential |
-| **Snapshot passphrase (Argon2id)** | Access using the optional memorized passphrase |
-| **Snapshot recovery words (portable)** | Recovery drill or recovery on another installation using the kit file |
-| **Legacy snapshot raw key** | Compatibility with old format-1 snapshots only |
+| --- | --- |
+| Snapshot unlock in macOS Keychain | Routine access on the Mac that created the entry |
+| Snapshot hidden-file unlock | Routine access with the separately stored owner-only credential |
+| Snapshot passphrase (Argon2id) | Access with the optional memorized passphrase |
+| Snapshot recovery words (portable) | A recovery drill, or recovery on another installation |
+| Legacy snapshot raw key | Format-1 snapshots only |
 
-If a Keychain item or hidden file is lost, do not recreate it by guessing. Open
-the same snapshot with the recovery-kit file, then create a new immutable
-protector generation using the operator guide.
+Lost the Keychain item or hidden file? Do not try to reconstruct it — it was a
+random key. Open the snapshot with the recovery kit and create a new protector
+generation, as described in [RECOVERABLE_SNAPSHOTS.md](RECOVERABLE_SNAPSHOTS.md).
 
-## Perform a portable recovery drill
+## Run a recovery drill
 
-Creation verifies the snapshot before reporting success. Also test the recovery
-copy after moving the snapshot or kit to its intended backup location:
+Creation verifies the snapshot before reporting success, but that verification
+happened where the snapshot was born. Test the copy again once it reaches its
+actual backup location:
 
 ```sh
-Native/GreenBubbles/target/release/greenbubbles \
-  snapshot verify <snapshot-directory> \
+greenbubbles snapshot verify <snapshot-directory> \
   --snapshot-recovery-kit <owner-only-recovery-kit-file>
 ```
 
-Success includes:
+A passing drill reports:
 
 ```json
 {
@@ -187,14 +189,15 @@ Success includes:
 }
 ```
 
-Verification reads no WeChat key. Repeat this drill after copying, protector
-rotation, storage migration, or a significant backup-system change.
+The first line is the one that matters: it opened with no WeChat key at all.
+Repeat the drill after copying the snapshot, rotating protectors, migrating
+storage, or changing your backup system.
 
-## CLI quick start
+## The command line
 
-The graphical app uses the same commands. For repeated terminal use, configure
-an owner-only [query profile](QUERY_PROFILES.md). With a default profile, the
-common commands need neither a source path nor a key/passphrase option:
+The app runs the same commands you can. For repeated terminal use, set up an
+owner-only [query profile](QUERY_PROFILES.md) so you stop retyping a source
+path and re-supplying a key:
 
 ```sh
 GB_CLI="Native/GreenBubbles/target/release/greenbubbles"
@@ -202,130 +205,61 @@ GB_CLI="Native/GreenBubbles/target/release/greenbubbles"
 "$GB_CLI" profile validate
 "$GB_CLI" source status
 "$GB_CLI" conversations list --limit 100
-"$GB_CLI" messages list \
-  --conversation <conversation-id> --limit 100
+"$GB_CLI" messages list --conversation <conversation-id> --limit 100
 "$GB_CLI" conversations list --profile archive --limit 100
 ```
 
-The profile file stores paths and access modes. Live keys and snapshot
-passphrases remain in separately referenced owner-only files; they are not
-placed in the general JSON settings. A local snapshot credential or portable
-recovery kit is already file-backed and can be referenced directly.
+The profile stores paths and access modes. Keys and passphrases stay in
+separately referenced owner-only files, never in the general JSON settings.
 
-For one-off queries and scripts that intentionally supply every input, set
-private paths in the shell session and keep the key in an owner-only file:
+Without a profile, supply everything explicitly and keep the key in a file:
 
 ```sh
 GB_CLI="Native/GreenBubbles/target/release/greenbubbles"
 GB_SOURCE="<WeChat-db_storage-root>"
 GB_KEY_FILE="<owner-only-WeChat-key-file>"
+
+cat "$GB_KEY_FILE" | "$GB_CLI" source status "$GB_SOURCE" --passphrase-stdin
+cat "$GB_KEY_FILE" | "$GB_CLI" conversations list "$GB_SOURCE" \
+  --passphrase-stdin --limit 100
+cat "$GB_KEY_FILE" | "$GB_CLI" messages list "$GB_SOURCE" \
+  --passphrase-stdin --conversation <conversation-id> --limit 100
 ```
 
-Inspect size and list the first page:
+The full surface is in [CLI_REFERENCE.md](CLI_REFERENCE.md).
+
+## When something is wrong
+
+Start with the [FAQ](FAQ.md) — slow search, missing contact names, a search
+that finds nothing, or a page that reports incomplete coverage are all covered
+there, and most of them are documented behaviour rather than faults.
+
+To check the bounded CLI against your own real databases and get a
+content-free report you can safely share:
 
 ```sh
-cat "$GB_KEY_FILE" | "$GB_CLI" \
-  source status "$GB_SOURCE" --passphrase-stdin
-
-cat "$GB_KEY_FILE" | "$GB_CLI" \
-  conversations list "$GB_SOURCE" --passphrase-stdin --limit 100
+swift scripts/check-live-database.swift
 ```
 
-Use a returned conversation `id` to page messages:
+It builds the release binaries, discovers readable accounts, tries your key
+against each, and for every source it authenticates verifies source status, a
+bounded conversation page, message lookup across up to 20 conversations, exact
+hydration of both a list identity and a search identity, and cursor
+continuation. Useful flags: `--key-file <path>` for a key elsewhere,
+`--skip-build` during iteration, and `--search-query-file <path>` when the
+bounded sample contains no suitable text to search for. Both files must be
+mode-`0600`, single-link, current-user-owned, in an owner-only directory.
 
-```sh
-cat "$GB_KEY_FILE" | "$GB_CLI" \
-  messages list "$GB_SOURCE" --passphrase-stdin \
-  --conversation <conversation-id> --limit 100
-```
+Its output is one JSON report with aggregate counts, coverage flags and
+warning codes — no paths, account IDs, conversation or message IDs, queries,
+snippets or content. Exit status zero means every authenticated source passed,
+including a positive search hit and its exact hydration. The check is bounded,
+not exhaustive: it makes no claim about full-corpus, schema-variant or
+cross-database coverage, and snapshot, attachment, connector and replica
+behaviour are separate test surfaces.
 
-Pass `page.nextCursor` back with `--cursor <opaque-cursor>` for the next page.
-The hard maximum is 500 conversations/messages or 200 search hits per response.
-There is deliberately no ordinary `--all` option.
+## Next
 
-Search text also belongs on standard input. Put sensitive query text in an
-owner-only file so it does not enter shell history:
-
-```sh
-{
-  cat "$GB_KEY_FILE"
-  cat <owner-only-query-file>
-} | "$GB_CLI" messages search "$GB_SOURCE" \
-  --passphrase-stdin --query-stdin --limit 50
-```
-
-For snapshot queries, replace `--passphrase-stdin` with one of:
-
-```text
---snapshot-local-credential <owner-only-file>
---snapshot-recovery-kit <owner-only-file>
---snapshot-passphrase-stdin
-```
-
-With a file-backed snapshot protector, only search text goes to standard input.
-With `--snapshot-passphrase-stdin`, the passphrase is the first line and the
-search text follows it.
-
-With any configured profile, only search text goes to standard input; the CLI
-loads the referenced credential separately. A positional source plus explicit
-access mode is mutually exclusive with `--profile`.
-
-## Common problems
-
-### “Required database is unavailable”
-
-The wrong directory was selected, or a required core file is missing. Select
-the `db_storage` directory containing `contact/contact.db` and
-`session/session.db`.
-
-### The encrypted source cannot be opened
-
-Confirm that the key belongs to the selected account and that its file contains
-only the supported raw 32-byte or 64-hex-character value plus a final newline.
-Failures are intentionally nondisclosing; GreenBubbles does not print the key
-or database path in the JSON error.
-
-### A recovery kit or local credential is rejected
-
-The file and its parent must be owned by the current user. The file must be a
-regular, single-link mode-`0600` file inside a mode-`0700` directory. Symbolic
-links and group/world-readable secret files are rejected.
-
-### A query profile is rejected
-
-Run `greenbubbles profile validate <name>`. The configuration file,
-credential file, and their containing directories must satisfy the same
-owner-only rules. Paths in the JSON must be absolute, the named profile must
-exist, and `defaultProfile` must name one of the configured profiles. Do not
-combine `--profile` with an explicit source or access flag.
-
-### A new snapshot path is rejected
-
-Snapshot generations are immutable and never overwritten. Choose a new path in
-an owner-only parent directory. Rewrap or rekey operations also publish a new
-generation rather than modifying the old one.
-
-### Search returns no hits but says `hasMore: true`
-
-Native FTS was unavailable and the fallback scanned only its fixed source
-window. Continue with `page.nextCursor`; an empty intermediate window is not a
-claim that the remaining history has no match.
-
-### A response reports incomplete coverage
-
-Read the `warnings` array. An unreadable optional message shard can produce a
-partial page with an opaque shard identifier. Do not infer that an absent
-message was deleted or never existed. Retry after WeChat is idle or use a
-verified recoverable snapshot.
-
-## Safety checklist
-
-- Keep WeChat keys, snapshot passphrases, local credentials, and recovery words
-  out of command arguments, logs, prompts, issues, and version control.
-- Keep the 24-word recovery copy separate from the only snapshot copy.
-- Prefer Keychain or a hidden local credential for daily access; use the words
-  for drills and disaster recovery.
-- Verify a copied snapshot using only its portable recovery kit.
-- Treat every published snapshot directory as immutable.
-- Use bounded pages for browsing. Run a full export only when a full export is
-  explicitly required.
+- [Give an AI access to some of this](AI_CONTEXT_CLI.md)
+- [Snapshot operations: rotation, retention, recovery](RECOVERABLE_SNAPSHOTS.md)
+- [What is not proven yet](KNOWN_LIMITATIONS.md)

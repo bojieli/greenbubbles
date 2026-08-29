@@ -1,40 +1,45 @@
-# Independently recoverable snapshots
+# Recoverable snapshots
 
-This is the detailed operator reference for creation, verification, protector
-rotation, and retention. For a GUI-first walkthrough and ordinary browsing
-commands, start with the [GreenBubbles user guide](USER_GUIDE.md).
+A copy of WeChat's encrypted files is not a backup. It still needs WeChat's
+key, and that key lives inside a running application you do not control. If the
+application changes, the account is lost, or the key becomes unavailable, an
+otherwise intact copy becomes an unopenable pile of bytes.
 
-GreenBubbles has two different snapshot concepts. They solve different
-problems and should not be confused.
+A GreenBubbles snapshot is designed against exactly that failure. It is
+re-encrypted under a key of its own, recoverable from 24 words you hold
+somewhere else, and its verification step proves this by opening it with **no
+WeChat key at all**.
 
-The Swift acquisition snapshot is a short-lived, consistent filesystem capture
-of WeChat's encrypted database, WAL, and SHM files. It preserves exact source
-evidence and is well suited to forensic restoration, but it remains encrypted
-with WeChat's key.
+This is the operator reference. For the graphical walkthrough, start with the
+[user guide](USER_GUIDE.md).
 
-The native recoverable snapshot is a logical SQLite backup. SQLite reads each
-source through the authorized WeChat key and writes a new SQLCipher database
-under a GreenBubbles recovery key. Its durable readability is independent of
-the WeChat application and its key material.
+## Two different things called "snapshot"
 
-The two stages can now be composed without plaintext: acquire a stable
-filesystem capture first, then use `snapshot create-capture` to convert that
-complete capture into the independently protected durable format.
+| | Acquisition snapshot | Recoverable snapshot |
+| --- | --- | --- |
+| What it is | a short-lived consistent filesystem capture of WeChat's `.db`, WAL and SHM | a logical SQLite backup re-encrypted under a GreenBubbles key |
+| Encrypted with | WeChat's key | a fresh random key of its own |
+| Good for | forensic restoration, exact source evidence | durable backup, repeatable queries |
+| Survives losing WeChat | no | yes |
 
-## Recovery model
+They compose. Acquire a stable filesystem capture first, then convert that
+complete capture with `snapshot create-capture` — no plaintext at any point in
+between.
 
-The portable recovery protector is a 24-word English BIP-39 mnemonic generated
-from 256 random bits. The words encode the full recovery entropy plus a checksum;
-they are not selected by the user and should not be edited into a memorable
-sentence. That recovery entropy wraps a separate random SQLCipher database key,
-so adding or changing protectors does not require decrypting databases to
-plaintext or rewriting their pages.
+## The recovery model
 
-BIP-39 is used only as a well-reviewed, checksummed human encoding. A
-GreenBubbles recovery phrase is not a cryptocurrency wallet seed: never reuse a
-wallet phrase here, and never import the GreenBubbles phrase into a wallet.
+The portable protector is a 24-word English BIP-39 mnemonic generated from 256
+random bits. The words encode recovery entropy plus a checksum; they are
+generated, not chosen, and must not be edited into something memorable. That
+entropy wraps a *separate* random SQLCipher database key — which is why adding
+or changing protectors never requires decrypting a database or rewriting its
+pages.
 
-Create a recovery kit in an owner-only directory before creating the snapshot:
+BIP-39 is used here only as a well-reviewed, checksummed human encoding.
+**A GreenBubbles recovery phrase is not a wallet seed.** Never reuse a wallet
+phrase here, and never import a GreenBubbles phrase into a wallet.
+
+Create the kit in an owner-only directory *before* creating the snapshot:
 
 ```sh
 umask 077
@@ -43,68 +48,66 @@ greenbubbles snapshot recovery-kit create \
   /private/greenbubbles-recovery/family-a.txt
 ```
 
-Store a second copy offline in a password manager, encrypted removable medium,
-or another recovery system controlled by the owner. A device-only Keychain copy
-is convenient but is not, by itself, a portable backup. Do not commit the key,
-paste it into an issue or model prompt, put it in a command argument, or store it
-beside the only copy of the snapshot.
-
 The CLI creates the file exclusively with mode `0600`, validates its BIP-39
-checksum, synchronizes it, and prints only a content-free JSON report. It does
-not print the words or a base64 key. Read the file yourself and copy the words
-to the independent recovery location before beginning the database conversion.
-Snapshot creation accepts an already-created kit, so the words exist before
-the potentially long database copy starts. Run `snapshot recovery-kit validate`
-against the intended recovery copy before relying on it.
+checksum, fsyncs it, and prints a content-free JSON report. It does not print
+the words. Read the file yourself, copy the words to an independent location —
+password manager, encrypted removable medium, another owner-controlled recovery
+system — and run `snapshot recovery-kit validate` against the copy you intend
+to rely on before you rely on it.
 
-The History app's **Create Recoverable Snapshot** flow performs this ceremony:
-it creates the owner-only kit first, displays all 24 words once, asks for four
-randomly selected word positions, and refuses to begin conversion until those
-answers match and the owner confirms an independent copy. The kit remains on
-disk if the owner cancels or conversion fails. Displayed words, confirmation
-answers, the WeChat key, and any snapshot passphrase are cleared from view state
-when conversion begins.
+The ordering here is deliberate: creation accepts an already-created kit, so
+the words exist before a potentially long database conversion starts and
+survive a cancelled or failed run.
 
-The CLI can additionally create a separate local-unlock protector. This lets
-the same account open the snapshot without reading the recovery words on every
-launch:
+Do not commit the kit, paste it into an issue or a model prompt, put it in a
+command argument, or store it beside the only copy of the snapshot.
+
+The History app performs this as a ceremony: it creates the owner-only kit
+first, shows all 24 words once, asks for four randomly chosen word positions,
+and refuses to begin conversion until the answers match and you confirm an
+independent copy exists. Displayed words, answers, the WeChat key and any
+snapshot passphrase are cleared from view state the moment conversion begins.
+
+### Convenience protectors
+
+A local-unlock credential lets the same account reopen a snapshot without
+reading the words every time:
 
 ```sh
 greenbubbles snapshot local-credential create \
   /private/greenbubbles-local/.family-a-unlock
 ```
 
-This mode-`0600`, current-user-owned, single-link file contains a distinct
-random wrapping credential. It contains neither the SQLCipher database key nor
-the 24 words, and the manifest contains only its public identifier and an
-authenticated wrapped key. It must never be the only recovery copy. Deleting it
-only disables convenient local unlock; the 24 words remain sufficient.
+This mode-`0600`, single-link, current-user-owned file holds a distinct random
+wrapping credential. It contains neither the database key nor the 24 words; the
+manifest holds only its public identifier and an authenticated wrapped key.
+Deleting it disables convenient local unlock and nothing else.
 
-On macOS the graphical flow defaults to storing that same random convenience
-credential as a generic-password Keychain item scoped to the snapshot identity
-and marked `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. It is not synchronized
-to another device. When opening the snapshot, the app writes the credential to
-a newly created mode-`0600` file in an owner-only temporary session directory,
-passes only that path to the CLI, and removes the directory when the source is
-closed. The hidden-file choice remains available as a cross-platform fallback;
-the app remembers its path, never its contents.
+On macOS the graphical flow instead stores that same random credential as a
+generic-password Keychain item scoped to the snapshot identity and marked
+`kSecAttrAccessibleWhenUnlockedThisDeviceOnly` — not synchronized to any other
+device. When opening the snapshot, the app writes the credential into a new
+mode-`0600` file in an owner-only temporary session directory, passes only that
+path to the CLI, and removes the directory when the source closes. The
+hidden-file option remains as a cross-platform fallback; the app remembers its
+path, never its contents.
 
-An optional passphrase can wrap the same database key. It uses Argon2id v1.3
-with 64 MiB memory, time cost 3, parallelism 1, then XChaCha20-Poly1305 with
-authenticated snapshot/protector/KDF metadata. The app never persists this
-passphrase. The CLI accepts one UTF-8 line of 12–1,024 bytes. A passphrase is a
-secondary convenience/recovery mechanism and cannot replace the mandatory
-24-word protector.
+An optional passphrase can wrap the same database key using Argon2id v1.3
+(64 MiB, time cost 3, parallelism 1) and XChaCha20-Poly1305 with authenticated
+snapshot, protector and KDF metadata. The app never persists it; the CLI accepts
+one UTF-8 line of 12–1,024 bytes.
+
+**None of these replace the words.** GreenBubbles refuses to create a
+device-local-only or passphrase-only backup, and removing the last portable
+protector is forbidden. A convenience credential is a convenience.
 
 Format-1 snapshots protected directly by a raw 256-bit key remain supported for
-compatibility. New operational examples use the format-2 recovery hierarchy.
+compatibility; new work uses the format-2 hierarchy.
 
-## Create from an encrypted WeChat source
+## Create from an encrypted source
 
-With format 2, standard input contains the 32-byte WeChat key and, when enabled,
-the optional snapshot passphrase on the next line. The CLI reads the recovery
-and optional local protector from their private files, generates a distinct
-random database key, and wraps it under every selected protector.
+Standard input carries the 32-byte WeChat key, and — when enabled — the
+snapshot passphrase on the next line:
 
 ```sh
 { cat wechat-key.txt; cat snapshot-passphrase.txt; } | \
@@ -116,16 +119,12 @@ random database key, and wraps it under every selected protector.
   --snapshot-passphrase-stdin
 ```
 
-All credential files must be current-user-owned mode `0600`, single-link files
-inside owner-only directories. The output parent must already be an owner-only
-real directory, and the final output path must not exist. A local credential or
-passphrase is accepted only together with a portable recovery kit;
-GreenBubbles refuses a device-local-only or passphrase-only backup. With an
-encrypted source, stdin line 1 is the WeChat key and line 2 is the optional
-snapshot passphrase.
+Every credential file must be a current-user-owned, mode-`0600`, single-link
+file inside an owner-only directory. The output parent must already be an
+owner-only real directory, and the output path must not exist.
 
-For an explicitly plaintext source, no source key is read. If a snapshot
-passphrase is enabled, it is stdin line 1; otherwise stdin is empty:
+For an explicitly plaintext source no source key is read, so the passphrase (if
+enabled) becomes stdin line 1:
 
 ```sh
 cat snapshot-passphrase.txt | \
@@ -137,13 +136,11 @@ cat snapshot-passphrase.txt | \
   --snapshot-passphrase-stdin
 ```
 
-## Create from a stable filesystem capture
+## Create from a stable capture
 
-When conversion should not span a changing live directory, first use the Swift
-snapshotter to capture each database and its present WAL/SHM with APFS
-copy-on-write cloning or its verified read-only byte-copy fallback. Convert the
-complete preserved generation with only the source key on standard input and
-the independent protector files named explicitly:
+When conversion should not span a changing live directory, capture first with
+the Swift snapshotter — APFS copy-on-write cloning, or its verified read-only
+byte-copy fallback — then convert the preserved generation:
 
 ```sh
 { cat wechat-key.txt; cat snapshot-passphrase.txt; } | \
@@ -156,46 +153,48 @@ the independent protector files named explicitly:
 ```
 
 The converter validates the acquisition manifest and every captured file hash,
-opens only the captured files read-only, performs direct SQLCipher-to-SQLCipher
-logical backup, and validates the entire capture again before publishing.
-Incremental acquisition fragments are rejected: conversion requires every
-current database set. The manifest labels this
-`stableAcquisitionSnapshotConversion`; `crossDatabaseAtomic` remains false for
-multi-database sources because a stable capture does not manufacture a shared
-transaction across WeChat's independent databases.
+opens only captured files read-only, performs a direct
+SQLCipher-to-SQLCipher logical backup, and validates the whole capture again
+before publishing. Incremental fragments are rejected: conversion requires every
+current database set. The manifest labels the result
+`stableAcquisitionSnapshotConversion`.
 
-## What creation guarantees
+`crossDatabaseAtomic` stays false even here. A stable capture stops files from
+moving during conversion; it does not manufacture a shared transaction across
+WeChat's independent databases, and claiming otherwise would be a lie the
+manifest is not willing to tell.
+
+## What creation actually does
 
 Creation inventories current-user-owned regular `.db` files beneath the source
-root and requires `contact/contact.db` and `session/session.db`. For each file it:
+root and requires `contact/contact.db` and `session/session.db`. For each file:
 
-1. opens the source read-only and enables SQLite `query_only`;
-2. creates a new mode-`0600` SQLCipher destination in an owner-only sibling
-   staging directory;
-3. uses SQLite's online backup API, which copies logical decrypted pages rather
-   than WeChat's ciphertext;
-4. checkpoints and selects delete-journal mode so no WAL/SHM file is required;
-5. closes and reopens the result with only the recovery key;
-6. rejects a plaintext `SQLite format 3` header;
-7. runs `PRAGMA integrity_check`, hashes the closed file, and records its size
-   and page count;
-8. synchronizes files and directories and atomically renames the verified
-   generation into place.
+1. open the source read-only with `query_only` enabled;
+2. create a new mode-`0600` SQLCipher destination in an owner-only staging
+   sibling;
+3. copy with SQLite's online backup API — logical decrypted pages, not WeChat's
+   ciphertext;
+4. checkpoint and select delete-journal mode so no WAL or SHM sidecar is
+   required;
+5. close and reopen the result using **only** the recovery key;
+6. reject a plaintext `SQLite format 3` header;
+7. run `PRAGMA integrity_check`, hash the closed file, record size and page
+   count;
+8. fsync files and directories, then atomically rename the verified generation
+   into place.
 
-No plaintext SQLite destination is created. Temporary destination databases are
-already SQLCipher-encrypted. A failed pre-publication operation removes its
-private staging directory.
+No plaintext SQLite destination is ever created; the temporary destinations are
+already SQLCipher-encrypted. A failure before publication removes its private
+staging directory.
 
-An online backup is consistent within one source database. WeChat divides state
-across multiple databases, so direct live conversion reports
-`perDatabaseOnlineBackup` and `crossDatabaseAtomic: false` when it copies more
-than one database. Stable-capture conversion prevents source files from moving
-during the longer logical conversion, while preserving the same honest
-cross-database atomicity limitation.
+An online backup is consistent within one source database. Direct live
+conversion across several databases therefore reports `perDatabaseOnlineBackup`
+and `crossDatabaseAtomic: false`.
 
 ## Verify without WeChat
 
-Run verification after copying the snapshot to its intended recovery location:
+Run this after the snapshot reaches its intended recovery location, not just
+where it was made:
 
 ```sh
 greenbubbles snapshot verify <snapshot-directory> \
@@ -209,29 +208,24 @@ cat snapshot-passphrase.txt | \
   --snapshot-passphrase-stdin
 ```
 
-Run the local and portable commands at least once. The first proves convenient
-local reopening; the second is the portable recovery drill that remains valid
-after deleting the local credential, forgetting the passphrase, and losing
-every WeChat key. Passphrase verification is an additional drill, not a
-substitute for the 24-word drill.
+Run at least the first two. The local one proves convenient reopening; **the
+portable one is the actual drill** — it stays valid after you delete the local
+credential, forget the passphrase, and lose every WeChat key. Passphrase
+verification is an extra drill, not a substitute.
 
-The verifier accepts no WeChat key. It checks:
-
-- owner-only directory and file permissions;
-- manifest schema and exact database inventory;
-- path confinement and absence of symbolic links;
-- closed database files with no required `-wal`, `-shm`, or `-journal` file;
-- encrypted rather than plaintext SQLite headers;
-- opening every database with the recovery key;
-- SQLite integrity, page counts, byte sizes, and SHA-256 hashes.
+The verifier accepts no WeChat key and checks owner-only permissions; manifest
+schema and exact database inventory; path confinement and absence of symlinks;
+closed database files needing no `-wal`, `-shm` or `-journal`; encrypted rather
+than plaintext headers; opening every database with the recovery key; and
+SQLite integrity, page counts, byte sizes and SHA-256 hashes.
 
 Success returns a content-free report with
-`recoveryVerifiedWithoutWechatKey: true`. Treat that report as evidence from a
-specific drill, not a reason to discard the only recovery key.
+`recoveryVerifiedWithoutWechatKey: true`. Treat that as evidence from one
+specific drill — not as a reason to discard your only recovery copy.
 
 ## Query a snapshot
 
-The same bounded adapter serves live and snapshot data:
+The same bounded adapter serves live and snapshot sources:
 
 ```sh
 greenbubbles source status <snapshot-directory> \
@@ -247,53 +241,32 @@ greenbubbles messages list <snapshot-directory> \
 
 greenbubbles message get <snapshot-directory> \
   --snapshot-local-credential /private/greenbubbles-local/.family-a-unlock \
-  --conversation <wxid-or-chatroom-id> \
-  --message <opaque-id-from-messages-list>
+  --conversation <wxid-or-chatroom-id> --message <opaque-id>
 ```
 
-Use `--snapshot-recovery-kit <file>` instead when performing a portable
-recovery drill. Use `--snapshot-passphrase-stdin` for passphrase access. For
-search, passphrase mode reads the passphrase line first and the query as the
-remaining UTF-8 input; either file-backed mode reads only the query. No
-protector-file content or unwrapped key is copied into the pipe.
+Substitute `--snapshot-recovery-kit <file>` for a portable drill, or
+`--snapshot-passphrase-stdin` for passphrase access. For search in passphrase
+mode, the passphrase is stdin line 1 and the query is the remaining UTF-8
+input; file-backed modes read only the query. No protector content or unwrapped
+key is ever copied into the pipe.
 
-Responses identify the source mode as `snapshotEncrypted`. No restoration,
-canonical JSONL, full replica, or media materialization is required.
+Responses report the source mode as `snapshotEncrypted`. No restoration,
+canonical JSONL, replica or media materialization is involved.
 
-### Browse with the native History app
+The History app runs these same commands: it measures storage, loads 100-item
+keyset pages, and requests an exact message only after a search hit is
+selected. It never puts a credential or passphrase in process arguments or
+preferences. Keychain failure *after* publication is non-destructive — the app
+reports it and the snapshot remains recoverable from its words.
 
-Build and run the local browser:
+Browsing is a query interface, not a drill. Keep running `snapshot verify`.
 
-```sh
-swift build --product greenbubbles-history
-swift run greenbubbles-history
-```
+## Rotate protectors without touching ciphertext
 
-Choose **Create Recoverable Snapshot** to run the word-confirmation ceremony and
-conversion. The convenience choices are macOS Keychain, an owner-only hidden
-file, or none; an independent 24-word kit is mandatory in every case. Keychain
-failure after snapshot publication is non-destructive: the app reports the
-failure and the snapshot remains recoverable with its words and optional
-passphrase.
-
-To browse, choose **Browse Live or Snapshot**, then select **Snapshot unlock in
-macOS Keychain**, **Snapshot hidden-file unlock**, **Snapshot passphrase
-(Argon2id)**, or **Snapshot recovery words (portable)**. The UI invokes the same
-bounded commands above: it measures database and sidecar storage, loads
-100-item keyset pages, and requests an exact message only after a search result
-is selected. It never puts a credential or passphrase in process arguments or
-preferences. The Keychain credential exists as an owner-only temporary file
-only for the open session; the passphrase remains only in memory.
-
-This is a query interface, not a substitute for the recovery drill. Continue to
-run `snapshot verify` after creating, copying, or rotating a generation.
-
-## Add or rotate protectors without rewriting SQLCipher
-
-Format-2 protector changes create a new immutable generation while preserving
-the existing random database key and every encrypted database byte. This is the
-normal way to replace a local credential, rotate recovery words, or add local
-convenience to a snapshot that currently has only recovery words:
+A protector change creates a new immutable generation while preserving the
+existing random database key and every encrypted byte. This is how you replace
+a local credential, rotate recovery words, or add convenience to a
+words-only snapshot:
 
 ```sh
 cat new-snapshot-passphrase.txt | \
@@ -305,23 +278,21 @@ cat new-snapshot-passphrase.txt | \
   --new-snapshot-passphrase-stdin
 ```
 
-Use `--old-snapshot-recovery-kit <file>` or
-`--old-snapshot-passphrase-stdin` instead if the prior local credential is
-unavailable. If both old and new passphrase flags are present, stdin line 1 is
-the old passphrase and line 2 is the new passphrase. The new recovery kit is
-mandatory, even when the new generation also has a local credential or
-passphrase. GreenBubbles fully verifies the source, byte-copies
-the already encrypted databases into a new owner-only staging generation,
-checks every copied byte against the manifest hash, binds new protectors to a
-new snapshot identity, verifies both new unlock paths, and atomically publishes.
-The source generation remains untouched. No SQLCipher page is decrypted,
-reencrypted, or exposed as plaintext during this operation.
+Use `--old-snapshot-recovery-kit` or `--old-snapshot-passphrase-stdin` if the
+old local credential is gone. With both old and new passphrase flags present,
+stdin line 1 is the old and line 2 is the new. A new recovery kit is mandatory
+regardless of what else the new generation has.
 
-## Legacy raw-key database rekey
+GreenBubbles verifies the source fully, byte-copies the already-encrypted
+databases into a new owner-only staging generation, checks every copied byte
+against the manifest hash, binds the new protectors to a new snapshot identity,
+verifies both new unlock paths, and publishes atomically. The source generation
+is untouched, and no SQLCipher page is decrypted or re-encrypted.
 
-Format-1 raw-key rotation creates a new immutable generation; it never rekeys
-the only database files in place. Supply the old key first and a distinct new
-key second:
+### Legacy raw-key rekey
+
+Format-1 rotation also creates a new generation and never rekeys files in
+place:
 
 ```sh
 { cat greenbubbles-recovery-key.txt; cat next-recovery-key.txt; } | \
@@ -330,20 +301,17 @@ key second:
   --old-snapshot-key-stdin --new-snapshot-key-stdin
 ```
 
-GreenBubbles first performs the complete source recovery verification with the
-old key. It then copies logical pages directly from old-key SQLCipher databases
-into new-key SQLCipher databases, creates no plaintext staging database,
-verifies the new generation using only the new key, and publishes it atomically.
-The old snapshot remains byte-for-byte untouched. Test the new key from its
-intended offline recovery location before retiring either the old generation or
-its protector.
+It fully verifies the source with the old key, copies logical pages directly
+between old-key and new-key SQLCipher databases with no plaintext staging,
+verifies the new generation with only the new key, and publishes atomically.
+Test the new key from its intended offline location before retiring anything.
 
-## Retention and failure boundaries
+## Retention: quarantine, never delete
 
-Each snapshot is an immutable generation. Never edit database or manifest files
-in place. Create and recovery-verify a new generation before retiring an old
-one. GreenBubbles retention is deliberately a recoverable quarantine operation,
-not an age-based delete:
+Each snapshot is an immutable generation. Never edit a database or manifest in
+place. Create and verify a new generation before retiring an old one.
+
+Retention is deliberately a recoverable quarantine, not an age-based delete:
 
 ```sh
 greenbubbles snapshot retention quarantine \
@@ -352,21 +320,21 @@ greenbubbles snapshot retention quarantine \
   --replacement-recovery-kit /private/greenbubbles-recovery/new-family.txt
 ```
 
-Before moving anything, the command fully verifies the retiring generation and
-proves the replacement through its portable recovery words. The replacement
-must be newer and linked either by parent snapshot identity or stable source
-identity. The directories must be distinct and non-nested. GreenBubbles then
-renames the entire retiring generation on the same filesystem, fsyncs both
-parents, verifies it again at the quarantine location, and automatically rolls
-back if that final check fails. A wrong replacement kit leaves the source
-untouched.
+Before moving anything it fully verifies the retiring generation *and* proves
+the replacement through its portable words. The replacement must be newer and
+linked by parent snapshot identity or stable source identity; the directories
+must be distinct and non-nested. It then renames the whole generation on the
+same filesystem, fsyncs both parents, verifies it again at the quarantine
+location, and rolls back automatically if that final check fails. A wrong
+replacement kit leaves the source untouched.
 
-The retiring generation may instead use
-`--retiring-snapshot-passphrase-stdin`, with its passphrase on stdin line 1. The
-replacement must still pass the portable recovery-kit drill; local or
-passphrase-only replacement verification is intentionally insufficient.
+The retiring generation may use `--retiring-snapshot-passphrase-stdin` instead.
+The replacement must still pass the *portable* drill — local or
+passphrase-only verification of a replacement is intentionally insufficient,
+because the whole point is proving you can still recover after losing this
+machine.
 
-Restore during the cooling period with:
+To bring one back during the cooling period:
 
 ```sh
 greenbubbles snapshot retention restore \
@@ -374,14 +342,12 @@ greenbubbles snapshot retention restore \
   --snapshot-recovery-kit /private/greenbubbles-recovery/old-family.txt
 ```
 
-Restore also accepts `--snapshot-passphrase-stdin` with the passphrase on stdin
-line 1, or the local credential file. None of these alternatives weakens the
-portable-recovery requirement imposed before quarantine.
+The retention commands never purge or recursively delete a completed
+generation. Permanent removal is a separate explicit operator decision, and
+the right time for it is after the quarantine period, an off-device backup
+check, and one more portable recovery drill. Failed unpublished staging
+generations may still be cleaned up automatically.
 
-GreenBubbles intentionally provides no automatic purge or recursive delete.
-Permanent removal remains a separate, explicit owner operation after the
-quarantine period, off-device backup check, and another portable recovery drill.
-
-The manifest contains database identities and aggregate sizes but no key,
-message body, contact name, or absolute source path. It remains private metadata
-and should stay with the protected snapshot.
+The manifest holds database identities and aggregate sizes — no key, no message
+body, no contact name, no absolute source path. It is private metadata and
+belongs with the protected snapshot.
