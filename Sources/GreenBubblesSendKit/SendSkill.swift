@@ -316,13 +316,19 @@ public struct MechanicalSendSkill {
       }
 
       stage = .compose
-      // In the no-navigation mode the compose box is already focused, because
-      // the person was just there. Measured live: a posted click does not take
-      // focus, and worse, it loses whatever focus existed, after which no
-      // keystroke lands anywhere. So this mode clicks nothing and clears
-      // nothing — it pastes into the focus that already exists and lets GATE 2
-      // decide whether that was really the compose box.
-      let mayTakeFocus = capability.addressingMode.typesBeforeRecipientGate
+      // The compose box must be empty before the skill uses it. Two reasons:
+      // it must never overwrite an unsent draft the person left there, and
+      // requiring it empty means the skill never has to send a destructive
+      // keystroke — it only ever pastes. Checked before anything is clicked, so
+      // a refusal here touches nothing at all.
+      let existing = try recognize(profile.ocrRegions.compose, in: frame)
+      guard SendText.normalized(existing.text).isEmpty else {
+        throw SendFailure(
+          .composeNotEmpty,
+          detail: "the compose box already holds unsent text"
+        )
+      }
+      var composeFocusProven = false
       if let attachment = capability.attachment {
         // Recorded before staging so GATE 2a can prove the region changed,
         // which is the only evidence an image thumbnail offers.
@@ -330,16 +336,9 @@ public struct MechanicalSendSkill {
           try requireAttachmentRegions().composeAttachment,
           in: frame
         )
-        try stageAttachment(
-          attachment,
-          in: frame,
-          takingFocus: mayTakeFocus,
-          evidence: &evidence
-        )
-      } else if mayTakeFocus {
-        try clearAndPaste(capability.body, at: profile.anchors.composeBox, in: frame)
+        try stageAttachment(attachment, in: frame, evidence: &evidence)
       } else {
-        try pasteIntoExistingFocus(capability.body)
+        try focusAndPaste(capability.body, at: profile.anchors.composeBox, in: frame)
       }
 
       stage = .contentVerify
@@ -360,8 +359,9 @@ public struct MechanicalSendSkill {
         if capability.capability == .imageSend {
           evidence.attachmentNameMatched = false
           evidence.composeMatched = evidence.attachmentStaged
+          composeFocusProven = evidence.attachmentStaged
           guard evidence.attachmentStaged else {
-            try clearCompose(in: frame)
+            try clearComposeIfFocusProven(in: frame, focusProven: false)
             throw SendFailure(
               .attachmentVerifyFailed,
               detail: "the compose area did not change, so no image was staged"
@@ -372,8 +372,9 @@ public struct MechanicalSendSkill {
           evidence.attachmentNameMatched = SendText.normalized(staged.text)
             .localizedCaseInsensitiveContains(SendText.normalized(attachment.displayFileName))
           evidence.composeMatched = evidence.attachmentNameMatched
+          composeFocusProven = evidence.attachmentStaged
           guard evidence.attachmentStaged, evidence.attachmentNameMatched else {
-            try clearCompose(in: frame)
+            try clearComposeIfFocusProven(in: frame, focusProven: composeFocusProven)
             throw SendFailure(
               .attachmentVerifyFailed,
               detail: "the staged attachment's name was not read back from the compose area"
@@ -615,7 +616,6 @@ public struct MechanicalSendSkill {
   private func stageAttachment(
     _ attachment: ActionAttachment,
     in frame: WindowFrame,
-    takingFocus: Bool,
     evidence: inout HelperGateEvidence
   ) throws(SendFailure) {
     let attachments = try requireAttachmentRegions()
@@ -623,15 +623,11 @@ public struct MechanicalSendSkill {
       guard !effector.humanActivityObserved() else {
         throw SendFailure(.humanCollision, detail: "user activity observed before pasting")
       }
-      if takingFocus {
-        try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
-        try effector.click(at: WindowGeometry.point(profile.anchors.composeBox, in: frame))
-        effector.settle(milliseconds: pacing.afterClickMilliseconds)
-        try manifest.authorize(.hotkey, bundleIdentifier: targetBundleIdentifier)
-        try effector.press(.selectAll)
-        try effector.press(.delete)
-        effector.settle(milliseconds: pacing.afterKeyMilliseconds)
-      }
+      // The compose box was verified empty above, so focusing it is all that
+      // is needed; nothing has to be deleted.
+      try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
+      try effector.click(at: WindowGeometry.point(profile.anchors.composeBox, in: frame))
+      effector.settle(milliseconds: pacing.afterClickMilliseconds)
       try manifest.authorize(
         .clipboardWriteFileReference,
         bundleIdentifier: targetBundleIdentifier
@@ -695,22 +691,6 @@ public struct MechanicalSendSkill {
       )
     }
     return attachments
-  }
-
-  /// Pastes into whatever already holds focus, taking none itself.
-  ///
-  /// Deliberately does not clear first: with focus unproven, a select-all plus
-  /// delete could land in a message list or another field. Pasting only ever
-  /// adds, and GATE 2 decides whether it landed where it was meant to.
-  private func pasteIntoExistingFocus(_ text: String) throws(SendFailure) {
-    guard !effector.humanActivityObserved() else {
-      throw SendFailure(.humanCollision, detail: "user activity observed before pasting")
-    }
-    try manifest.authorize(.clipboardWrite, bundleIdentifier: targetBundleIdentifier)
-    try effector.writeClipboard(text)
-    try manifest.authorize(.hotkey, bundleIdentifier: targetBundleIdentifier)
-    try effector.press(.paste)
-    effector.settle(milliseconds: pacing.afterPasteMilliseconds)
   }
 
   /// Clears the compose box only when the caret's location has been proven.

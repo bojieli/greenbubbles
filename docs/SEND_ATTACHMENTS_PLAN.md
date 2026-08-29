@@ -407,6 +407,10 @@ targeting File Transfer only.
 
 ## 14. Mechanism findings that change the picture (2026-08-29, second live session)
 
+> **Superseded in part by §17.** The central claim below — that a background
+> click cannot move keyboard focus — was wrong. The click was malformed. Read
+> §17 before relying on anything in this section.
+
 A second live session, on an idle machine, answered the question the incident
 raised and produced a harder result than expected. All runs were dry runs;
 nothing was sent.
@@ -584,3 +588,64 @@ precondition is honest and small: **have the conversation open, with the compose
 box focused** — exactly the state you are in when you are about to type. GATE 1
 proves the recipient, GATE 2 proves the content, and either failing is
 non-destructive.
+
+---
+
+## 17. Correction: the click was malformed, and background sending works
+
+The conclusion in §14 was wrong, and the error was mine rather than the
+platform's.
+
+### What was actually broken
+
+The synthesized click omitted `kCGMouseEventClickState`. Without it a Qt control
+treats the down/up pair as stray button traffic and never takes focus from it,
+which is exactly the symptom §14 recorded: the click reached the process, moved
+no caret, and left the next keystroke to land wherever the person had last put
+it. Adding the click state — plus a `mouseMoved` prelude and a short gap between
+events, so the pair is legible as a press and a release — makes it work.
+
+Measured with `focus-probe`, which clicks an anchor, pastes a marker, and reads
+the region back:
+
+| Anchor | Click takes focus |
+| --- | --- |
+| compose box | **yes** |
+| search box | no |
+
+So the design's original methodology — *mouse focuses, keyboard acts* — holds
+after all, for the anchor that matters. The search box still does not take focus
+from a background click, so search-based addressing remains unusable, but the
+chosen no-navigation mode never needed it.
+
+### End-to-end validation, fully autonomous
+
+All three payload kinds now complete the dry run against File Transfer with no
+human involvement: the runner waits for the machine to go idle, then runs.
+
+| Payload | GATE 1 title | GATE 2 | Attempted | Stage reached |
+| --- | --- | --- | --- | --- |
+| text | matched, conf 1.0 | `composeMatched` | no | `contentVerify` |
+| image | matched, conf 1.0 | region changed, no name (as designed) | no | `contentVerify` |
+| file | matched, conf 1.0 | region changed **and** name matched | no | `contentVerify` |
+
+Every run stopped before Return, cleared the compose box, restored the
+clipboard, and left the client exactly as it was found.
+
+### What the earlier failure bought
+
+The wrong conclusion still produced the two gates that make the path safe, and
+both are worth keeping now that the click works:
+
+- **GATE 0** catches a click that misses, instead of typing into whatever the
+  person was using.
+- **The empty-compose precondition** means the skill never sends a select-all or
+  a delete at all: it refuses rather than overwriting an unsent draft, and it
+  refuses before clicking anything.
+
+### Standing lesson
+
+"The platform cannot do this" is a conclusion that needs the same scrutiny as a
+passing test. Here it was three live sessions of accumulating theory — clicks
+do not focus, focus cannot be restored, background sending is impossible — on
+top of one missing field in an event. Check the boring explanation first.

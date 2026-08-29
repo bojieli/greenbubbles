@@ -328,26 +328,33 @@ allow list and denies, which is the fail-closed answer.
 costs in privilege, and which questions a read-only spike must answer first.
 `GATE_READINESS.md` P4-FILE keeps it a separate gate.
 
-## 11b. A background send cannot currently complete on this build
+## 11b. Addressing: the conversation already open
 
-Measured live on 2026-08-29 (WeChat 4.1.13.269579, macOS 26): posted keystrokes
-reach whatever field the client already has focused, but **a posted click does
-not move that focus**. The methodology in `SEND_INTEGRATION_DESIGN.md` §3
-("mouse focuses, keyboard acts") does not hold for background operation here.
+The adapter reaches its recipient by **not navigating**. `currentConversation`
+addressing verifies that the conversation the client already has open *is* the
+approved recipient, and refuses otherwise. It is the default, and it is the
+safest mode available: the skill performs **no input at all before GATE 1**, so
+a wrong conversation produces a read-only abort that cannot disturb anything the
+person was doing.
 
-Two consequences, both now handled:
+Two preconditions make it non-destructive, both checked before anything is
+clicked or typed:
 
-* **GATE 0** was added. Addressing pastes without clearing first, then reads the
-  search field back and requires the search key to appear. A click that missed
-  is caught before anything destructive happens.
-* **The path stays closed.** Cmd+F *does* move focus in the background, but
-  WeChat does not run the search while its window is inactive, so no result can
-  be selected and GATE 1 never sees the right title.
+* GATE 1 must read the approved title out of the live window.
+* The compose box must be **empty**. The skill refuses rather than overwriting
+  an unsent draft, and because it never has to clear anything, it never sends a
+  select-all or a delete at all.
 
-Opening it would require accepting a brief foreground activation for addressing
-— a different product from the one this design describes — and that is an owner
-decision, not a code change. `SEND_ATTACHMENTS_PLAN.md` §14 records the full
-measurement.
+Search-based addressing (`SendAddressingMode::Search`) is retained but is not
+usable on this build: the search field does not take focus from a background
+click, and the client does not run its search while its window is inactive.
+GATE 0 catches the first of those non-destructively.
+
+Validated live on 2026-08-29 against File Transfer, autonomously, for all three
+payload kinds — text, image, and file — each passing GATE 1 and GATE 2 and
+stopping before Return. `SEND_ATTACHMENTS_PLAN.md` §17 records the measurements,
+including the malformed-click bug that made an earlier session believe
+background sending was impossible.
 
 ## 12. What is still gated
 

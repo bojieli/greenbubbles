@@ -190,6 +190,63 @@ case "keys":
     Thread.sleep(forTimeInterval: 0.15)
   }
   print("posted \(arguments.count - 1) keys")
+case "focus-probe":
+  // Answers the question the whole design rests on: can a posted click take
+  // keyboard focus? Clicks one named anchor, pastes a marker, and reports what
+  // the region reads back.
+  func probeOption(_ name: String) -> String? {
+    guard let i = arguments.firstIndex(of: name), i + 1 < arguments.count else { return nil }
+    return arguments[i + 1]
+  }
+  guard let profilePath = probeOption("--profile"), let anchorName = probeOption("--anchor") else {
+    FileHandle.standardError.write(
+      Data("usage: focus-probe --profile <f> --anchor composeBox|searchBox\n".utf8))
+    exit(2)
+  }
+  do {
+    let data = try Data(contentsOf: URL(fileURLWithPath: profilePath))
+    let signed = try SendCodec.decode(SignedCalibrationProfile.self, from: data)
+    guard let target = WeChatTarget.locate(bundleIdentifier: "com.tencent.xinWeChat"),
+      let frame = target.frame
+    else { throw SendFailure(.wechatNotRunning) }
+    let anchors = signed.body.anchors
+    let regions = signed.body.ocrRegions
+    let (anchor, region) =
+      anchorName == "searchBox"
+      ? (anchors.searchBox, regions.search) : (anchors.composeBox, regions.compose)
+    let effector = MacOSInputEffector(processIdentifier: target.processIdentifier)
+    guard !effector.humanActivityObserved() else {
+      FileHandle.standardError.write(Data("refused: the machine is not idle\n".utf8))
+      exit(2)
+    }
+    let perception = MacOSScreenPerception(
+      processIdentifier: target.processIdentifier,
+      bundleIdentifier: "com.tencent.xinWeChat"
+    )
+    let before = try perception.recognizeText(in: WindowGeometry.rect(region, in: frame))
+    try effector.click(at: WindowGeometry.point(anchor, in: frame))
+    Thread.sleep(forTimeInterval: 0.4)
+    let marker = "GBSPIKE-FOCUS"
+    try effector.writeClipboard(marker)
+    try effector.press(.paste)
+    Thread.sleep(forTimeInterval: 0.8)
+    let after = try perception.recognizeText(in: WindowGeometry.rect(region, in: frame))
+    effector.restoreClipboard()
+    let took = after.text.contains(marker)
+    let report: [String: Any] = [
+      "anchor": anchorName,
+      "textBefore": before.text,
+      "textAfter": after.text,
+      "clickTookFocus": took,
+    ]
+    print(
+      String(
+        decoding: try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]),
+        as: UTF8.self))
+  } catch {
+    FileHandle.standardError.write(Data("focus probe failed: \(error)\n".utf8))
+    exit(2)
+  }
 case "ocr":
   // Read-only calibration aid: prints what the gates actually read out of one
   // named region of the signed profile.

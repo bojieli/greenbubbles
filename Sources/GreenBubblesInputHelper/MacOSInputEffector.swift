@@ -46,7 +46,10 @@ final class MacOSInputEffector: InputEffector {
     guard let source = CGEventSource(stateID: .privateState) else {
       throw SendFailure(.engineUnavailable, detail: "could not create a private event source")
     }
-    for type in [CGEventType.leftMouseDown, .leftMouseUp] {
+    // A synthetic click needs its click state set, or a Qt control treats the
+    // pair as stray button traffic and never takes focus from it. Measured:
+    // without this the click reaches the process but moves no caret.
+    for type in [CGEventType.mouseMoved, .leftMouseDown, .leftMouseUp] {
       guard
         let event = CGEvent(
           mouseEventSource: source,
@@ -57,7 +60,13 @@ final class MacOSInputEffector: InputEffector {
       else {
         throw SendFailure(.engineUnavailable, detail: "could not synthesize a mouse event")
       }
+      if type != .mouseMoved {
+        event.setIntegerValueField(.mouseEventClickState, value: 1)
+      }
       event.postToPid(processIdentifier)
+      // Qt coalesces same-tick events; a short gap makes the pair legible as a
+      // press and release rather than a single ambiguous transition.
+      Thread.sleep(forTimeInterval: 0.02)
     }
   }
 

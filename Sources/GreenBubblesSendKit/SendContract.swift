@@ -156,6 +156,7 @@ public enum SendFailureCode: String, Codable, Sendable, CaseIterable {
   case recipientVerifyFailed
   case contentVerifyFailed
   case addressingFocusFailed
+  case composeNotEmpty
   case attachmentInvalid
   case attachmentStagingFailed
   case attachmentDigestMismatch
@@ -198,6 +199,8 @@ public enum SendFailureCode: String, Codable, Sendable, CaseIterable {
     case .contentVerifyFailed: "The composed text did not match the approved body."
     case .addressingFocusFailed:
       "The search box did not take focus, so the recipient was never addressed; nothing destructive was typed and the run stopped."
+    case .composeNotEmpty:
+      "The conversation already has unsent text in its compose box; send or clear it first, so the adapter never overwrites your draft."
     case .attachmentInvalid:
       "The attachment is malformed, too large, or names a path outside its staging directory."
     case .attachmentStagingFailed:

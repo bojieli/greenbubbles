@@ -17,6 +17,9 @@ struct MechanicalSendSkillTests {
     var frame: WindowFrame
     var searchResult: Result<RecognizedRegionText, SendFailure>?
     var titleResult: Result<RecognizedRegionText, SendFailure>
+    /// What the compose region reads *before* the skill uses it. Empty by
+    /// default, which is the precondition the skill requires.
+    var composeBeforeResult: Result<RecognizedRegionText, SendFailure>?
     var composeResult: Result<RecognizedRegionText, SendFailure>
     var composeAfterSendResult: Result<RecognizedRegionText, SendFailure>?
     var newestOutgoingResult: Result<RecognizedRegionText, SendFailure>
@@ -68,9 +71,19 @@ struct MechanicalSendSkillTests {
           .get()
       case .title: return try titleResult.get()
       case .compose:
+        // Read once to prove the box is empty, once for the content gate, then
+        // once more after Return.
         composeReads += 1
-        if composeReads > 1, let after = composeAfterSendResult { return try after.get() }
-        return try composeResult.get()
+        switch composeReads {
+        case 1:
+          return try
+            (composeBeforeResult
+            ?? .success(RecognizedRegionText(text: "", confidencePartsPerMillion: 0))).get()
+        case 2:
+          return try composeResult.get()
+        default:
+          return try (composeAfterSendResult ?? composeResult).get()
+        }
       case .newestOutgoing: return try newestOutgoingResult.get()
       case .composeAttachment:
         return try
@@ -920,5 +933,44 @@ extension MechanicalSendSkillTests {
       effector.actions.contains(
         "fileReference(/Users/owner/.greenbubbles/send/staging/0f1e2d3c/photo.png)"
       ))
+  }
+}
+
+extension MechanicalSendSkillTests {
+  @Test("an unsent draft in the compose box is never overwritten")
+  func existingDraftIsNeverOverwritten() {
+    // The precondition that makes the skill non-destructive: it refuses rather
+    // than clobbering text the person left behind, and it refuses before
+    // clicking or typing anything at all.
+    let profile = profile()
+    let effector = FakeEffector()
+    let perception = perception(profile)
+    perception.composeBeforeResult = .success(
+      RecognizedRegionText(text: "周六上午?", confidencePartsPerMillion: 1_000_000)
+    )
+    let outcome = makeSkill(profile: profile, effector: effector, perception: perception)
+      .execute(capability(permitSend: true, addressingMode: .currentConversation))
+    #expect(outcome.failure == .composeNotEmpty)
+    #expect(outcome.stageReached == .compose)
+    #expect(!outcome.attempted)
+    // Nothing was clicked, typed, or pasted.
+    #expect(effector.actions.filter { $0 != "restoreClipboard" }.isEmpty)
+  }
+
+  @Test("the skill never sends a select-all or a delete")
+  func theSkillNeverSendsADestructiveKeystroke() {
+    // Requiring an empty compose box means there is nothing to clear on the
+    // way in, so no destructive keystroke is needed to place the body.
+    let profile = profile()
+    let effector = FakeEffector()
+    let outcome = makeSkill(
+      profile: profile,
+      effector: effector,
+      perception: perception(profile)
+    ).execute(capability(permitSend: false, addressingMode: .currentConversation))
+    #expect(outcome.failure == nil)
+    let beforePaste = effector.actions.prefix { $0 != "clipboard(\(body))" }
+    #expect(!beforePaste.contains("press(selectAll)"))
+    #expect(!beforePaste.contains("press(delete)"))
   }
 }
