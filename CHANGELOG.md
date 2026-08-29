@@ -32,6 +32,8 @@ First public source-and-binary research release.
   primary name for the main command-line entry point. There is no compatibility
   alias for either old name; update saved paths, scripts, and the command-line
   tool selected in the history browser.
+- Moved the Rust workspace from `Native/GreenBubblesRestore` to
+  `Native/GreenBubbles` so the source layout follows the primary CLI name.
 - Reframed the project around private, local AI context and created a concise
   public-facing entry point.
 - Hardened CI and release permissions, pinned external Actions, and added

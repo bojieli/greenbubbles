@@ -84,12 +84,14 @@ acquisition route, or qualified legal advice for every jurisdiction.
 - [x] Every shipped Mach-O and app bundle is signed with Developer ID,
       Hardened Runtime, and a secure timestamp, then verified for identity,
       Team ID, runtime flag, and strict signature validity.
-- [x] The CLI ZIP and app DMG are separate Apple notarization submissions. A
-      non-`Accepted` verdict stops publication and emits the Apple log.
+- [x] The app ZIP, CLI ZIP, and final app DMG are separate Apple notarization
+      submissions. A non-`Accepted` verdict stops publication and emits the
+      Apple log.
 - [x] Bare CLI tickets must resolve as `Notarized Developer ID`; the DMG must
       staple and validate successfully before release creation.
 - [x] The workflow publishes SHA-256 checksums, a dependency SBOM, build
-      provenance inside the app, full notices, and both Apple notarization logs.
+      provenance inside the app, full notices, and all three Apple notarization
+      logs.
 - [x] The archived helper is rescanned for diagnostic bypass commands and the
       send trust root remains empty.
 - [x] Supported architecture and minimum macOS version are explicit: Apple

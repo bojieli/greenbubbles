@@ -278,7 +278,7 @@ jobs:
           cp "${{ steps.archive.outputs.staging }}/sbom.json" \
             "${{ steps.archive.outputs.sbom }}"
 
-      - name: Notarize both binary distributions
+      - name: Notarize the app, CLI archive, and disk image
         id: notarize
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -306,10 +306,12 @@ jobs:
               local failed_id
               failed_id="$(jq -r '.id // empty' "$submit_result" 2>/dev/null || true)"
               if [ -n "$failed_id" ]; then
-                xcrun notarytool log "$failed_id" "$notary_log" \
+                if xcrun notarytool log "$failed_id" "$notary_log" \
                   --key "$key_path" \
                   --key-id "$APPLE_NOTARY_KEY_ID" \
-                  --issuer "$APPLE_NOTARY_ISSUER_ID" || true
+                  --issuer "$APPLE_NOTARY_ISSUER_ID"; then
+                  cat "$notary_log"
+                fi
               fi
               return 1
             fi
@@ -319,6 +321,12 @@ jobs:
             verdict="$(jq -er '.status' "$submit_result")"
             if [ "$verdict" != "Accepted" ]; then
               echo "error: Apple returned notarization verdict '$verdict'" >&2
+              if xcrun notarytool log "$NOTARY_SUBMISSION_ID" "$notary_log" \
+                --key "$key_path" \
+                --key-id "$APPLE_NOTARY_KEY_ID" \
+                --issuer "$APPLE_NOTARY_ISSUER_ID"; then
+                cat "$notary_log"
+              fi
               return 1
             fi
             xcrun notarytool log "$NOTARY_SUBMISSION_ID" "$notary_log" \
