@@ -51,7 +51,8 @@ let package = Package(
     ),
     .executableTarget(
       name: "GreenBubblesHistoryApp",
-      dependencies: ["GreenBubblesHistory"]
+      dependencies: ["GreenBubblesHistory"],
+      linkerSettings: [.linkedFramework("Security")]
     ),
     .testTarget(
       name: "GreenBubblesCoreTests",

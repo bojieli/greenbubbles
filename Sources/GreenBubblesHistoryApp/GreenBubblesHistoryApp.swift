@@ -20,15 +20,27 @@ struct GreenBubblesHistoryApplication: App {
     .defaultSize(width: 1_320, height: 860)
     .commands {
       CommandGroup(replacing: .newItem) {
+        Button("Browse Live or Snapshot…") {
+          model.presentDirectConnection()
+        }
+        .keyboardShortcut("o")
+
         Button("Open History Bundle…") {
           model.chooseBundle()
         }
-        .keyboardShortcut("o")
+        .keyboardShortcut("o", modifiers: [.command, .option])
+
+        Divider()
+
+        Button("Create Recoverable Snapshot…") {
+          model.presentSnapshotCreation()
+        }
+        .keyboardShortcut("s", modifiers: [.command, .shift])
 
         Button("Close History") {
           model.closeBundle()
         }
-        .disabled(model.session == nil)
+        .disabled(!model.hasOpenHistory)
         .keyboardShortcut("w", modifiers: [.command, .shift])
       }
     }

@@ -30,6 +30,30 @@ enum HistorySection: String, CaseIterable, Identifiable {
   }
 }
 
+enum HistoryDirectSection: String, CaseIterable, Identifiable {
+  case overview
+  case chats
+  case search
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .overview: "Overview"
+    case .chats: "Chats"
+    case .search: "Search"
+    }
+  }
+
+  var systemImage: String {
+    switch self {
+    case .overview: "externaldrive.badge.checkmark"
+    case .chats: "bubble.left.and.bubble.right"
+    case .search: "text.magnifyingglass"
+    }
+  }
+}
+
 struct HistoryMediaRequest: Identifiable {
   let conversationID: String
   let artifact: HistoryArtifact
@@ -64,6 +88,37 @@ final class HistoryBrowserModel {
   var liveReplicaPath = ""
   var livePolicyPath = ""
   var liveAuditPath = ""
+  var showsDirectConnection = false
+  var showsSnapshotCreation = false
+  var directSourcePath = ""
+  var directAccessMode: HistoryDirectAccessMode = .liveEncrypted
+  var directLocalCredentialPath = ""
+  var directRecoveryKitPath = ""
+  var directConfiguration: HistoryDirectConfiguration?
+  var directStatus: HistoryDirectSourceStatus?
+  var directSection: HistoryDirectSection? = .overview
+  var directConversations: [HistoryDirectConversation] = []
+  var directConversationCursor: String?
+  var directConversationWarnings: [HistoryDirectWarning] = []
+  var directConversationConsistency: HistoryDirectConsistency?
+  var directSelectedConversationID: String?
+  var directMessages: [HistoryDirectMessage] = []
+  var directMessageCursor: String?
+  var directMessageWarnings: [HistoryDirectWarning] = []
+  var directMessageConsistency: HistoryDirectConsistency?
+  var directSearchQuery = ""
+  var directSearchResults: [HistoryDirectSearchHit] = []
+  var directSearchCursor: String?
+  var directSearchWarnings: [HistoryDirectWarning] = []
+  var isDirectConnecting = false
+  var isLoadingDirectConversations = false
+  var isLoadingDirectMessages = false
+  var isSearchingDirect = false
+  var directConversationError: String?
+  var directMessageError: String?
+  var directSearchError: String?
+  var directIsSearchContext = false
+  var directHighlightedMessageID: String?
 
   private var store: HistoryStore?
   private var loadTask: Task<Void, Never>?
@@ -73,10 +128,23 @@ final class HistoryBrowserModel {
   private var activeTimelineID = UUID()
   private var activeSearchID = UUID()
   private var activeArtifactID = UUID()
+  private var directLoadTask: Task<Void, Never>?
+  private var directConversationTask: Task<Void, Never>?
+  private var directMessageTask: Task<Void, Never>?
+  private var directSearchTask: Task<Void, Never>?
+  private var activeDirectLoadID = UUID()
+  private var activeDirectConversationID = UUID()
+  private var activeDirectMessageID = UUID()
+  private var activeDirectSearchID = UUID()
+  @ObservationIgnored private var directKeyUTF8: [UInt8] = []
+  @ObservationIgnored private let directClient = HistoryDirectQueryClient()
+  @ObservationIgnored private let snapshotKeychain = SnapshotKeychainStore()
   private var pendingStartupBundleURL: URL?
   private var processedStartupBundle = false
   private let mediaSessionURL = FileManager.default.temporaryDirectory.appending(
     path: "greenbubbles-history-media-\(UUID().uuidString)", directoryHint: .isDirectory)
+  private let snapshotUnlockSessionURL = FileManager.default.temporaryDirectory.appending(
+    path: "greenbubbles-history-unlock-\(UUID().uuidString)", directoryHint: .isDirectory)
 
   init(
     arguments: [String] = Array(CommandLine.arguments.dropFirst()),
@@ -95,6 +163,21 @@ final class HistoryBrowserModel {
     }) {
       liveExecutablePath = executable.path
     }
+    let defaults = UserDefaults.standard
+    if let rememberedSource = defaults.string(forKey: "history.direct.sourcePath") {
+      directSourcePath = rememberedSource
+    }
+    if let rememberedKit = defaults.string(forKey: "history.direct.recoveryKitPath") {
+      directRecoveryKitPath = rememberedKit
+    }
+    if let rememberedLocal = defaults.string(forKey: "history.direct.localCredentialPath") {
+      directLocalCredentialPath = rememberedLocal
+    }
+    if let rememberedMode = defaults.string(forKey: "history.direct.accessMode"),
+      let mode = HistoryDirectAccessMode(rawValue: rememberedMode)
+    {
+      directAccessMode = mode
+    }
     do {
       pendingStartupBundleURL = try HistoryBrowserLaunchOptions(
         arguments: arguments,
@@ -106,7 +189,17 @@ final class HistoryBrowserModel {
   }
 
   deinit {
+    directKeyUTF8.resetBytes(in: 0..<directKeyUTF8.count)
     try? FileManager.default.removeItem(at: mediaSessionURL)
+    try? FileManager.default.removeItem(at: snapshotUnlockSessionURL)
+  }
+
+  var hasOpenHistory: Bool {
+    session != nil || directConfiguration != nil
+  }
+
+  var isDirectHistoryOpen: Bool {
+    directConfiguration != nil && directStatus != nil
   }
 
   var selectedConversation: HistoryConversation? {
@@ -143,10 +236,362 @@ final class HistoryBrowserModel {
     }
   }
 
+  var filteredDirectConversations: [HistoryDirectConversation] {
+    let query = conversationFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !query.isEmpty else { return directConversations }
+    return directConversations.filter { conversation in
+      conversation.displayName.localizedCaseInsensitiveContains(query)
+        || (conversation.summary?.localizedCaseInsensitiveContains(query) == true)
+        || (conversation.lastSenderDisplayName?.localizedCaseInsensitiveContains(query) == true)
+    }
+  }
+
+  var selectedDirectConversation: HistoryDirectConversation? {
+    guard let directSelectedConversationID else { return nil }
+    return directConversations.first { $0.id == directSelectedConversationID }
+  }
+
   func resolvedDirection(for message: HistoryMessage) -> String? {
     message.resolvedDirection(
       selfParticipantID: session?.manifest.context.selfParticipantID
     )
+  }
+
+  func presentDirectConnection() {
+    libraryError = nil
+    showsDirectConnection = true
+  }
+
+  func presentSnapshotCreation() {
+    libraryError = nil
+    showsSnapshotCreation = true
+  }
+
+  func rememberCreatedSnapshot(
+    _ result: HistorySnapshotCreationResult,
+    keychainProtected: Bool,
+    hiddenCredentialURL: URL?,
+    recoveryKitURL: URL,
+    passphraseProtected: Bool
+  ) {
+    directSourcePath = result.outputURL.standardizedFileURL.path
+    directRecoveryKitPath = recoveryKitURL.standardizedFileURL.path
+    if keychainProtected {
+      directAccessMode = .snapshotKeychain
+    } else if let hiddenCredentialURL {
+      directAccessMode = .snapshotLocalCredential
+      directLocalCredentialPath = hiddenCredentialURL.standardizedFileURL.path
+    } else if passphraseProtected {
+      directAccessMode = .snapshotPassphrase
+    } else {
+      directAccessMode = .snapshotRecoveryKit
+    }
+    UserDefaults.standard.set(directSourcePath, forKey: "history.direct.sourcePath")
+    UserDefaults.standard.set(directAccessMode.rawValue, forKey: "history.direct.accessMode")
+    UserDefaults.standard.set(
+      directRecoveryKitPath,
+      forKey: "history.direct.recoveryKitPath"
+    )
+  }
+
+  func connectDirectSource(
+    executableURL: URL,
+    sourceURL: URL,
+    accessMode: HistoryDirectAccessMode,
+    keyUTF8: [UInt8],
+    recoveryKitURL: URL? = nil,
+    localCredentialURL: URL? = nil
+  ) {
+    closeBundle()
+    let effectiveLocalCredentialURL: URL?
+    if accessMode == .snapshotKeychain {
+      do {
+        effectiveLocalCredentialURL = try snapshotKeychain.materialize(
+          snapshotURL: sourceURL,
+          sessionDirectory: snapshotUnlockSessionURL
+        )
+      } catch {
+        libraryError = String(describing: error)
+        showsDirectConnection = false
+        return
+      }
+    } else {
+      effectiveLocalCredentialURL = localCredentialURL
+    }
+    liveExecutablePath = executableURL.standardizedFileURL.path
+    directSourcePath = sourceURL.standardizedFileURL.path
+    directAccessMode = accessMode
+    directRecoveryKitPath = recoveryKitURL?.standardizedFileURL.path ?? directRecoveryKitPath
+    if accessMode != .snapshotKeychain {
+      directLocalCredentialPath =
+        localCredentialURL?.standardizedFileURL.path ?? directLocalCredentialPath
+    }
+    let configuration = HistoryDirectConfiguration(
+      executableURL: executableURL,
+      sourceURL: sourceURL,
+      accessMode: accessMode,
+      recoveryKitURL: recoveryKitURL,
+      localCredentialURL: effectiveLocalCredentialURL
+    )
+    let defaults = UserDefaults.standard
+    defaults.set(directSourcePath, forKey: "history.direct.sourcePath")
+    defaults.set(accessMode.rawValue, forKey: "history.direct.accessMode")
+    if let recoveryKitURL {
+      defaults.set(
+        recoveryKitURL.standardizedFileURL.path,
+        forKey: "history.direct.recoveryKitPath"
+      )
+    }
+    if let localCredentialURL, accessMode != .snapshotKeychain {
+      defaults.set(
+        localCredentialURL.standardizedFileURL.path,
+        forKey: "history.direct.localCredentialPath"
+      )
+    }
+    directConfiguration = configuration
+    replaceDirectKey(with: keyUTF8)
+    showsDirectConnection = false
+    isDirectConnecting = true
+    libraryError = nil
+    let loadID = UUID()
+    activeDirectLoadID = loadID
+    directLoadTask = Task { [weak self] in
+      guard let self else { return }
+      var key = directKeyUTF8
+      defer { key.resetBytes(in: 0..<key.count) }
+      do {
+        let status = try await directClient.status(
+          configuration: configuration,
+          keyUTF8: key
+        )
+        try Task.checkCancellation()
+        let page = try await directClient.conversations(
+          configuration: configuration,
+          keyUTF8: key,
+          limit: 100
+        )
+        try Task.checkCancellation()
+        guard activeDirectLoadID == loadID, directConfiguration == configuration else { return }
+        directStatus = status
+        directConversations = page.items
+        directConversationCursor = page.page.nextCursor
+        directConversationWarnings = page.warnings
+        directConversationConsistency = page.consistency
+        directSection = .overview
+        isDirectConnecting = false
+      } catch is CancellationError {
+        if activeDirectLoadID == loadID { isDirectConnecting = false }
+      } catch {
+        guard activeDirectLoadID == loadID else { return }
+        isDirectConnecting = false
+        libraryError = String(describing: error)
+        clearDirectState()
+      }
+    }
+  }
+
+  func loadMoreDirectConversations() {
+    guard let configuration = directConfiguration, let cursor = directConversationCursor,
+      !isLoadingDirectConversations
+    else { return }
+    directConversationTask?.cancel()
+    let requestID = UUID()
+    activeDirectConversationID = requestID
+    isLoadingDirectConversations = true
+    directConversationError = nil
+    directConversationTask = Task { [weak self] in
+      guard let self else { return }
+      var key = directKeyUTF8
+      defer { key.resetBytes(in: 0..<key.count) }
+      do {
+        let page = try await directClient.conversations(
+          configuration: configuration,
+          keyUTF8: key,
+          limit: 100,
+          cursor: cursor
+        )
+        try Task.checkCancellation()
+        guard activeDirectConversationID == requestID,
+          directConfiguration == configuration,
+          directConversationCursor == cursor
+        else { return }
+        let existing = Set(directConversations.map(\.id))
+        directConversations.append(contentsOf: page.items.filter { !existing.contains($0.id) })
+        directConversationCursor = page.page.nextCursor
+        directConversationWarnings = mergeDirectWarnings(
+          directConversationWarnings,
+          page.warnings
+        )
+        directConversationConsistency = page.consistency
+        isLoadingDirectConversations = false
+      } catch is CancellationError {
+        if activeDirectConversationID == requestID { isLoadingDirectConversations = false }
+      } catch {
+        if activeDirectConversationID == requestID {
+          isLoadingDirectConversations = false
+          directConversationError = String(describing: error)
+        }
+      }
+    }
+  }
+
+  func selectDirectConversation(_ conversationID: String) {
+    directSection = .chats
+    directSelectedConversationID = conversationID
+    loadDirectMessages(conversationID: conversationID, cursor: nil, appending: false)
+  }
+
+  func loadOlderDirectMessages() {
+    guard let conversationID = directSelectedConversationID,
+      let cursor = directMessageCursor,
+      !isLoadingDirectMessages,
+      !directIsSearchContext
+    else { return }
+    loadDirectMessages(conversationID: conversationID, cursor: cursor, appending: true)
+  }
+
+  func returnToLatestDirectMessages() {
+    guard let conversationID = directSelectedConversationID else { return }
+    loadDirectMessages(conversationID: conversationID, cursor: nil, appending: false)
+  }
+
+  func performDirectSearch() async {
+    let query = directSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    let searchID = UUID()
+    activeDirectSearchID = searchID
+    guard !query.isEmpty, let configuration = directConfiguration else {
+      directSearchTask?.cancel()
+      directSearchResults = []
+      directSearchCursor = nil
+      directSearchWarnings = []
+      directSearchError = nil
+      isSearchingDirect = false
+      return
+    }
+    isSearchingDirect = true
+    directSearchError = nil
+    var key = directKeyUTF8
+    defer { key.resetBytes(in: 0..<key.count) }
+    do {
+      try await Task.sleep(for: .milliseconds(250))
+      try Task.checkCancellation()
+      guard activeDirectSearchID == searchID,
+        query == directSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+      else { return }
+      let page = try await directClient.search(
+        configuration: configuration,
+        keyUTF8: key,
+        query: query,
+        limit: 100
+      )
+      try Task.checkCancellation()
+      guard activeDirectSearchID == searchID,
+        directConfiguration == configuration,
+        query == directSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+      else { return }
+      directSearchResults = page.items
+      directSearchCursor = page.page.nextCursor
+      directSearchWarnings = page.warnings
+      isSearchingDirect = false
+    } catch is CancellationError {
+      if activeDirectSearchID == searchID { isSearchingDirect = false }
+    } catch {
+      if activeDirectSearchID == searchID {
+        isSearchingDirect = false
+        directSearchResults = []
+        directSearchCursor = nil
+        directSearchError = String(describing: error)
+      }
+    }
+  }
+
+  func loadMoreDirectSearchResults() {
+    let query = directSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !query.isEmpty, let configuration = directConfiguration,
+      let cursor = directSearchCursor, !isSearchingDirect
+    else { return }
+    directSearchTask?.cancel()
+    let searchID = UUID()
+    activeDirectSearchID = searchID
+    isSearchingDirect = true
+    directSearchError = nil
+    directSearchTask = Task { [weak self] in
+      guard let self else { return }
+      var key = directKeyUTF8
+      defer { key.resetBytes(in: 0..<key.count) }
+      do {
+        let page = try await directClient.search(
+          configuration: configuration,
+          keyUTF8: key,
+          query: query,
+          limit: 100,
+          cursor: cursor
+        )
+        try Task.checkCancellation()
+        guard activeDirectSearchID == searchID,
+          directConfiguration == configuration,
+          directSearchCursor == cursor,
+          query == directSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        else { return }
+        let existing = Set(directSearchResults.map(\.id))
+        directSearchResults.append(contentsOf: page.items.filter { !existing.contains($0.id) })
+        directSearchCursor = page.page.nextCursor
+        directSearchWarnings = mergeDirectWarnings(directSearchWarnings, page.warnings)
+        isSearchingDirect = false
+      } catch is CancellationError {
+        if activeDirectSearchID == searchID { isSearchingDirect = false }
+      } catch {
+        if activeDirectSearchID == searchID {
+          isSearchingDirect = false
+          directSearchError = String(describing: error)
+        }
+      }
+    }
+  }
+
+  func openDirectSearchResult(_ hit: HistoryDirectSearchHit) {
+    guard let configuration = directConfiguration else { return }
+    directMessageTask?.cancel()
+    let requestID = UUID()
+    activeDirectMessageID = requestID
+    directSection = .chats
+    directSelectedConversationID = hit.conversationID
+    directMessages = []
+    directMessageCursor = nil
+    directMessageWarnings = []
+    directMessageError = nil
+    directIsSearchContext = true
+    directHighlightedMessageID = hit.id
+    isLoadingDirectMessages = true
+    directMessageTask = Task { [weak self] in
+      guard let self else { return }
+      var key = directKeyUTF8
+      defer { key.resetBytes(in: 0..<key.count) }
+      do {
+        let resource = try await directClient.message(
+          configuration: configuration,
+          keyUTF8: key,
+          conversationID: hit.conversationID,
+          messageID: hit.id
+        )
+        try Task.checkCancellation()
+        guard activeDirectMessageID == requestID,
+          directSelectedConversationID == hit.conversationID,
+          directConfiguration == configuration
+        else { return }
+        directMessages = [resource.item]
+        directMessageWarnings = resource.warnings
+        directMessageConsistency = resource.consistency
+        isLoadingDirectMessages = false
+      } catch is CancellationError {
+        if activeDirectMessageID == requestID { isLoadingDirectMessages = false }
+      } catch {
+        if activeDirectMessageID == requestID {
+          isLoadingDirectMessages = false
+          directMessageError = String(describing: error)
+        }
+      }
+    }
   }
 
   func chooseBundle() {
@@ -180,6 +625,8 @@ final class HistoryBrowserModel {
   }
 
   func openBundle(_ url: URL) {
+    clearDirectState()
+    showsDirectConnection = false
     loadTask?.cancel()
     timelineTask?.cancel()
     let loadID = UUID()
@@ -287,6 +734,8 @@ final class HistoryBrowserModel {
     showsCoverageDetails = false
     artifactCache.removeAll()
     pendingMediaRequest = nil
+    clearDirectState()
+    showsDirectConnection = false
   }
 
   func selectConversation(_ conversationID: String, around canonicalID: String? = nil) {
@@ -497,6 +946,127 @@ final class HistoryBrowserModel {
         }
       }
     }
+  }
+
+  private func loadDirectMessages(
+    conversationID: String,
+    cursor: String?,
+    appending: Bool
+  ) {
+    guard let configuration = directConfiguration else { return }
+    directMessageTask?.cancel()
+    let requestID = UUID()
+    activeDirectMessageID = requestID
+    if !appending {
+      directMessages = []
+      directMessageCursor = nil
+      directMessageWarnings = []
+    }
+    directMessageError = nil
+    directIsSearchContext = false
+    directHighlightedMessageID = nil
+    isLoadingDirectMessages = true
+    directMessageTask = Task { [weak self] in
+      guard let self else { return }
+      var key = directKeyUTF8
+      defer { key.resetBytes(in: 0..<key.count) }
+      do {
+        let page = try await directClient.messages(
+          configuration: configuration,
+          keyUTF8: key,
+          conversationID: conversationID,
+          limit: 100,
+          cursor: cursor
+        )
+        try Task.checkCancellation()
+        guard activeDirectMessageID == requestID,
+          directSelectedConversationID == conversationID,
+          directConfiguration == configuration
+        else { return }
+        if appending {
+          let existing = Set(directMessages.map(\.id))
+          directMessages.append(contentsOf: page.items.filter { !existing.contains($0.id) })
+          directMessageWarnings = mergeDirectWarnings(directMessageWarnings, page.warnings)
+        } else {
+          directMessages = page.items
+          directMessageWarnings = page.warnings
+        }
+        directMessageCursor = page.page.nextCursor
+        directMessageConsistency = page.consistency
+        isLoadingDirectMessages = false
+      } catch is CancellationError {
+        if activeDirectMessageID == requestID { isLoadingDirectMessages = false }
+      } catch {
+        if activeDirectMessageID == requestID {
+          isLoadingDirectMessages = false
+          directMessageError = String(describing: error)
+        }
+      }
+    }
+  }
+
+  private func replaceDirectKey(with key: [UInt8]) {
+    directKeyUTF8.resetBytes(in: 0..<directKeyUTF8.count)
+    directKeyUTF8.removeAll(keepingCapacity: false)
+    directKeyUTF8 = key
+  }
+
+  private func clearDirectState() {
+    directLoadTask?.cancel()
+    directConversationTask?.cancel()
+    directMessageTask?.cancel()
+    directSearchTask?.cancel()
+    activeDirectLoadID = UUID()
+    activeDirectConversationID = UUID()
+    activeDirectMessageID = UUID()
+    activeDirectSearchID = UUID()
+    directLoadTask = nil
+    directConversationTask = nil
+    directMessageTask = nil
+    directSearchTask = nil
+    directKeyUTF8.resetBytes(in: 0..<directKeyUTF8.count)
+    directKeyUTF8.removeAll(keepingCapacity: false)
+    directConfiguration = nil
+    directStatus = nil
+    directSection = .overview
+    directConversations = []
+    directConversationCursor = nil
+    directConversationWarnings = []
+    directConversationConsistency = nil
+    directSelectedConversationID = nil
+    directMessages = []
+    directMessageCursor = nil
+    directMessageWarnings = []
+    directMessageConsistency = nil
+    directSearchQuery = ""
+    directSearchResults = []
+    directSearchCursor = nil
+    directSearchWarnings = []
+    isDirectConnecting = false
+    isLoadingDirectConversations = false
+    isLoadingDirectMessages = false
+    isSearchingDirect = false
+    directConversationError = nil
+    directMessageError = nil
+    directSearchError = nil
+    directIsSearchContext = false
+    directHighlightedMessageID = nil
+    try? FileManager.default.removeItem(at: snapshotUnlockSessionURL)
+  }
+
+  private func mergeDirectWarnings(
+    _ existing: [HistoryDirectWarning],
+    _ additions: [HistoryDirectWarning]
+  ) -> [HistoryDirectWarning] {
+    var merged = existing
+    for warning in additions {
+      if let index = merged.firstIndex(where: { $0.id == warning.id }) {
+        merged[index] = warning
+      } else {
+        merged.append(warning)
+      }
+    }
+    return merged
   }
 
   private func historyIndexDirectory() throws -> URL {

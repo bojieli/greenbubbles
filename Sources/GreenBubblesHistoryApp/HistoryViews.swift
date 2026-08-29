@@ -7,16 +7,25 @@ struct HistoryRootView: View {
 
   var body: some View {
     Group {
-      if model.isLoading {
+      if model.isDirectConnecting {
+        HistoryDirectConnectingView {
+          model.closeBundle()
+        }
+      } else if model.isLoading {
         HistoryLoadingView(progress: model.loadProgress) {
           model.closeBundle()
         }
-      } else if model.session == nil {
-        HistoryWelcomeView(errorMessage: model.libraryError) {
-          model.chooseBundle()
-        }
-      } else {
+      } else if model.isDirectHistoryOpen {
+        HistoryDirectLibraryView(model: model)
+      } else if model.session != nil {
         HistoryLibraryView(model: model)
+      } else {
+        HistoryWelcomeView(
+          errorMessage: model.libraryError,
+          browseDirect: { model.presentDirectConnection() },
+          createSnapshot: { model.presentSnapshotCreation() },
+          openBundle: { model.chooseBundle() }
+        )
       }
     }
     .task {
@@ -29,12 +38,22 @@ struct HistoryRootView: View {
       model.openBundle(directory)
       return true
     }
+    .sheet(isPresented: $model.showsDirectConnection) {
+      HistoryDirectConnectionSheet(model: model)
+        .frame(minWidth: 680, minHeight: 560)
+    }
+    .sheet(isPresented: $model.showsSnapshotCreation) {
+      HistorySnapshotCreationSheet(model: model)
+        .frame(minWidth: 820, minHeight: 720)
+    }
   }
 }
 
 private struct HistoryWelcomeView: View {
   let errorMessage: String?
-  let open: () -> Void
+  let browseDirect: () -> Void
+  let createSnapshot: () -> Void
+  let openBundle: () -> Void
 
   var body: some View {
     VStack(spacing: 24) {
@@ -51,20 +70,30 @@ private struct HistoryWelcomeView: View {
         Text("Browse your GreenBubbles history")
           .font(.largeTitle.weight(.semibold))
         Text(
-          "Open an audited AI context bundle to navigate chats, people, relationships, and media."
+          "Query live WeChat databases read-only, browse an independently recoverable snapshot, or open an exported history bundle."
         )
         .font(.title3)
         .foregroundStyle(.secondary)
         .multilineTextAlignment(.center)
         .frame(maxWidth: 660)
       }
-      Button(action: open) {
-        Label("Open History Bundle", systemImage: "folder.badge.plus")
+      Button(action: browseDirect) {
+        Label("Browse Live or Snapshot…", systemImage: "externaldrive.badge.magnifyingglass")
           .padding(.horizontal, 10)
           .padding(.vertical, 4)
       }
       .buttonStyle(.borderedProminent)
       .controlSize(.large)
+
+      Button(action: createSnapshot) {
+        Label("Create Recoverable Snapshot…", systemImage: "externaldrive.badge.plus")
+      }
+      .buttonStyle(.bordered)
+
+      Button(action: openBundle) {
+        Label("Open Exported History Bundle…", systemImage: "folder.badge.plus")
+      }
+      .buttonStyle(.bordered)
 
       if let errorMessage {
         Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
@@ -78,11 +107,11 @@ private struct HistoryWelcomeView: View {
 
       HStack(spacing: 24) {
         WelcomePromise(icon: "lock.shield", text: "Read-only and local")
-        WelcomePromise(icon: "checkmark.seal", text: "Hashes verified before display")
-        WelcomePromise(icon: "externaldrive.badge.checkmark", text: "Large-history indexing")
+        WelcomePromise(icon: "list.number", text: "Bounded JSON pages")
+        WelcomePromise(icon: "externaldrive.badge.checkmark", text: "No restoration required")
       }
       Spacer()
-      Text("You can also drag the five-file bundle directory into this window.")
+      Text("Exported five-file bundle directories can also be dragged into this window.")
         .font(.footnote)
         .foregroundStyle(.tertiary)
         .padding(.bottom, 24)
