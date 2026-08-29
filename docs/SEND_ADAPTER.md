@@ -315,6 +315,19 @@ third-party was installed, so nothing third-party remains.
    a separate channel, which keeps the number of things that can disable the
    path small and all of them signed.
 
+## 11a. Attachments
+
+Text only. Image and file sending are refused rather than absent: PRECHECK
+rejects any draft carrying attachments, the minted capability is hard-coded to
+`textSend`, and the helper has no file primitive at all — its bounded manifest
+grants six tools, none of which can name a path. Allow-listing `fileSend` in the
+configuration enables nothing; the guard then finds `textSend` missing from the
+allow list and denies, which is the fail-closed answer.
+
+`SEND_ATTACHMENTS_PLAN.md` specifies how the capability would be added, what it
+costs in privilege, and which questions a read-only spike must answer first.
+`GATE_READINESS.md` P4-FILE keeps it a separate gate.
+
 ## 12. What is still gated
 
 The adapter is built and closed. Opening it needs, in order: a provisioned
