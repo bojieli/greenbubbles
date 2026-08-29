@@ -1,20 +1,22 @@
-# Send adapter: implementation, operation, and limits
+# The send adapter
 
-Status: **implemented, shipped closed.** This document describes what is built,
-how to operate it, and what it deliberately refuses to do. It is the
-implementation counterpart to `SEND_INTEGRATION_DESIGN.md`; where the two
-differ, the deviations are recorded in §11 with their reasons.
+It is built. It is shipped closed. This document is what exists, how it would
+be operated, and what it refuses to do.
 
 The adapter sends a message by driving the real WeChat client's user interface
 from a privilege-separated, first-party helper. Nothing is injected into
 WeChat, no wire protocol is reimplemented, no private network API is called,
-and no third-party binary is downloaded or run. `SEND_PATH_RE_FINDINGS.md`
-establishes why no other same-identity path exists.
+and no third-party binary is downloaded or run. The archived
+[reverse-engineering findings](archive/SEND_PATH_RE_FINDINGS.md) establish why
+no other same-identity path exists. Where this deviates from the archived
+[integration design](archive/SEND_INTEGRATION_DESIGN.md), §11 records why.
 
 **A default build cannot send.** The release verifying key is empty unless a
 release pipeline pins one, so no release calibration profile verifies, so no
 rollout stage above `dryRun` can open. Turning the send path on is a deliberate,
-multi-step, owner-driven act, and every step of it is auditable.
+multi-step, owner-driven act, and every step of it is auditable. Two of the
+required steps are decisions rather than code, which is why this is not a
+schedule — see [ROADMAP.md](ROADMAP.md).
 
 ---
 
@@ -27,7 +29,7 @@ multi-step, owner-driven act, and every step of it is auditable.
 | `GreenBubblesInputHelper` | login-item agent | Accessibility + Screen Recording | one capability at a time, nothing else |
 
 The split exists for two grounded reasons. First, this project's own
-prompt-injection threat model (`AI_TOOL_BOUNDARY.md`): desktop-wide input and
+prompt-injection threat model ([AI_TOOL_BOUNDARY.md](AI_TOOL_BOUNDARY.md)): desktop-wide input and
 capture must not sit on the process that parses attacker-controlled message
 content and holds the decryption keys. Second, crash isolation: an effector is
 stall- and crash-prone, and a separate process can be watchdog-killed and
@@ -97,8 +99,8 @@ entry point, so the target receives the click or keystroke while the user's
 physical cursor never moves and no application is raised. Capture uses
 ScreenCaptureKit's window filter, so WeChat can stay backgrounded and occluded
 throughout. Recognition is Apple Vision: first-party, public, on device.
-WeChat's own `wxocr` is deliberately not used (see `SEND_INTEGRATION_DESIGN.md`
-§10).
+WeChat's own `wxocr` is deliberately not used (see the archived
+[integration design](archive/SEND_INTEGRATION_DESIGN.md) §10).
 
 **Two independent verification sources at GATE 1 by design.** OCR proves what
 is on screen now; the DB replica proved the identity mapping for the bound
@@ -115,7 +117,7 @@ shipping a profile rather than rebuilding the application.
 Window-relative geometry is carried as integer **parts-per-million**, not
 floating point, so the signed bytes are exactly reproducible in both languages.
 The canonical encoders are hand-written in Rust and Swift and pinned against
-one another by `docs/send-canonical-vectors.json`, which both test suites
+one another by [`send-canonical-vectors.json`](send-canonical-vectors.json), which both test suites
 assert on; the Swift suite additionally verifies a *Rust-signed* profile with
 CryptoKit, so a profile shipped to the field is provably accepted by the
 component that enforces it.
@@ -173,7 +175,7 @@ for a cooldown. It records body digests, never bodies.
 
 ## 6. Lifecycle: how `observedSent` is created
 
-`ACTION_SAFETY_CONTRACT.md` requires that an adapter acknowledgement can never
+[ACTION_SAFETY_CONTRACT.md](ACTION_SAFETY_CONTRACT.md) requires that an adapter acknowledgement can never
 create `observedSent`. It does not here. A visually confirmed send is recorded
 as **evidence** and parked; `observedSent` is created only by
 `send reconcile`, which searches the account's own encrypted replica for an
@@ -303,7 +305,8 @@ recalling — precisely the catastrophic class the on-screen gates exist to
 prevent, and one the adapter cannot verify before committing to the click. The
 adapter therefore reports the remaining window and the exact steps rather than
 automating a gesture it cannot gate. This is a deliberate narrowing of
-`SEND_INTEGRATION_DESIGN.md` §23 M4; see §11.
+the archived [integration design](archive/SEND_INTEGRATION_DESIGN.md) §23 M4;
+   see §11.
 
 ## 10. Packaging, distribution, uninstall
 
@@ -336,7 +339,8 @@ third-party was installed, so nothing third-party remains.
 ## 11. Deviations from the design, and why
 
 1. **The effector is first-party, not a vendored third-party engine.**
-   `SEND_INTEGRATION_DESIGN.md` §16 decision 3 chose Path C: vendor a pinned
+   The archived [integration design](archive/SEND_INTEGRATION_DESIGN.md) §16
+   decision 3 chose Path C: vendor a pinned
    commit of the MIT cua-driver source and build it in our CI. What ships
    instead is a first-party effector built on public macOS API —
    `CGEvent.postToPid` for background input, ScreenCaptureKit for occluded
@@ -367,9 +371,10 @@ grants six tools, none of which can name a path. Allow-listing `fileSend` in the
 configuration enables nothing; the guard then finds `textSend` missing from the
 allow list and denies, which is the fail-closed answer.
 
-`SEND_ATTACHMENTS_PLAN.md` specifies how the capability would be added, what it
-costs in privilege, and which questions a read-only spike must answer first.
-`GATE_READINESS.md` P4-FILE keeps it a separate gate.
+The archived [attachments plan](archive/SEND_ATTACHMENTS_PLAN.md) specifies how
+the capability would be added, what it costs in privilege, and which questions a
+read-only spike must answer first. The archived
+[gate readiness](archive/GATE_READINESS.md) record keeps P4-FILE a separate gate.
 
 ## 11b. Addressing: the conversation already open
 
@@ -395,7 +400,8 @@ GATE 0 catches the first of those non-destructively.
 
 Validated live on 2026-08-29 against File Transfer, autonomously, for all three
 payload kinds — text, image, and file — each passing GATE 1 and GATE 2 and
-stopping before Return. `SEND_ATTACHMENTS_PLAN.md` §17 records the measurements,
+stopping before Return. The archived
+[attachments plan](archive/SEND_ATTACHMENTS_PLAN.md) §17 records the measurements,
 including the malformed-click bug that made an earlier session believe
 background sending was impossible.
 
@@ -406,7 +412,8 @@ release signing key; a measured and signed calibration profile for the exact
 WeChat build; a signed compatibility matrix marking that (host × client) pair
 `supported`; the four gate-evidence flags in the configuration, which stand for
 the acquisition, restoration, mechanism, and legal-review decisions recorded in
-`GATE_READINESS.md` and `ACTION_SAFETY_CONTRACT.md`; the two TCC grants; and a
+the archived [gate readiness](archive/GATE_READINESS.md) record and
+[ACTION_SAFETY_CONTRACT.md](ACTION_SAFETY_CONTRACT.md); the two TCC grants; and a
 rollout-stage change made deliberately. None of those is a code change, and
 none of them happens by default.
 
