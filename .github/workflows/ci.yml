@@ -48,6 +48,21 @@ jobs:
           plutil -lint Packaging/GreenBubbles.entitlements
           plutil -lint Packaging/GreenBubblesInputHelper.entitlements
 
+      - name: Check the release helper contains no diagnostic bypass
+        run: |
+          # These subcommands drive input and read screen content without a
+          # capability, an approval, the outbox, the audit journal, or the XPC
+          # peer check. In a binary holding Accessibility and Screen Recording
+          # they would be an unauthenticated bypass of the whole architecture.
+          swift build -c release --product greenbubbles-input-helper
+          for command in capture spike keys focus-probe ocr collision-probe; do
+            if strings .build/release/greenbubbles-input-helper | grep -qx "$command"; then
+              echo "error: release helper contains the $command diagnostic" >&2
+              exit 1
+            fi
+          done
+          echo "release helper contains no diagnostic bypass"
+
       - name: Check the send path ships closed
         run: |
           # A build with no pinned release verifying key must refuse every
