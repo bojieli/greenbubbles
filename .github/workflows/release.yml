@@ -28,7 +28,10 @@ jobs:
   publish:
     needs: verify
     runs-on: macos-15
-    timeout-minutes: 60
+    # The app, CLI archive, and final DMG are independent sequential Apple
+    # submissions. Leave enough room for all three 30-minute service waits and
+    # ticket propagation without weakening any verdict gate.
+    timeout-minutes: 150
     permissions:
       contents: write
 
@@ -207,6 +210,10 @@ jobs:
             grep -F "Authority=$APPLE_SIGNING_IDENTITY" <<<"$details" >/dev/null
             grep -F "TeamIdentifier=$APPLE_TEAM_ID" <<<"$details" >/dev/null
             grep -E '^flags=.*\(.*runtime.*\)' <<<"$details" >/dev/null
+            [ "$(lipo -archs "$executable")" = "arm64" ] || {
+              echo "error: $executable is not an arm64-only release binary" >&2
+              exit 1
+            }
           done
 
       - name: Confirm the signed helper carries no diagnostic bypass
@@ -231,6 +238,36 @@ jobs:
           bash scripts/package-send-helper.sh
           cp "$GREENBUBBLES_OUTPUT_DIRECTORY/GreenBubbles.dmg" \
             "${{ steps.archive.outputs.dmg }}"
+
+      - name: Verify every application signature
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/greenbubbles-app/GreenBubbles.app"
+          helper="$app/Contents/Library/LoginItems/GreenBubblesInputHelper.app"
+
+          for executable in \
+            "$app/Contents/MacOS/greenbubbles-history" \
+            "$app/Contents/MacOS/greenbubbles-send" \
+            "$app/Contents/MacOS/greenbubbles" \
+            "$helper/Contents/MacOS/greenbubbles-input-helper"; do
+            codesign --verify --strict --verbose=2 "$executable"
+            details="$(codesign --display --verbose=4 "$executable" 2>&1)"
+            grep -F "Authority=$APPLE_SIGNING_IDENTITY" <<<"$details" >/dev/null
+            grep -F "TeamIdentifier=$APPLE_TEAM_ID" <<<"$details" >/dev/null
+            grep -E '^flags=.*\(.*runtime.*\)' <<<"$details" >/dev/null
+            [ "$(lipo -archs "$executable")" = "arm64" ] || {
+              echo "error: $executable is not an arm64-only release binary" >&2
+              exit 1
+            }
+          done
+
+          codesign --verify --strict --verbose=2 "$helper"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+            "$app/Contents/Info.plist")" = "${{ steps.tag.outputs.version }}" ]
 
       - name: Package the signed CLI archive
         run: |
