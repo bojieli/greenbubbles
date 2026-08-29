@@ -11,6 +11,10 @@ It explains how to build and launch the History app, select the correct
 reported database size, create a 24-word recoverable snapshot, reopen it with
 Keychain or a hidden credential, and run a recovery drill.
 
+For repeated terminal use, the [query-profile guide](docs/QUERY_PROFILES.md)
+shows how to configure a private default live source and named snapshot sources
+without repeating database paths or unlock flags on every bounded query.
+
 The shortest GUI path is:
 
 ```sh

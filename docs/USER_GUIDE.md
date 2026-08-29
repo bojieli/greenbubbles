@@ -4,6 +4,8 @@ This guide covers the normal workflow: inspect storage, browse WeChat history
 without restoring it, create an independently recoverable snapshot, and reopen
 that snapshot later. For protector rotation and retention operations, see the
 [recoverable snapshot operator guide](RECOVERABLE_SNAPSHOTS.md).
+For repeated terminal queries without retyping source and credential options,
+see the [query-profile guide](QUERY_PROFILES.md).
 
 GreenBubbles is local software. The query path does not send messages, upload
 history, or copy the full message corpus into JSON. It opens owner-authorized
@@ -20,6 +22,7 @@ requires.
 | Need | Recommended workflow |
 |---|---|
 | Browse current history on this Mac | History app → **Browse Live or Snapshot…** → **Live WeChat (read-only)** |
+| Query live and snapshot history repeatedly from a terminal | Configure a private default and named profiles in `~/.greenbubbles/query-profiles.json` |
 | See how much storage WeChat actually uses | Open the live source; read **SQLite files**, **WAL**, and **Total** in Overview |
 | Keep a durable backup independent of WeChat | History app → **Create Recoverable Snapshot…** |
 | Reopen a snapshot routinely on the same Mac | **Snapshot unlock in macOS Keychain** |
@@ -189,8 +192,28 @@ rotation, storage migration, or a significant backup-system change.
 
 ## CLI quick start
 
-The graphical app uses the same commands. For scripts, set private paths in the
-shell session and keep the key in an owner-only file:
+The graphical app uses the same commands. For repeated terminal use, configure
+an owner-only [query profile](QUERY_PROFILES.md). With a default profile, the
+common commands need neither a source path nor a key/passphrase option:
+
+```sh
+GB_CLI="Native/GreenBubblesRestore/target/release/greenbubbles-restore"
+
+"$GB_CLI" profile validate
+"$GB_CLI" source status
+"$GB_CLI" conversations list --limit 100
+"$GB_CLI" messages list \
+  --conversation <conversation-id> --limit 100
+"$GB_CLI" conversations list --profile archive --limit 100
+```
+
+The profile file stores paths and access modes. Live keys and snapshot
+passphrases remain in separately referenced owner-only files; they are not
+placed in the general JSON settings. A local snapshot credential or portable
+recovery kit is already file-backed and can be referenced directly.
+
+For one-off queries and scripts that intentionally supply every input, set
+private paths in the shell session and keep the key in an owner-only file:
 
 ```sh
 GB_CLI="Native/GreenBubblesRestore/target/release/greenbubbles-restore"
@@ -243,6 +266,10 @@ With a file-backed snapshot protector, only search text goes to standard input.
 With `--snapshot-passphrase-stdin`, the passphrase is the first line and the
 search text follows it.
 
+With any configured profile, only search text goes to standard input; the CLI
+loads the referenced credential separately. A positional source plus explicit
+access mode is mutually exclusive with `--profile`.
+
 ## Common problems
 
 ### “Required database is unavailable”
@@ -263,6 +290,14 @@ or database path in the JSON error.
 The file and its parent must be owned by the current user. The file must be a
 regular, single-link mode-`0600` file inside a mode-`0700` directory. Symbolic
 links and group/world-readable secret files are rejected.
+
+### A query profile is rejected
+
+Run `greenbubbles-restore profile validate <name>`. The configuration file,
+credential file, and their containing directories must satisfy the same
+owner-only rules. Paths in the JSON must be absolute, the named profile must
+exist, and `defaultProfile` must name one of the configured profiles. Do not
+combine `--profile` with an explicit source or access flag.
 
 ### A new snapshot path is rejected
 
