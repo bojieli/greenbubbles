@@ -760,8 +760,13 @@ about the one fact that matters most.
 
 Drafts the connector produces are consistent by construction, because both
 fields come from the same replica resolution. The exposure arrived with
-`emit_action_draft`, a tool added during this work that writes draft files
-directly; it widened the trust surface without the guard widening to match.
+`emit_action_draft`, a debugging tool added during this work that wrote draft
+files directly; it widened the trust surface without the guard widening to
+match. That tool has since been removed. `tool-draft` is the supported way to
+produce a draft — including for the no-navigation addressing mode, where the
+conversation is named explicitly rather than resolved by search — because it
+goes through the connector under the tool policy and the audit log, and so
+cannot disagree with itself about who the recipient is.
 
 The fix binds policy to the value that selects the destination. The allow list
 now carries `recipientTitles`, one owner-authorized title per allow-listed
