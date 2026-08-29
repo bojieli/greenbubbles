@@ -47,6 +47,23 @@ final class MacOSScreenPerception: ScreenPerception {
     return frame
   }
 
+  /// Digests one region's pixels. Used where recognition has nothing to read:
+  /// an image staged into the compose area is a bare thumbnail.
+  func regionFingerprint(in rect: CGRect) throws(SendFailure) -> String {
+    let frame = try windowFrame()
+    let image = try captureWindow()
+    captures &+= 1
+    guard let cropped = crop(image, to: rect, window: frame),
+      let data = cropped.dataProvider?.data as Data?
+    else {
+      throw SendFailure(
+        .calibrationDrift,
+        detail: "the profile's region falls outside the captured window"
+      )
+    }
+    return SendDigest.sha256Hex(data)
+  }
+
   func recognizeText(in rect: CGRect) throws(SendFailure) -> RecognizedRegionText {
     let frame = try windowFrame()
     let image = try captureWindow()

@@ -474,3 +474,57 @@ None of these is a code change to make unilaterally. Attachments are unaffected
 as a capability — the staging, gates, and reconciliation all stand — but they
 inherit this limitation, because every attachment send has to address a
 recipient first.
+
+---
+
+## 15. Q1, Q2 and Q5 answered live (2026-08-29, third session)
+
+Answered against File Transfer, the owner's own self-chat, with the compose box
+already focused. Nothing was sent: the compose area was cleared after each
+probe and no Return was ever pressed.
+
+**Q1 — does the compose box accept a pasted file reference?** **Yes.** Writing a
+`fileURL` to the pasteboard and pressing Cmd+V stages the file. Path A is
+viable, and it needs no anchor, no panel, and no cursor.
+
+**Q2 — does paste distinguish image-as-image from image-as-file?** **Yes,
+automatically, by type**, and the two look different on screen:
+
+| Pasted | Staged as | On-screen evidence |
+| --- | --- | --- |
+| `.png` | inline image thumbnail | **no text at all** |
+| `.txt` | file chip | the name and size, e.g. `gbspike-probe.txt` / `65B` |
+
+**Q5 — is there a confirmation sheet?** None appeared for either kind on this
+build. `presentsConfirmationSheet` stays false in the measured profile, and the
+sheet-handling code remains for builds that do raise one.
+
+### The gap this exposed, and the fix
+
+GATE 2a as first written required the display name to be read back out of the
+compose area. That works for a file chip and **can never work for an image**,
+which stages as a bare thumbnail carrying no text. Every image send would have
+failed the gate.
+
+The gate is now kind-specific, which is what §4 originally called for:
+
+- **file** — the compose region must change *and* the chip must carry the
+  approved name;
+- **image** — the compose region's pixels must change, which is the only
+  evidence available, and the outcome records `attachmentNameMatched: false`
+  rather than implying a match that was never made.
+
+That required a new perception primitive, `regionFingerprint`, because text
+recognition has nothing to read in a thumbnail.
+
+### What this means overall
+
+The attachment mechanism is **solved and measured**: staging works, both kinds
+are distinguishable, and each has a gate matched to what is actually observable.
+What remains blocked is addressing (§14) — reaching a chosen conversation — and
+that blocks text and attachment sends alike.
+
+A `send-to-the-currently-open-conversation` mode would sidestep addressing
+entirely: the title gate already proves which conversation is open, and every
+other gate is unchanged. It is a weaker product, but it is one that works today
+and is worth an explicit decision.

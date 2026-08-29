@@ -23,6 +23,10 @@ struct MechanicalSendSkillTests {
     var composeAttachmentResult: Result<RecognizedRegionText, SendFailure>?
     var confirmSheetResult: Result<RecognizedRegionText, SendFailure>?
     var frameFailure: SendFailure?
+    /// Scripted region digests, consumed in order, so a test can say whether
+    /// the compose area changed when the attachment was staged.
+    var fingerprints: [String] = []
+    private var fingerprintIndex = 0
     private(set) var captures: UInt32 = 0
     private var composeReads = 0
     private let profile: CalibrationProfileBody
@@ -44,6 +48,13 @@ struct MechanicalSendSkillTests {
     func windowFrame() throws(SendFailure) -> WindowFrame {
       if let frameFailure { throw frameFailure }
       return frame
+    }
+
+    func regionFingerprint(in rect: CGRect) throws(SendFailure) -> String {
+      captures &+= 1
+      defer { fingerprintIndex += 1 }
+      guard fingerprintIndex < fingerprints.count else { return "unchanged" }
+      return fingerprints[fingerprintIndex]
     }
 
     func recognizeText(in rect: CGRect) throws(SendFailure) -> RecognizedRegionText {
@@ -582,6 +593,7 @@ extension MechanicalSendSkillTests {
     perception.composeAttachmentResult = .success(
       RecognizedRegionText(text: "photo.png  4 KB", confidencePartsPerMillion: 1_000_000)
     )
+    perception.fingerprints = ["before", "after"]
     let outcome = makeSkill(profile: profile, effector: effector, perception: perception)
       .execute(
         capability(permitSend: false, capability: .imageSend, attachment: stagedAttachment)
@@ -590,7 +602,9 @@ extension MechanicalSendSkillTests {
     #expect(!outcome.attempted)
     #expect(outcome.stageReached == .contentVerify)
     #expect(outcome.evidence.attachmentStaged)
-    #expect(outcome.evidence.attachmentNameMatched)
+    #expect(outcome.evidence.attachmentRegionChanged)
+    // An image carries no readable name, so none is claimed.
+    #expect(!outcome.evidence.attachmentNameMatched)
     // The helper hands over a reference, never bytes, and never types the body.
     #expect(
       effector.actions.contains(
@@ -608,6 +622,7 @@ extension MechanicalSendSkillTests {
     perception.composeAttachmentResult = .success(
       RecognizedRegionText(text: "someone-elses-file.pdf", confidencePartsPerMillion: 1_000_000)
     )
+    perception.fingerprints = ["before", "after"]
     let outcome = makeSkill(profile: profile, effector: effector, perception: perception)
       .execute(
         capability(permitSend: true, capability: .fileSend, attachment: stagedAttachment)
@@ -626,6 +641,7 @@ extension MechanicalSendSkillTests {
     perception.composeAttachmentResult = .success(
       RecognizedRegionText(text: "   ", confidencePartsPerMillion: 1_000_000)
     )
+    perception.fingerprints = ["same", "same"]
     let outcome = makeSkill(profile: profile, effector: effector, perception: perception)
       .execute(
         capability(permitSend: true, capability: .fileSend, attachment: stagedAttachment)
@@ -659,6 +675,7 @@ extension MechanicalSendSkillTests {
     perception.composeAttachmentResult = .success(
       RecognizedRegionText(text: "photo.png", confidencePartsPerMillion: 1_000_000)
     )
+    perception.fingerprints = ["before", "after"]
     let outcome = makeSkill(profile: profile, effector: effector, perception: perception)
       .execute(
         capability(permitSend: false, capability: .fileSend, attachment: stagedAttachment)
@@ -679,6 +696,7 @@ extension MechanicalSendSkillTests {
     perception.composeAttachmentResult = .success(
       RecognizedRegionText(text: "photo.png", confidencePartsPerMillion: 1_000_000)
     )
+    perception.fingerprints = ["before", "after"]
     perception.confirmSheetResult = .success(
       RecognizedRegionText(text: "Send holiday-plans.pdf?", confidencePartsPerMillion: 1_000_000)
     )
@@ -785,5 +803,64 @@ extension MechanicalSendSkillTests {
     #expect(searchPaste != nil)
     #expect(firstClear != nil)
     #expect((searchPaste ?? 0) < (firstClear ?? 0))
+  }
+}
+
+extension MechanicalSendSkillTests {
+  @Test("an image is verified by the compose region changing, not by a filename")
+  func imageStagingIsVerifiedByRegionChange() {
+    // Measured live: an image stages as a bare thumbnail carrying no text, so
+    // requiring a filename read-back would fail every image send.
+    let profile = profile()
+    let effector = FakeEffector()
+    let perception = perception(profile)
+    perception.fingerprints = ["empty-compose", "thumbnail-present"]
+    perception.composeAttachmentResult = .success(
+      RecognizedRegionText(text: "", confidencePartsPerMillion: 0)
+    )
+    let outcome = makeSkill(profile: profile, effector: effector, perception: perception)
+      .execute(
+        capability(permitSend: false, capability: .imageSend, attachment: stagedAttachment)
+      )
+    #expect(outcome.failure == nil)
+    #expect(outcome.evidence.attachmentRegionChanged)
+    #expect(outcome.evidence.attachmentStaged)
+    // Honest about the weaker evidence: no name was matched, and none exists.
+    #expect(!outcome.evidence.attachmentNameMatched)
+  }
+
+  @Test("an image that does not change the compose region is refused")
+  func imageStagingThatChangedNothingIsRefused() {
+    let profile = profile()
+    let effector = FakeEffector()
+    let perception = perception(profile)
+    perception.fingerprints = ["unchanged", "unchanged"]
+    let outcome = makeSkill(profile: profile, effector: effector, perception: perception)
+      .execute(
+        capability(permitSend: true, capability: .imageSend, attachment: stagedAttachment)
+      )
+    #expect(outcome.failure == .attachmentVerifyFailed)
+    #expect(!outcome.evidence.attachmentRegionChanged)
+    #expect(!outcome.attempted)
+    #expect(!effector.actions.contains("press(returnKey)"))
+  }
+
+  @Test("a file still requires its name, even when the region changed")
+  func fileStagingStillRequiresItsName() {
+    let profile = profile()
+    let effector = FakeEffector()
+    let perception = perception(profile)
+    perception.fingerprints = ["before", "after"]
+    perception.composeAttachmentResult = .success(
+      RecognizedRegionText(text: "a-different-file.pdf 12 KB", confidencePartsPerMillion: 1_000_000)
+    )
+    let outcome = makeSkill(profile: profile, effector: effector, perception: perception)
+      .execute(
+        capability(permitSend: true, capability: .fileSend, attachment: stagedAttachment)
+      )
+    #expect(outcome.failure == .attachmentVerifyFailed)
+    #expect(outcome.evidence.attachmentRegionChanged)
+    #expect(!outcome.evidence.attachmentNameMatched)
+    #expect(!outcome.attempted)
   }
 }

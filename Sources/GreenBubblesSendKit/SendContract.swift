@@ -436,6 +436,10 @@ public struct HelperGateEvidence: Codable, Equatable, Sendable {
   public var attachmentNameMatched: Bool
   /// Whether the compose region showed a staged attachment at all.
   public var attachmentStaged: Bool
+  /// Whether the compose region's pixels changed when the attachment was
+  /// staged. For an image this is the *only* available on-screen evidence,
+  /// because the thumbnail carries no readable text.
+  public var attachmentRegionChanged: Bool
   /// Whether a send-confirmation sheet was observed and confirmed.
   public var confirmationSheetConfirmed: Bool
   public var composeCleared: Bool
@@ -453,6 +457,7 @@ public struct HelperGateEvidence: Codable, Equatable, Sendable {
     composeMatched: Bool = false,
     attachmentNameMatched: Bool = false,
     attachmentStaged: Bool = false,
+    attachmentRegionChanged: Bool = false,
     confirmationSheetConfirmed: Bool = false,
     composeCleared: Bool = false,
     newestOutgoingMatched: Bool = false,
@@ -468,6 +473,7 @@ public struct HelperGateEvidence: Codable, Equatable, Sendable {
     self.composeMatched = composeMatched
     self.attachmentNameMatched = attachmentNameMatched
     self.attachmentStaged = attachmentStaged
+    self.attachmentRegionChanged = attachmentRegionChanged
     self.confirmationSheetConfirmed = confirmationSheetConfirmed
     self.composeCleared = composeCleared
     self.newestOutgoingMatched = newestOutgoingMatched

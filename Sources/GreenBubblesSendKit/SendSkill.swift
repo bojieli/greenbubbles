@@ -140,6 +140,13 @@ public protocol ScreenPerception: AnyObject {
   func windowFrame() throws(SendFailure) -> WindowFrame
   /// On-device text recognition inside one window-relative region.
   func recognizeText(in rect: CGRect) throws(SendFailure) -> RecognizedRegionText
+  /// A content digest of one region's pixels.
+  ///
+  /// Needed because an image staged into the compose area is a *thumbnail with
+  /// no filename*, measured live on WeChat 4.1.13: text recognition returns
+  /// nothing to compare against. Comparing the region before and after staging
+  /// is the only on-screen evidence an image send can offer.
+  func regionFingerprint(in rect: CGRect) throws(SendFailure) -> String
   /// How many captures have been taken, for gate evidence.
   var captureCount: UInt32 { get }
 }
@@ -235,6 +242,7 @@ public struct MechanicalSendSkill {
     var stage = SendStage.precheck
     var attempted = false
     var confirmation = VisualConfirmation.notAttempted
+    var attachmentBaseline = ""
     let started = clock()
     do {
       try capability.validate(nowUnixNanoseconds: started)
@@ -303,6 +311,12 @@ public struct MechanicalSendSkill {
 
       stage = .compose
       if let attachment = capability.attachment {
+        // Recorded before staging so GATE 2a can prove the region changed,
+        // which is the only evidence an image thumbnail offers.
+        attachmentBaseline = try fingerprint(
+          try requireAttachmentRegions().composeAttachment,
+          in: frame
+        )
         try stageAttachment(attachment, in: frame, evidence: &evidence)
       } else {
         try clearAndPaste(capability.body, at: profile.anchors.composeBox, in: frame)
@@ -313,18 +327,38 @@ public struct MechanicalSendSkill {
         // GATE 2a. An attachment's bytes never appear on screen, so this proves
         // *which* file was staged, not what it contains. The digest half of the
         // gate already ran in the control plane, against the staged copy.
+        //
+        // What is provable differs by kind, measured live: a file stages as a
+        // chip carrying its name and size, which can be read back and matched;
+        // an image stages as a bare thumbnail with no text at all, so the only
+        // available evidence is that the compose region changed. The weaker
+        // case is recorded as such rather than dressed up as a name match.
         let regions = try requireAttachmentRegions()
-        let staged = try recognize(regions.composeAttachment, in: frame)
-        evidence.attachmentStaged = !SendText.normalized(staged.text).isEmpty
-        evidence.attachmentNameMatched = SendText.normalized(staged.text)
-          .localizedCaseInsensitiveContains(SendText.normalized(attachment.displayFileName))
-        evidence.composeMatched = evidence.attachmentNameMatched
-        guard evidence.attachmentStaged, evidence.attachmentNameMatched else {
-          try clearCompose(in: frame)
-          throw SendFailure(
-            .attachmentVerifyFailed,
-            detail: "the staged attachment's name was not read back from the compose area"
-          )
+        let after = try fingerprint(regions.composeAttachment, in: frame)
+        evidence.attachmentRegionChanged = after != attachmentBaseline
+        evidence.attachmentStaged = evidence.attachmentRegionChanged
+        if capability.capability == .imageSend {
+          evidence.attachmentNameMatched = false
+          evidence.composeMatched = evidence.attachmentStaged
+          guard evidence.attachmentStaged else {
+            try clearCompose(in: frame)
+            throw SendFailure(
+              .attachmentVerifyFailed,
+              detail: "the compose area did not change, so no image was staged"
+            )
+          }
+        } else {
+          let staged = try recognize(regions.composeAttachment, in: frame)
+          evidence.attachmentNameMatched = SendText.normalized(staged.text)
+            .localizedCaseInsensitiveContains(SendText.normalized(attachment.displayFileName))
+          evidence.composeMatched = evidence.attachmentNameMatched
+          guard evidence.attachmentStaged, evidence.attachmentNameMatched else {
+            try clearCompose(in: frame)
+            throw SendFailure(
+              .attachmentVerifyFailed,
+              detail: "the staged attachment's name was not read back from the compose area"
+            )
+          }
         }
       } else {
         let composed = try recognize(profile.ocrRegions.compose, in: frame)
@@ -656,6 +690,15 @@ public struct MechanicalSendSkill {
     evidence.humanActivityObserved = true
     if let frame { try? clearCompose(in: frame) }
     throw SendFailure(.humanCollision, detail: "real user activity was observed on the client")
+  }
+
+  /// A content digest of one window-relative region.
+  private func fingerprint(
+    _ region: WindowRelativeRect,
+    in frame: WindowFrame
+  ) throws(SendFailure) -> String {
+    try manifest.authorize(.windowCapture, bundleIdentifier: targetBundleIdentifier)
+    return try perception.regionFingerprint(in: WindowGeometry.rect(region, in: frame))
   }
 
   private func recognize(

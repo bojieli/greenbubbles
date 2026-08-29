@@ -136,6 +136,20 @@ case "keys":
   }
   // Diagnostic-only escape hatch, deliberately not a reviewed SendKey: answers
   // whether a keyboard shortcut can move focus where a background click cannot.
+  if arguments.dropFirst().first == "pasteFileReference", arguments.count >= 3 {
+    let effector = MacOSInputEffector(processIdentifier: target.processIdentifier)
+    do {
+      try effector.writeClipboardFileReference(arguments[2])
+      try effector.press(.paste)
+    } catch {
+      FileHandle.standardError.write(Data("paste failed: \(error)\n".utf8))
+      exit(2)
+    }
+    Thread.sleep(forTimeInterval: 1.0)
+    effector.restoreClipboard()
+    print("pasted a file reference into whatever holds focus")
+    exit(0)
+  }
   if arguments.dropFirst().first == "pasteSearchKey" {
     let effector = MacOSInputEffector(processIdentifier: target.processIdentifier)
     try? effector.writeClipboard("File Transfer")
