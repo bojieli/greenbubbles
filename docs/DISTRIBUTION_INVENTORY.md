@@ -1,15 +1,12 @@
 # Dependency and distribution inventory
 
-Audit date: 2026-08-29
+What the source and the resolved build actually contain, audited 2026-08-29.
+This is a factual engineering record, not legal advice.
 
-Repository state: approved for public source and macOS arm64 binary release
-
-This is a factual engineering inventory, not legal advice. It records what the
-current source and resolved build contain. On 2026-08-29 the repository owner
-selected MIT and explicitly authorized public source plus Developer ID signed,
-Apple-notarized macOS arm64 binaries. That owner decision does not publish real
-user data, waive third-party terms, or make a legal conclusion about every use
-or jurisdiction.
+On 2026-08-29 the repository owner selected MIT and explicitly authorized
+public source plus Developer ID signed, Apple-notarized macOS arm64 binaries.
+That decision does not publish real user data, waive third-party terms, or
+reach a legal conclusion about every use or jurisdiction.
 
 ## Current project status
 
@@ -211,5 +208,6 @@ project's research roadmap:
 5. Real data and diagnostic artifacts remain private regardless of repository
    visibility.
 6. Qualified legal review, Tencent permission, disposable-account evidence,
-   and broader compatibility remain open risk/research items in `PLAN.md`, not
+   and broader compatibility remain open risk and research items in
+   [`ROADMAP.md`](ROADMAP.md), not
    claims implied by this research-alpha release.

@@ -1,14 +1,15 @@
 # Public release checklist
 
-Status: **0.1.1 source and macOS arm64 binary release approved; hosted launch
-requires the green Release workflow**
+The 0.1.1 source and macOS arm64 binary release is approved; a hosted launch
+still requires a green Release workflow. Last reviewed 2026-08-29.
 
-Last reviewed: 2026-08-29
+This records the owner's explicit release decision and the mechanical gates CI
+must pass. Unchecked boxes are things that have genuinely not happened yet, and
+are left visible rather than tidied away.
 
-This checklist records the repository owner's explicit public-release decision
-and the mechanical gates that GitHub Actions must pass. It is not legal advice.
-Public release never authorizes publishing real conversations, databases,
-credentials, media, captures, or owner-private diagnostic artifacts.
+It is not legal advice, and release **never** authorizes publishing real
+conversations, databases, credentials, media, captures, or owner-private
+diagnostic artefacts.
 
 ## Approved 0.1.1 boundary
 
@@ -19,7 +20,7 @@ credentials, media, captures, or owner-private diagnostic artifacts.
 | Native history app | Publish for macOS 14+, Apple silicon, as a signed/notarized/stapled DMG |
 | Complete CLI/tool set | Publish for macOS 14+, Apple silicon, as a signed/notarized ZIP |
 | Real user data and diagnostic artifacts | Never publish |
-| Passphrase acquisition | Source is public; remains advanced, owner-run, invasive, and outside the AI boundary |
+| Passphrase acquisition | Source is public; remains owner-run, root-requiring, and outside the AI boundary |
 | Sending | Source is public; release binary ships cryptographically closed and dry-run only |
 | Other architectures/platforms | Not approved by this target-specific review |
 
@@ -33,7 +34,7 @@ acquisition route, or qualified legal advice for every jurisdiction.
 - [x] Rust package metadata says `MIT`, version `0.1.1`, and retains
       `publish = false`.
 - [x] README, contribution terms, security policy, distribution inventory,
-      gate audit, roadmap, notices, and changelog reflect the public boundary.
+      roadmap, notices, and changelog reflect the public boundary.
 - [x] The exact source, documentation, synthetic-fixture, acquisition-source,
       closed-send-source, hosted-metadata, and research-evidence categories have
       an owner decision.

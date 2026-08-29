@@ -1,11 +1,17 @@
 # Operational response plan
 
-Status: **operational for the public research-alpha release**
+What to do when something goes wrong: a client update breaks decoding, a key
+may have leaked, a security report arrives, or a takedown notice does.
 
-This playbook defines fail-closed technical and evidence-handling actions for
-GreenBubbles incidents. It is not legal advice. The repository owner approved
-it for the 0.1.1 public boundary on 2026-08-29; broader active capabilities or
-distribution targets require a fresh review.
+Every action here is fail-closed and reversible until the event is classified.
+None of it is legal advice. It was approved for the 0.1.1 public boundary on
+2026-08-29; a broader capability or distribution target needs a fresh review.
+
+The single most important thing on this page: **containment must never attach
+to WeChat, inspect process memory, export session material, bypass a warning,
+or make an account or network operation in order to diagnose the event.** The
+tools that would help you investigate fastest are the ones that turn an
+incident into a second incident.
 
 ## Owners and intake
 
@@ -66,9 +72,8 @@ classified:
    observed behavior, containment action, and evidence custodian in a private
    incident record. Distinguish observed facts from hypotheses.
 
-Containment must not attach to WeChat, inspect process memory, export session
-material, bypass a warning, or make an account/network operation to diagnose the
-event.
+None of these steps may attach to WeChat, inspect process memory, export
+session material, bypass a warning, or make an account or network operation.
 
 ## Triage and severity
 
@@ -109,8 +114,9 @@ not reduce a real private-data or account-safety event by itself.
 2. Re-run passive signed-bundle, redacted discovery, schema profiling, and
    observed-type coverage checks after an update. Version-family acceptance
    never converts an unhandled schema into supported data.
-3. Keep full-restoration false for schema/type/media gaps. Active-read and
-   action capabilities retain their separate adapter-specific gates.
+3. Keep full-restoration false for schema, type or media gaps. Active-read
+   and action capabilities keep their separate adapter-specific gates —
+   restoring read compatibility never restores those.
 4. The debugger-based acquisition helper remains exact-build-bound. If either
    the 4.1+ passive family or a pinned acquisition-helper build must be revoked,
    land a reviewed compatibility change and tests proving the revoked boundary
@@ -126,8 +132,10 @@ not reduce a real private-data or account-safety event by itself.
    into the incident record: passphrase, replica key, database/snapshot,
    restoration archive, media, path/identifier metadata, or logs.
 3. Invalidate or replace credentials under the owning system's documented
-   procedure where possible. A WeChat database passphrase may not be rotatable;
-   do not claim remediation from deleting one copy.
+   procedure where possible. **A WeChat database passphrase may not be
+   rotatable at all** — deleting one copy is not remediation, and must not be
+   recorded as though it were. Containment here means accounting for every
+   copy.
 4. Rebootstrap a replica under a new random key if that key or plaintext replica
    was exposed. Do not reuse a suspect backup as trusted serving state without
    the independent audit.
@@ -159,12 +167,13 @@ not reduce a real private-data or account-safety event by itself.
    to the notice.
 3. Escalate to the repository owner and qualified counsel. Separate source,
    binary, schema/format documentation, fixture, real-data, hosted-repository,
-   and research-publication questions using the distribution inventory.
+   and research-publication questions using the [distribution inventory](DISTRIBUTION_INVENTORY.md).
 4. Make repository/host responses, counter-notices, removals, or public
    statements only through the authorized owner and counsel. Record the decision
    and exact artifact scope.
-5. A complaint about one mechanism does not authorize a stealthier fallback.
-   The Phase 0.5 kill criterion remains controlling.
+5. **A complaint about one mechanism does not authorize a stealthier
+   fallback.** A negative outcome is accepted, not routed around. This is the
+   controlling rule and it does not bend under pressure.
 
 ## User notice criteria
 
