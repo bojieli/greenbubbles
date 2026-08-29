@@ -6,7 +6,7 @@ active capture path added after that evaluation. It does not establish that an
 official workflow produces a portable GreenBubbles archive. The previous
 blanket prohibition on debugger-based acquisition was lifted by explicit owner
 decision on 2026-08-27; the resulting gated path is documented in
-[PASSPHRASE_ACQUISITION.md](PASSPHRASE_ACQUISITION.md).
+[PASSPHRASE_ACQUISITION.md](../PASSPHRASE_ACQUISITION.md).
 
 ## Pinned static evidence
 
@@ -79,7 +79,7 @@ preference order:
    mechanism
    breakpoints a system library symbol, so it is build-agnostic and performs
    no client version, hash, or signature gating. See
-   [PASSPHRASE_ACQUISITION.md](PASSPHRASE_ACQUISITION.md). The passive
+   [PASSPHRASE_ACQUISITION.md](../PASSPHRASE_ACQUISITION.md). The passive
    pipeline itself — discovery, snapshot, restore, replica, connector — never
    invokes this path and retains its non-invasive guarantees unchanged.
 
@@ -155,7 +155,7 @@ decision, GreenBubbles now embeds one such mechanism — the LLDB
 `CCKeyDerivationPBKDF` capture ported from the MIT-licensed
 [`TANGandXUE/wcdb-key-tool`](https://github.com/TANGandXUE/wcdb-key-tool) — as
 the gated, owner-authorized path 3 described above and in
-[PASSPHRASE_ACQUISITION.md](PASSPHRASE_ACQUISITION.md). The standalone
+[PASSPHRASE_ACQUISITION.md](../PASSPHRASE_ACQUISITION.md). The standalone
 external tools surveyed here remain unused, undownloaded, and unautomated by
 GreenBubbles.
 
