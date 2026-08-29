@@ -49,7 +49,7 @@ pub enum ActionGuardDenial {
     RateLimitExceeded,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ActionAdapterBinding {
     pub adapter_id: String,
@@ -57,7 +57,7 @@ pub struct ActionAdapterBinding {
     pub client_build_profile_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ActionGateEvidence {
     pub gate_decision_id: String,
@@ -67,7 +67,7 @@ pub struct ActionGateEvidence {
     pub legal_review_approved: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ActionAllowList {
     pub account_ids: BTreeSet<String>,
@@ -75,7 +75,7 @@ pub struct ActionAllowList {
     pub capabilities: BTreeSet<ActionCapability>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ActionRateState {
     pub window_started_at_unix_nanoseconds: u128,
@@ -84,7 +84,7 @@ pub struct ActionRateState {
     pub reserved_attempts: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ExternalApprovalEvidence {
     pub approval_id: String,

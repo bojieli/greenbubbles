@@ -566,6 +566,14 @@ pub struct ConnectorStateAuditReport {
     pub all_drafts_linked_to_request_events: bool,
     pub all_completed_review_events_linked_to_drafts: bool,
     pub gated_action_stage_event_count: u64,
+    #[serde(default)]
+    pub send_approval_draft_count: u64,
+    #[serde(default)]
+    pub send_attempt_draft_count: u64,
+    #[serde(default)]
+    pub send_reconciliation_draft_count: u64,
+    #[serde(default)]
+    pub send_lifecycle_ordering_valid: bool,
 }
 
 pub struct ConnectorService<'a> {
@@ -665,11 +673,6 @@ impl<'a> ConnectorService<'a> {
             .approval_event_count
             .saturating_add(audit_log.attempt_event_count)
             .saturating_add(audit_log.reconciliation_event_count);
-        if gated_action_stage_event_count != 0 {
-            return Err(RestoreError::Integrity(
-                "connector journal contains a gated action stage".to_string(),
-            ));
-        }
         let status = replica_status(&self.replica_path, self.key)?;
         let current_source_fingerprint = status.current_source_fingerprint.ok_or_else(|| {
             RestoreError::Integrity("connector replica has no current checkpoint".to_string())
@@ -731,9 +734,26 @@ impl<'a> ConnectorService<'a> {
         let mut completed_requests = BTreeMap::<String, u64>::new();
         let mut reviewed_drafts = BTreeSet::new();
         let mut completed_review_count = 0_u64;
+        let mut send_approvals = BTreeMap::<String, u64>::new();
+        let mut send_attempts = BTreeMap::<String, u64>::new();
+        let mut send_reconciliations = BTreeMap::<String, u64>::new();
         for event in &events {
             validate_current_connector_stage_evidence(event)?;
             match (event.stage, event.outcome) {
+                (ConnectorAuditStage::ApprovalRecorded, ConnectorAuditOutcome::Completed) => {
+                    let draft = linked_audit_draft(event, &drafts, event.operation.as_str())?;
+                    *send_approvals.entry(draft.draft_id.clone()).or_default() += 1;
+                }
+                (ConnectorAuditStage::AttemptRecorded, _) => {
+                    let draft = linked_audit_draft(event, &drafts, event.operation.as_str())?;
+                    *send_attempts.entry(draft.draft_id.clone()).or_default() += 1;
+                }
+                (ConnectorAuditStage::ReconciliationRecorded, _) => {
+                    let draft = linked_audit_draft(event, &drafts, event.operation.as_str())?;
+                    *send_reconciliations
+                        .entry(draft.draft_id.clone())
+                        .or_default() += 1;
+                }
                 (ConnectorAuditStage::DraftRequested, ConnectorAuditOutcome::Completed) => {
                     let draft = linked_audit_draft(event, &drafts, "createDraft")?;
                     if event.requester_id != draft.requester_id {
@@ -760,6 +780,23 @@ impl<'a> ConnectorService<'a> {
                 "connector drafts and completed request events are not one-to-one".to_string(),
             ));
         }
+        // The send lifecycle is strictly ordered per draft: a dispatch needs a
+        // completed approval, and a reconciliation needs a dispatch. A journal
+        // that violates the ordering is tampered with or truncated.
+        for (draft_id, attempts) in &send_attempts {
+            if send_approvals.get(draft_id).copied().unwrap_or_default() < *attempts {
+                return Err(RestoreError::Integrity(
+                    "connector journal records a send attempt without its approval".to_string(),
+                ));
+            }
+        }
+        for draft_id in send_reconciliations.keys() {
+            if !send_attempts.contains_key(draft_id) {
+                return Err(RestoreError::Integrity(
+                    "connector journal records a reconciliation without its attempt".to_string(),
+                ));
+            }
+        }
         let (_, final_events) =
             verified_connector_log_for_account(&self.audit_path, Some(&self.policy.account_id))?;
         if audit_event_snapshot(&events)? != audit_event_snapshot(&final_events)?
@@ -785,6 +822,10 @@ impl<'a> ConnectorService<'a> {
             all_drafts_linked_to_request_events: true,
             all_completed_review_events_linked_to_drafts: true,
             gated_action_stage_event_count,
+            send_approval_draft_count: send_approvals.len() as u64,
+            send_attempt_draft_count: send_attempts.len() as u64,
+            send_reconciliation_draft_count: send_reconciliations.len() as u64,
+            send_lifecycle_ordering_valid: true,
         })
     }
 
@@ -3087,19 +3128,40 @@ fn validate_current_connector_stage_evidence(
                 && event.draft_id.is_none()
                 && event.policy_decision_id.is_none()
         }
+        // The send adapter appends these three stages. They are only valid
+        // when they name the immutable draft and the policy decision the
+        // attempt was bound to, and when they use one of the adapter's own
+        // operation names — an approval or attempt can never be introduced by
+        // a connector operation.
+        (ConnectorAuditStage::ApprovalRecorded, ConnectorAuditOutcome::Denied) => {
+            is_send_adapter_operation(&event.operation)
+        }
         (
             ConnectorAuditStage::ApprovalRecorded
             | ConnectorAuditStage::AttemptRecorded
             | ConnectorAuditStage::ReconciliationRecorded,
             _,
-        ) => false,
+        ) => {
+            is_send_adapter_operation(&event.operation)
+                && event.draft_id.is_some()
+                && event.policy_decision_id.is_some()
+        }
     };
     if !valid {
         return Err(RestoreError::Integrity(
-            "connector journal stage evidence is invalid for the current product phase".to_string(),
+            "connector journal stage evidence is invalid for its stage".to_string(),
         ));
     }
     Ok(())
+}
+
+/// The operation names the send adapter is permitted to write into the shared
+/// journal. Anything else appearing on an action stage is an integrity failure.
+pub(crate) fn is_send_adapter_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "executeSend" | "executeSendDryRun" | "reconcileSend"
+    )
 }
 
 fn read_connector_draft_file(path: &Path) -> Result<Vec<u8>, RestoreError> {
@@ -3442,6 +3504,52 @@ pub(crate) fn append_owner_only_connector_event(
         return Err(std::io::Error::last_os_error().into());
     }
     Ok(())
+}
+
+/// The content-addressed identity of an action draft. It is a pure derivation
+/// of the draft's own immutable fields, which is why a draft file whose name
+/// does not equal this value is rejected. Exposing the derivation authorizes
+/// nothing: drafts are still created only through the policy-checked connector.
+pub fn action_draft_identity(draft: &ActionDraft) -> String {
+    draft_identity(
+        &draft.account_id,
+        &draft.conversation_id,
+        &draft.recipient,
+        draft.reply_target.as_ref(),
+        &draft.rendered_text_sha256,
+        &draft.attachments,
+        &draft.source_fingerprint,
+        &draft.policy_decision_id,
+        &draft.requester_id,
+        &draft.connector_version,
+        &draft.api_version,
+        draft.created_at_unix_nanoseconds,
+        draft.expires_at_unix_nanoseconds,
+    )
+}
+
+/// Reads one immutable connector draft from an owner-only file and validates
+/// its structure. The send adapter uses this so it never parses a draft with
+/// weaker checks than the connector that produced it.
+pub fn load_action_draft(path: &Path) -> Result<ActionDraft, RestoreError> {
+    let bytes = read_connector_draft_file(path)?;
+    let draft: ActionDraft = serde_json::from_slice(&bytes)?;
+    validate_draft_structure(&draft)?;
+    let file_id = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| valid_sha256(value))
+        .ok_or_else(|| {
+            RestoreError::Integrity(
+                "connector draft filename is not an immutable draft identity".to_string(),
+            )
+        })?;
+    if draft.draft_id != file_id {
+        return Err(RestoreError::Integrity(
+            "connector draft filename does not match its contents".to_string(),
+        ));
+    }
+    Ok(draft)
 }
 
 pub fn audit_connector_log(path: &Path) -> Result<ConnectorAuditReport, RestoreError> {

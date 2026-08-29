@@ -46,10 +46,20 @@ different conversation, enable a remote model, or send a reply remains inert
 message content.
 
 There is deliberately no send capability, approval operation, private-client
-call, or network client in this module. Draft creation writes a new mode-`0600`
-local record into an owner-only directory and cannot mutate WeChat state.
-Draft text and search queries enter the CLI through standard input so they do
-not appear in process arguments.
+call, or network client in this module, and there is none in the connector
+either. Draft creation writes a new mode-`0600` local record into an owner-only
+directory and cannot mutate WeChat state. Draft text and search queries enter
+the CLI through standard input so they do not appear in process arguments.
+
+Sending exists as a separate, owner-driven command (`SEND_ADAPTER.md`), never
+as a tool an AI caller can invoke. The separation is deliberate and structural,
+not conventional: the send path requires approval evidence a local human must
+produce with `send approve --confirm`, it runs in a different process from the
+one that parses message content, and the process that actually drives the
+client holds no key, no replica handle, and no policy. A message that asks an
+agent to send a reply therefore remains inert message content at every layer —
+the agent cannot reach the adapter, and the adapter would refuse a capability
+whose recipient the owner did not approve.
 
 ## Audit semantics
 
@@ -70,17 +80,20 @@ signed attestation; see `CONNECTOR_AUDIT.md`.
 The key-gated `audit-connector-state` command further verifies all immutable
 draft files against the encrypted replica, current policy, and completed
 request/review events. It reports stale and expired counts without releasing
-draft or recipient data, and fails if a gated action stage appears. It is a
-local maintenance command, not a Unix connector operation available to an AI caller.
+draft or recipient data, and validates the send adapter's action stages against
+their drafts and their required ordering. It is a local maintenance command,
+not a Unix connector operation available to an AI caller.
 
 Connector drafts bind the body to account/conversation and human-readable
 recipient evidence, optional reply target, attachment digests, connector/API
 version, expiry, requester, policy decision, and authoritative checkpoint.
-They are immutable (`create_new`) and have a separate preview operation, but no
-approval or execution operation exists before the Phase 4 gate.
+They are immutable (`create_new`) and have a separate preview operation. No
+approval or execution operation is exposed over the connector; a draft becomes
+sendable only when the owner approves it out of band.
 
 The Rust library also contains the pure validation types documented in
-`ACTION_SAFETY_CONTRACT.md`. They let tests exercise future gate, adapter,
-approval-binding, idempotency, rate, kill-switch, and lifecycle invariants, but
-they are not registered as connector, CLI, or Unix operations. They have no
-approval issuer or action adapter and do not change this tool boundary.
+`ACTION_SAFETY_CONTRACT.md`. They enforce the gate, adapter, approval-binding,
+idempotency, rate, kill-switch, and lifecycle invariants for the send adapter,
+and they remain unregistered as connector or Unix operations. The adapter's own
+commands live under `greenbubbles-restore send` and are reachable only from a
+local shell, never from a tool call.

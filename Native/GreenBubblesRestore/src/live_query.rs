@@ -1424,7 +1424,7 @@ fn list_messages_in_time_range_with_open_shards(
             continue;
         }
 
-        let columns = match table_columns(&connection, &table_name) {
+        let columns = match table_columns(connection, &table_name) {
             Ok(columns) => columns,
             Err(_) => {
                 warnings.push(QueryWarning {

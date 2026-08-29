@@ -12,6 +12,7 @@ let package = Package(
     .library(name: "GreenBubblesHistory", targets: ["GreenBubblesHistory"]),
     .library(name: "GreenBubblesWeb", targets: ["GreenBubblesWeb"]),
     .library(name: "GreenBubblesAcquire", targets: ["GreenBubblesAcquire"]),
+    .library(name: "GreenBubblesSendKit", targets: ["GreenBubblesSendKit"]),
     .executable(name: "greenbubbles", targets: ["GreenBubblesCLI"]),
     .executable(
       name: "greenbubbles-public-article",
@@ -25,6 +26,14 @@ let package = Package(
       name: "greenbubbles-history",
       targets: ["GreenBubblesHistoryApp"]
     ),
+    .executable(
+      name: "greenbubbles-send",
+      targets: ["GreenBubblesSendCLI"]
+    ),
+    .executable(
+      name: "greenbubbles-input-helper",
+      targets: ["GreenBubblesInputHelper"]
+    ),
   ],
   targets: [
     .target(name: "GreenBubblesCore"),
@@ -33,6 +42,7 @@ let package = Package(
       linkerSettings: [.linkedLibrary("sqlite3")]
     ),
     .target(name: "GreenBubblesWeb"),
+    .target(name: "GreenBubblesSendKit"),
     .target(
       name: "GreenBubblesAcquire",
       dependencies: ["GreenBubblesCore"]
@@ -54,6 +64,20 @@ let package = Package(
       dependencies: ["GreenBubblesHistory"],
       linkerSettings: [.linkedFramework("Security")]
     ),
+    .executableTarget(
+      name: "GreenBubblesSendCLI",
+      dependencies: ["GreenBubblesSendKit"],
+      linkerSettings: [.linkedFramework("AppKit")]
+    ),
+    .executableTarget(
+      name: "GreenBubblesInputHelper",
+      dependencies: ["GreenBubblesSendKit"],
+      linkerSettings: [
+        .linkedFramework("AppKit"),
+        .linkedFramework("ScreenCaptureKit"),
+        .linkedFramework("Vision"),
+      ]
+    ),
     .testTarget(
       name: "GreenBubblesCoreTests",
       dependencies: ["GreenBubblesCore"]
@@ -69,6 +93,10 @@ let package = Package(
     .testTarget(
       name: "GreenBubblesAcquireTests",
       dependencies: ["GreenBubblesAcquire"]
+    ),
+    .testTarget(
+      name: "GreenBubblesSendKitTests",
+      dependencies: ["GreenBubblesSendKit"]
     ),
   ]
 )

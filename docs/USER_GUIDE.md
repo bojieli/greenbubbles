@@ -9,6 +9,12 @@ GreenBubbles is local software. The query path does not send messages, upload
 history, or copy the full message corpus into JSON. It opens owner-authorized
 SQLite/WCDB files read-only and returns one bounded page at a time.
 
+Sending is a separate, owner-run path that ships closed and is never reachable
+from a query or a tool call. If you want to enable it, read
+[the send adapter guide](SEND_ADAPTER.md) first; `greenbubbles-restore send
+doctor` will tell you precisely why it is disabled and what each reason
+requires.
+
 ## Choose a workflow
 
 | Need | Recommended workflow |

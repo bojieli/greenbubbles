@@ -124,10 +124,7 @@ mod tests {
     #[test]
     fn rejects_an_oversized_or_non_utf8_secret_line() {
         assert!(matches!(
-            decode_32_byte_secret_line(
-                &vec![b'1'; MAXIMUM_SECRET_LINE_BYTES + 1],
-                invalid_replica_key
-            ),
+            decode_32_byte_secret_line(&[b'1'; MAXIMUM_SECRET_LINE_BYTES + 1], invalid_replica_key),
             Err(RestoreError::InvalidReplicaKey)
         ));
         assert!(matches!(

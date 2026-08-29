@@ -23,13 +23,18 @@ let stagedMode = CommandLine.arguments.dropFirst().contains("--staged")
 
 // Rules target secret-shaped material only. Plain 64-hex strings are allowed:
 // pinned build hashes legitimately appear in sources and docs.
-let bannedFileNames: [String] = ["all_keys.json", "wechat-passphrase.json"]
+let bannedFileNames: [String] = [
+  "all_keys.json", "wechat-passphrase.json", "signing-key.json", "signing-seed.json",
+]
 let bannedPathComponents: [String] = ["decrypted"]
 let bannedContentRules: [(label: String, pattern: String)] = [
   ("WCDB raw-key literal", #"x'[0-9a-fA-F]{96}'"#),
   ("JSON passphrase field", #""passphrase"\s*:\s*"[0-9a-fA-F]{64}""#),
   ("JSON enc_key field", #""enc_key"\s*:\s*"[0-9a-fA-F]{64}""#),
   ("SQLCipher PRAGMA key", #"(?i)PRAGMA\s+key\s*=\s*"?x?'?[0-9a-fA-F]{64,}"?'?"#),
+  // The send adapter's release signing seed. Only the verifying (public) key
+  // may ever be committed, and it is pinned at build time, not stored here.
+  ("send signing-key seed", #""signingKeySeedHex"\s*:\s*"[0-9a-fA-F]{64}""#),
 ]
 
 func runGit(_ arguments: [String]) throws -> String {

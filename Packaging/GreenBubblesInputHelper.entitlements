@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The helper requests nothing either. Accessibility and Screen Recording are
+  TCC grants, not entitlements: they are granted by the user in System Settings
+  and can be revoked there. The helper links only Apple-signed system
+  frameworks and our own same-team-signed code, so library validation stays on.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict/>
+</plist>

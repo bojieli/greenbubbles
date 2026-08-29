@@ -80,3 +80,27 @@ resolve back to the same draft, conversation, and policy decision. The command
 rejects any approval, attempt, or reconciliation stage while Phase 4 remains
 closed. Its output contains counts and booleans only; it emits no draft text,
 recipient, account, conversation, requester, path, or stable identity.
+
+## Send-adapter action stages
+
+The `approvalRecorded`, `attemptRecorded`, and `reconciliationRecorded` stages
+are written by the send adapter (`SEND_ADAPTER.md`), never by a connector
+operation. Each event names the immutable draft and its policy decision, uses
+one of the adapter's own operation names (`executeSend`, `executeSendDryRun`,
+`reconcileSend`), and carries no message body: only counts, digests, and the
+outcome.
+
+One attempt produces exactly three events, in order and before the actions they
+describe can have had an effect:
+
+1. `approvalRecorded` — the PRECHECK decision. A denial ends here, and no
+   effector call is ever made.
+2. `attemptRecorded` — appended *before* the capability is dispatched, so an
+   interrupted process still leaves a record that a dispatch was about to
+   happen.
+3. `reconciliationRecorded` — the settled outcome, and again later when a
+   parked attempt is resolved against the replica.
+
+`audit-connector-state` validates this ordering per draft: an attempt without a
+completed approval, or a reconciliation without an attempt, is an integrity
+failure.

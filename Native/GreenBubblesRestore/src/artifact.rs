@@ -236,9 +236,10 @@ impl ArtifactResolver {
                 self.resource_index_incomplete && md5s.is_empty() && title.is_none();
             let availability = if self.account_root.is_none() {
                 ArtifactAvailability::AccountRootUnavailable
-            } else if metadata_index_gap || self.file_index_incomplete {
-                ArtifactAvailability::MetadataMissing
-            } else if md5s.is_empty() && title.is_none() {
+            } else if metadata_index_gap
+                || self.file_index_incomplete
+                || (md5s.is_empty() && title.is_none())
+            {
                 ArtifactAvailability::MetadataMissing
             } else {
                 ArtifactAvailability::NotDownloaded
