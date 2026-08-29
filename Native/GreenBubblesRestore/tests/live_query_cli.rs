@@ -9,6 +9,12 @@ use std::time::Instant;
 use rusqlite::{params, Connection};
 use serde_json::Value;
 
+use greenbubbles_restore::live_query::QueryDatabaseAccess;
+use greenbubbles_restore::recoverable_snapshot::create_recoverable_snapshot_with_recovery_words_and_optional_protectors;
+use greenbubbles_restore::snapshot_protector::{
+    SnapshotLocalCredential, SnapshotPassphrase, SnapshotRecoveryWords,
+};
+
 const RAW_KEY: [u8; 32] = [0xAB; 32];
 
 #[test]
@@ -469,6 +475,243 @@ fn encrypted_cli_reads_directly_and_wrong_key_fails_without_disclosure() {
 }
 
 #[test]
+fn default_and_named_profiles_remove_repeated_source_arguments() {
+    let fixture = Fixture::new(false);
+    let profile_home = ProfileHome::new(serde_json::json!({
+        "schema": "greenbubbles.query-profiles.v1",
+        "formatVersion": 1,
+        "defaultProfile": "plain",
+        "profiles": {
+            "plain": {
+                "sourceRoot": fixture.root,
+                "access": {"mode": "decrypted"}
+            },
+            "alternate": {
+                "sourceRoot": fixture.root,
+                "access": {"mode": "decrypted"}
+            }
+        }
+    }));
+
+    let conversations = run_with_home(
+        profile_home.path(),
+        &["conversations", "list", "--limit", "1"],
+        None,
+    );
+    assert_success(&conversations);
+    let conversations: Value = serde_json::from_slice(&conversations.stdout).unwrap();
+    assert_eq!(conversations["source"]["mode"], "decrypted");
+    assert_eq!(conversations["page"]["returned"], 1);
+
+    let messages = run_with_home(
+        profile_home.path(),
+        &[
+            "messages",
+            "list",
+            "--profile",
+            "alternate",
+            "--conversation",
+            "wxid_talker",
+            "--limit",
+            "1",
+        ],
+        None,
+    );
+    assert_success(&messages);
+    let messages: Value = serde_json::from_slice(&messages.stdout).unwrap();
+    assert_eq!(messages["items"][0]["content"]["Text"], "s1-new");
+
+    for (arguments, expected_operation) in [
+        (vec!["profile", "list"], None),
+        (vec!["profile", "show", "plain"], None),
+        (vec!["profile", "validate"], None),
+        (vec!["source", "status"], Some("source.status")),
+    ] {
+        let output = run_with_home(profile_home.path(), &arguments, None);
+        assert_success(&output);
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        if let Some(expected_operation) = expected_operation {
+            assert_eq!(response["operation"], expected_operation);
+        }
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("message_content"));
+    }
+
+    let set_default = run_with_home(
+        profile_home.path(),
+        &["profile", "set-default", "alternate"],
+        None,
+    );
+    assert_success(&set_default);
+    let stored: Value =
+        serde_json::from_slice(&fs::read(profile_home.config_path()).unwrap()).unwrap();
+    assert_eq!(stored["defaultProfile"], "alternate");
+    assert_eq!(
+        fs::metadata(profile_home.config_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+
+    for arguments in [
+        vec![
+            "conversations",
+            "list",
+            fixture.root.to_str().unwrap(),
+            "--decrypted",
+            "--profile",
+            "plain",
+        ],
+        vec!["conversations", "list", "--decrypted"],
+    ] {
+        let failure = run_with_home(profile_home.path(), &arguments, None);
+        assert!(!failure.status.success());
+        let response: Value = serde_json::from_slice(&failure.stdout).unwrap();
+        assert_eq!(response["error"]["code"], "invalidRequest");
+    }
+}
+
+#[test]
+fn live_key_profile_keeps_key_out_of_arguments_and_search_stdin() {
+    let fixture = Fixture::new(true);
+    let profile_home = ProfileHome::empty();
+    let credential = profile_home.credential_path("wechat-key");
+    write_private_file(
+        &credential,
+        format!("{}\n", hex::encode(RAW_KEY)).as_bytes(),
+    );
+    profile_home.write_configuration(serde_json::json!({
+        "schema": "greenbubbles.query-profiles.v1",
+        "formatVersion": 1,
+        "defaultProfile": "live",
+        "profiles": {
+            "live": {
+                "sourceRoot": fixture.root,
+                "access": {
+                    "mode": "liveWeChatKeyFile",
+                    "credentialFile": credential
+                }
+            }
+        }
+    }));
+
+    let conversations = run_with_home(
+        profile_home.path(),
+        &["conversations", "list", "--limit", "1"],
+        None,
+    );
+    assert_success(&conversations);
+    let conversations: Value = serde_json::from_slice(&conversations.stdout).unwrap();
+    assert_eq!(conversations["source"]["mode"], "liveEncrypted");
+
+    let search = run_with_home(
+        profile_home.path(),
+        &[
+            "messages",
+            "search",
+            "--query-stdin",
+            "--conversation",
+            "wxid_talker",
+            "--limit",
+            "1",
+        ],
+        Some(b"hello\n"),
+    );
+    assert_success(&search);
+    let search: Value = serde_json::from_slice(&search.stdout).unwrap();
+    assert_eq!(search["operation"], "messages.search");
+    assert_eq!(search["page"]["returned"], 1);
+
+    fs::set_permissions(&credential, fs::Permissions::from_mode(0o640)).unwrap();
+    let failure = run_with_home(profile_home.path(), &["conversations", "list"], None);
+    assert!(!failure.status.success());
+    let response: Value = serde_json::from_slice(&failure.stdout).unwrap();
+    assert_eq!(response["error"]["code"], "invalidProfile");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&failure.stdout),
+        String::from_utf8_lossy(&failure.stderr)
+    );
+    assert!(!combined.contains(&hex::encode(RAW_KEY)));
+    assert!(!combined.contains(fixture.root.to_str().unwrap()));
+}
+
+#[test]
+fn snapshot_profiles_support_local_recovery_and_passphrase_credentials() {
+    let fixture = Fixture::new(true);
+    fs::set_permissions(fixture._directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let recovery_words = SnapshotRecoveryWords::generate().unwrap();
+    let local_credential = SnapshotLocalCredential::generate().unwrap();
+    let passphrase = SnapshotPassphrase::from_utf8(
+        b"correct horse battery staple for snapshot profile".to_vec(),
+    )
+    .unwrap();
+    let snapshot = fixture._directory.path().join("recoverable-snapshot");
+    create_recoverable_snapshot_with_recovery_words_and_optional_protectors(
+        &fixture.root,
+        QueryDatabaseAccess::LiveEncrypted(&RAW_KEY),
+        &snapshot,
+        &recovery_words,
+        Some(&local_credential),
+        Some(&passphrase),
+    )
+    .unwrap();
+
+    let profile_home = ProfileHome::empty();
+    let recovery_file = profile_home.credential_path("recovery-kit");
+    let local_file = profile_home.credential_path("local-credential");
+    let passphrase_file = profile_home.credential_path("snapshot-passphrase");
+    recovery_words.write_private_file(&recovery_file).unwrap();
+    local_credential.write_private_file(&local_file).unwrap();
+    write_private_file(
+        &passphrase_file,
+        b"correct horse battery staple for snapshot profile\n",
+    );
+    profile_home.write_configuration(serde_json::json!({
+        "schema": "greenbubbles.query-profiles.v1",
+        "formatVersion": 1,
+        "defaultProfile": "archive-local",
+        "profiles": {
+            "archive-local": {
+                "sourceRoot": snapshot,
+                "access": {
+                    "mode": "snapshotLocalCredential",
+                    "credentialFile": local_file
+                }
+            },
+            "archive-recovery": {
+                "sourceRoot": snapshot,
+                "access": {
+                    "mode": "snapshotRecoveryKit",
+                    "credentialFile": recovery_file
+                }
+            },
+            "archive-passphrase": {
+                "sourceRoot": snapshot,
+                "access": {
+                    "mode": "snapshotPassphraseFile",
+                    "credentialFile": passphrase_file
+                }
+            }
+        }
+    }));
+
+    for profile in [None, Some("archive-recovery"), Some("archive-passphrase")] {
+        let mut arguments = vec!["conversations", "list"];
+        if let Some(profile) = profile {
+            arguments.extend(["--profile", profile]);
+        }
+        arguments.extend(["--limit", "1"]);
+        let output = run_with_home(profile_home.path(), &arguments, None);
+        assert_success(&output);
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["source"]["mode"], "snapshotEncrypted");
+        assert_eq!(response["page"]["returned"], 1);
+    }
+}
+
+#[test]
 fn unbounded_and_ambiguous_access_options_fail_closed() {
     let fixture = Fixture::new(false);
     for arguments in [
@@ -840,10 +1083,83 @@ fn open_database_for_creation(path: &Path, encrypted: bool) -> Connection {
     connection
 }
 
+struct ProfileHome {
+    directory: tempfile::TempDir,
+    configuration_directory: PathBuf,
+    credential_directory: PathBuf,
+}
+
+impl ProfileHome {
+    fn empty() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let configuration_directory = directory.path().join(".greenbubbles");
+        let credential_directory = configuration_directory.join("credentials");
+        fs::create_dir_all(&credential_directory).unwrap();
+        fs::set_permissions(&configuration_directory, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&credential_directory, fs::Permissions::from_mode(0o700)).unwrap();
+        Self {
+            directory,
+            configuration_directory,
+            credential_directory,
+        }
+    }
+
+    fn new(configuration: Value) -> Self {
+        let home = Self::empty();
+        home.write_configuration(configuration);
+        home
+    }
+
+    fn path(&self) -> &Path {
+        self.directory.path()
+    }
+
+    fn config_path(&self) -> PathBuf {
+        self.configuration_directory.join("query-profiles.json")
+    }
+
+    fn credential_path(&self, name: &str) -> PathBuf {
+        self.credential_directory.join(name)
+    }
+
+    fn write_configuration(&self, configuration: Value) {
+        write_private_file(
+            &self.config_path(),
+            &serde_json::to_vec_pretty(&configuration).unwrap(),
+        );
+    }
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) {
+    fs::write(path, bytes).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
 fn run(arguments: &[&str], input: Option<&[u8]>) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"));
     command
         .args(arguments)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if input.is_some() {
+        command.stdin(Stdio::piped());
+    } else {
+        command.stdin(Stdio::null());
+    }
+    let mut child = command.spawn().unwrap();
+    if let Some(input) = input {
+        child.stdin.take().unwrap().write_all(input).unwrap();
+    }
+    child.wait_with_output().unwrap()
+}
+
+fn run_with_home(home: &Path, arguments: &[&str], input: Option<&[u8]>) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"));
+    command
+        .args(arguments)
+        .env("HOME", home)
+        .env_remove("GREENBUBBLES_QUERY_PROFILES_FILE")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if input.is_some() {

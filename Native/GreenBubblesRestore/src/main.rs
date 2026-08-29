@@ -50,6 +50,11 @@ use greenbubbles_restore::{
     operator::{restore_snapshot_and_publish_with_progress, OfflineRestorePublishOptions},
     preflight_snapshot_with_progress, prepare_available_catalog_with_progress,
     prepare_catalog_batch_with_progress, prepare_catalog_with_progress,
+    query_profile::{
+        default_query_profile_path, read_private_32_byte_credential,
+        read_private_snapshot_passphrase, QueryProfile, QueryProfileAccess, QueryProfileError,
+        QueryProfileStore, QUERY_PROFILE_FORMAT_VERSION, QUERY_PROFILE_SCHEMA,
+    },
     reconcile::reconcile_archives,
     recoverable_snapshot::{
         create_recoverable_snapshot, create_recoverable_snapshot_from_stable_capture,
@@ -219,6 +224,13 @@ fn query_error_details(
             false,
         );
     }
+    if error.downcast_ref::<QueryProfileError>().is_some() {
+        return (
+            "invalidProfile",
+            "The selected local query profile could not be loaded or validated.",
+            false,
+        );
+    }
     (
         "invalidRequest",
         "The query invocation is invalid or incomplete.",
@@ -275,6 +287,172 @@ fn attachment_error_details(
     )
 }
 
+fn run_query_profile_command(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    let subcommand = arguments.first().map(String::as_str).unwrap_or("help");
+    if subcommand == "help"
+        || subcommand == "--help"
+        || subcommand == "-h"
+        || arguments
+            .iter()
+            .skip(1)
+            .any(|value| matches!(value.as_str(), "--help" | "-h"))
+    {
+        println!("{}", query_profile_command_help());
+        return Ok(());
+    }
+    match subcommand {
+        "path" => {
+            require_exact_argument_count(&arguments, 1, "profile path takes no arguments")?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema": QUERY_PROFILE_SCHEMA,
+                    "formatVersion": QUERY_PROFILE_FORMAT_VERSION,
+                    "configurationFile": default_query_profile_path()?,
+                }))?
+            );
+        }
+        "template" => {
+            require_exact_argument_count(&arguments, 1, "profile template takes no arguments")?;
+            println!("{}", query_profile_template()?);
+        }
+        "list" => {
+            require_exact_argument_count(&arguments, 1, "profile list takes no arguments")?;
+            let (configuration_file, store) = QueryProfileStore::load_default()?;
+            let profiles = store
+                .profiles
+                .iter()
+                .map(|(name, profile)| {
+                    serde_json::json!({
+                        "name": name,
+                        "default": store.default_profile.as_deref() == Some(name.as_str()),
+                        "sourceRoot": profile.source_root,
+                        "accessMode": profile.access.mode_name(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema": QUERY_PROFILE_SCHEMA,
+                    "formatVersion": QUERY_PROFILE_FORMAT_VERSION,
+                    "configurationFile": configuration_file,
+                    "defaultProfile": store.default_profile,
+                    "profiles": profiles,
+                }))?
+            );
+        }
+        "show" => {
+            require_exact_argument_count(&arguments, 2, "profile show requires one name")?;
+            let (configuration_file, store) = QueryProfileStore::load_default()?;
+            let (name, profile) = store.select(Some(&arguments[1]))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema": QUERY_PROFILE_SCHEMA,
+                    "formatVersion": QUERY_PROFILE_FORMAT_VERSION,
+                    "configurationFile": configuration_file,
+                    "name": name,
+                    "default": store.default_profile.as_deref() == Some(name.as_str()),
+                    "sourceRoot": profile.source_root,
+                    "access": profile.access,
+                }))?
+            );
+        }
+        "validate" => {
+            if arguments.len() > 2 {
+                return Err("profile validate accepts at most one name".into());
+            }
+            let requested = arguments.get(1).map(String::as_str);
+            let (configuration_file, invocation) =
+                load_configured_query_invocation(requested)?;
+            let source = invocation.access.open_source(&invocation.source_root)?;
+            let status = live_source_status(&source)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema": "greenbubbles.query-profile-validation.v1",
+                    "formatVersion": 1,
+                    "ok": true,
+                    "configurationFile": configuration_file,
+                    "profile": invocation.profile_name,
+                    "sourceMode": status.source.mode,
+                    "databaseCount": status.database_count,
+                    "totalSqliteStorageBytes": status.total_sqlite_storage_bytes,
+                }))?
+            );
+        }
+        "set-default" => {
+            require_exact_argument_count(
+                &arguments,
+                2,
+                "profile set-default requires one name",
+            )?;
+            let (configuration_file, mut store) = QueryProfileStore::load_default()?;
+            store.set_default(&arguments[1])?;
+            store.replace_private_file(&configuration_file)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema": QUERY_PROFILE_SCHEMA,
+                    "formatVersion": QUERY_PROFILE_FORMAT_VERSION,
+                    "configurationFile": configuration_file,
+                    "defaultProfile": arguments[1],
+                    "updated": true,
+                }))?
+            );
+        }
+        _ => {
+            return Err(format!(
+                "unsupported profile subcommand: {subcommand}; expected path, template, list, show, validate, or set-default"
+            )
+            .into())
+        }
+    }
+    Ok(())
+}
+
+fn require_exact_argument_count(
+    arguments: &[String],
+    expected: usize,
+    message: &str,
+) -> Result<(), String> {
+    if arguments.len() == expected {
+        Ok(())
+    } else {
+        Err(message.into())
+    }
+}
+
+fn query_profile_template() -> Result<String, Box<dyn std::error::Error>> {
+    let home = env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/Users/you"));
+    let credential_directory = home.join(".greenbubbles/credentials");
+    Ok(serde_json::to_string_pretty(&serde_json::json!({
+        "schema": QUERY_PROFILE_SCHEMA,
+        "formatVersion": QUERY_PROFILE_FORMAT_VERSION,
+        "defaultProfile": "live",
+        "profiles": {
+            "live": {
+                "sourceRoot": "/ABSOLUTE/PATH/TO/WECHAT/db_storage",
+                "access": {
+                    "mode": "liveWeChatKeyFile",
+                    "credentialFile": credential_directory.join("wechat-database-key")
+                }
+            },
+            "archive": {
+                "sourceRoot": "/ABSOLUTE/PATH/TO/RECOVERABLE-SNAPSHOT",
+                "access": {
+                    "mode": "snapshotLocalCredential",
+                    "credentialFile": credential_directory.join("snapshot-local-credential")
+                }
+            }
+        }
+    }))?)
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = env::args().skip(1).peekable();
     let command = arguments.next().unwrap_or_else(|| "help".to_string());
@@ -291,6 +469,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     match command.as_str() {
+        "profile" => {
+            run_query_profile_command(arguments.collect::<Vec<_>>())?;
+        }
         "source" => {
             let subcommand = arguments
                 .next()
@@ -305,8 +486,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{}", source_status_help());
                 return Ok(());
             }
-            let database_root = required_path(arguments.next(), "WeChat database root")?;
-            let remaining = arguments.collect::<Vec<_>>();
+            let (database_root, remaining) =
+                split_optional_query_source(arguments.collect::<Vec<_>>());
             if remaining
                 .iter()
                 .any(|value| matches!(value.as_str(), "--help" | "-h"))
@@ -316,7 +497,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             validate_command_options(
                 &remaining,
-                &["--snapshot-recovery-kit", "--snapshot-local-credential"],
+                &[
+                    "--profile",
+                    "--snapshot-recovery-kit",
+                    "--snapshot-local-credential",
+                ],
                 &[
                     "--passphrase-stdin",
                     "--snapshot-key-stdin",
@@ -324,8 +509,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "--decrypted",
                 ],
             )?;
-            let access = load_live_query_access(&database_root, &remaining)?;
-            let source = access.open_source(&database_root)?;
+            let invocation = resolve_query_invocation(database_root, &remaining)?;
+            let source = invocation.access.open_source(&invocation.source_root)?;
             let response = live_source_status(&source)?;
             println!("{}", serialize_query_response(&response)?);
         }
@@ -343,8 +528,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{}", conversations_command_help());
                 return Ok(());
             }
-            let database_root = required_path(arguments.next(), "WeChat database root")?;
-            let remaining = arguments.collect::<Vec<_>>();
+            let (database_root, remaining) =
+                split_optional_query_source(arguments.collect::<Vec<_>>());
             if remaining
                 .iter()
                 .any(|value| matches!(value.as_str(), "--help" | "-h"))
@@ -355,6 +540,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             validate_command_options(
                 &remaining,
                 &[
+                    "--profile",
                     "--limit",
                     "--cursor",
                     "--snapshot-recovery-kit",
@@ -367,8 +553,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "--decrypted",
                 ],
             )?;
-            let access = load_live_query_access(&database_root, &remaining)?;
-            let source = access.open_source(&database_root)?;
+            let invocation = resolve_query_invocation(database_root, &remaining)?;
+            let source = invocation.access.open_source(&invocation.source_root)?;
             let limit = option_usize(&remaining, "--limit")?.unwrap_or(DEFAULT_PAGE_LIMIT);
             let cursor = option_string(&remaining, "--cursor")?;
             let response = list_live_conversations(&source, limit, cursor.as_deref())?;
@@ -382,8 +568,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{}", messages_subcommand_help(&subcommand)?);
                 return Ok(());
             }
-            let database_root = required_path(arguments.next(), "WeChat database root")?;
-            let remaining = arguments.collect::<Vec<_>>();
+            let (database_root, remaining) =
+                split_optional_query_source(arguments.collect::<Vec<_>>());
             if remaining
                 .iter()
                 .any(|value| matches!(value.as_str(), "--help" | "-h"))
@@ -396,6 +582,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     validate_command_options(
                         &remaining,
                         &[
+                            "--profile",
                             "--conversation",
                             "--limit",
                             "--cursor",
@@ -409,9 +596,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             "--decrypted",
                         ],
                     )?;
-                    let access = load_live_query_access(&database_root, &remaining)?;
+                    let invocation = resolve_query_invocation(database_root, &remaining)?;
                     let conversation = required_option(&remaining, "--conversation")?;
-                    let source = access.open_source(&database_root)?;
+                    let source = invocation.access.open_source(&invocation.source_root)?;
                     let limit = option_usize(&remaining, "--limit")?.unwrap_or(DEFAULT_PAGE_LIMIT);
                     let cursor = option_string(&remaining, "--cursor")?;
                     let response =
@@ -422,6 +609,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     validate_command_options(
                         &remaining,
                         &[
+                            "--profile",
                             "--conversation",
                             "--limit",
                             "--cursor",
@@ -439,12 +627,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     if !remaining.iter().any(|value| value == "--query-stdin") {
                         return Err("message search requires --query-stdin".into());
                     }
-                    let access = load_live_query_access(&database_root, &remaining)?;
+                    let invocation = resolve_query_invocation(database_root, &remaining)?;
                     let mut query = read_utf8_stdin_limited(MAX_SEARCH_QUERY_BYTES as u64)?;
                     while query.ends_with(['\n', '\r']) {
                         query.pop();
                     }
-                    let source = access.open_source(&database_root)?;
+                    let source = invocation.access.open_source(&invocation.source_root)?;
                     let conversation = option_string(&remaining, "--conversation")?;
                     let limit =
                         option_usize(&remaining, "--limit")?.unwrap_or(DEFAULT_SEARCH_LIMIT);
@@ -480,8 +668,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{}", message_get_help());
                 return Ok(());
             }
-            let database_root = required_path(arguments.next(), "WeChat database root")?;
-            let remaining = arguments.collect::<Vec<_>>();
+            let (database_root, remaining) =
+                split_optional_query_source(arguments.collect::<Vec<_>>());
             if remaining
                 .iter()
                 .any(|value| matches!(value.as_str(), "--help" | "-h"))
@@ -492,6 +680,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             validate_command_options(
                 &remaining,
                 &[
+                    "--profile",
                     "--conversation",
                     "--message",
                     "--snapshot-recovery-kit",
@@ -504,10 +693,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "--decrypted",
                 ],
             )?;
-            let access = load_live_query_access(&database_root, &remaining)?;
+            let invocation = resolve_query_invocation(database_root, &remaining)?;
             let conversation = required_option(&remaining, "--conversation")?;
             let message_id = required_option(&remaining, "--message")?;
-            let source = access.open_source(&database_root)?;
+            let source = invocation.access.open_source(&invocation.source_root)?;
             let response = match get_live_message(&source, &conversation, &message_id) {
                 Ok(response) => response,
                 Err(LiveQueryError::InvalidCursor(_)) => {
@@ -2281,10 +2470,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!(
                 concat!(
                     "Usage:\n",
+                    "  greenbubbles-restore profile path|template|list|show|validate|set-default ...\n",
+                    "  greenbubbles-restore source status [--profile <name>]\n",
                     "  greenbubbles-restore source status <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
+                    "  greenbubbles-restore conversations list [--profile <name>] [--limit <1..500>] [--cursor <opaque-cursor>]\n",
                     "  greenbubbles-restore conversations list <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n",
+                    "  greenbubbles-restore messages list --conversation <id> [--profile <name>] [--limit <1..500>] [--cursor <opaque-cursor>]\n",
                     "  greenbubbles-restore messages list <source-root> --conversation <id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n",
+                    "  greenbubbles-restore messages search --query-stdin [--profile <name>] [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n",
                     "  greenbubbles-restore messages search <source-root> --query-stdin (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n",
+                    "  greenbubbles-restore message get --conversation <id> --message <opaque-id> [--profile <name>]\n",
                     "  greenbubbles-restore message get <source-root> --conversation <id> --message <opaque-id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
                     "  greenbubbles-restore attachment inspect <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
                     "  greenbubbles-restore attachment materialize <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document --attachment <opaque-id> --output <new-path> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
@@ -2357,9 +2552,37 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+const fn query_profile_command_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore profile path\n",
+        "  greenbubbles-restore profile template\n",
+        "  greenbubbles-restore profile list\n",
+        "  greenbubbles-restore profile show <name>\n",
+        "  greenbubbles-restore profile validate [<name>]\n",
+        "  greenbubbles-restore profile set-default <name>\n\n",
+        "Named query profiles live in ~/.greenbubbles/query-profiles.json by default.\n",
+        "The configuration remembers a source root and access mode. It never contains\n",
+        "a raw WeChat key, snapshot key, recovery phrase, or passphrase: encrypted modes\n",
+        "refer to a separate current-user-owned 0600 credential file inside an owner-only\n",
+        "directory. Configuration and credential symlinks are rejected.\n\n",
+        "Query use:\n",
+        "  omit both source and access arguments to use defaultProfile\n",
+        "  --profile <name> selects a different named profile\n",
+        "  explicit <source-root> plus one access mode remains supported\n",
+        "  profile selection cannot be mixed with explicit source/access arguments\n\n",
+        "Access mode names:\n",
+        "  liveWeChatKeyFile, snapshotLocalCredential, snapshotRecoveryKit,\n",
+        "  snapshotPassphraseFile, snapshotRawKeyFile, decrypted\n\n",
+        "GREENBUBBLES_QUERY_PROFILES_FILE may select another absolute owner-only\n",
+        "configuration file. Run `profile template` for the strict JSON schema.\n",
+    )
+}
+
 const fn source_status_help() -> &'static str {
     concat!(
         "Usage:\n",
+        "  greenbubbles-restore source status [--profile <name>]\n",
         "  greenbubbles-restore source status <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n\n",
         "Authenticates the required core databases read-only, then returns bounded,\n",
         "content-free storage accounting for every regular .db file and its adjacent\n",
@@ -2367,6 +2590,8 @@ const fn source_status_help() -> &'static str {
         "rows are restored, decoded, exported, indexed, or copied. Absolute paths are\n",
         "not returned. The inventory is capped at 4,096 databases and 100,000 entries.\n\n",
         "Access modes:\n",
+        "  no access arguments   Use defaultProfile from the private profile file\n",
+        "  --profile <name>      Use one named private query profile\n",
         "  --passphrase-stdin   Read the 32-byte WeChat database key from standard input\n",
         "  --snapshot-local-credential <file>  Use the owner-only local convenience file\n",
         "  --snapshot-recovery-kit <file>      Use the portable 24-word recovery kit\n",
@@ -2380,11 +2605,14 @@ const fn source_status_help() -> &'static str {
 const fn conversations_command_help() -> &'static str {
     concat!(
         "Usage:\n",
+        "  greenbubbles-restore conversations list [--profile <name>] [--limit <1..500>] [--cursor <opaque-cursor>]\n",
         "  greenbubbles-restore conversations list <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n\n",
         "Returns one bounded, keyset-paginated JSON page directly from session.db.\n",
         "The source is opened read-only with SQLite query_only enforcement; no archive,\n",
         "replica, staging database, search index, or media derivative is created.\n\n",
         "Access modes:\n",
+        "  no access arguments  Use defaultProfile from the private profile file\n",
+        "  --profile <name>     Use one named private query profile\n",
         "  --passphrase-stdin  Read the 32-byte WeChat database key from standard input\n",
         "  --snapshot-local-credential <file>  Use a local snapshot convenience protector\n",
         "  --snapshot-recovery-kit <file>      Use portable 24-word snapshot recovery\n",
@@ -2401,7 +2629,9 @@ const fn conversations_command_help() -> &'static str {
 const fn messages_command_help() -> &'static str {
     concat!(
         "Usage:\n",
+        "  greenbubbles-restore messages list --conversation <id> [--profile <name>] [--limit <1..500>] [--cursor <opaque-cursor>]\n",
         "  greenbubbles-restore messages list <source-root> --conversation <id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n\n",
+        "  greenbubbles-restore messages search --query-stdin [--profile <name>] [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n",
         "  greenbubbles-restore messages search <source-root> --query-stdin (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n\n",
         "Returns one bounded, typed, keyset-paginated JSON page directly from numbered\n",
         "WeChat message shards. Each shard uses a short read-only statement; the response\n",
@@ -2409,6 +2639,8 @@ const fn messages_command_help() -> &'static str {
         "prefers compatible native WeChat FTS. If it is unavailable, each response scans at\n",
         "most 500 decoded source messages and returns a continuation without writing an index.\n\n",
         "Access modes:\n",
+        "  no access arguments  Use defaultProfile from the private profile file\n",
+        "  --profile <name>     Use one named private query profile\n",
         "  --passphrase-stdin  Read the 32-byte WeChat database key from standard input\n",
         "  --snapshot-local-credential <file>  Use a local snapshot convenience protector\n",
         "  --snapshot-recovery-kit <file>      Use portable 24-word snapshot recovery\n",
@@ -2426,6 +2658,7 @@ const fn messages_command_help() -> &'static str {
 const fn messages_search_help() -> &'static str {
     concat!(
         "Usage:\n",
+        "  greenbubbles-restore messages search --query-stdin [--profile <name>] [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n",
         "  greenbubbles-restore messages search <source-root> --query-stdin (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n\n",
         "Runs one literal, parameterized, keyset-paginated query against a compatible\n",
         "read-only native WeChat message FTS database. It never builds an index or falls\n",
@@ -2439,6 +2672,8 @@ const fn messages_search_help() -> &'static str {
         "                          UTF-8 input is the search query\n",
         "  snapshot protector file all standard input is the search query; protector\n",
         "                          contents and unwrapped key never enter standard input\n",
+        "  configured profile      all standard input is the search query; the private\n",
+        "                          credential file is read separately\n",
         "  --decrypted             all standard input is the search query\n\n",
         "Options:\n",
         "  --query-stdin       Required; search text is never accepted in an argument\n",
@@ -2462,12 +2697,15 @@ fn messages_subcommand_help(subcommand: &str) -> Result<&'static str, String> {
 const fn message_get_help() -> &'static str {
     concat!(
         "Usage:\n",
+        "  greenbubbles-restore message get --conversation <id> --message <opaque-id> [--profile <name>]\n",
         "  greenbubbles-restore message get <source-root> --conversation <id> --message <opaque-id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n\n",
         "Performs one bounded retrieval by the opaque identity returned from messages\n",
         "list. The identity is bound to the source and conversation. GreenBubbles opens\n",
         "only the named read-only shard and performs one rowid/key lookup; it does not\n",
         "scan the conversation or create an archive, index, replica, or derivative.\n\n",
         "Access modes:\n",
+        "  no access arguments   Use defaultProfile from the private profile file\n",
+        "  --profile <name>      Use one named private query profile\n",
         "  --passphrase-stdin   Read the 32-byte WeChat database key from standard input\n",
         "  --snapshot-local-credential <file>  Use a local snapshot convenience protector\n",
         "  --snapshot-recovery-kit <file>      Use portable 24-word snapshot recovery\n",
@@ -2792,6 +3030,7 @@ const fn connector_query_direct_help() -> &'static str {
 
 fn ai_command_help(command: &str) -> Option<&'static str> {
     match command {
+        "profile" => Some(query_profile_command_help()),
         "source" => Some(source_status_help()),
         "conversations" => Some(conversations_command_help()),
         "messages" => Some(messages_command_help()),
@@ -2902,6 +3141,12 @@ enum OwnedLiveQueryAccess {
     Decrypted,
 }
 
+struct ResolvedQueryInvocation {
+    source_root: PathBuf,
+    access: OwnedLiveQueryAccess,
+    profile_name: Option<String>,
+}
+
 impl OwnedLiveQueryAccess {
     fn open_source<'a>(
         &'a self,
@@ -2942,6 +3187,140 @@ impl OwnedLiveQueryAccess {
             }
         }
     }
+}
+
+fn split_optional_query_source(mut arguments: Vec<String>) -> (Option<PathBuf>, Vec<String>) {
+    let source_root = arguments
+        .first()
+        .filter(|value| !value.starts_with("--"))
+        .map(PathBuf::from);
+    if source_root.is_some() {
+        arguments.remove(0);
+    }
+    (source_root, arguments)
+}
+
+fn resolve_query_invocation(
+    explicit_source_root: Option<PathBuf>,
+    arguments: &[String],
+) -> Result<ResolvedQueryInvocation, Box<dyn std::error::Error>> {
+    let requested_profile = option_string(arguments, "--profile")?;
+    if let Some(source_root) = explicit_source_root {
+        if requested_profile.is_some() {
+            return Err(
+                "--profile cannot be combined with an explicit source root or access mode".into(),
+            );
+        }
+        let access = load_live_query_access(&source_root, arguments)?;
+        return Ok(ResolvedQueryInvocation {
+            source_root,
+            access,
+            profile_name: None,
+        });
+    }
+    if contains_database_access_option(arguments) {
+        return Err(
+            "database access options require an explicit source root and cannot override a profile"
+                .into(),
+        );
+    }
+    let (_, invocation) = load_configured_query_invocation(requested_profile.as_deref())?;
+    Ok(invocation)
+}
+
+fn load_configured_query_invocation(
+    requested_profile: Option<&str>,
+) -> Result<(PathBuf, ResolvedQueryInvocation), Box<dyn std::error::Error>> {
+    let (configuration_file, store) = QueryProfileStore::load_default()?;
+    let (profile_name, profile) = store.select(requested_profile)?;
+    let access = load_query_profile_access(profile)?;
+    Ok((
+        configuration_file,
+        ResolvedQueryInvocation {
+            source_root: profile.source_root.clone(),
+            access,
+            profile_name: Some(profile_name),
+        },
+    ))
+}
+
+fn load_query_profile_access(
+    profile: &QueryProfile,
+) -> Result<OwnedLiveQueryAccess, QueryProfileError> {
+    match &profile.access {
+        QueryProfileAccess::LiveWeChatKeyFile(access) => {
+            let key = read_private_32_byte_credential(&access.credential_file)?;
+            Ok(OwnedLiveQueryAccess::LiveEncrypted(
+                DatabasePassphrase::from_bytes(*key),
+            ))
+        }
+        QueryProfileAccess::SnapshotRawKeyFile(access) => {
+            let key = read_private_32_byte_credential(&access.credential_file)?;
+            Ok(OwnedLiveQueryAccess::SnapshotEncrypted(
+                SnapshotKey::from_bytes(*key),
+            ))
+        }
+        QueryProfileAccess::SnapshotPassphraseFile(access) => {
+            let passphrase = read_private_snapshot_passphrase(&access.credential_file)?;
+            let key =
+                unlock_recoverable_snapshot_with_passphrase(&profile.source_root, &passphrase)
+                    .map_err(|_| {
+                        QueryProfileError::InvalidCredential(
+                            "snapshot passphrase could not unlock the selected snapshot".into(),
+                        )
+                    })?;
+            Ok(OwnedLiveQueryAccess::SnapshotEncrypted(key))
+        }
+        QueryProfileAccess::SnapshotRecoveryKit(access) => {
+            let words = SnapshotRecoveryWords::read_private_file(&access.credential_file).map_err(
+                |_| {
+                    QueryProfileError::InvalidCredential(
+                        "recovery kit could not be loaded as a private credential".into(),
+                    )
+                },
+            )?;
+            let key = unlock_recoverable_snapshot_with_recovery_words(&profile.source_root, &words)
+                .map_err(|_| {
+                    QueryProfileError::InvalidCredential(
+                        "recovery kit could not unlock the selected snapshot".into(),
+                    )
+                })?;
+            Ok(OwnedLiveQueryAccess::SnapshotEncrypted(key))
+        }
+        QueryProfileAccess::SnapshotLocalCredential(access) => {
+            let credential = SnapshotLocalCredential::read_private_file(&access.credential_file)
+                .map_err(|_| {
+                    QueryProfileError::InvalidCredential(
+                        "local snapshot credential could not be loaded privately".into(),
+                    )
+                })?;
+            let key = unlock_recoverable_snapshot_with_local_credential(
+                &profile.source_root,
+                &credential,
+            )
+            .map_err(|_| {
+                QueryProfileError::InvalidCredential(
+                    "local credential could not unlock the selected snapshot".into(),
+                )
+            })?;
+            Ok(OwnedLiveQueryAccess::SnapshotEncrypted(key))
+        }
+        QueryProfileAccess::Decrypted(_) => Ok(OwnedLiveQueryAccess::Decrypted),
+    }
+}
+
+fn contains_database_access_option(arguments: &[String]) -> bool {
+    const OPTIONS: [&str; 6] = [
+        "--passphrase-stdin",
+        "--snapshot-key-stdin",
+        "--snapshot-passphrase-stdin",
+        "--snapshot-recovery-kit",
+        "--snapshot-local-credential",
+        "--decrypted",
+    ];
+    arguments
+        .iter()
+        .any(|argument| OPTIONS.contains(&argument.as_str()))
 }
 
 fn attachment_account_root(selected_root: &Path) -> Option<PathBuf> {
