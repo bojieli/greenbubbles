@@ -1628,7 +1628,7 @@ fn write_private_manifest(path: &Path, manifest: &Value) {
 }
 
 fn run(arguments: &[&str], input: Option<&[u8]>) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_greenbubbles"));
     command
         .args(arguments)
         .stdin(if input.is_some() {

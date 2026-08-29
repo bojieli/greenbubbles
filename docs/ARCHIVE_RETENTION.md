@@ -20,7 +20,7 @@ Create an owner-only mode-`0700` directory on the same filesystem as the
 archives, then run:
 
 ```sh
-greenbubbles-restore replica-archive-quarantine \
+greenbubbles replica-archive-quarantine \
   <private-handoff.json> <private-quarantine-directory> \
   --retain-publications 2
 ```
@@ -51,7 +51,7 @@ Restore the physical archive to its exact original canonical path by any
 generation that referenced it:
 
 ```sh
-greenbubbles-restore replica-archive-restore \
+greenbubbles replica-archive-restore \
   <private-handoff.json> <private-quarantine-directory> \
   --generation <positive-integer>
 ```

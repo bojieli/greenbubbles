@@ -12,6 +12,11 @@
 #   GREENBUBBLES_TEAM_IDENTIFIER    Apple team identifier (pinned by the helper's
 #                                   XPC code-signing requirement)
 # Optional environment:
+#   GREENBUBBLES_VERSION             Bundle marketing version. Defaults to the
+#                                   root Rust package version.
+#   GREENBUBBLES_SKIP_BUILD          Set to 1 when verified release binaries
+#                                   were already built before credentials were
+#                                   imported into an ephemeral CI keychain.
 #   GREENBUBBLES_SEND_RELEASE_PUBLIC_KEYS
 #                                   Comma-separated hexadecimal Ed25519 public
 #                                   keys pinned into this build. Omitting it
@@ -29,6 +34,8 @@ cd "$repository_root"
 
 signing_identity="${GREENBUBBLES_SIGNING_IDENTITY:-}"
 team_identifier="${GREENBUBBLES_TEAM_IDENTIFIER:-}"
+version="${GREENBUBBLES_VERSION:-$(awk -F '"' '/^version[[:space:]]*=/ { print $2; exit }' Native/GreenBubblesRestore/Cargo.toml)}"
+skip_build="${GREENBUBBLES_SKIP_BUILD:-0}"
 release_public_keys="${GREENBUBBLES_SEND_RELEASE_PUBLIC_KEYS:-}"
 notary_profile="${GREENBUBBLES_NOTARY_PROFILE:-}"
 output_directory="${GREENBUBBLES_OUTPUT_DIRECTORY:-$repository_root/.build/package}"
@@ -43,6 +50,10 @@ fail() {
 
 [ -n "$signing_identity" ] || fail "set GREENBUBBLES_SIGNING_IDENTITY to a Developer ID Application identity"
 [ -n "$team_identifier" ] || fail "set GREENBUBBLES_TEAM_IDENTIFIER to the Apple team identifier"
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] \
+  || fail "GREENBUBBLES_VERSION must be a semantic version"
+[[ "$skip_build" == "0" || "$skip_build" == "1" ]] \
+  || fail "GREENBUBBLES_SKIP_BUILD must be 0 or 1"
 
 # The release verifying keys are pinned into the binary rather than read from
 # disk at run time, so a profile can only be trusted if this build says so. The
@@ -68,18 +79,29 @@ else
   echo "no release verifying key supplied: this build trusts no release calibration profile"
 fi
 
-echo "==> building release binaries"
-swift build -c release --product greenbubbles-history
-swift build -c release --product greenbubbles-send
-swift build -c release --product greenbubbles-input-helper
-(
-  cd Native/GreenBubblesRestore
-  if [ -n "$release_public_keys" ]; then
-    GREENBUBBLES_SEND_RELEASE_PUBLIC_KEYS="$release_public_keys" cargo build --locked --release
-  else
-    cargo build --locked --release
-  fi
-)
+if [ "$skip_build" == "1" ]; then
+  echo "==> using prebuilt release binaries"
+  for executable in \
+    .build/release/greenbubbles-history \
+    .build/release/greenbubbles-send \
+    .build/release/greenbubbles-input-helper \
+    Native/GreenBubblesRestore/target/release/greenbubbles; do
+    [ -x "$executable" ] || fail "prebuilt executable is missing: $executable"
+  done
+else
+  echo "==> building release binaries"
+  swift build -c release --product greenbubbles-history
+  swift build -c release --product greenbubbles-send
+  swift build -c release --product greenbubbles-input-helper
+  (
+    cd Native/GreenBubblesRestore
+    if [ -n "$release_public_keys" ]; then
+      GREENBUBBLES_SEND_RELEASE_PUBLIC_KEYS="$release_public_keys" cargo build --locked --release
+    else
+      cargo build --locked --release
+    fi
+  )
+fi
 
 echo "==> assembling $app_bundle"
 rm -rf "$app_bundle"
@@ -90,19 +112,24 @@ mkdir -p "$app_bundle/Contents/MacOS" \
   "$helper_bundle/Contents/Resources"
 cp Packaging/GreenBubbles/Info.plist "$app_bundle/Contents/Info.plist"
 cp Packaging/GreenBubblesInputHelper/Info.plist "$helper_bundle/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" \
+  "$app_bundle/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" \
+  "$helper_bundle/Contents/Info.plist"
 cp Packaging/GreenBubblesInputHelper/me.greenbubbles.InputHelper.plist \
   "$app_bundle/Contents/Library/LaunchAgents/"
 cp .build/release/greenbubbles-history "$app_bundle/Contents/MacOS/"
 cp .build/release/greenbubbles-send "$app_bundle/Contents/MacOS/"
-cp Native/GreenBubblesRestore/target/release/greenbubbles-restore "$app_bundle/Contents/MacOS/"
+cp Native/GreenBubblesRestore/target/release/greenbubbles "$app_bundle/Contents/MacOS/"
 cp .build/release/greenbubbles-input-helper "$helper_bundle/Contents/MacOS/"
-cp NOTICE.md "$app_bundle/Contents/Resources/"
+cp LICENSE NOTICE.md THIRD_PARTY_NOTICES.md "$app_bundle/Contents/Resources/"
 
 echo "==> recording the build provenance"
 git_commit=$(git rev-parse HEAD)
 cat >"$app_bundle/Contents/Resources/build-provenance.json" <<PROVENANCE
 {
   "formatVersion": 1,
+  "version": "$version",
   "gitCommit": "$git_commit",
   "builtAtUnixSeconds": $(date +%s),
   "teamIdentifier": "$team_identifier",
@@ -128,7 +155,7 @@ codesign --force --timestamp --options runtime \
   --entitlements Packaging/GreenBubblesInputHelper.entitlements \
   --identifier me.greenbubbles.InputHelper \
   --sign "$signing_identity" "$helper_bundle"
-for executable in greenbubbles-history greenbubbles-send greenbubbles-restore; do
+for executable in greenbubbles-history greenbubbles-send greenbubbles; do
   codesign --force --timestamp --options runtime \
     --entitlements Packaging/GreenBubbles.entitlements \
     --sign "$signing_identity" "$app_bundle/Contents/MacOS/$executable"

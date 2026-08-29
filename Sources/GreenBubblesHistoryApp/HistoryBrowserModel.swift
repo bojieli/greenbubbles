@@ -154,9 +154,9 @@ final class HistoryBrowserModel {
   ) {
     let candidates = [
       Bundle.main.executableURL?.deletingLastPathComponent().appending(
-        path: "greenbubbles-restore"),
+        path: "greenbubbles"),
       URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        .appending(path: "Native/GreenBubblesRestore/target/debug/greenbubbles-restore"),
+        .appending(path: "Native/GreenBubblesRestore/target/debug/greenbubbles"),
     ].compactMap { $0 }
     if let executable = candidates.first(where: {
       FileManager.default.isExecutableFile(atPath: $0.path)
@@ -878,7 +878,7 @@ final class HistoryBrowserModel {
   }
 
   func chooseLiveExecutable() {
-    if let url = chooseFile(title: "Choose greenbubbles-restore", prompt: "Choose CLI") {
+    if let url = chooseFile(title: "Choose greenbubbles", prompt: "Choose CLI") {
       liveExecutablePath = url.path
     }
   }

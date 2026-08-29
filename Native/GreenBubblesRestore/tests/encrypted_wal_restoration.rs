@@ -2,10 +2,10 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Mutex;
 
-use greenbubbles_restore::manifest::{
+use greenbubbles::manifest::{
     PathReference, SnapshotEntry, SnapshotFileRole, SnapshotManifest, SourceFileFingerprint,
 };
-use greenbubbles_restore::{
+use greenbubbles::{
     audit::audit_archive, prepare_catalog, prepare_catalog_with_progress, restore_catalog,
     restore_catalog_with_progress, ClientBuildCompatibilityState, DatabaseKeySet,
     DatabasePassphrase, DatabaseUnlockMaterial, ProgressEvent, ProgressObserver, ProgressPhase,

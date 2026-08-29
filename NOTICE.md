@@ -1,44 +1,31 @@
-# Third-party components
+# Notices
 
-The native restoration prototype depends on selected crates from
-[`pandorafuture/wx-cli`](https://github.com/pandorafuture/wx-cli), pinned to
-commit `2abe708f55bfe135539a385df856fdc58f97fc74`. The upstream repository has an
-MIT root license and declares MIT at the workspace level, but the five selected
-package manifests do not inherit that field and consequently report an unknown
-license through Cargo metadata. This discrepancy must be reviewed before
-distribution. The dependency supplies independently tested WCDB/SQLCipher page
-and WAL decryption, typed message decoding, and media-format primitives.
-GreenBubbles adds its own immutable snapshot, lossless restoration, integrity,
-policy, and AI-facing layers.
+GreenBubbles is Copyright (c) 2026 Bojie Li and is distributed under the MIT
+License in [`LICENSE`](LICENSE).
 
-The resolved native build statically compiles bundled SQLCipher carrying a
-Zetetic BSD-style license, bundled SILK C sources carrying a separate Skype
-Limited BSD-style notice and patent disclaimer, and bundled Zstandard sources
-carrying Meta's BSD license. Cargo wrapper metadata is not a complete
-description of these bundled C sources. A public binary would require the
-applicable source/binary notices and target-specific review.
+The macOS binary distribution statically includes Rust dependencies and bundled
+native source. The complete target-specific notices are reproduced in
+[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), including:
 
-The send adapter's signed calibration profiles and compatibility matrices are
-verified with `ed25519-dalek` (BSD-3-Clause) in Rust and with Apple's CryptoKit
-in Swift. Its effector uses only public macOS API — CoreGraphics event posting,
-ScreenCaptureKit window capture, and Vision text recognition — and vendors no
-third-party automation engine, so no additional attribution arises from it.
+- the MIT-licensed `wx-cli` packages pinned to commit
+  `2abe708f55bfe135539a385df856fdc58f97fc74` (Copyright (c) 2026
+  pandorafuture);
+- Zetetic's BSD-style SQLCipher notice;
+- the MIT `silk-rs` wrapper notice and Skype Limited's separate SILK C-source
+  notice, including its patent disclaimer;
+- Meta's BSD notice for bundled Zstandard source;
+- the MIT notice for acquisition code derived from
+  `TANGandXUE/wcdb-key-tool` (Copyright (c) 2025 CloudDreamAI / TANGandXUE);
+- the resolved Rust package inventory and every applicable upstream license
+  text, preserving package-specific copyright statements.
 
-Transitive Rust and Swift dependencies retain their respective licenses. Run
-`cargo metadata --manifest-path Native/GreenBubblesRestore/Cargo.toml` and
-`swift package show-dependencies` to inspect the resolved dependency graphs.
-The reviewed factual inventory and fail-closed baseline are documented in
-[`docs/DISTRIBUTION_INVENTORY.md`](docs/DISTRIBUTION_INVENTORY.md). This notice
-is not yet a complete public binary notice bundle.
+`Native/GreenBubblesRestore/about.toml` records the reviewed macOS arm64
+license policy and fail-closed clarification for the `wx-*` package-metadata
+omission. Regenerate the notice bundle with `cargo-about 0.9.2` and
+`Native/GreenBubblesRestore/about.hbs` whenever the locked dependency graph or
+release target changes. The dependency boundary is independently checked by
+`scripts/check-distribution-inventory.swift`.
 
-The `greenbubbles-acquire` passphrase-capture implementation is derived from
-[`TANGandXUE/wcdb-key-tool`](https://github.com/TANGandXUE/wcdb-key-tool),
-which is MIT-licensed and credits kkocdko, wxchat-export, and
-ylytdeng/wechat-decrypt. The upstream copyright and permission notice reads:
-"Copyright (c) 2025 CloudDreamAI / TANGandXUE", released under the MIT License;
-that notice must be included in all copies or substantial portions of the
-derived implementation. GreenBubbles reimplements only the LLDB
-`CCKeyDerivationPBKDF` capture, PBKDF2-HMAC-SHA512 derivation, and SQLCipher4
-page-1 HMAC verification; the standalone upstream tool is not downloaded, run,
-or automated. See
-[`docs/PASSPHRASE_ACQUISITION.md`](docs/PASSPHRASE_ACQUISITION.md).
+GreenBubbles is an independent research project. It is not affiliated with,
+endorsed by, or sponsored by Tencent or WeChat. WeChat and other product names
+are trademarks of their respective owners.

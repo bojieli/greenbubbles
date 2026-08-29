@@ -1,6 +1,6 @@
 # AI context CLI and static bundle
 
-GreenBubbles' primary agent surface is the `greenbubbles-restore` command-line
+GreenBubbles' primary agent surface is the `greenbubbles` command-line
 program. It serves source-faithful WeChat context without requiring a
 long-running connector process, direct SQL, or access to restoration secrets.
 The repository skill in `skills/greenbubbles-context` gives an agent the concise
@@ -59,7 +59,7 @@ owner-only file:
 ```
 
 ```text
-greenbubbles-restore connector-query-direct \
+greenbubbles connector-query-direct \
   <source-root> <direct-policy.json> <audit.ndjson> <request.json> \
   --passphrase-stdin
 ```
@@ -89,7 +89,7 @@ The request schema remains `greenbubbles.ai-query.v1`:
 Invoke it with:
 
 ```text
-greenbubbles-restore ai-query \
+greenbubbles ai-query \
   <replica.db> <policy.json> <audit.ndjson> <request.json> \
   --replica-key-stdin
 ```
@@ -118,7 +118,7 @@ New `ai-export` generations write schema `greenbubbles.ai-context.v2` and
 `formatVersion: 2`:
 
 ```text
-greenbubbles-restore ai-export \
+greenbubbles ai-export \
   <replica.db> <policy.json> <audit.ndjson> <new-output-directory> \
   --replica-key-stdin --requester <id> [--destination local|remote]
 ```
@@ -151,7 +151,7 @@ After copying or before indexing a generation, run the aggregate-only bundled
 verifier:
 
 ```text
-greenbubbles-restore audit-ai-context <context-bundle-directory> \
+greenbubbles audit-ai-context <context-bundle-directory> \
   [--progress-file <owner-only-new-events.ndjson>] \
   [--progress-json | --quiet-progress]
 ```
@@ -185,7 +185,7 @@ of individual message lines. Create a deterministic conversational projection
 after export:
 
 ```text
-greenbubbles-restore ai-memory-export \
+greenbubbles ai-memory-export \
   <AI-context-bundle-directory> <new-output-directory> \
   [--max-messages-per-chunk <1..1000>] \
   [--max-text-bytes-per-chunk <256..1048576>] \
@@ -223,7 +223,7 @@ for tested framework workflows and update semantics.
 Before indexing or after copying a projection, run:
 
 ```text
-greenbubbles-restore audit-ai-memory <AI-memory-output-directory> \
+greenbubbles audit-ai-memory <AI-memory-output-directory> \
   [--progress-file <owner-only-new-events.ndjson>] \
   [--progress-json | --quiet-progress]
 ```

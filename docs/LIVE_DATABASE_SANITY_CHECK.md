@@ -16,12 +16,12 @@ swift scripts/check-live-database.swift
 
 By default the command:
 
-1. builds the current release `greenbubbles` discovery executable;
-2. builds the current release `greenbubbles-restore` executable with the locked
+1. builds the current release `greenbubbles-discover` executable;
+2. builds the current release `greenbubbles` executable with the locked
    Cargo graph;
 3. securely opens `~/.greenbubbles-acquire/passphrase.txt`;
 4. discovers readable installed-account `db_storage` roots through
-   `greenbubbles accounts --include-paths`;
+   `greenbubbles-discover accounts --include-paths`;
 5. tries the key against every discovered source and checks every source that
    it authenticates.
 

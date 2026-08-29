@@ -22,7 +22,7 @@ multi-step, owner-driven act, and every step of it is auditable.
 
 | Component | Process | Grants | Holds |
 | --- | --- | --- | --- |
-| Control plane (`greenbubbles-restore send …`) | main application | **none** | keys, encrypted replica, policy, drafts, outbox, audit journal |
+| Control plane (`greenbubbles send …`) | main application | **none** | keys, encrypted replica, policy, drafts, outbox, audit journal |
 | `greenbubbles-send` | short-lived child | **none** | nothing; a bounded XPC bridge |
 | `GreenBubblesInputHelper` | login-item agent | Accessibility + Screen Recording | one capability at a time, nothing else |
 
@@ -129,13 +129,13 @@ a send.
 
 ```sh
 # Once, on the release machine, offline:
-greenbubbles-restore send profile-keygen ~/.greenbubbles/send/signing-key.json
+greenbubbles send profile-keygen ~/.greenbubbles/send/signing-key.json
 # Pin the printed public key into the binaries at build time (see §8).
 
-greenbubbles-restore send profile-template > /tmp/profile-body.json   # then measure
-greenbubbles-restore send profile-sign /tmp/profile-body.json \
+greenbubbles send profile-template > /tmp/profile-body.json   # then measure
+greenbubbles send profile-sign /tmp/profile-body.json \
   ~/.greenbubbles/send/calibration-profile.json --signing-key-file …
-greenbubbles-restore send matrix-sign  /tmp/matrix-body.json \
+greenbubbles send matrix-sign  /tmp/matrix-body.json \
   ~/.greenbubbles/send/compatibility-matrix.json --signing-key-file …
 ```
 
@@ -270,28 +270,28 @@ greenbubbles-send onboarding --open        # deep-links to the exact panes
 greenbubbles-send helper-status
 
 # 1. Is the path open, and if not, exactly why?
-greenbubbles-restore send doctor ~/.greenbubbles/send/config.json
+greenbubbles send doctor ~/.greenbubbles/send/config.json
 
 # 2. Gate the profile before first use (no send).
-greenbubbles-restore send selftest ~/.greenbubbles/send/config.json
+greenbubbles send selftest ~/.greenbubbles/send/config.json
 
 # 3. Approve one draft, explicitly. The recipient and the body digest are
 #    printed before the evidence file is written.
-greenbubbles-restore send approval-binding <config> <draft.json>
-greenbubbles-restore send approve <config> <draft.json> <approval.json> \
+greenbubbles send approval-binding <config> <draft.json>
+greenbubbles send approve <config> <draft.json> <approval.json> \
   --approver local-owner --validity-seconds 600 --confirm
 
 # 4. Evaluate, then run.
-greenbubbles-restore send precheck <config> <draft.json> <approval.json>
-greenbubbles-restore send submit   <config> <draft.json> <approval.json>
+greenbubbles send precheck <config> <draft.json> <approval.json>
+greenbubbles send submit   <config> <draft.json> <approval.json>
 
 # 5. Settle the lifecycle against the replica.
-greenbubbles-restore send outbox-status <config>
-greenbubbles-restore send reconcile <config> <draft.json> \
+greenbubbles send outbox-status <config>
+greenbubbles send reconcile <config> <draft.json> \
   --idempotency-key <hex> --replica <path> --replica-key-stdin
 
 # 6. If a message must be taken back.
-greenbubbles-restore send recall-window <config> --idempotency-key <hex>
+greenbubbles send recall-window <config> --idempotency-key <hex>
 ```
 
 ### Recall
@@ -311,7 +311,7 @@ automating a gesture it cannot gate. This is a deliberate narrowing of
 
 ```
 GreenBubbles.app/Contents/
-  MacOS/{greenbubbles-history,greenbubbles-send,greenbubbles-restore}
+  MacOS/{greenbubbles-history,greenbubbles-send,greenbubbles}
   Library/LaunchAgents/me.greenbubbles.InputHelper.plist
   Library/LoginItems/GreenBubblesInputHelper.app/
   Resources/{build-provenance.json,sbom.json,NOTICE.md}

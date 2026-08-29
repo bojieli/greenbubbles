@@ -9,9 +9,9 @@ use std::time::Instant;
 use rusqlite::{params, Connection};
 use serde_json::Value;
 
-use greenbubbles_restore::live_query::QueryDatabaseAccess;
-use greenbubbles_restore::recoverable_snapshot::create_recoverable_snapshot_with_recovery_words_and_optional_protectors;
-use greenbubbles_restore::snapshot_protector::{
+use greenbubbles::live_query::QueryDatabaseAccess;
+use greenbubbles::recoverable_snapshot::create_recoverable_snapshot_with_recovery_words_and_optional_protectors;
+use greenbubbles::snapshot_protector::{
     SnapshotLocalCredential, SnapshotPassphrase, SnapshotRecoveryWords,
 };
 
@@ -21,7 +21,7 @@ const RAW_KEY: [u8; 32] = [0xAB; 32];
 fn resource_commands_expose_help_without_opening_a_database() {
     for command in ["source", "conversations", "messages", "message"] {
         for arguments in [vec![command, "--help"], vec!["help", command]] {
-            let output = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+            let output = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
                 .args(arguments)
                 .output()
                 .unwrap();
@@ -203,13 +203,12 @@ fn exact_message_identity_is_bound_to_source_and_conversation() {
 #[test]
 fn native_search_is_bounded_keyset_paginated_and_query_bound() {
     let fixture = Fixture::new(false);
-    let direct_source = greenbubbles_restore::live_query::LiveQuerySource::open(
+    let direct_source = greenbubbles::live_query::LiveQuerySource::open(
         &fixture.root,
-        greenbubbles_restore::live_query::QueryDatabaseAccess::Decrypted,
+        greenbubbles::live_query::QueryDatabaseAccess::Decrypted,
     )
     .unwrap();
-    let direct =
-        greenbubbles_restore::live_query::search_messages(&direct_source, "hello", None, 1, None);
+    let direct = greenbubbles::live_query::search_messages(&direct_source, "hello", None, 1, None);
     assert!(direct.is_ok(), "direct search failed: {direct:?}");
     let first = run(
         &[
@@ -1137,7 +1136,7 @@ fn write_private_file(path: &Path, bytes: &[u8]) {
 }
 
 fn run(arguments: &[&str], input: Option<&[u8]>) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_greenbubbles"));
     command
         .args(arguments)
         .stdout(Stdio::piped())
@@ -1155,7 +1154,7 @@ fn run(arguments: &[&str], input: Option<&[u8]>) -> Output {
 }
 
 fn run_with_home(home: &Path, arguments: &[&str], input: Option<&[u8]>) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_greenbubbles"));
     command
         .args(arguments)
         .env("HOME", home)

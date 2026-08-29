@@ -5,15 +5,15 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use greenbubbles_restore::merge::merge_incremental_archive;
-use greenbubbles_restore::replica::{
+use greenbubbles::merge::merge_incremental_archive;
+use greenbubbles::replica::{
     bootstrap_replica, bootstrap_replica_with_progress, synchronize_replica_with_progress,
 };
-use greenbubbles_restore::tools::{
+use greenbubbles::tools::{
     create_tool_policy, ConversationToolScope, LocalToolService, ToolCapability,
     ToolDataDestination, ToolMessageField, ToolSourceDatabaseFreshness,
 };
-use greenbubbles_restore::{
+use greenbubbles::{
     audit::audit_archive, ArtifactAvailability, ArtifactDecodeState, ArtifactKind, ArtifactRole,
     CachedSurfaceCompleteness, CachedSurfaceCoverage, CachedSurfaceTableCoverage,
     CachedSurfaceTableRole, CanonicalArtifact, CanonicalCachedMoment, CanonicalConversation,
@@ -436,7 +436,7 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
     };
     let message_tables = source_sets
         .iter()
-        .map(|source_set| greenbubbles_restore::MessageTableCoverage {
+        .map(|source_set| greenbubbles::MessageTableCoverage {
             source_set_id: (*source_set).to_string(),
             source_logical_path: format!("message/{source_set}.db"),
             source_table_id: format!("table-{source_set}"),
@@ -460,7 +460,7 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
             schema_fingerprint: table.schema_fingerprint.clone(),
             role: TableCoverageRole::Message,
             classification_reason: "synthetic".to_string(),
-            availability: greenbubbles_restore::TableCoverageAvailability::Complete,
+            availability: greenbubbles::TableCoverageAvailability::Complete,
             limitation_code: None,
         })
         .collect::<Vec<_>>();
@@ -480,7 +480,7 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
         )))),
         role: TableCoverageRole::Other,
         classification_reason: "synthetic cached table".to_string(),
-        availability: greenbubbles_restore::TableCoverageAvailability::Complete,
+        availability: greenbubbles::TableCoverageAvailability::Complete,
         limitation_code: None,
     }));
     all_tables.push(TableSchemaCoverage {
@@ -493,7 +493,7 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
         schema_fingerprint: Some(hex::encode(sha2::Sha256::digest("voice-schema"))),
         role: TableCoverageRole::KnownAuxiliary,
         classification_reason: "synthetic voice payload table".to_string(),
-        availability: greenbubbles_restore::TableCoverageAvailability::Complete,
+        availability: greenbubbles::TableCoverageAvailability::Complete,
         limitation_code: None,
     });
     let coverage = RestorationCoverage {
@@ -544,7 +544,7 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
                 restored_row_count: 1,
                 role: CachedSurfaceTableRole::MomentTimeline,
                 classification_reason: "synthetic exact signature".to_string(),
-                availability: greenbubbles_restore::TableCoverageAvailability::Complete,
+                availability: greenbubbles::TableCoverageAvailability::Complete,
                 limitation_code: None,
             })
             .collect(),
@@ -617,12 +617,12 @@ fn build_archive(parent: &Path, name: &str, fragment: bool) -> PathBuf {
     write_ndjson(&archive.join("participants.ndjson"), &[participant]);
     write_ndjson(&archive.join("artifacts.ndjson"), &[artifact]);
     write_ndjson(&archive.join("cached-moments.ndjson"), &cached_moments);
-    write_ndjson::<greenbubbles_restore::CanonicalCachedMomentInteraction>(
+    write_ndjson::<greenbubbles::CanonicalCachedMomentInteraction>(
         &archive.join("cached-moment-interactions.ndjson"),
         &[],
     );
     write_json(&archive.join("cached-surfaces.json"), &cached_coverage);
-    write_ndjson::<greenbubbles_restore::RejectedRow>(&archive.join("rejections.ndjson"), &[]);
+    write_ndjson::<greenbubbles::RejectedRow>(&archive.join("rejections.ndjson"), &[]);
     archive
 }
 

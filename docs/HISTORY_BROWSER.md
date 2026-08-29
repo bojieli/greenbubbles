@@ -11,7 +11,7 @@ For setup and ordinary operation, start with the
 [GreenBubbles user guide](USER_GUIDE.md). This document describes the browser's
 implementation and trust boundaries. The app never acquires a database key,
 runs an agent server, or sends messages. In direct mode it invokes the local
-`greenbubbles-restore` helper, which opens the selected databases read-only and
+`greenbubbles` helper, which opens the selected databases read-only and
 returns only bounded JSON pages.
 
 ## Technology decision
@@ -25,7 +25,7 @@ The recommended production stack is:
 - CryptoKit SHA-256 for independent bundle and media verification;
 - Quick Look for images, animated images, video, audio, PDF, Office documents,
   and other system-supported formats; and
-- the existing `greenbubbles-restore` one-shot CLI for bounded live/snapshot
+- the existing `greenbubbles` one-shot CLI for bounded live/snapshot
   queries, recoverable snapshot creation, and policy-scoped exported-bundle
   media resolution.
 
@@ -43,7 +43,7 @@ bounded-JSON and explicit exported-JSONL contracts.
 ```text
 live WeChat SQLite/WCDB or recoverable snapshot
               |
-              | greenbubbles-restore read-only resource commands
+              | greenbubbles read-only resource commands
               v
 bounded conversation/message/search JSON pages
               |
@@ -54,7 +54,7 @@ or, for an explicit exported-history workflow:
 
 encrypted replica + owner policy
               |
-              | greenbubbles-restore ai-export
+              | greenbubbles ai-export
               v
 private five-file AI context bundle
               |
@@ -233,11 +233,11 @@ swift run greenbubbles-history --bundle /absolute/path/to/ai-context-bundle
 ```
 
 For direct browsing or snapshot creation, select
-`Native/GreenBubblesRestore/target/release/greenbubbles-restore` as the local
+`Native/GreenBubblesRestore/target/release/greenbubbles` as the local
 CLI and choose **Browse Live or Snapshot…** or **Create Recoverable Snapshot…**.
 
 For exported-history mode, open a new output directory produced by
-`greenbubbles-restore ai-export`, or drag that directory into the empty browser
+`greenbubbles ai-export`, or drag that directory into the empty browser
 window. The explicit `--bundle`
 launch option, file panel, drag/drop path, and macOS directory/`manifest.json`
 open events all converge on the same verifier. The directory and every file
@@ -246,7 +246,7 @@ under `Application Support/GreenBubbles/HistoryIndexes` and contains normalized
 search text, so it must remain private even though it contains no keys or raw
 source columns.
 
-Media preview additionally asks for the local `greenbubbles-restore`
+Media preview additionally asks for the local `greenbubbles`
 executable, encrypted replica, tool policy, connector audit log, and one-time
 replica key. A release application should bundle the matching signed Rust
 executable instead of asking for its path.
@@ -257,7 +257,7 @@ The Swift Package executable is the development and automated-test surface.
 Before distributing a `.app`, add an Xcode archive target that reuses these
 sources and:
 
-- embeds the matching `greenbubbles-restore` binary as a signed helper;
+- embeds the matching `greenbubbles` binary as a signed helper;
 - enables Hardened Runtime, code signing, notarization, and deterministic
   version binding between the UI and helper;
 - adopts App Sandbox plus user-selected security-scoped bookmarks for bundle,

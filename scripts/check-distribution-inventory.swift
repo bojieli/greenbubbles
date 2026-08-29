@@ -148,7 +148,7 @@ func buildInventory() throws -> [String: Any] {
   }
   guard
     let rootPackage = packages.first(where: {
-      ($0["name"] as? String) == "greenbubbles-restore" && $0["source"] is NSNull
+      ($0["name"] as? String) == "greenbubbles" && $0["source"] is NSNull
     })
   else {
     throw InventoryError.missingField("cargo root package")

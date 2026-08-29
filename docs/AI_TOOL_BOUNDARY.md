@@ -95,5 +95,5 @@ The Rust library also contains the pure validation types documented in
 `ACTION_SAFETY_CONTRACT.md`. They enforce the gate, adapter, approval-binding,
 idempotency, rate, kill-switch, and lifecycle invariants for the send adapter,
 and they remain unregistered as connector or Unix operations. The adapter's own
-commands live under `greenbubbles-restore send` and are reachable only from a
+commands live under `greenbubbles send` and are reachable only from a
 local shell, never from a tool call.

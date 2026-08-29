@@ -53,7 +53,7 @@ This proves substantial locally persisted artifact candidates, not their
 message linkage, format, decryptability, semantic usefulness, or completeness
 relative to server history.
 
-`greenbubbles-restore preflight` verified every copied database/WAL/SHM digest,
+`greenbubbles preflight` verified every copied database/WAL/SHM digest,
 accepted the exact signed-client evidence, and classified every database from
 its 16-byte header without decryption or schema enumeration. All 40 databases
 were encrypted. Therefore real semantic restoration requires a stable 32-byte

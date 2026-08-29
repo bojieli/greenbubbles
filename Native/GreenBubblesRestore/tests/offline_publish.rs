@@ -3,8 +3,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use greenbubbles_restore::operator::{restore_snapshot_and_publish, OfflineRestorePublishOptions};
-use greenbubbles_restore::{
+use greenbubbles::operator::{restore_snapshot_and_publish, OfflineRestorePublishOptions};
+use greenbubbles::{
     audit::audit_archive, ClientBuildFingerprint, SnapshotAcquisitionEvidence,
     SnapshotAcquisitionMode, SnapshotEntry, SnapshotFileRole, SnapshotManifest,
     SnapshotSourceFileInventory, SnapshotSourceSetInventory,
@@ -28,7 +28,7 @@ fn restores_audits_merges_and_monotonically_publishes_offline_snapshots() {
     }
 
     let bootstrap_snapshot = build_bootstrap_snapshot(&private, &account_root);
-    let preflight_output = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let preflight_output = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .arg("preflight")
         .arg(&bootstrap_snapshot)
         .arg("--progress-json")
@@ -55,7 +55,7 @@ fn restores_audits_merges_and_monotonically_publishes_offline_snapshots() {
     );
 
     let probe_progress_path = private.join("probe-progress.ndjson");
-    let probe_output = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let probe_output = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .arg("probe")
         .arg(&bootstrap_snapshot)
         .arg("--progress-json")
@@ -128,7 +128,7 @@ fn restores_audits_merges_and_monotonically_publishes_offline_snapshots() {
     let incremental_snapshot =
         build_incremental_snapshot(&private, &bootstrap_snapshot, &account_root);
     let incremental_archive = private.join("archive-incremental");
-    let output = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let output = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .arg("restore-publish")
         .args([&incremental_snapshot, &incremental_archive, &handoff])
         .args(["--previous-snapshot", bootstrap_snapshot.to_str().unwrap()])
@@ -363,7 +363,7 @@ fn build_integrity_snapshot(
             expected_source_path.to_string_lossy().as_bytes(),
         ));
         entries.push(SnapshotEntry {
-            source: greenbubbles_restore::manifest::PathReference {
+            source: greenbubbles::manifest::PathReference {
                 opaque_id: opaque_id[..24].to_string(),
                 path: None,
             },
@@ -430,7 +430,7 @@ fn create_database(
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
     let bytes = fs::read(&path).unwrap();
     let digest = hex::encode(Sha256::digest(&bytes));
-    let fingerprint = greenbubbles_restore::manifest::SourceFileFingerprint {
+    let fingerprint = greenbubbles::manifest::SourceFileFingerprint {
         device_id: 1,
         file_id,
         byte_count: bytes.len() as i64,
@@ -447,7 +447,7 @@ fn create_database(
     ));
     CreatedSet {
         entry: SnapshotEntry {
-            source: greenbubbles_restore::manifest::PathReference {
+            source: greenbubbles::manifest::PathReference {
                 opaque_id: opaque_id[..24].to_string(),
                 path: None,
             },

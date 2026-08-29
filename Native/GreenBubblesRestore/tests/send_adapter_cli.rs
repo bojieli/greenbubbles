@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use greenbubbles_restore::connector::{action_draft_identity, ActionDraft};
+use greenbubbles::connector::{action_draft_identity, ActionDraft};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -18,7 +18,7 @@ const CONVERSATION: &str = "filehelper";
 const BODY: &str = "adapter dry run";
 
 fn binary() -> &'static str {
-    env!("CARGO_BIN_EXE_greenbubbles-restore")
+    env!("CARGO_BIN_EXE_greenbubbles")
 }
 
 fn run(arguments: &[&str]) -> (bool, String, String) {

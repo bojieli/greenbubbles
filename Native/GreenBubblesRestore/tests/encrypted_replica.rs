@@ -6,11 +6,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use greenbubbles_restore::follow::{
+use greenbubbles::follow::{
     follow_replica_once, publish_replica_handoff, replica_follower_status, ReplicaFollowOutcome,
     ReplicaFollowerHealth,
 };
-use greenbubbles_restore::replica::{
+use greenbubbles::replica::{
     audit_replica, audit_replica_backup, audit_replica_backup_with_progress,
     audit_replica_with_progress, bootstrap_replica, bootstrap_replica_with_progress,
     get_replica_artifact, get_replica_changes, get_replica_conversation, get_replica_message,
@@ -20,11 +20,11 @@ use greenbubbles_restore::replica::{
     search_replica_messages, synchronize_replica, synchronize_replica_with_progress,
     ReplicaCachedMomentFilter, ReplicaMessageFilter,
 };
-use greenbubbles_restore::tools::{
+use greenbubbles::tools::{
     create_all_conversations_tool_policy_with_cached_moments, create_tool_policy,
     ConversationToolScope, ToolCapability, ToolMessageField, ToolSourceDatabaseFreshness,
 };
-use greenbubbles_restore::{
+use greenbubbles::{
     ai_context::{
         audit_ai_context, audit_ai_context_with_progress, export_ai_context, query_ai_context,
         AiQueryRequest, AiQueryResult,
@@ -39,7 +39,7 @@ use greenbubbles_restore::{
     },
     transport::{send_unix_request, serve_unix_once},
 };
-use greenbubbles_restore::{
+use greenbubbles::{
     AccountHolderBindingEvidence, ArtifactAvailability, ArtifactDecodeState, ArtifactKind,
     ArtifactRole, CachedMomentInteractionKind, CachedSurfaceCompleteness, CachedSurfaceCoverage,
     CanonicalArtifact, CanonicalCachedMoment, CanonicalCachedMomentInteraction,
@@ -311,7 +311,7 @@ fn serves_scoped_replica_reads_and_complete_non_executing_drafts() {
     assert_eq!(state_audit.completed_draft_request_event_count, 1);
     assert_eq!(state_audit.completed_draft_review_event_count, 1);
     assert_eq!(state_audit.gated_action_stage_event_count, 0);
-    let mut state_audit_process = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let mut state_audit_process = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .arg("audit-connector-state")
         .args([&replica, &policy, &audit, &drafts])
         .arg("--replica-key-stdin")
@@ -840,7 +840,7 @@ fn creates_an_explicit_local_scope_for_every_archive_conversation() {
     fs::rename(&unavailable_messages_path, &messages_path).unwrap();
 
     let cli_policy_path = private.join("all-conversations-cli-policy.json");
-    let cli = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let cli = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .args([
             "tool-policy",
             archive.to_str().unwrap(),
@@ -858,13 +858,13 @@ fn creates_an_explicit_local_scope_for_every_archive_conversation() {
         "{}",
         String::from_utf8_lossy(&cli.stderr)
     );
-    let cli_policy: greenbubbles_restore::tools::ToolAuthorizationPolicy =
+    let cli_policy: greenbubbles::tools::ToolAuthorizationPolicy =
         serde_json::from_slice(&cli.stdout).unwrap();
     assert_eq!(cli_policy.conversation_scopes.len(), 1);
     assert!(!cli_policy.conversation_scopes["conversation-a"].allow_remote_model);
 
     let rejected_path = private.join("mixed-policy.json");
-    let rejected = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let rejected = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .args([
             "tool-policy",
             archive.to_str().unwrap(),
@@ -1426,7 +1426,7 @@ fn unavailable_cached_surface_is_typed_without_blocking_replica_queries() {
     .unwrap();
     assert_eq!(
         page.availability,
-        greenbubbles_restore::replica::ReplicaCachedSurfaceAvailability::Unavailable
+        greenbubbles::replica::ReplicaCachedSurfaceAvailability::Unavailable
     );
     assert!(page.items.is_empty());
     assert!(page
@@ -1874,7 +1874,7 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
             },
         },
     );
-    let mut cli_query = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let mut cli_query = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .args([
             "ai-query",
             replica.to_str().unwrap(),
@@ -1896,12 +1896,12 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
         .unwrap();
     let cli_query = cli_query.wait_with_output().unwrap();
     assert!(cli_query.status.success(), "{:?}", cli_query.stderr);
-    let cli_response: greenbubbles_restore::ai_context::AiQueryResponse =
+    let cli_response: greenbubbles::ai_context::AiQueryResponse =
         serde_json::from_slice(&cli_query.stdout).unwrap();
     assert!(cli_response.ok);
 
     let cli_output = private.join("ai-context-cli");
-    let mut cli_export = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let mut cli_export = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .args([
             "ai-export",
             replica.to_str().unwrap(),
@@ -1926,12 +1926,12 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
         .unwrap();
     let cli_export = cli_export.wait_with_output().unwrap();
     assert!(cli_export.status.success(), "{:?}", cli_export.stderr);
-    let cli_manifest: greenbubbles_restore::ai_context::AiContextManifest =
+    let cli_manifest: greenbubbles::ai_context::AiContextManifest =
         serde_json::from_slice(&cli_export.stdout).unwrap();
     assert!(cli_manifest.export_complete);
     assert_eq!(cli_manifest.exported_message_count, 1);
     let forbidden_progress = cli_output.join("must-not-modify-bundle.ndjson");
-    let rejected_progress = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let rejected_progress = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .args(["audit-ai-context", cli_output.to_str().unwrap()])
         .args(["--progress-file", forbidden_progress.to_str().unwrap()])
         .output()
@@ -1943,7 +1943,7 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     let aliased_progress = progress_alias
         .join("ai-context-cli")
         .join("must-not-modify-bundle-through-alias.ndjson");
-    let rejected_alias = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let rejected_alias = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .args(["audit-ai-context", cli_output.to_str().unwrap()])
         .args(["--progress-file", aliased_progress.to_str().unwrap()])
         .output()
@@ -1953,14 +1953,14 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
         .join("must-not-modify-bundle-through-alias.ndjson")
         .exists());
     let cli_context_audit_progress = private.join("ai-context-audit-progress.ndjson");
-    let cli_audit = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let cli_audit = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .args(["audit-ai-context", cli_output.to_str().unwrap()])
         .args(["--progress-json", "--progress-file"])
         .arg(&cli_context_audit_progress)
         .output()
         .unwrap();
     assert!(cli_audit.status.success(), "{:?}", cli_audit.stderr);
-    let cli_audit: greenbubbles_restore::ai_context::AiContextAuditReport =
+    let cli_audit: greenbubbles::ai_context::AiContextAuditReport =
         serde_json::from_slice(&cli_audit.stdout).unwrap();
     assert!(cli_audit.references_verified);
     assert!(fs::read_to_string(&cli_context_audit_progress)
@@ -2083,7 +2083,7 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
 
     let cli_memory_output = private.join("ai-memory-cli");
     let cli_memory_progress = private.join("ai-memory-export-progress.ndjson");
-    let cli_memory = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let cli_memory = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .args([
             "ai-memory-export",
             cli_output.to_str().unwrap(),
@@ -2099,7 +2099,7 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
         .output()
         .unwrap();
     assert!(cli_memory.status.success(), "{:?}", cli_memory.stderr);
-    let cli_memory_manifest: greenbubbles_restore::ai_memory::AiMemoryManifest =
+    let cli_memory_manifest: greenbubbles::ai_memory::AiMemoryManifest =
         serde_json::from_slice(&cli_memory.stdout).unwrap();
     assert_eq!(
         cli_memory_manifest.projection_id,
@@ -2117,7 +2117,7 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
                 && event["emittedDocumentCount"] == 1
         }));
     let cli_memory_audit_progress = private.join("ai-memory-audit-progress.ndjson");
-    let cli_memory_audit = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let cli_memory_audit = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .args(["audit-ai-memory", cli_memory_output.to_str().unwrap()])
         .args(["--progress-json", "--progress-file"])
         .arg(&cli_memory_audit_progress)
@@ -2128,7 +2128,7 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
         "{:?}",
         cli_memory_audit.stderr
     );
-    let cli_memory_audit: greenbubbles_restore::ai_memory::AiMemoryAuditReport =
+    let cli_memory_audit: greenbubbles::ai_memory::AiMemoryAuditReport =
         serde_json::from_slice(&cli_memory_audit.stdout).unwrap();
     assert!(cli_memory_audit.markdown_documents_verified);
     assert!(fs::read_to_string(&cli_memory_audit_progress)
@@ -2146,7 +2146,7 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     let messages_path = limited_bundle.join("messages.jsonl");
     fs::write(&messages_path, b"{not-json}\n").unwrap();
     fs::set_permissions(&messages_path, fs::Permissions::from_mode(0o600)).unwrap();
-    let mut limited_manifest: greenbubbles_restore::ai_context::AiContextManifest =
+    let mut limited_manifest: greenbubbles::ai_context::AiContextManifest =
         serde_json::from_slice(&fs::read(limited_bundle.join("manifest.json")).unwrap()).unwrap();
     let message_file = limited_manifest
         .files
@@ -2340,7 +2340,7 @@ fn spawn_connector_process(
     drafts: &Path,
     socket: &Path,
 ) -> Child {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .arg("connector-serve")
         .args([replica, policy, audit, drafts, socket])
         .arg("--replica-key-stdin")
@@ -2445,7 +2445,7 @@ fn bootstraps_account_isolated_encrypted_replica_and_retains_migration_backup() 
     assert_eq!(status.decoder_version.as_deref(), Some("1"));
     assert_eq!(
         status.media_phase,
-        Some(greenbubbles_restore::RestorationMediaPhase::Resolved)
+        Some(greenbubbles::RestorationMediaPhase::Resolved)
     );
     assert_eq!(status.last_sync_kind.as_deref(), Some("bootstrap"));
     assert!(status.last_sync_started_unix_nanoseconds.is_some());
@@ -2904,7 +2904,7 @@ fn audits_pre_migration_backup_without_mutation_or_private_output() {
     assert!(audit_replica_backup(&backup, &ReplicaKey::from_bytes(WRONG_KEY_BYTES)).is_err());
     assert!(audit_replica_backup(&replica, &key).is_err());
 
-    let mut audit_process = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let mut audit_process = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .arg("audit-replica-backup")
         .arg(&backup)
         .arg("--replica-key-stdin")
@@ -3167,7 +3167,7 @@ fn prepares_a_verified_recovery_candidate_without_replacing_existing_state() {
     assert!(!overlapping.exists());
 
     let cli_candidate = private.join("cli-recovered-candidate.db");
-    let mut process = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let mut process = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .arg("prepare-replica-recovery")
         .arg(&backup)
         .arg(&cli_candidate)
@@ -3311,7 +3311,7 @@ fn independently_audits_encrypted_replica_records_indexes_and_checkpoint() {
     assert!(audit_replica(&replica, &key).is_ok());
 
     let audit_progress = private.join("replica-audit-progress.ndjson");
-    let mut audit_process = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let mut audit_process = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .arg("audit-replica")
         .arg(&replica)
         .arg("--replica-key-stdin")
@@ -3367,7 +3367,7 @@ fn independently_audits_encrypted_replica_records_indexes_and_checkpoint() {
         final_progress["phaseCompleted"],
         final_progress["phaseTotal"]
     );
-    let overlapping_progress = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let overlapping_progress = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .arg("audit-replica")
         .arg(&replica)
         .arg("--replica-key-stdin")
@@ -3489,7 +3489,7 @@ fn follows_monotonic_authoritative_archive_handoffs_with_crash_safe_state() {
     assert_eq!(current.generation_lag, 0);
     assert!(current.published_generation_age_seconds.is_some());
     assert!(current.publication_to_checkpoint_milliseconds.is_some());
-    let mut status_process = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let mut status_process = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .arg("replica-follow-status")
         .args([&handoff, &state, &replica])
         .arg("--replica-key-stdin")
@@ -3548,7 +3548,7 @@ fn follows_monotonic_authoritative_archive_handoffs_with_crash_safe_state() {
 
     let supervised_state = private.join("supervised-state.json");
     let supervised_replica = private.join("supervised-replica.db");
-    let mut supervised = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let mut supervised = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .arg("replica-follow")
         .args([&handoff, &supervised_state, &supervised_replica])
         .args([
@@ -3585,7 +3585,7 @@ fn follows_monotonic_authoritative_archive_handoffs_with_crash_safe_state() {
         assert!(!supervised_text.contains(private_value));
     }
 
-    let published_by_cli = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let published_by_cli = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .arg("replica-publish")
         .args([&archive_b, &handoff])
         .args(["--generation", "3"])

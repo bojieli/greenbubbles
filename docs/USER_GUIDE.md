@@ -13,7 +13,7 @@ SQLite/WCDB files read-only and returns one bounded page at a time.
 
 Sending is a separate, owner-run path that ships closed and is never reachable
 from a query or a tool call. If you want to enable it, read
-[the send adapter guide](SEND_ADAPTER.md) first; `greenbubbles-restore send
+[the send adapter guide](SEND_ADAPTER.md) first; `greenbubbles send
 doctor` will tell you precisely why it is disabled and what each reason
 requires.
 
@@ -49,7 +49,7 @@ WeChat container and do not select an individual `.db` file.
 If the location is unknown, run this locally:
 
 ```sh
-swift run greenbubbles accounts --include-paths
+swift run greenbubbles-discover accounts --include-paths
 ```
 
 Path-bearing output may contain a stable account identifier. Keep it private.
@@ -71,7 +71,7 @@ swift run greenbubbles-history
 When the app asks for the local CLI, choose:
 
 ```text
-Native/GreenBubblesRestore/target/release/greenbubbles-restore
+Native/GreenBubblesRestore/target/release/greenbubbles
 ```
 
 The app may find a previously built debug CLI automatically. Selecting the
@@ -80,7 +80,7 @@ release binary explicitly gives better query performance.
 ## Browse the live database
 
 1. Launch the History app and choose **Browse Live or Snapshot…**.
-2. Choose the `greenbubbles-restore` executable built above.
+2. Choose the `greenbubbles` executable built above.
 3. Set **Access** to **Live WeChat (read-only)**.
 4. Choose the account's `db_storage` directory.
 5. Enter the matching WeChat database key and choose **Connect**.
@@ -170,7 +170,7 @@ Creation verifies the snapshot before reporting success. Also test the recovery
 copy after moving the snapshot or kit to its intended backup location:
 
 ```sh
-Native/GreenBubblesRestore/target/release/greenbubbles-restore \
+Native/GreenBubblesRestore/target/release/greenbubbles \
   snapshot verify <snapshot-directory> \
   --snapshot-recovery-kit <owner-only-recovery-kit-file>
 ```
@@ -197,7 +197,7 @@ an owner-only [query profile](QUERY_PROFILES.md). With a default profile, the
 common commands need neither a source path nor a key/passphrase option:
 
 ```sh
-GB_CLI="Native/GreenBubblesRestore/target/release/greenbubbles-restore"
+GB_CLI="Native/GreenBubblesRestore/target/release/greenbubbles"
 
 "$GB_CLI" profile validate
 "$GB_CLI" source status
@@ -216,7 +216,7 @@ For one-off queries and scripts that intentionally supply every input, set
 private paths in the shell session and keep the key in an owner-only file:
 
 ```sh
-GB_CLI="Native/GreenBubblesRestore/target/release/greenbubbles-restore"
+GB_CLI="Native/GreenBubblesRestore/target/release/greenbubbles"
 GB_SOURCE="<WeChat-db_storage-root>"
 GB_KEY_FILE="<owner-only-WeChat-key-file>"
 ```
@@ -293,7 +293,7 @@ links and group/world-readable secret files are rejected.
 
 ### A query profile is rejected
 
-Run `greenbubbles-restore profile validate <name>`. The configuration file,
+Run `greenbubbles profile validate <name>`. The configuration file,
 credential file, and their containing directories must satisfy the same
 owner-only rules. Paths in the JSON must be absolute, the named profile must
 exist, and `defaultProfile` must name one of the configured profiles. Do not

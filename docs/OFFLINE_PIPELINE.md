@@ -12,7 +12,7 @@ private locations. An encrypted snapshot passphrase is accepted only through
 standard input:
 
 ```sh
-greenbubbles-restore restore-publish \
+greenbubbles restore-publish \
   <bootstrap-snapshot> <new-publication-archive> <private-handoff.json> \
   --account-root <authorized-account-root> --passphrase-stdin
 ```
@@ -33,7 +33,7 @@ Every non-bootstrap acquisition must supply both retained sides of its
 baseline:
 
 ```sh
-greenbubbles-restore restore-publish \
+greenbubbles restore-publish \
   <next-snapshot> <new-publication-archive> <private-handoff.json> \
   --previous-snapshot <previous-snapshot> \
   --previous-archive <previous-publication-archive> \

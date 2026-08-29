@@ -127,11 +127,12 @@ public struct WeChatClientBuildInspector: Sendable {
     let signing = try Self.parseSigningEvidence(
       run("/usr/bin/codesign", ["-d", "--verbose=4", application.path], acceptStatus: 0)
     )
-    let signatureValid = (try? run(
-      "/usr/bin/codesign",
-      ["--verify", "--strict", "--deep", application.path],
-      acceptStatus: 0
-    )) != nil
+    let signatureValid =
+      (try? run(
+        "/usr/bin/codesign",
+        ["--verify", "--strict", "--deep", application.path],
+        acceptStatus: 0
+      )) != nil
     let architectures = try run("/usr/bin/lipo", ["-archs", executable.path], acceptStatus: 0)
       .split(whereSeparator: { $0.isWhitespace })
       .map(String.init)
@@ -166,7 +167,7 @@ public struct WeChatClientBuildInspector: Sendable {
     var teamIdentifier: String?
     var codeDirectorySHA256: String?
     var hardenedRuntime = false
-    for line in output.split(whereSeparator: \ .isNewline).map(String.init) {
+    for line in output.split(whereSeparator: \.isNewline).map(String.init) {
       if line.hasPrefix("Identifier=") {
         identifier = String(line.dropFirst("Identifier=".count))
       } else if line.hasPrefix("TeamIdentifier=") {
@@ -194,7 +195,9 @@ public struct WeChatClientBuildInspector: Sendable {
     )
   }
 
-  private func run(_ executable: String, _ arguments: [String], acceptStatus: Int32) throws -> String {
+  private func run(_ executable: String, _ arguments: [String], acceptStatus: Int32) throws
+    -> String
+  {
     let process = Process()
     let output = Pipe()
     process.executableURL = URL(fileURLWithPath: executable)
@@ -205,10 +208,12 @@ public struct WeChatClientBuildInspector: Sendable {
     process.waitUntilExit()
     let data = output.fileHandleForReading.readDataToEndOfFile()
     guard process.terminationReason == .exit, process.terminationStatus == acceptStatus else {
-      throw ClientBuildFingerprintError.commandFailed(URL(fileURLWithPath: executable).lastPathComponent)
+      throw ClientBuildFingerprintError.commandFailed(
+        URL(fileURLWithPath: executable).lastPathComponent)
     }
     guard let value = String(data: data, encoding: .utf8) else {
-      throw ClientBuildFingerprintError.commandFailed(URL(fileURLWithPath: executable).lastPathComponent)
+      throw ClientBuildFingerprintError.commandFailed(
+        URL(fileURLWithPath: executable).lastPathComponent)
     }
     return value.trimmingCharacters(in: .whitespacesAndNewlines)
   }

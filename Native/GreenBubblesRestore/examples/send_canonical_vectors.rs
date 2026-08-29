@@ -10,13 +10,13 @@
 //! cargo run --example send_canonical_vectors > ../../docs/send-canonical-vectors.json
 //! ```
 
-use greenbubbles_restore::action::ActionCapability;
-use greenbubbles_restore::send_contract::{
+use greenbubbles::action::ActionCapability;
+use greenbubbles::send_contract::{
     capability_binding_sha256, normalized_send_text, normalized_send_text_sha256, ActionAttachment,
     ActionCapabilityEnvelope, HelperGateEvidence, HelperSendOutcome, SendAddressingMode,
     SendFailureCode, SendRolloutStage, SendStage, VisualConfirmation, SEND_CONTRACT_VERSION,
 };
-use greenbubbles_restore::send_profile::{
+use greenbubbles::send_profile::{
     calibration_profile_signing_bytes, compatibility_matrix_signing_bytes,
     sign_calibration_profile, sign_compatibility_matrix, signing_key_public_hex,
     CalibrationAnchors, CalibrationAttachments, CalibrationOcrRegions, CalibrationProfileBody,

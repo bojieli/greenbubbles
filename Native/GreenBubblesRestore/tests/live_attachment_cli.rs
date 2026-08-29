@@ -744,7 +744,7 @@ fn relative_files(root: &Path) -> Vec<String> {
 }
 
 fn run(arguments: &[&str]) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .args(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

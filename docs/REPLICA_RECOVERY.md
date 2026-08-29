@@ -5,7 +5,7 @@ replica by an automated command. GreenBubbles can instead turn a verified older
 backup into a separate, current-schema recovery candidate:
 
 ```sh
-greenbubbles-restore prepare-replica-recovery \
+greenbubbles prepare-replica-recovery \
   <encrypted-pre-migration-backup.db> <new-candidate.db> \
   --replica-key-stdin
 ```

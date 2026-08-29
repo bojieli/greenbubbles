@@ -194,7 +194,7 @@ struct HistoryDirectConnectionSheet: View {
 
   private func chooseExecutable() {
     let panel = NSOpenPanel()
-    panel.title = "Choose greenbubbles-restore"
+    panel.title = "Choose greenbubbles"
     panel.prompt = "Choose CLI"
     panel.canChooseFiles = true
     panel.canChooseDirectories = false
@@ -842,8 +842,8 @@ private struct HistoryDirectSearchView: View {
                 hit.senderLabel.isEmpty
                   ? directHumanize(hit.messageTypeLabel) : hit.senderLabel
               )
-                .font(.caption)
-                .foregroundStyle(.secondary)
+              .font(.caption)
+              .foregroundStyle(.secondary)
             }
             .padding(.vertical, 4)
           }

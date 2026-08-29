@@ -1,9 +1,12 @@
 [package]
-name = "greenbubbles-restore"
-version = "0.1.0"
+name = "greenbubbles"
+version = "0.1.1"
 edition = "2021"
-default-run = "greenbubbles-restore"
-license = "Proprietary"
+default-run = "greenbubbles"
+description = "Local-first WeChat history query, snapshot, restoration, and AI context engine"
+license = "MIT"
+readme = "../../README.md"
+repository = "https://github.com/bojieli/greenbubbles"
 publish = false
 
 [dependencies]

@@ -37,11 +37,13 @@ struct HistoryBrowserLaunchOptionsTests {
     #expect(options.bundleURL == nil)
   }
 
-  @Test("rejects missing duplicate and unknown launch options", arguments: [
-    ["--bundle"],
-    ["--bundle", "one", "--bundle", "two"],
-    ["--unknown"],
-  ])
+  @Test(
+    "rejects missing duplicate and unknown launch options",
+    arguments: [
+      ["--bundle"],
+      ["--bundle", "one", "--bundle", "two"],
+      ["--unknown"],
+    ])
   func rejectsInvalidArguments(arguments: [String]) {
     #expect(throws: HistoryBrowserLaunchError.self) {
       try HistoryBrowserLaunchOptions(

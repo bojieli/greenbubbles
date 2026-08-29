@@ -188,9 +188,9 @@ private let usage = """
 
 private let scriptURL = URL(fileURLWithPath: #filePath).standardizedFileURL
 private let repositoryRoot = scriptURL.deletingLastPathComponent().deletingLastPathComponent()
-private let discoveryExecutable = repositoryRoot.appending(path: ".build/release/greenbubbles")
+private let discoveryExecutable = repositoryRoot.appending(path: ".build/release/greenbubbles-discover")
 private let queryExecutable = repositoryRoot.appending(
-  path: "Native/GreenBubblesRestore/target/release/greenbubbles-restore"
+  path: "Native/GreenBubblesRestore/target/release/greenbubbles"
 )
 
 private func privateFileURL(_ value: String) -> URL {
@@ -980,7 +980,7 @@ private func run(_ options: Options) throws -> CheckReport {
   if !options.skipBuild {
     try runBuild(
       "swift",
-      ["build", "-c", "release", "--product", "greenbubbles"],
+      ["build", "-c", "release", "--product", "greenbubbles-discover"],
       stage: "Building the current Swift discovery CLI..."
     )
     try runBuild(

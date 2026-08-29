@@ -2,7 +2,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
-use greenbubbles_restore::{
+use greenbubbles::{
     audit::audit_archive, prepare_catalog, restore_catalog, AccountHolderBindingEvidence,
     RestorationOptions, SnapshotAccountBinding, SnapshotAccountBindingEvidence,
     SnapshotAcquisitionEvidence, SnapshotAcquisitionMode, SnapshotEntry, SnapshotFileRole,
@@ -94,7 +94,7 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
         client_build: None,
         acquisition: None,
         entries: vec![SnapshotEntry {
-            source: greenbubbles_restore::manifest::PathReference {
+            source: greenbubbles::manifest::PathReference {
                 opaque_id: "source".to_string(),
                 path: None,
             },
@@ -102,7 +102,7 @@ fn restores_every_plain_source_row_and_preserves_raw_payloads() {
             logical_path: "message/message_0.db".to_string(),
             relative_path: "sets/0000/database.db".to_string(),
             role: SnapshotFileRole::Database,
-            fingerprint: greenbubbles_restore::manifest::SourceFileFingerprint {
+            fingerprint: greenbubbles::manifest::SourceFileFingerprint {
                 device_id: 1,
                 file_id: 1,
                 byte_count: metadata.len() as i64,
@@ -630,7 +630,7 @@ fn write_legacy_snapshot_manifest(snapshot: &Path, database: &Path, account_root
         client_build: None,
         acquisition: None,
         entries: vec![SnapshotEntry {
-            source: greenbubbles_restore::manifest::PathReference {
+            source: greenbubbles::manifest::PathReference {
                 opaque_id: hex::encode(Sha256::digest(
                     fs::canonicalize(account_root)
                         .unwrap()
@@ -645,7 +645,7 @@ fn write_legacy_snapshot_manifest(snapshot: &Path, database: &Path, account_root
             logical_path: "message/message_0.db".to_string(),
             relative_path: "sets/0000/database.db".to_string(),
             role: SnapshotFileRole::Database,
-            fingerprint: greenbubbles_restore::manifest::SourceFileFingerprint {
+            fingerprint: greenbubbles::manifest::SourceFileFingerprint {
                 device_id: 1,
                 file_id: 1,
                 byte_count: metadata.len() as i64,
@@ -666,7 +666,7 @@ fn write_bound_snapshot_manifest(snapshot: &Path, database: &Path, account_root:
     let bytes = fs::read(database).unwrap();
     let metadata = fs::metadata(database).unwrap();
     let content_sha256 = hex::encode(Sha256::digest(&bytes));
-    let fingerprint = greenbubbles_restore::manifest::SourceFileFingerprint {
+    let fingerprint = greenbubbles::manifest::SourceFileFingerprint {
         device_id: 1,
         file_id: 1,
         byte_count: metadata.len() as i64,
@@ -712,7 +712,7 @@ fn write_bound_snapshot_manifest(snapshot: &Path, database: &Path, account_root:
             last_integrity_scan_at: Some("2026-08-27T00:00:00Z".to_string()),
         }),
         entries: vec![SnapshotEntry {
-            source: greenbubbles_restore::manifest::PathReference {
+            source: greenbubbles::manifest::PathReference {
                 opaque_id: "bound-source".to_string(),
                 path: None,
             },

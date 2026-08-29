@@ -19,13 +19,13 @@ Ordinary local reads do not need restoration. Choose exactly one access mode:
 List conversations, then page only the selected conversation:
 
 ```text
-greenbubbles-restore conversations list <source-root> \
+greenbubbles conversations list <source-root> \
   --passphrase-stdin --limit 100
 
-greenbubbles-restore messages list <source-root> \
+greenbubbles messages list <source-root> \
   --passphrase-stdin --conversation <id> --limit 100 [--cursor <token>]
 
-greenbubbles-restore message get <source-root> \
+greenbubbles message get <source-root> \
   --passphrase-stdin --conversation <id> --message <opaque-id>
 ```
 
@@ -41,7 +41,7 @@ index; it never silently scans the entire corpus in one request:
 
 ```text
 { <key-line>; <query-utf8>; } | \
-  greenbubbles-restore messages search <source-root> \
+  greenbubbles messages search <source-root> \
   --passphrase-stdin --query-stdin [--conversation <id>] \
   [--limit 50] [--cursor <token>]
 ```
@@ -81,11 +81,11 @@ Lazy attachment access is separate from message-page retrieval. Prefer the
 exact message-bound form and select exactly one database access mode:
 
 ```text
-greenbubbles-restore attachment inspect <account-or-source-root> \
+greenbubbles attachment inspect <account-or-source-root> \
   --conversation <id> --message <opaque-message-id> \
   --kind image|voice|video|document <access-mode>
 
-greenbubbles-restore attachment materialize <account-or-source-root> \
+greenbubbles attachment materialize <account-or-source-root> \
   --conversation <id> --message <opaque-message-id> \
   --kind image|voice|video|document \
   --attachment <opaque-id> --output <new-private-path>
@@ -109,12 +109,12 @@ For ordinary messages that require an owner policy and chained audit, create a
 source-bound policy once and run one private connector request:
 
 ```text
-greenbubbles-restore connector-policy-direct \
+greenbubbles connector-policy-direct \
   <source-root> <new-policy.json> <conversation-id>... \
   --capabilities list,read,search \
   --fields sender,created-at,type,content --passphrase-stdin
 
-greenbubbles-restore connector-query-direct \
+greenbubbles connector-query-direct \
   <source-root> <policy.json> <audit.ndjson> <request.json> \
   --passphrase-stdin
 ```
@@ -149,7 +149,7 @@ with an archive/replica policy.
 replica. It does not require a daemon:
 
 ```text
-greenbubbles-restore ai-query \
+greenbubbles ai-query \
   <replica.db> <policy.json> <audit.ndjson> <request.json> \
   --replica-key-stdin
 ```
@@ -206,7 +206,7 @@ field may simply be policy-redacted.
 `ai-export` writes one checkpoint-consistent, policy-scoped generation:
 
 ```text
-greenbubbles-restore ai-export \
+greenbubbles ai-export \
   <replica.db> <policy.json> <audit.ndjson> <new-output-directory> \
   --replica-key-stdin --requester local-agent
 ```
@@ -247,7 +247,7 @@ displaying that friendly label.
 
 Every JSONL line is an independent JSON object. Verify each file against the
 SHA-256 and record count in `manifest.json` before bulk ingestion. Prefer the
-aggregate-only `greenbubbles-restore audit-ai-context <bundle-directory>`
+aggregate-only `greenbubbles audit-ai-context <bundle-directory>`
 command, which also validates schemas, permissions, identities, references,
 and freshness without printing content. Preserve the opaque IDs and checkpoint
 identity in downstream indexes so later change events can update or invalidate
@@ -269,7 +269,7 @@ After verifying or creating a static bundle, build bounded conversational
 chunks for memory and retrieval frameworks:
 
 ```text
-greenbubbles-restore ai-memory-export \
+greenbubbles ai-memory-export \
   <AI-context-bundle-directory> <new-output-directory> \
   [--max-messages-per-chunk <n>] [--max-text-bytes-per-chunk <n>] \
   [--progress-file <new-owner-only-events.ndjson>] \
@@ -281,7 +281,7 @@ Defaults are 64 messages and 49,152 UTF-8 text bytes. The output includes
 `documents/` for QMD/Khoj-style Markdown indexing, `documents.jsonl` for stable
 path/digest evidence, and a checkpoint-bound manifest. The command needs no
 replica key because it only consumes the already policy-minimized bundle.
-Run `greenbubbles-restore audit-ai-memory <output-directory>` after copying and
+Run `greenbubbles audit-ai-memory <output-directory>` after copying and
 before indexing; it verifies every chunk and document without printing content.
 The audit accepts the same progress options. Projection/audit events expose the
 current file, source bytes/records, processed messages, emitted or verified

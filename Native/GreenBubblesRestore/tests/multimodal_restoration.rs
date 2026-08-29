@@ -4,15 +4,13 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
-use greenbubbles_restore::archive::{create_conversation_policy, read_conversation_page};
-use greenbubbles_restore::audit::audit_archive;
-use greenbubbles_restore::manifest::{
+use greenbubbles::archive::{create_conversation_policy, read_conversation_page};
+use greenbubbles::audit::audit_archive;
+use greenbubbles::manifest::{
     PathReference, SnapshotEntry, SnapshotFileRole, SnapshotManifest, SourceFileFingerprint,
 };
-use greenbubbles_restore::reconcile::reconcile_archives;
-use greenbubbles_restore::{
-    prepare_catalog, restore_catalog, RestorationMediaPhase, RestorationOptions,
-};
+use greenbubbles::reconcile::reconcile_archives;
+use greenbubbles::{prepare_catalog, restore_catalog, RestorationMediaPhase, RestorationOptions};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 

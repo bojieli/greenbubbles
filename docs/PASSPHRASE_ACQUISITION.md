@@ -75,7 +75,7 @@ replace an existing file). It never appears on a command line, in a JSON
 report, or in logs. The file is shaped so it can be piped directly:
 
 ```sh
-cat <passphrase-file> | greenbubbles-restore restore \
+cat <passphrase-file> | greenbubbles restore \
   <snapshot-directory> <private-output-directory> \
   --account-root <authorized-account-directory> --passphrase-stdin
 ```

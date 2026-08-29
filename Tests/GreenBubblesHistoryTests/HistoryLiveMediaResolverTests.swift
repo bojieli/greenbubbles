@@ -138,7 +138,7 @@ private struct LiveMediaFixture {
     let responseData = try JSONSerialization.data(
       withJSONObject: response, options: [.sortedKeys, .withoutEscapingSlashes])
     let responseText = String(decoding: responseData, as: UTF8.self)
-    let executable = rootURL.appending(path: "fake-greenbubbles-restore")
+    let executable = rootURL.appending(path: "fake-greenbubbles")
     let responseCommand =
       bindRequestID
       ? """

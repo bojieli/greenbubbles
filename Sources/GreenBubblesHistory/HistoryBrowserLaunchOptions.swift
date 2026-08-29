@@ -42,10 +42,11 @@ public struct HistoryBrowserLaunchOptions: Equatable, Sendable {
       return
     }
     let expandedPath = (rawBundlePath as NSString).expandingTildeInPath
-    bundleURL = URL(
-      fileURLWithPath: expandedPath,
-      relativeTo: currentDirectoryURL.standardizedFileURL
-    ).standardizedFileURL
+    bundleURL =
+      URL(
+        fileURLWithPath: expandedPath,
+        relativeTo: currentDirectoryURL.standardizedFileURL
+      ).standardizedFileURL
   }
 
   public static func normalizeOpenedURL(_ url: URL) -> URL {

@@ -1,25 +1,29 @@
 # Dependency and distribution inventory
 
-Audit date: 2026-08-27
+Audit date: 2026-08-29
 
-Repository state: private; no public-release approval
+Repository state: approved for public source and macOS arm64 binary release
 
-This is a factual engineering inventory, not legal advice and not a license or
-publication decision. It records what the current source and resolved build
-contain so that the repository owner and qualified counsel can assess source,
-binary, documentation, fixture, and hosted-repository distribution separately.
+This is a factual engineering inventory, not legal advice. It records what the
+current source and resolved build contain. On 2026-08-29 the repository owner
+selected MIT and explicitly authorized public source plus Developer ID signed,
+Apple-notarized macOS arm64 binaries. That owner decision does not publish real
+user data, waive third-party terms, or make a legal conclusion about every use
+or jurisdiction.
 
 ## Current project status
 
-- The repository has no project-wide open-source license. The native Cargo
-  package declares `license = "Proprietary"` and `publish = false`.
-- `NOTICE.md` identifies important third-party components but is not a complete
-  binary notice bundle.
-- The repository must remain private until the owner selects a project license,
-  the publication categories below are reviewed, and Phase 0.5's legal and
-  distribution gate is explicitly passed.
-- No conclusion in this document authorizes a public source repository, a
-  downloadable binary, or distribution of WeChat-derived material.
+- The repository is licensed under MIT. The native Cargo package declares
+  `license = "MIT"` and remains `publish = false`; crates.io publication is not
+  part of this release.
+- `THIRD_PARTY_NOTICES.md` is the complete reviewed notice bundle for the
+  macOS arm64 target. It is generated from the locked runtime graph and
+  augmented with SQLCipher, SILK, Zstandard, and derived-code notices.
+- `Native/GreenBubblesRestore/about.toml` pins the target license policy and
+  anchors the `wx-*` MIT clarification to the exact upstream LICENSE digest.
+- Public release covers repository source, documentation, synthetic fixtures,
+  hosted metadata, and the described binaries. It never authorizes publishing
+  messages, databases, keys, media, captures, or other owner-private material.
 
 ## Reproducible boundary
 
@@ -84,8 +88,8 @@ families are:
 | `filetime` (development only) | 0.2.29 | MIT/Apache-2.0 | timestamp tests |
 
 The locked graph contains 185 non-local package records across target and build
-configurations. Cargo metadata reports permissive expressions for 180 and no
-license value for the five pinned `wx-*` package records. License metadata is a
+configurations. Cargo metadata reports permissive expressions for 179 and no
+license value for the six pinned `wx-*` package records. License metadata is a
 useful index, not proof that every bundled source file is covered by that one
 expression; the native-source review below demonstrates why source inspection
 is also necessary.
@@ -98,7 +102,7 @@ from:
 ```text
 repository: https://github.com/pandorafuture/wx-cli
 commit:     2abe708f55bfe135539a385df856fdc58f97fc74
-packages:   wx-db, wx-decrypt, wx-media, wx-keychain, wx-paths
+packages:   wx-context, wx-db, wx-decrypt, wx-media, wx-keychain, wx-paths
 version:    0.7.4
 ```
 
@@ -107,15 +111,15 @@ At the exact checkout:
 - the workspace declares `license = "MIT"` in `[workspace.package]`;
 - the repository root contains an MIT license whose SHA-256 is
   `4d97412ef3e92a7f816240a39e5aae454dfe64c1b716e3702c21f64aa53e310e`;
-- none of the five selected crate manifests declares `license.workspace =
+- none of the six selected crate manifests declares `license.workspace =
   true` or its own `license`, so Cargo metadata reports their license as
   unknown.
 
-The repository-level evidence resolves the earlier question of whether the
-checkout has an apparent license file: it does. The package metadata omission
-remains a packaging ambiguity to review before distribution. GreenBubbles does
-not copy the upstream source into this repository; Cargo fetches the exact
-pinned revision to build it.
+The repository-level evidence resolves the metadata omission for this release.
+The owner accepted the pinned packages under that MIT root license, and
+`about.toml` makes the exact license digest a fail-closed build input.
+GreenBubbles does not copy the upstream source into this repository; Cargo
+fetches the exact pinned revision to build it.
 
 One further implementation observation matters to privilege review: selecting
 `wx-media` also selects its `wx-keychain` and `wx-paths` code even though
@@ -175,36 +179,37 @@ must include the bundled Zstandard notice.
 
 These are separate review units; approval of one does not approve the others.
 
-| Category | Current contents or example | Current status before public release |
+| Category | Current contents or example | Public 0.1.1 decision |
 | --- | --- | --- |
-| GreenBubbles source | Swift/Rust implementation, scripts, CI | No project license selected; dependency and mechanism review required. |
-| Source build dependencies | pinned `wx-cli`, crates.io sources, bundled C | Preserve upstream terms; resolve package metadata ambiguity and nested native notices. |
-| Prebuilt binaries | CLI, restoration engine, and local service processes | Requires complete binary notice bundle, linkage review, target-specific inventory, and exact mechanism/legal approval. |
-| Schema/format documentation | storage signatures, SQLCipher profile, row/type mappings | Assess separately under Phase 0.5; documentation may expose private implementation details even without code. |
-| Sanitized fixtures | generated databases and synthetic payloads | Publish only with provenance proving generation or redistribution permission and a privacy scan. |
+| GreenBubbles source | Swift/Rust implementation, scripts, CI | Publish under MIT. |
+| Source build dependencies | pinned `wx-cli`, crates.io sources, bundled C | Publish lock/config references; preserve upstream terms and exact notices. |
+| Prebuilt binaries | app DMG plus complete CLI archive | Publish macOS arm64 only after Developer ID signing, Apple Accepted verdicts, ticket verification, SBOM, and checksums. |
+| Schema/format documentation | storage signatures, SQLCipher profile, row/type mappings | Publish as research documentation with the stated authorization and compatibility caveats. |
+| Sanitized fixtures | generated databases and synthetic payloads | Publish only where repository provenance and privacy checks pass. |
 | Real restored data or captures | messages, media, database fragments, absolute paths, IDs, digests | Never publish or commit; owner-private artifacts only. |
-| Hosted repository metadata | commit history, issues, CI logs, release assets | Requires a deliberate hosting decision and procedures for takedown, complaints, security reports, and accidental private-data exposure. |
-| Research evidence | redacted build fingerprints and aggregate measurements | Review mechanism, contractual, privacy, and re-identification risk before publication. |
+| Hosted repository metadata | commit history, issues, CI logs, release assets | Publish with private vulnerability reporting, issue hygiene, release holds, and takedown procedures. |
+| Research evidence | redacted build fingerprints and aggregate measurements | Publish only the already reviewed content-free or aggregate evidence. |
 
 The source/binary distinction is especially important: a source license notice
 in an upstream checkout does not automatically produce the documentation and
 notices required beside a statically linked binary.
 
-## Open items
+## Release decision and remaining limits
 
-This audit does not complete any legal/distribution checkbox in `PLAN.md`.
-Before a public release, the remaining work includes:
+The owner-approved public 0.1.1 boundary is deliberately narrower than the
+project's research roadmap:
 
-1. repository-owner selection of a GreenBubbles license;
-2. qualified review of the exact source, binary, schema, fixture, research, and
-   hosting categories and intended jurisdictions;
-3. resolution or explicit acceptance of the selected `wx-*` package metadata
-   omission and the compiled `wx-keychain` boundary;
-4. complete notice generation and verification for each binary target,
-   including SQLCipher and bundled SILK terms;
-5. fixture provenance and privacy review;
-6. Tencent-route, mechanism-supportability, response-plan, and publication
-   decisions required by Phase 0.5.
-
-Until those items produce an explicit decision, the correct engineering state
-is `private`, `publish = false`, and no downloadable binary.
+1. MIT applies to GreenBubbles; every third-party component retains its own
+   terms and notices.
+2. The six `wx-*` manifests' missing metadata is explicitly accepted only at
+   the pinned MIT-licensed revision and license digest.
+3. Binary approval is macOS arm64-specific. Another architecture or platform
+   requires a fresh runtime graph, native-source review, notice generation,
+   signing path, and clean-machine qualification.
+4. The release does not endorse automated acquisition or sending. Acquisition
+   remains advanced and owner-run; public builds ship the send path closed.
+5. Real data and diagnostic artifacts remain private regardless of repository
+   visibility.
+6. Qualified legal review, Tencent permission, disposable-account evidence,
+   and broader compatibility remain open risk/research items in `PLAN.md`, not
+   claims implied by this research-alpha release.

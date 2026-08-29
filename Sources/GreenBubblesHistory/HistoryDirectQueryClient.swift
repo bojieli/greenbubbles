@@ -737,12 +737,51 @@ private final class DirectSecureBytes: @unchecked Sendable {
 
   var isValidUTF8: Bool {
     guard let storage else { return true }
-    return String(
-      bytesNoCopy: storage,
-      length: count,
-      encoding: .utf8,
-      freeWhenDone: false
-    ) != nil
+    let bytes = storage.assumingMemoryBound(to: UInt8.self)
+    let continuation: (UInt8) -> Bool = { (0x80...0xBF).contains($0) }
+    var index = 0
+    while index < count {
+      switch bytes[index] {
+      case 0x00...0x7F:
+        index += 1
+      case 0xC2...0xDF:
+        guard index + 1 < count, continuation(bytes[index + 1]) else { return false }
+        index += 2
+      case 0xE0:
+        guard index + 2 < count, (0xA0...0xBF).contains(bytes[index + 1]),
+          continuation(bytes[index + 2])
+        else { return false }
+        index += 3
+      case 0xE1...0xEC, 0xEE...0xEF:
+        guard index + 2 < count, continuation(bytes[index + 1]),
+          continuation(bytes[index + 2])
+        else { return false }
+        index += 3
+      case 0xED:
+        guard index + 2 < count, (0x80...0x9F).contains(bytes[index + 1]),
+          continuation(bytes[index + 2])
+        else { return false }
+        index += 3
+      case 0xF0:
+        guard index + 3 < count, (0x90...0xBF).contains(bytes[index + 1]),
+          continuation(bytes[index + 2]), continuation(bytes[index + 3])
+        else { return false }
+        index += 4
+      case 0xF1...0xF3:
+        guard index + 3 < count, continuation(bytes[index + 1]),
+          continuation(bytes[index + 2]), continuation(bytes[index + 3])
+        else { return false }
+        index += 4
+      case 0xF4:
+        guard index + 3 < count, (0x80...0x8F).contains(bytes[index + 1]),
+          continuation(bytes[index + 2]), continuation(bytes[index + 3])
+        else { return false }
+        index += 4
+      default:
+        return false
+      }
+    }
+    return true
   }
 
   func append(to data: inout Data) {

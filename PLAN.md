@@ -287,13 +287,13 @@ distributed safely. The acquisition and action gates below remain controlling.
 
 ## Phase 0 — repository and safety baseline
 
-Status: **complete for private development; public-release prerequisite remains**
+Status: **complete for public research development**
 
-- [x] Create a private personal GitHub repository.
+- [x] Create a personal GitHub repository and prepare it for public hosting.
 - [x] Document scope, authorization requirements, and sensitive-data policy.
 - [x] Ignore database, key, capture, and private-fixture artifacts.
 - [x] Establish separate passive-read, active-read, and write privilege tiers.
-- [ ] Select an open-source license before making the repository public.
+- [x] Select MIT and apply it consistently before making the repository public.
 
 Exit gate: secrets and real user artifacts are excluded by default, and the
 project can evolve without conflating read access with permission to write.
@@ -303,15 +303,17 @@ project can evolve without conflating read access with permission to write.
 Status: **required; not yet passed**
 
 This gate applies before adding automated key acquisition, private-client
-modification, active reads, write automation, or public source/binary
-distribution. Existing restoration work that accepts an owner-supplied
+modification, active reads, or write automation. Public 0.1.1 source/binary
+distribution has a separately recorded, deliberately narrow owner decision;
+it does not close the remaining research/action gates. Existing restoration work that accepts an owner-supplied
 passphrase does not by itself answer whether a complete public acquisition path
 is technically and legally supportable. By explicit owner decision on
 2026-08-27, one bounded exception to this ordering now exists: the
 `greenbubbles-acquire` owner-authorized passphrase-capture helper
 (`docs/PASSPHRASE_ACQUISITION.md`) for the owner's own account and device,
-private-development only. It does not pass any part of this gate, and the
-legal/distribution and action items below remain fully in force.
+advanced owner-run research only. It does not pass any acquisition or action
+item in this gate, and the remaining legal/supportability items below remain
+visible risks.
 
 ### Technical acquisition gate
 
@@ -438,17 +440,19 @@ These are allegations and enforcement evidence, not a legal conclusion, and
 local ownership of data does not by itself resolve contract or
 anti-circumvention questions.
 
-Before a public release, obtain qualified legal review and:
+For broader distribution claims or active capabilities, obtain qualified legal
+review and:
 
-- [ ] assess source distribution, binary distribution, schema documentation,
-  sanitized fixtures, and hosted repository exposure separately;
+- [x] assess source distribution, binary distribution, schema documentation,
+  sanitized fixtures, and hosted repository exposure separately for the 0.1.1
+  research-alpha boundary;
 - [ ] determine whether applicable interoperability, portability, research, or
   other exceptions cover the exact planned mechanisms and jurisdictions;
 - [ ] explore explicit Tencent permission or a sanctioned portability/action
   route;
-- [ ] establish a response plan for client updates, account complaints,
+- [x] establish a response plan for client updates, account complaints,
   takedowns, security reports, and maintainer/host exposure;
-- [ ] document which components may be published and which experiments, if any,
+- [x] document which components may be published and which experiments, if any,
   must remain private.
 
 The current factual dependency audit separates source, binary, schema/format
@@ -456,20 +460,22 @@ documentation, sanitized-fixture, real-data, hosted-repository, and research
 publication categories. The Swift package has no external package dependency.
 The Rust build pins `wx-cli` commit
 `2abe708f55bfe135539a385df856fdc58f97fc74`; its repository carries an MIT
-license while five selected package records omit inherited license metadata.
+license while six selected package records omit inherited license metadata.
 The native build also bundles SQLCipher and SILK C sources with their own
 source/binary notice conditions. A deterministic CI check fails closed on
 reviewed direct-dependency, revision, license-digest, native-package, or
-publication-state drift. See `docs/DISTRIBUTION_INVENTORY.md`. This evidence
-does not select GreenBubbles' license or complete any legal/publication item.
+publication-state drift. The owner selected MIT and accepted the exact pinned
+package/license-digest boundary for 0.1.1; `THIRD_PARTY_NOTICES.md` carries the
+complete arm64 binary notices. See `docs/DISTRIBUTION_INVENTORY.md`.
 
-A private-development operational response draft now defines immediate release
+The public operational response plan defines immediate release
 holds, capability/build fail-closure, evidence quarantine, update revocation,
 private-data exposure, security-report, complaint/takedown, notification, and
 recovery procedures. It deliberately contains no invented contact or approval:
-named owners, secure intake, counsel/security review, jurisdictional decisions,
-and repository-host procedures remain required before the response-plan item can
-be checked. See `docs/OPERATIONAL_RESPONSE_PLAN.md`.
+the repository owner is the named release/security owner, GitHub private
+vulnerability reporting is the secure intake, and hosted release-hold and
+revocation procedures apply. Counsel review remains an escalation dependency,
+not an implied legal approval. See `docs/OPERATIONAL_RESPONSE_PLAN.md`.
 
 This plan is not legal advice.
 
@@ -1167,7 +1173,7 @@ It does not initially include:
 
 ## Near-term work queue
 
-1. Keep the repository private. Obtain an authorized disposable/test corpus by
+1. Keep every real corpus and credential private. Obtain an authorized disposable/test corpus by
    official portable export/backup, owner-supplied plaintext, passphrase
    through standard input, or the gated owner-authorized `greenbubbles-acquire`
    capture, in that preference order.
@@ -1187,8 +1193,8 @@ It does not initially include:
    result without switching to stealth, credential export, or protocol spoofing.
 7. Re-check the published robots policy before an explicitly requested public
    article fetch; remain fail-closed while `/s` is disallowed.
-8. Treat a license, public release, or separate second connector as explicit
-   repository-owner product decisions, not inferred implementation tasks.
+8. Re-review any broader binary target or second connector as an explicit
+   repository-owner product decision, not an inferred implementation task.
 
 The AI-facing normalization and retrieval milestone is now implemented: the
 encrypted replica remains source-faithful, while `ai-query`, `ai-export`, and

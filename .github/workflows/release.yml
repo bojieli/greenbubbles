@@ -7,12 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to publish, for example v0.1.0"
+        description: "Existing annotated tag to publish, for example v0.1.1"
         required: true
         type: string
 
-permissions:
-  contents: write
+permissions: {}
 
 concurrency:
   group: release-${{ inputs.tag || github.ref }}
@@ -20,51 +19,87 @@ concurrency:
 
 jobs:
   # A release publishes only what CI already accepts. Calling the workflow
-  # rather than restating its steps keeps the release gate and the everyday
-  # build from drifting apart.
+  # keeps its tests and the everyday build from drifting apart.
   verify:
+    permissions:
+      contents: read
     uses: ./.github/workflows/ci.yml
 
   publish:
     needs: verify
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 60
+    permissions:
+      contents: write
 
     steps:
       - name: Resolve the release tag
         id: tag
+        env:
+          REQUESTED_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          tag="${{ inputs.tag || github.ref_name }}"
-          case "$tag" in
-            v[0-9]*) ;;
-            *)
-              echo "error: '$tag' is not a v-prefixed release tag" >&2
-              exit 1
-              ;;
-          esac
-          echo "tag=$tag" >>"$GITHUB_OUTPUT"
-          echo "version=${tag#v}" >>"$GITHUB_OUTPUT"
+          tag="$REQUESTED_TAG"
+          if [[ ! "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?)$ ]]; then
+            echo "error: '$tag' is not a semantic v-prefixed release tag" >&2
+            exit 1
+          fi
+          if [ "$GITHUB_REF" != "refs/tags/$tag" ]; then
+            echo "error: release runs must execute from the exact requested tag ref" >&2
+            echo "expected refs/tags/$tag, got $GITHUB_REF" >&2
+            exit 1
+          fi
+          {
+            echo "tag=$tag"
+            echo "version=${tag#v}"
+          } >>"$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ steps.tag.outputs.tag }}
           fetch-depth: 0
 
-      - name: Show toolchain versions
+      - name: Check public binary release prerequisites
+        run: bash scripts/check-public-release.sh "${{ steps.tag.outputs.tag }}"
+
+      - name: Require the complete Apple release credential set
+        env:
+          CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
         run: |
+          set -euo pipefail
+          for value in \
+            "$CERTIFICATE" \
+            "$CERTIFICATE_PASSWORD" \
+            "$SIGNING_IDENTITY" \
+            "$TEAM_ID" \
+            "$NOTARY_KEY" \
+            "$NOTARY_KEY_ID" \
+            "$NOTARY_ISSUER_ID"; do
+            if [ -z "$value" ]; then
+              echo "error: the complete Apple signing and notarization secret set is required" >&2
+              exit 1
+            fi
+          done
+
+      # Build before importing any private signing material. Dependency build
+      # scripts therefore cannot access the release keychain or Notary key.
+      - name: Build the unsigned release executables
+        run: |
+          set -euo pipefail
           swift --version
           rustc --version
           cargo --version
+          swift build -c release
+          cargo build --locked --release \
+            --manifest-path Native/GreenBubblesRestore/Cargo.toml
 
-      - name: Build the Swift release executables
-        run: swift build -c release
-
-      - name: Build the restoration engine
-        working-directory: Native/GreenBubblesRestore
-        run: cargo build --locked --release
-
-      - name: Assemble the distribution archive
+      - name: Assemble the unsigned CLI distribution
         id: archive
         run: |
           set -euo pipefail
@@ -74,7 +109,7 @@ jobs:
           mkdir -p "$staging/bin" "$staging/docs"
 
           for product in \
-            greenbubbles \
+            greenbubbles-discover \
             greenbubbles-acquire \
             greenbubbles-history \
             greenbubbles-public-article \
@@ -83,58 +118,334 @@ jobs:
             cp ".build/release/$product" "$staging/bin/"
           done
 
-          for product in greenbubbles-restore greenbubbles-change-consumer; do
+          for product in greenbubbles greenbubbles-change-consumer; do
             cp "Native/GreenBubblesRestore/target/release/$product" "$staging/bin/"
           done
 
-          cp README.md NOTICE.md "$staging/"
-          for doc in docs/USER_GUIDE.md docs/SEND_ADAPTER.md docs/AI_TOOL_BOUNDARY.md; do
-            # An `&&` list as the last statement in the loop body would make the
-            # loop — and so the step, under `set -e` — fail on the first absent
-            # file rather than skipping it.
-            if [ -f "$doc" ]; then cp "$doc" "$staging/docs/"; fi
+          cp README.md CHANGELOG.md LICENSE NOTICE.md THIRD_PARTY_NOTICES.md "$staging/"
+          for doc in \
+            docs/CLI_REFERENCE.md \
+            docs/USER_GUIDE.md \
+            docs/SEND_ADAPTER.md \
+            docs/AI_TOOL_BOUNDARY.md \
+            docs/PUBLIC_RELEASE_CHECKLIST.md; do
+            cp "$doc" "$staging/docs/"
           done
+          swift scripts/check-distribution-inventory.swift --print \
+            >"$staging/sbom.json"
 
-          tar -czf "dist/$name.tar.gz" -C dist "$name"
-          ( cd dist && shasum -a 256 "$name.tar.gz" >"$name.tar.gz.sha256" )
+          {
+            echo "name=$name"
+            echo "staging=$staging"
+            echo "archive=dist/$name.zip"
+            echo "dmg=dist/GreenBubbles-${version}-macos-arm64.dmg"
+            echo "sbom=dist/$name-sbom.json"
+            echo "checksums=dist/SHA256SUMS-${version}.txt"
+            echo "app_notary_log=dist/GreenBubbles-${version}-app-notarization.json"
+            echo "cli_notary_log=dist/$name-notarization.json"
+            echo "dmg_notary_log=dist/GreenBubbles-${version}-macos-arm64-notarization.json"
+          } >>"$GITHUB_OUTPUT"
 
-          echo "name=$name" >>"$GITHUB_OUTPUT"
-          echo "archive=dist/$name.tar.gz" >>"$GITHUB_OUTPUT"
-          echo "checksum=dist/$name.tar.gz.sha256" >>"$GITHUB_OUTPUT"
-
-      - name: Confirm the archived helper carries no diagnostic bypass
+      - name: Import the Developer ID certificate
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: |
           set -euo pipefail
-          # The same invariant CI enforces on the build tree, re-checked on the
-          # binary that is actually about to be published.
-          if strings "dist/${{ steps.archive.outputs.name }}/bin/greenbubbles-input-helper" |
-            grep -q 'focus-probe --profile'; then
+          keychain="$RUNNER_TEMP/greenbubbles-signing.keychain-db"
+          certificate="$RUNNER_TEMP/greenbubbles-developer-id.p12"
+          keychain_password="$(uuidgen)"
+          echo "GREENBUBBLES_RELEASE_KEYCHAIN=$keychain" >>"$GITHUB_ENV"
+
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 7200 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          printf '%s' "$APPLE_CERTIFICATE_P12_BASE64" | base64 -D >"$certificate"
+          chmod 600 "$certificate"
+          security import "$certificate" \
+            -k "$keychain" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -x
+          rm -f "$certificate"
+
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_password" "$keychain" >/dev/null
+
+          existing=()
+          while IFS= read -r line; do
+            line=${line#"${line%%[![:space:]]*}"}
+            line=${line%\"}
+            line=${line#\"}
+            [ -n "$line" ] && existing+=("$line")
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$keychain" "${existing[@]}"
+
+          security find-identity -v -p codesigning "$keychain" \
+            | grep -F "$APPLE_SIGNING_IDENTITY" >/dev/null || {
+              echo "error: configured Developer ID identity is absent from the P12" >&2
+              exit 1
+            }
+
+      - name: Sign and verify every CLI executable
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for executable in "${{ steps.archive.outputs.staging }}"/bin/*; do
+            codesign --force \
+              --keychain "$GREENBUBBLES_RELEASE_KEYCHAIN" \
+              --options runtime \
+              --timestamp \
+              --sign "$APPLE_SIGNING_IDENTITY" \
+              "$executable"
+            codesign --verify --strict --verbose=2 "$executable"
+            details="$(codesign --display --verbose=4 "$executable" 2>&1)"
+            grep -F "Authority=$APPLE_SIGNING_IDENTITY" <<<"$details" >/dev/null
+            grep -F "TeamIdentifier=$APPLE_TEAM_ID" <<<"$details" >/dev/null
+            grep -E '^flags=.*\(.*runtime.*\)' <<<"$details" >/dev/null
+          done
+
+      - name: Confirm the signed helper carries no diagnostic bypass
+        run: |
+          set -euo pipefail
+          helper="${{ steps.archive.outputs.staging }}/bin/greenbubbles-input-helper"
+          if strings "$helper" | grep -q 'focus-probe --profile'; then
             echo "error: the archived helper contains the debug diagnostics" >&2
             exit 1
           fi
-          echo "archived helper contains no diagnostic bypass"
+          echo "signed helper contains no diagnostic bypass"
+
+      - name: Build the signed application disk image
+        env:
+          GREENBUBBLES_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          GREENBUBBLES_TEAM_IDENTIFIER: ${{ secrets.APPLE_TEAM_ID }}
+          GREENBUBBLES_VERSION: ${{ steps.tag.outputs.version }}
+          GREENBUBBLES_SKIP_BUILD: "1"
+          GREENBUBBLES_OUTPUT_DIRECTORY: ${{ runner.temp }}/greenbubbles-app
+        run: |
+          set -euo pipefail
+          bash scripts/package-send-helper.sh
+          cp "$GREENBUBBLES_OUTPUT_DIRECTORY/GreenBubbles.dmg" \
+            "${{ steps.archive.outputs.dmg }}"
+
+      - name: Package the signed CLI archive
+        run: |
+          set -euo pipefail
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
+            "${{ steps.archive.outputs.staging }}" \
+            "${{ steps.archive.outputs.archive }}"
+          cp "${{ steps.archive.outputs.staging }}/sbom.json" \
+            "${{ steps.archive.outputs.sbom }}"
+
+      - name: Notarize both binary distributions
+        id: notarize
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          key_path="$RUNNER_TEMP/AuthKey_${APPLE_NOTARY_KEY_ID}.p8"
+          printf '%s' "$APPLE_NOTARY_KEY_P8" >"$key_path"
+          chmod 600 "$key_path"
+
+          notarize() {
+            local artifact="$1"
+            local submit_result="$2"
+            local notary_log="$3"
+            if ! xcrun notarytool submit "$artifact" \
+              --key "$key_path" \
+              --key-id "$APPLE_NOTARY_KEY_ID" \
+              --issuer "$APPLE_NOTARY_ISSUER_ID" \
+              --wait \
+              --timeout 30m \
+              --output-format json >"$submit_result"; then
+              cat "$submit_result"
+              local failed_id
+              failed_id="$(jq -r '.id // empty' "$submit_result" 2>/dev/null || true)"
+              if [ -n "$failed_id" ]; then
+                xcrun notarytool log "$failed_id" "$notary_log" \
+                  --key "$key_path" \
+                  --key-id "$APPLE_NOTARY_KEY_ID" \
+                  --issuer "$APPLE_NOTARY_ISSUER_ID" || true
+              fi
+              return 1
+            fi
+            cat "$submit_result"
+            local verdict
+            NOTARY_SUBMISSION_ID="$(jq -er '.id' "$submit_result")"
+            verdict="$(jq -er '.status' "$submit_result")"
+            if [ "$verdict" != "Accepted" ]; then
+              echo "error: Apple returned notarization verdict '$verdict'" >&2
+              return 1
+            fi
+            xcrun notarytool log "$NOTARY_SUBMISSION_ID" "$notary_log" \
+              --key "$key_path" \
+              --key-id "$APPLE_NOTARY_KEY_ID" \
+              --issuer "$APPLE_NOTARY_ISSUER_ID"
+          }
+
+          app="$RUNNER_TEMP/greenbubbles-app/GreenBubbles.app"
+          app_zip="$RUNNER_TEMP/GreenBubbles-app-notarize.zip"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$app" "$app_zip"
+
+          app_result="$RUNNER_TEMP/greenbubbles-app-notary-submit.json"
+          notarize \
+            "$app_zip" \
+            "$app_result" \
+            "${{ steps.archive.outputs.app_notary_log }}"
+          app_id="$NOTARY_SUBMISSION_ID"
+
+          app_stapled=
+          for attempt in $(seq 1 20); do
+            if xcrun stapler staple "$app"; then
+              app_stapled=yes
+              break
+            fi
+            echo "application ticket is still propagating ($attempt/20)"
+            sleep 15
+          done
+          [ -n "$app_stapled" ] || {
+            echo "error: unable to staple the accepted application ticket" >&2
+            exit 1
+          }
+          xcrun stapler validate "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          spctl --assess --type execute --verbose=4 "$app"
+
+          # Rebuild the disk image from the now-stapled app so both the inner
+          # app and the outer distribution remain verifiable offline.
+          rm -f "${{ steps.archive.outputs.dmg }}"
+          hdiutil create -quiet \
+            -volname GreenBubbles \
+            -srcfolder "$app" \
+            -ov \
+            -format UDZO \
+            "${{ steps.archive.outputs.dmg }}"
+          codesign --force \
+            --keychain "$GREENBUBBLES_RELEASE_KEYCHAIN" \
+            --timestamp \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            "${{ steps.archive.outputs.dmg }}"
+          codesign --verify --strict --verbose=2 "${{ steps.archive.outputs.dmg }}"
+
+          cli_result="$RUNNER_TEMP/greenbubbles-cli-notary-submit.json"
+          dmg_result="$RUNNER_TEMP/greenbubbles-dmg-notary-submit.json"
+          notarize \
+            "${{ steps.archive.outputs.archive }}" \
+            "$cli_result" \
+            "${{ steps.archive.outputs.cli_notary_log }}"
+          cli_id="$NOTARY_SUBMISSION_ID"
+          notarize \
+            "${{ steps.archive.outputs.dmg }}" \
+            "$dmg_result" \
+            "${{ steps.archive.outputs.dmg_notary_log }}"
+          dmg_id="$NOTARY_SUBMISSION_ID"
+          rm -f "$key_path"
+          {
+            echo "app_submission_id=$app_id"
+            echo "cli_submission_id=$cli_id"
+            echo "dmg_submission_id=$dmg_id"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Verify notarization tickets and staple the disk image
+        run: |
+          set -euo pipefail
+
+          # Bare Mach-O tickets resolve online and cannot be stapled. Poll the
+          # primary-signature assessment until every exact cdhash says
+          # "Notarized Developer ID"; any other rejection fails immediately.
+          resolved=
+          for attempt in $(seq 1 20); do
+            unresolved=0
+            for executable in "${{ steps.archive.outputs.staging }}"/bin/*; do
+              result="$RUNNER_TEMP/spctl-$(basename "$executable").txt"
+              spctl --assess --type open --context context:primary-signature -vvv \
+                "$executable" >"$result" 2>&1 || true
+              if grep -qx 'source=Notarized Developer ID' "$result"; then
+                continue
+              fi
+              if grep -qx 'source=Unnotarized Developer ID' "$result"; then
+                unresolved=$((unresolved + 1))
+                continue
+              fi
+              cat "$result"
+              echo "error: unexpected Gatekeeper verdict for $executable" >&2
+              exit 1
+            done
+            if [ "$unresolved" -eq 0 ]; then
+              resolved=yes
+              break
+            fi
+            echo "$unresolved notarization ticket(s) are still propagating ($attempt/20)"
+            sleep 15
+          done
+          [ -n "$resolved" ] || {
+            echo "error: accepted CLI notarization tickets did not become resolvable" >&2
+            exit 1
+          }
+
+          stapled=
+          for attempt in $(seq 1 20); do
+            if xcrun stapler staple "${{ steps.archive.outputs.dmg }}"; then
+              stapled=yes
+              break
+            fi
+            echo "disk-image ticket is still propagating ($attempt/20)"
+            sleep 15
+          done
+          [ -n "$stapled" ] || {
+            echo "error: unable to staple the accepted disk-image ticket" >&2
+            exit 1
+          }
+          xcrun stapler validate "${{ steps.archive.outputs.dmg }}"
+          spctl --assess --type open --context context:primary-signature -vvv \
+            "${{ steps.archive.outputs.dmg }}"
+
+      - name: Write release checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          shasum -a 256 \
+            "$(basename "${{ steps.archive.outputs.archive }}")" \
+            "$(basename "${{ steps.archive.outputs.dmg }}")" \
+            "$(basename "${{ steps.archive.outputs.sbom }}")" \
+            "$(basename "${{ steps.archive.outputs.app_notary_log }}")" \
+            "$(basename "${{ steps.archive.outputs.cli_notary_log }}")" \
+            "$(basename "${{ steps.archive.outputs.dmg_notary_log }}")" \
+            >"$(basename "${{ steps.archive.outputs.checksums }}")"
 
       - name: Compose the release notes
-        id: notes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tag="${{ steps.tag.outputs.tag }}"
           {
-            echo "## Artifacts"
+            echo "## Source"
             echo
-            echo "\`${{ steps.archive.outputs.name }}.tar.gz\` — macOS arm64 executables."
-            echo "Verify with the published \`.sha256\` before use."
+            echo "This tag is the complete MIT-licensed GreenBubbles source release."
+            echo "GitHub's source archives are attached automatically."
             echo
-            echo "> **These binaries are unsigned and not notarized.** macOS Gatekeeper"
-            echo "> will refuse them until they are cleared locally. Signing needs a"
-            echo "> Developer ID certificate and notarization needs an Apple ID, neither"
-            echo "> of which is available to CI."
+            echo "## Signed and notarized macOS binaries"
             echo
-            echo "> **The send path ships closed.** No release verifying key is committed,"
-            echo "> so every release-signed calibration profile is refused and the adapter"
-            echo "> stays in its dry-run stage until an operator configures it deliberately."
+            echo "- \`GreenBubbles-${{ steps.tag.outputs.version }}-macos-arm64.dmg\` — native history app; Developer ID signed, Apple notarized, and stapled."
+            echo "- \`${{ steps.archive.outputs.name }}.zip\` — complete CLI/tool set; every Mach-O is Developer ID signed and Apple notarized. Bare CLI tickets resolve online and cannot be stapled."
+            echo "- \`SHA256SUMS-${{ steps.tag.outputs.version }}.txt\` — checksums for every release artifact."
+            echo "- The SBOM and Apple notarization logs are published beside the binaries."
+            echo
+            echo "Requirements: Apple silicon and macOS 14 or later. Verify the checksums before use."
+            echo
+            echo "> **Research alpha:** GreenBubbles handles exceptionally sensitive data. Use only with data and accounts you are authorized to access, and read the acquisition/security guidance first."
+            echo
+            echo "> **The send path ships closed.** No release verification key is committed, so release-signed calibration profiles are refused and sending remains in dry-run until an operator deliberately configures a separate trust root."
+            echo
+            echo "Notarization submissions: app \`${{ steps.notarize.outputs.app_submission_id }}\`; CLI \`${{ steps.notarize.outputs.cli_submission_id }}\`; DMG \`${{ steps.notarize.outputs.dmg_submission_id }}\`."
             echo
             echo "## Changes"
             echo
@@ -144,15 +455,41 @@ jobs:
             -f tag_name="$tag" \
             --jq '.body' >>release-notes.md
 
-      - name: Publish the release
+      - name: Publish the source and binary release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           gh release create "${{ steps.tag.outputs.tag }}" \
-            --title "${{ steps.tag.outputs.tag }}" \
+            --title "GreenBubbles ${{ steps.tag.outputs.version }}" \
             --notes-file release-notes.md \
             --prerelease \
             --verify-tag \
             "${{ steps.archive.outputs.archive }}" \
-            "${{ steps.archive.outputs.checksum }}"
+            "${{ steps.archive.outputs.dmg }}" \
+            "${{ steps.archive.outputs.checksums }}" \
+            "${{ steps.archive.outputs.sbom }}" \
+            "${{ steps.archive.outputs.app_notary_log }}" \
+            "${{ steps.archive.outputs.cli_notary_log }}" \
+            "${{ steps.archive.outputs.dmg_notary_log }}"
+
+      - name: Remove signing material and temporary keychain
+        if: always()
+        run: |
+          set +e
+          rm -f \
+            "$RUNNER_TEMP"/AuthKey_*.p8 \
+            "$RUNNER_TEMP"/greenbubbles-developer-id.p12
+          if [ -n "${GREENBUBBLES_RELEASE_KEYCHAIN:-}" ]; then
+            remaining=()
+            while IFS= read -r line; do
+              line=${line#"${line%%[![:space:]]*}"}
+              line=${line%\"}
+              line=${line#\"}
+              if [ -n "$line" ] && [ "$line" != "$GREENBUBBLES_RELEASE_KEYCHAIN" ]; then
+                remaining+=("$line")
+              fi
+            done < <(security list-keychains -d user)
+            security list-keychains -d user -s "${remaining[@]}"
+            security delete-keychain "$GREENBUBBLES_RELEASE_KEYCHAIN"
+          fi

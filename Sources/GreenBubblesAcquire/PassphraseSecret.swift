@@ -31,7 +31,7 @@ public final class PassphraseSecret {
     self.bytes = bytes
   }
 
-  /// Reads one line from standard input, mirroring the `greenbubbles-restore`
+  /// Reads one line from standard input, mirroring the `greenbubbles`
   /// `--passphrase-stdin` contract: a 64-character hexadecimal line is decoded,
   /// anything else is taken as raw bytes; the result must be exactly 32 bytes.
   public static func readFromStandardInput() throws -> PassphraseSecret {

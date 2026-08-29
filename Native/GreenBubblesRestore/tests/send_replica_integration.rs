@@ -12,16 +12,16 @@ use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use greenbubbles_restore::action::ActionCapability;
-use greenbubbles_restore::connector::{load_action_draft, ConnectorService, DraftAttachment};
-use greenbubbles_restore::replica::bootstrap_replica;
-use greenbubbles_restore::send_adapter::{observe_send_in_replica, SendMatchStrength};
-use greenbubbles_restore::send_contract::{normalized_send_text_sha256, SendRolloutStage};
-use greenbubbles_restore::send_outbox::{OutboxEntry, OutboxEntryState};
-use greenbubbles_restore::tools::{
+use greenbubbles::action::ActionCapability;
+use greenbubbles::connector::{load_action_draft, ConnectorService, DraftAttachment};
+use greenbubbles::replica::bootstrap_replica;
+use greenbubbles::send_adapter::{observe_send_in_replica, SendMatchStrength};
+use greenbubbles::send_contract::{normalized_send_text_sha256, SendRolloutStage};
+use greenbubbles::send_outbox::{OutboxEntry, OutboxEntryState};
+use greenbubbles::tools::{
     create_tool_policy, ConversationToolScope, ToolCapability, ToolMessageField,
 };
-use greenbubbles_restore::{
+use greenbubbles::{
     ArtifactAvailability, ArtifactDecodeState, ArtifactKind, ArtifactRole, CanonicalArtifact,
     CanonicalConversation, CanonicalMessage, CanonicalParticipant, ConversationKind,
     DirectionEvidence, EntityDecodeState, LocalProfileState, MessageArtifactReference,

@@ -13,7 +13,7 @@ let package = Package(
     .library(name: "GreenBubblesWeb", targets: ["GreenBubblesWeb"]),
     .library(name: "GreenBubblesAcquire", targets: ["GreenBubblesAcquire"]),
     .library(name: "GreenBubblesSendKit", targets: ["GreenBubblesSendKit"]),
-    .executable(name: "greenbubbles", targets: ["GreenBubblesCLI"]),
+    .executable(name: "greenbubbles-discover", targets: ["GreenBubblesCLI"]),
     .executable(
       name: "greenbubbles-public-article",
       targets: ["GreenBubblesArticleCLI"]

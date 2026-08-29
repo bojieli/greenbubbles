@@ -12,7 +12,7 @@ left unchanged.
 An operator can independently verify a retained backup before relying on it:
 
 ```sh
-greenbubbles-restore audit-replica-backup \
+greenbubbles audit-replica-backup \
   <encrypted-pre-migration-backup.db> --replica-key-stdin \
   --progress-file <owner-only-new-progress.ndjson>
 ```

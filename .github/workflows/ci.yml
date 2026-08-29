@@ -13,16 +13,16 @@ permissions:
 jobs:
   test:
     runs-on: macos-15
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Show Swift version
         run: swift --version
 
       - name: Check formatting
-        run: swift format lint --recursive Package.swift Sources Tests
+        run: swift format lint --strict --recursive Package.swift Sources Tests
 
       - name: Run tests
         run: swift test
@@ -42,6 +42,8 @@ jobs:
       - name: Check packaging manifests
         run: |
           bash -n scripts/package-send-helper.sh
+          bash -n scripts/check-public-release.sh
+          bash scripts/check-public-release.sh
           plutil -lint Packaging/GreenBubbles/Info.plist
           plutil -lint Packaging/GreenBubblesInputHelper/Info.plist
           plutil -lint Packaging/GreenBubblesInputHelper/me.greenbubbles.InputHelper.plist
@@ -80,6 +82,20 @@ jobs:
 
       - name: Show Rust version
         run: rustc --version && cargo --version
+
+      - name: Audit Rust dependencies
+        working-directory: Native/GreenBubblesRestore
+        run: |
+          cargo install cargo-audit --locked --version 0.22.2
+          cargo audit --file Cargo.lock
+
+      - name: Reproduce the third-party notice bundle
+        working-directory: Native/GreenBubblesRestore
+        run: |
+          cargo install cargo-about --locked --features cli --version 0.9.2
+          cargo about generate --locked --fail \
+            -o "$RUNNER_TEMP/THIRD_PARTY_NOTICES.md" about.hbs
+          diff -u ../../THIRD_PARTY_NOTICES.md "$RUNNER_TEMP/THIRD_PARTY_NOTICES.md"
 
       - name: Check Rust formatting
         working-directory: Native/GreenBubblesRestore

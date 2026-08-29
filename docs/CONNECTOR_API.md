@@ -22,14 +22,14 @@ For ordinary reads, create a policy bound to the selected SQLite source, then
 use either a one-shot request or a reusable socket:
 
 ```text
-greenbubbles-restore connector-policy-direct <source-root> <new-policy.json> \
+greenbubbles connector-policy-direct <source-root> <new-policy.json> \
   <conversation-id>... --capabilities list,read,search \
   --fields sender,created-at,type,content --passphrase-stdin
 
-greenbubbles-restore connector-query-direct <source-root> <policy.json> \
+greenbubbles connector-query-direct <source-root> <policy.json> \
   <audit.ndjson> <private-request.json> --passphrase-stdin
 
-greenbubbles-restore connector-serve-direct <source-root> <policy.json> \
+greenbubbles connector-serve-direct <source-root> <policy.json> \
   <audit.ndjson> <connector.sock> --passphrase-stdin
 ```
 
@@ -44,7 +44,7 @@ start the replica serving process:
 
 ```text
 printf '%s\n' "$REPLICA_KEY" |
-  greenbubbles-restore connector-serve \
+  greenbubbles connector-serve \
     private/replica.db private/policy.json private/audit.ndjson \
     private/drafts private/connector.sock --replica-key-stdin
 ```
@@ -83,7 +83,7 @@ and verifies the same descriptor before and after the bounded read:
 ```
 
 ```text
-greenbubbles-restore connector-call private/connector.sock private/request.json
+greenbubbles connector-call private/connector.sock private/request.json
 ```
 
 `connector-query-direct` applies the same owner/single-link/no-follow request
@@ -212,7 +212,7 @@ For example, a cached-only local policy can be created without granting any
 conversation reads:
 
 ```text
-greenbubbles-restore tool-policy <archive> private/policy.json \
+greenbubbles tool-policy <archive> private/policy.json \
   --enable-cached-moments \
   --cached-fields author,created-at,type,content,title,url,media-count \
   --cached-not-before-unix 1700000000

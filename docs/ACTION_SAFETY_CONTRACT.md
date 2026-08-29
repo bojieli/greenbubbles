@@ -33,7 +33,7 @@ consumed, the idempotency key has not been reserved, the global kill switch is
 off, and the configured attempt window has capacity. Any mismatch produces
 one or more machine-readable denials.
 
-The approval issuer is `greenbubbles-restore send approve`. It is a local,
+The approval issuer is `greenbubbles send approve`. It is a local,
 explicit, owner-run command: it prints the resolved recipient, the body length,
 and the body digest, and refuses to write anything without `--confirm`. It
 mints nothing on behalf of an AI caller and is reachable from no connector

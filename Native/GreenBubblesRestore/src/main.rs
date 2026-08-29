@@ -12,7 +12,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use greenbubbles_restore::{
+use greenbubbles::{
     acquisition_audit::audit_acquisition_chain,
     action::{ActionCapability, ExternalApprovalEvidence},
     ai_context::{
@@ -2474,81 +2474,81 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!(
                 concat!(
                     "Usage:\n",
-                    "  greenbubbles-restore profile path|template|list|show|validate|set-default ...\n",
-                    "  greenbubbles-restore source status [--profile <name>]\n",
-                    "  greenbubbles-restore source status <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
-                    "  greenbubbles-restore conversations list [--profile <name>] [--limit <1..500>] [--cursor <opaque-cursor>]\n",
-                    "  greenbubbles-restore conversations list <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n",
-                    "  greenbubbles-restore messages list --conversation <id> [--profile <name>] [--limit <1..500>] [--cursor <opaque-cursor>]\n",
-                    "  greenbubbles-restore messages list <source-root> --conversation <id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n",
-                    "  greenbubbles-restore messages search --query-stdin [--profile <name>] [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n",
-                    "  greenbubbles-restore messages search <source-root> --query-stdin (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n",
-                    "  greenbubbles-restore message get --conversation <id> --message <opaque-id> [--profile <name>]\n",
-                    "  greenbubbles-restore message get <source-root> --conversation <id> --message <opaque-id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
-                    "  greenbubbles-restore attachment inspect <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
-                    "  greenbubbles-restore attachment materialize <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document --attachment <opaque-id> --output <new-path> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
-                    "  greenbubbles-restore snapshot recovery-kit create <new-private-file>\n",
-                    "  greenbubbles-restore snapshot local-credential create <new-private-file>\n",
-                    "  greenbubbles-restore snapshot create <WeChat-database-root> <new-snapshot-directory> (--source-passphrase-stdin | --source-decrypted) (--snapshot-recovery-kit <file> [--snapshot-local-credential <file>] [--snapshot-passphrase-stdin] | --snapshot-key-stdin)\n",
-                    "  greenbubbles-restore snapshot create-capture <stable-acquisition-snapshot> <new-snapshot-directory> (--source-passphrase-stdin | --source-decrypted) (--snapshot-recovery-kit <file> [--snapshot-local-credential <file>] [--snapshot-passphrase-stdin] | --snapshot-key-stdin)\n",
-                    "  greenbubbles-restore snapshot verify <snapshot-directory> (--snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin)\n",
-                    "  greenbubbles-restore snapshot rewrap <snapshot-directory> <new-snapshot-directory> (--old-snapshot-recovery-kit <file> | --old-snapshot-local-credential <file> | --old-snapshot-passphrase-stdin) --new-snapshot-recovery-kit <file> [--new-snapshot-local-credential <file>] [--new-snapshot-passphrase-stdin]\n",
-                    "  greenbubbles-restore snapshot retention quarantine <retiring> <replacement> <quarantine-directory> (--retiring-recovery-kit <file> | --retiring-local-credential <file> | --retiring-snapshot-passphrase-stdin) --replacement-recovery-kit <file>\n",
-                    "  greenbubbles-restore snapshot retention restore <quarantined> <restored-directory> (--snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin)\n",
-                    "  greenbubbles-restore snapshot rekey <snapshot-directory> <new-snapshot-directory> --old-snapshot-key-stdin --new-snapshot-key-stdin\n",
-                    "  greenbubbles-restore synthetic-benchmark <private-work-directory> [--samples <n>] [--small-messages <n>] [--large-messages <n>] [--burst-messages <n>]\n",
-                    "  greenbubbles-restore preflight <snapshot> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles-restore probe <snapshot> [--passphrase-stdin | --database-keys-file <owner-only-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles-restore restore <snapshot> <output> [--account-root <path>] [--defer-media] [--passphrase-stdin | --database-keys-file <owner-only-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles-restore diagnose-batch <snapshot> <diagnostic-output> [--database-offset <n>] [--database-limit <n>] [--resolve-media --account-root <path>] [--passphrase-stdin | --database-keys-file <owner-only-json>] [--summary-file <private-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles-restore diagnose-available <snapshot> <diagnostic-output> --database-keys-file <owner-only-json> [--resolve-media --account-root <path>] [--summary-file <private-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles-restore diagnose-archive-payloads <archive> <private-report-json> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles-restore diagnose-archive-schema <archive> <private-report-json> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles-restore restore-publish <snapshot> <publication-output> <handoff-file> [--previous-snapshot <path> --previous-archive <path>] [--account-root <path>] [--defer-media] [--passphrase-stdin | --database-keys-file <owner-only-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles-restore audit-archive <archive> [--summary-file <private-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles-restore audit-acquisition-chain <previous-snapshot> <current-snapshot>\n",
-                    "  greenbubbles-restore audit-connector-log <connector-audit-log>\n",
-                    "  greenbubbles-restore audit-connector-state <replica-path> <policy-file> <connector-audit-log> <draft-directory> --replica-key-stdin\n",
-                    "  greenbubbles-restore policy <archive> <policy-file> <conversation-id>... [--max-page-size <n>]\n",
-                    "  greenbubbles-restore read <archive> <policy-file> <conversation-id> [--cursor <cursor>] [--limit <n>]\n",
-                    "  greenbubbles-restore reconcile <previous-archive> <current-archive> <policy-file> <events-output>\n",
-                    "  greenbubbles-restore merge-incremental <previous-archive> <fragment-archive> <output-archive>\n",
-                    "  greenbubbles-restore replica-bootstrap <archive> <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles-restore replica-status <replica-path> --replica-key-stdin\n",
-                    "  greenbubbles-restore audit-replica <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles-restore audit-replica-backup <pre-migration-backup-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles-restore prepare-replica-recovery <pre-migration-backup-path> <new-candidate-path> --replica-key-stdin\n",
-                    "  greenbubbles-restore replica-sync <archive> <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles-restore replica-publish <replica-eligible-archive> <handoff-file> --generation <positive-integer>\n",
-                    "  greenbubbles-restore replica-archive-quarantine <handoff-file> <quarantine-directory> [--retain-publications <n, minimum 2>]\n",
-                    "  greenbubbles-restore replica-archive-restore <handoff-file> <quarantine-directory> --generation <positive-integer>\n",
-                    "  greenbubbles-restore compose-latency-evidence <private-snapshot-report> <private-offline-report> <private-follower-report> <private-handoff-file>\n",
-                    "  greenbubbles-restore summarize-latency-evidence <private-sample-array-json>\n",
-                    "  greenbubbles-restore replica-follow-once <handoff-file> <follow-state-file> <replica-path> --replica-key-stdin\n",
-                    "  greenbubbles-restore replica-follow <handoff-file> <follow-state-file> <replica-path> --replica-key-stdin [--poll-milliseconds <100..60000>] [--maximum-polls <n>]\n",
-                    "  greenbubbles-restore replica-follow-status <handoff-file> <follow-state-file> <replica-path> --replica-key-stdin\n",
-                    "  greenbubbles-restore replica-changes <replica-path> --replica-key-stdin [--cursor <cursor>] [--limit <n>]\n",
-                    "  greenbubbles-restore replica-search <replica-path> <private-filter-json> --replica-key-stdin [--cursor <cursor>] [--limit <n>]\n",
-                    "  greenbubbles-restore replica-cached-moments <replica-path> --replica-key-stdin [--author <opaque-id>] [--content-type <n>] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--cursor <cursor>] [--limit <n>]\n",
-                    "  greenbubbles-restore replica-message <replica-path> <canonical-id> --replica-key-stdin\n",
-                    "  greenbubbles-restore replica-conversations <replica-path> --replica-key-stdin [--limit <n>]\n",
-                    "  greenbubbles-restore replica-coverage <replica-path> --replica-key-stdin\n",
-                    "  greenbubbles-restore ai-query <replica-path> <policy-file> <connector-audit-log> <private-request-json> --replica-key-stdin\n",
-                    "  greenbubbles-restore ai-export <replica-path> <policy-file> <connector-audit-log> <new-output-directory> --replica-key-stdin --requester <id> [--destination local|remote] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles-restore audit-ai-context <AI-context-bundle-directory> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles-restore ai-memory-export <AI-context-bundle-directory> <new-output-directory> [--max-messages-per-chunk <n>] [--max-text-bytes-per-chunk <n>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles-restore audit-ai-memory <AI-memory-output-directory> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles-restore connector-policy-direct <source-root> <new-policy-file> <conversation-id>... --capabilities list,read,search --fields sender,created-at,type,content (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--max-results <n>] [--max-summary-bytes <n>]\n",
-                    "  greenbubbles-restore connector-query-direct <source-root> <policy-file> <audit-log> <private-request-json> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
-                    "  greenbubbles-restore connector-serve-direct <source-root> <policy-file> <audit-log> <socket-path> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
-                    "  greenbubbles-restore connector-serve <replica-path> <policy-file> <audit-log> <draft-directory> <socket-path> --replica-key-stdin\n",
-                    "  greenbubbles-restore connector-call <socket-path> <private-request-json>\n",
-                    "  greenbubbles-restore tool-policy <archive> <policy-file> ([<conversation-id>...] | --all-conversations) [--capabilities list,read,search,draft] [--fields sender,created-at,direction,type,content,attachments,relationships] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--enable-cached-moments --cached-fields author,created-at,type,content,title,description,url,media-count,like-count,comment-count] [--cached-not-before-unix <seconds>] [--cached-not-after-unix <seconds>] [--allow-cached-remote-model] [--max-results <n>] [--max-summary-bytes <n>] [--max-draft-bytes <n>]\n",
-                    "  greenbubbles-restore tool-list <archive> <policy-file> <audit-log> --requester <id> [--destination local|remote]\n",
-                    "  greenbubbles-restore tool-recent <archive> <policy-file> <audit-log> <conversation-id> --requester <id> [--limit <n>] [--destination local|remote]\n",
-                    "  greenbubbles-restore tool-search <archive> <policy-file> <audit-log> --requester <id> --query-stdin [--conversation <id>] [--limit <n>] [--destination local|remote]\n",
-                    "  greenbubbles-restore tool-draft <archive> <policy-file> <audit-log> <draft-directory> <conversation-id> --requester <id> --body-stdin\n",
-                    "  greenbubbles-restore send <subcommand>   (run 'greenbubbles-restore send --help')"
+                    "  greenbubbles profile path|template|list|show|validate|set-default ...\n",
+                    "  greenbubbles source status [--profile <name>]\n",
+                    "  greenbubbles source status <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
+                    "  greenbubbles conversations list [--profile <name>] [--limit <1..500>] [--cursor <opaque-cursor>]\n",
+                    "  greenbubbles conversations list <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n",
+                    "  greenbubbles messages list --conversation <id> [--profile <name>] [--limit <1..500>] [--cursor <opaque-cursor>]\n",
+                    "  greenbubbles messages list <source-root> --conversation <id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n",
+                    "  greenbubbles messages search --query-stdin [--profile <name>] [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n",
+                    "  greenbubbles messages search <source-root> --query-stdin (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n",
+                    "  greenbubbles message get --conversation <id> --message <opaque-id> [--profile <name>]\n",
+                    "  greenbubbles message get <source-root> --conversation <id> --message <opaque-id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
+                    "  greenbubbles attachment inspect <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
+                    "  greenbubbles attachment materialize <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document --attachment <opaque-id> --output <new-path> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
+                    "  greenbubbles snapshot recovery-kit create <new-private-file>\n",
+                    "  greenbubbles snapshot local-credential create <new-private-file>\n",
+                    "  greenbubbles snapshot create <WeChat-database-root> <new-snapshot-directory> (--source-passphrase-stdin | --source-decrypted) (--snapshot-recovery-kit <file> [--snapshot-local-credential <file>] [--snapshot-passphrase-stdin] | --snapshot-key-stdin)\n",
+                    "  greenbubbles snapshot create-capture <stable-acquisition-snapshot> <new-snapshot-directory> (--source-passphrase-stdin | --source-decrypted) (--snapshot-recovery-kit <file> [--snapshot-local-credential <file>] [--snapshot-passphrase-stdin] | --snapshot-key-stdin)\n",
+                    "  greenbubbles snapshot verify <snapshot-directory> (--snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin)\n",
+                    "  greenbubbles snapshot rewrap <snapshot-directory> <new-snapshot-directory> (--old-snapshot-recovery-kit <file> | --old-snapshot-local-credential <file> | --old-snapshot-passphrase-stdin) --new-snapshot-recovery-kit <file> [--new-snapshot-local-credential <file>] [--new-snapshot-passphrase-stdin]\n",
+                    "  greenbubbles snapshot retention quarantine <retiring> <replacement> <quarantine-directory> (--retiring-recovery-kit <file> | --retiring-local-credential <file> | --retiring-snapshot-passphrase-stdin) --replacement-recovery-kit <file>\n",
+                    "  greenbubbles snapshot retention restore <quarantined> <restored-directory> (--snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin)\n",
+                    "  greenbubbles snapshot rekey <snapshot-directory> <new-snapshot-directory> --old-snapshot-key-stdin --new-snapshot-key-stdin\n",
+                    "  greenbubbles synthetic-benchmark <private-work-directory> [--samples <n>] [--small-messages <n>] [--large-messages <n>] [--burst-messages <n>]\n",
+                    "  greenbubbles preflight <snapshot> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles probe <snapshot> [--passphrase-stdin | --database-keys-file <owner-only-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles restore <snapshot> <output> [--account-root <path>] [--defer-media] [--passphrase-stdin | --database-keys-file <owner-only-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles diagnose-batch <snapshot> <diagnostic-output> [--database-offset <n>] [--database-limit <n>] [--resolve-media --account-root <path>] [--passphrase-stdin | --database-keys-file <owner-only-json>] [--summary-file <private-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles diagnose-available <snapshot> <diagnostic-output> --database-keys-file <owner-only-json> [--resolve-media --account-root <path>] [--summary-file <private-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles diagnose-archive-payloads <archive> <private-report-json> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles diagnose-archive-schema <archive> <private-report-json> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles restore-publish <snapshot> <publication-output> <handoff-file> [--previous-snapshot <path> --previous-archive <path>] [--account-root <path>] [--defer-media] [--passphrase-stdin | --database-keys-file <owner-only-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles audit-archive <archive> [--summary-file <private-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles audit-acquisition-chain <previous-snapshot> <current-snapshot>\n",
+                    "  greenbubbles audit-connector-log <connector-audit-log>\n",
+                    "  greenbubbles audit-connector-state <replica-path> <policy-file> <connector-audit-log> <draft-directory> --replica-key-stdin\n",
+                    "  greenbubbles policy <archive> <policy-file> <conversation-id>... [--max-page-size <n>]\n",
+                    "  greenbubbles read <archive> <policy-file> <conversation-id> [--cursor <cursor>] [--limit <n>]\n",
+                    "  greenbubbles reconcile <previous-archive> <current-archive> <policy-file> <events-output>\n",
+                    "  greenbubbles merge-incremental <previous-archive> <fragment-archive> <output-archive>\n",
+                    "  greenbubbles replica-bootstrap <archive> <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles replica-status <replica-path> --replica-key-stdin\n",
+                    "  greenbubbles audit-replica <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles audit-replica-backup <pre-migration-backup-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles prepare-replica-recovery <pre-migration-backup-path> <new-candidate-path> --replica-key-stdin\n",
+                    "  greenbubbles replica-sync <archive> <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles replica-publish <replica-eligible-archive> <handoff-file> --generation <positive-integer>\n",
+                    "  greenbubbles replica-archive-quarantine <handoff-file> <quarantine-directory> [--retain-publications <n, minimum 2>]\n",
+                    "  greenbubbles replica-archive-restore <handoff-file> <quarantine-directory> --generation <positive-integer>\n",
+                    "  greenbubbles compose-latency-evidence <private-snapshot-report> <private-offline-report> <private-follower-report> <private-handoff-file>\n",
+                    "  greenbubbles summarize-latency-evidence <private-sample-array-json>\n",
+                    "  greenbubbles replica-follow-once <handoff-file> <follow-state-file> <replica-path> --replica-key-stdin\n",
+                    "  greenbubbles replica-follow <handoff-file> <follow-state-file> <replica-path> --replica-key-stdin [--poll-milliseconds <100..60000>] [--maximum-polls <n>]\n",
+                    "  greenbubbles replica-follow-status <handoff-file> <follow-state-file> <replica-path> --replica-key-stdin\n",
+                    "  greenbubbles replica-changes <replica-path> --replica-key-stdin [--cursor <cursor>] [--limit <n>]\n",
+                    "  greenbubbles replica-search <replica-path> <private-filter-json> --replica-key-stdin [--cursor <cursor>] [--limit <n>]\n",
+                    "  greenbubbles replica-cached-moments <replica-path> --replica-key-stdin [--author <opaque-id>] [--content-type <n>] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--cursor <cursor>] [--limit <n>]\n",
+                    "  greenbubbles replica-message <replica-path> <canonical-id> --replica-key-stdin\n",
+                    "  greenbubbles replica-conversations <replica-path> --replica-key-stdin [--limit <n>]\n",
+                    "  greenbubbles replica-coverage <replica-path> --replica-key-stdin\n",
+                    "  greenbubbles ai-query <replica-path> <policy-file> <connector-audit-log> <private-request-json> --replica-key-stdin\n",
+                    "  greenbubbles ai-export <replica-path> <policy-file> <connector-audit-log> <new-output-directory> --replica-key-stdin --requester <id> [--destination local|remote] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles audit-ai-context <AI-context-bundle-directory> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles ai-memory-export <AI-context-bundle-directory> <new-output-directory> [--max-messages-per-chunk <n>] [--max-text-bytes-per-chunk <n>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles audit-ai-memory <AI-memory-output-directory> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles connector-policy-direct <source-root> <new-policy-file> <conversation-id>... --capabilities list,read,search --fields sender,created-at,type,content (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--max-results <n>] [--max-summary-bytes <n>]\n",
+                    "  greenbubbles connector-query-direct <source-root> <policy-file> <audit-log> <private-request-json> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
+                    "  greenbubbles connector-serve-direct <source-root> <policy-file> <audit-log> <socket-path> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
+                    "  greenbubbles connector-serve <replica-path> <policy-file> <audit-log> <draft-directory> <socket-path> --replica-key-stdin\n",
+                    "  greenbubbles connector-call <socket-path> <private-request-json>\n",
+                    "  greenbubbles tool-policy <archive> <policy-file> ([<conversation-id>...] | --all-conversations) [--capabilities list,read,search,draft] [--fields sender,created-at,direction,type,content,attachments,relationships] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--enable-cached-moments --cached-fields author,created-at,type,content,title,description,url,media-count,like-count,comment-count] [--cached-not-before-unix <seconds>] [--cached-not-after-unix <seconds>] [--allow-cached-remote-model] [--max-results <n>] [--max-summary-bytes <n>] [--max-draft-bytes <n>]\n",
+                    "  greenbubbles tool-list <archive> <policy-file> <audit-log> --requester <id> [--destination local|remote]\n",
+                    "  greenbubbles tool-recent <archive> <policy-file> <audit-log> <conversation-id> --requester <id> [--limit <n>] [--destination local|remote]\n",
+                    "  greenbubbles tool-search <archive> <policy-file> <audit-log> --requester <id> --query-stdin [--conversation <id>] [--limit <n>] [--destination local|remote]\n",
+                    "  greenbubbles tool-draft <archive> <policy-file> <audit-log> <draft-directory> <conversation-id> --requester <id> --body-stdin\n",
+                    "  greenbubbles send <subcommand>   (run 'greenbubbles send --help')"
                 )
             );
         }
@@ -2559,12 +2559,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 const fn query_profile_command_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore profile path\n",
-        "  greenbubbles-restore profile template\n",
-        "  greenbubbles-restore profile list\n",
-        "  greenbubbles-restore profile show <name>\n",
-        "  greenbubbles-restore profile validate [<name>]\n",
-        "  greenbubbles-restore profile set-default <name>\n\n",
+        "  greenbubbles profile path\n",
+        "  greenbubbles profile template\n",
+        "  greenbubbles profile list\n",
+        "  greenbubbles profile show <name>\n",
+        "  greenbubbles profile validate [<name>]\n",
+        "  greenbubbles profile set-default <name>\n\n",
         "Named query profiles live in ~/.greenbubbles/query-profiles.json by default.\n",
         "The configuration remembers a source root and access mode. It never contains\n",
         "a raw WeChat key, snapshot key, recovery phrase, or passphrase: encrypted modes\n",
@@ -2586,8 +2586,8 @@ const fn query_profile_command_help() -> &'static str {
 const fn source_status_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore source status [--profile <name>]\n",
-        "  greenbubbles-restore source status <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n\n",
+        "  greenbubbles source status [--profile <name>]\n",
+        "  greenbubbles source status <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n\n",
         "Authenticates the required core databases read-only, then returns bounded,\n",
         "content-free storage accounting for every regular .db file and its adjacent\n",
         "WAL, SHM, or rollback-journal sidecars. Sizes are filesystem byte counts; no\n",
@@ -2609,8 +2609,8 @@ const fn source_status_help() -> &'static str {
 const fn conversations_command_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore conversations list [--profile <name>] [--limit <1..500>] [--cursor <opaque-cursor>]\n",
-        "  greenbubbles-restore conversations list <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n\n",
+        "  greenbubbles conversations list [--profile <name>] [--limit <1..500>] [--cursor <opaque-cursor>]\n",
+        "  greenbubbles conversations list <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n\n",
         "Returns one bounded, keyset-paginated JSON page directly from session.db.\n",
         "The source is opened read-only with SQLite query_only enforcement; no archive,\n",
         "replica, staging database, search index, or media derivative is created.\n\n",
@@ -2633,10 +2633,10 @@ const fn conversations_command_help() -> &'static str {
 const fn messages_command_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore messages list --conversation <id> [--profile <name>] [--limit <1..500>] [--cursor <opaque-cursor>]\n",
-        "  greenbubbles-restore messages list <source-root> --conversation <id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n\n",
-        "  greenbubbles-restore messages search --query-stdin [--profile <name>] [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n",
-        "  greenbubbles-restore messages search <source-root> --query-stdin (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n\n",
+        "  greenbubbles messages list --conversation <id> [--profile <name>] [--limit <1..500>] [--cursor <opaque-cursor>]\n",
+        "  greenbubbles messages list <source-root> --conversation <id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n\n",
+        "  greenbubbles messages search --query-stdin [--profile <name>] [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n",
+        "  greenbubbles messages search <source-root> --query-stdin (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n\n",
         "Returns one bounded, typed, keyset-paginated JSON page directly from numbered\n",
         "WeChat message shards. Each shard uses a short read-only statement; the response\n",
         "reports cross-database consistency and partial-coverage warnings explicitly. Search\n",
@@ -2662,8 +2662,8 @@ const fn messages_command_help() -> &'static str {
 const fn messages_search_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore messages search --query-stdin [--profile <name>] [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n",
-        "  greenbubbles-restore messages search <source-root> --query-stdin (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n\n",
+        "  greenbubbles messages search --query-stdin [--profile <name>] [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n",
+        "  greenbubbles messages search <source-root> --query-stdin (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n\n",
         "Runs one literal, parameterized, keyset-paginated query against a compatible\n",
         "read-only native WeChat message FTS database. It never builds an index or falls\n",
         "back to a corpus-wide message scan. Index freshness is reported as unverified.\n\n",
@@ -2701,8 +2701,8 @@ fn messages_subcommand_help(subcommand: &str) -> Result<&'static str, String> {
 const fn message_get_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore message get --conversation <id> --message <opaque-id> [--profile <name>]\n",
-        "  greenbubbles-restore message get <source-root> --conversation <id> --message <opaque-id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n\n",
+        "  greenbubbles message get --conversation <id> --message <opaque-id> [--profile <name>]\n",
+        "  greenbubbles message get <source-root> --conversation <id> --message <opaque-id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n\n",
         "Performs one bounded retrieval by the opaque identity returned from messages\n",
         "list. The identity is bound to the source and conversation. GreenBubbles opens\n",
         "only the named read-only shard and performs one rowid/key lookup; it does not\n",
@@ -2726,10 +2726,10 @@ const fn message_get_help() -> &'static str {
 const fn attachment_command_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore attachment inspect <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document <access-mode>\n",
-        "  greenbubbles-restore attachment materialize <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document --attachment <opaque-id> --output <new-path> <access-mode>\n",
-        "  greenbubbles-restore attachment inspect <account-root> --conversation <id> --md5 <hex>\n",
-        "  greenbubbles-restore attachment materialize <account-root> --conversation <id> --md5 <hex> --attachment <opaque-id> --output <new-path>\n\n",
+        "  greenbubbles attachment inspect <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document <access-mode>\n",
+        "  greenbubbles attachment materialize <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document --attachment <opaque-id> --output <new-path> <access-mode>\n",
+        "  greenbubbles attachment inspect <account-root> --conversation <id> --md5 <hex>\n",
+        "  greenbubbles attachment materialize <account-root> --conversation <id> --md5 <hex> --attachment <opaque-id> --output <new-path>\n\n",
         "Inspects or materializes one exact image, voice, video, or document on demand.\n",
         "The preferred message-bound form hydrates one opaque message identity read-only,\n",
         "then performs bounded media-DB, hardlink-metadata, or conversation filesystem\n",
@@ -2743,8 +2743,8 @@ const fn attachment_command_help() -> &'static str {
 const fn attachment_inspect_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore attachment inspect <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document <access-mode>\n",
-        "  greenbubbles-restore attachment inspect <account-root> --conversation <id> --md5 <hex>\n\n",
+        "  greenbubbles attachment inspect <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document <access-mode>\n",
+        "  greenbubbles attachment inspect <account-root> --conversation <id> --md5 <hex>\n\n",
         "Returns a small versioned JSON description without decoding or writing media.\n",
         "The preferred form binds the source, conversation, exact opaque message, kind,\n",
         "candidate location or row, and current content/version evidence. Legacy --md5 is\n",
@@ -2768,8 +2768,8 @@ const fn attachment_inspect_help() -> &'static str {
 const fn attachment_materialize_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore attachment materialize <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document --attachment <opaque-id> --output <new-path> <access-mode>\n",
-        "  greenbubbles-restore attachment materialize <account-root> --conversation <id> --md5 <hex> --attachment <opaque-id> --output <new-path>\n\n",
+        "  greenbubbles attachment materialize <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document --attachment <opaque-id> --output <new-path> <access-mode>\n",
+        "  greenbubbles attachment materialize <account-root> --conversation <id> --md5 <hex> --attachment <opaque-id> --output <new-path>\n\n",
         "Materializes exactly one previously inspected candidate. Images are decoded; a\n",
         "voice payload is converted from SILK to Ogg Opus when supported and otherwise\n",
         "retained as SILK; video and documents are streamed without whole-file buffering.\n",
@@ -2802,15 +2802,15 @@ fn attachment_subcommand_help(subcommand: &str) -> Result<&'static str, String> 
 const fn snapshot_command_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore snapshot recovery-kit (create | validate) <private-file>\n",
-        "  greenbubbles-restore snapshot local-credential (create | validate) <private-file>\n",
-        "  greenbubbles-restore snapshot create <WeChat-database-root> <new-snapshot-directory> (--source-passphrase-stdin | --source-decrypted) (--snapshot-recovery-kit <private-file> [--snapshot-local-credential <private-file>] [--snapshot-passphrase-stdin] | --snapshot-key-stdin)\n",
-        "  greenbubbles-restore snapshot create-capture <stable-acquisition-snapshot> <new-snapshot-directory> (--source-passphrase-stdin | --source-decrypted) (--snapshot-recovery-kit <private-file> [--snapshot-local-credential <private-file>] [--snapshot-passphrase-stdin] | --snapshot-key-stdin)\n",
-        "  greenbubbles-restore snapshot verify <snapshot-directory> (--snapshot-recovery-kit <private-file> | --snapshot-local-credential <private-file> | --snapshot-passphrase-stdin | --snapshot-key-stdin)\n\n",
-        "  greenbubbles-restore snapshot rewrap <snapshot-directory> <new-snapshot-directory> (--old-snapshot-recovery-kit <private-file> | --old-snapshot-local-credential <private-file> | --old-snapshot-passphrase-stdin) --new-snapshot-recovery-kit <private-file> [--new-snapshot-local-credential <private-file>] [--new-snapshot-passphrase-stdin]\n",
-        "  greenbubbles-restore snapshot retention quarantine <retiring> <replacement> <quarantine-directory> (--retiring-recovery-kit <private-file> | --retiring-local-credential <private-file> | --retiring-snapshot-passphrase-stdin) --replacement-recovery-kit <private-file>\n",
-        "  greenbubbles-restore snapshot retention restore <quarantined> <restored-directory> (--snapshot-recovery-kit <private-file> | --snapshot-local-credential <private-file> | --snapshot-passphrase-stdin)\n",
-        "  greenbubbles-restore snapshot rekey <snapshot-directory> <new-snapshot-directory> --old-snapshot-key-stdin --new-snapshot-key-stdin\n\n",
+        "  greenbubbles snapshot recovery-kit (create | validate) <private-file>\n",
+        "  greenbubbles snapshot local-credential (create | validate) <private-file>\n",
+        "  greenbubbles snapshot create <WeChat-database-root> <new-snapshot-directory> (--source-passphrase-stdin | --source-decrypted) (--snapshot-recovery-kit <private-file> [--snapshot-local-credential <private-file>] [--snapshot-passphrase-stdin] | --snapshot-key-stdin)\n",
+        "  greenbubbles snapshot create-capture <stable-acquisition-snapshot> <new-snapshot-directory> (--source-passphrase-stdin | --source-decrypted) (--snapshot-recovery-kit <private-file> [--snapshot-local-credential <private-file>] [--snapshot-passphrase-stdin] | --snapshot-key-stdin)\n",
+        "  greenbubbles snapshot verify <snapshot-directory> (--snapshot-recovery-kit <private-file> | --snapshot-local-credential <private-file> | --snapshot-passphrase-stdin | --snapshot-key-stdin)\n\n",
+        "  greenbubbles snapshot rewrap <snapshot-directory> <new-snapshot-directory> (--old-snapshot-recovery-kit <private-file> | --old-snapshot-local-credential <private-file> | --old-snapshot-passphrase-stdin) --new-snapshot-recovery-kit <private-file> [--new-snapshot-local-credential <private-file>] [--new-snapshot-passphrase-stdin]\n",
+        "  greenbubbles snapshot retention quarantine <retiring> <replacement> <quarantine-directory> (--retiring-recovery-kit <private-file> | --retiring-local-credential <private-file> | --retiring-snapshot-passphrase-stdin) --replacement-recovery-kit <private-file>\n",
+        "  greenbubbles snapshot retention restore <quarantined> <restored-directory> (--snapshot-recovery-kit <private-file> | --snapshot-local-credential <private-file> | --snapshot-passphrase-stdin)\n",
+        "  greenbubbles snapshot rekey <snapshot-directory> <new-snapshot-directory> --old-snapshot-key-stdin --new-snapshot-key-stdin\n\n",
         "Creates and verifies durable logical SQLite backups whose encryption key is\n",
         "independent of WeChat. Use 'snapshot create --help' or 'snapshot verify --help'\n",
         "for secret-input ordering and recovery details.\n",
@@ -2820,8 +2820,8 @@ const fn snapshot_command_help() -> &'static str {
 const fn snapshot_local_credential_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore snapshot local-credential create <new-private-file>\n",
-        "  greenbubbles-restore snapshot local-credential validate <private-file>\n\n",
+        "  greenbubbles snapshot local-credential create <new-private-file>\n",
+        "  greenbubbles snapshot local-credential validate <private-file>\n\n",
         "Creates or validates a random local convenience credential. The file is\n",
         "exclusively created mode 0600 beneath an owner-only directory and is never\n",
         "printed. It wraps the snapshot database key independently; it contains neither\n",
@@ -2833,8 +2833,8 @@ const fn snapshot_local_credential_help() -> &'static str {
 const fn snapshot_recovery_kit_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore snapshot recovery-kit create <new-private-file>\n",
-        "  greenbubbles-restore snapshot recovery-kit validate <private-file>\n\n",
+        "  greenbubbles snapshot recovery-kit create <new-private-file>\n",
+        "  greenbubbles snapshot recovery-kit validate <private-file>\n\n",
         "Creates or validates a standard 24-word English BIP-39 recovery kit. Creation\n",
         "uses 256 random bits, validates the checksum, exclusively creates a mode-0600\n",
         "single-link file beneath an owner-only directory, and syncs it before success.\n",
@@ -2846,7 +2846,7 @@ const fn snapshot_recovery_kit_help() -> &'static str {
 const fn snapshot_create_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore snapshot create <WeChat-database-root> <new-snapshot-directory> (--source-passphrase-stdin | --source-decrypted) (--snapshot-recovery-kit <private-file> [--snapshot-local-credential <private-file>] [--snapshot-passphrase-stdin] | --snapshot-key-stdin)\n\n",
+        "  greenbubbles snapshot create <WeChat-database-root> <new-snapshot-directory> (--source-passphrase-stdin | --source-decrypted) (--snapshot-recovery-kit <private-file> [--snapshot-local-credential <private-file>] [--snapshot-passphrase-stdin] | --snapshot-key-stdin)\n\n",
         "Copies every regular .db file through SQLite's logical backup API into a new\n",
         "SQLCipher database protected by a random key independent from WeChat. Prefer a\n",
         "24-word recovery kit, which wraps that key without becoming the database key.\n",
@@ -2870,7 +2870,7 @@ const fn snapshot_create_help() -> &'static str {
 const fn snapshot_create_capture_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore snapshot create-capture <stable-acquisition-snapshot> <new-snapshot-directory> (--source-passphrase-stdin | --source-decrypted) (--snapshot-recovery-kit <private-file> [--snapshot-local-credential <private-file>] [--snapshot-passphrase-stdin] | --snapshot-key-stdin)\n\n",
+        "  greenbubbles snapshot create-capture <stable-acquisition-snapshot> <new-snapshot-directory> (--source-passphrase-stdin | --source-decrypted) (--snapshot-recovery-kit <private-file> [--snapshot-local-credential <private-file>] [--snapshot-passphrase-stdin] | --snapshot-key-stdin)\n\n",
         "Converts a complete owner-only filesystem capture produced by GreenBubbles'\n",
         "database/WAL/SHM snapshotter. It verifies every capture hash before use, opens\n",
         "captured databases read-only, writes logical pages directly into separately\n",
@@ -2895,7 +2895,7 @@ const fn snapshot_create_capture_help() -> &'static str {
 const fn snapshot_verify_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore snapshot verify <snapshot-directory> (--snapshot-recovery-kit <private-file> | --snapshot-local-credential <private-file> | --snapshot-passphrase-stdin | --snapshot-key-stdin)\n\n",
+        "  greenbubbles snapshot verify <snapshot-directory> (--snapshot-recovery-kit <private-file> | --snapshot-local-credential <private-file> | --snapshot-passphrase-stdin | --snapshot-key-stdin)\n\n",
         "Verifies owner-only permissions, exact inventory, manifest hashes, encrypted\n",
         "headers, absence of required WAL/SHM/journal files, and SQLite integrity using\n",
         "only an independent snapshot protector. No WeChat key is accepted. A local\n",
@@ -2912,7 +2912,7 @@ const fn snapshot_verify_help() -> &'static str {
 const fn snapshot_rekey_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore snapshot rekey <snapshot-directory> <new-snapshot-directory> --old-snapshot-key-stdin --new-snapshot-key-stdin\n\n",
+        "  greenbubbles snapshot rekey <snapshot-directory> <new-snapshot-directory> --old-snapshot-key-stdin --new-snapshot-key-stdin\n\n",
         "Verifies an immutable source generation using only its old recovery key, then\n",
         "logically copies each database directly from old-key SQLCipher into new-key\n",
         "SQLCipher. No plaintext database is created. A separate generation is verified\n",
@@ -2930,7 +2930,7 @@ const fn snapshot_rekey_help() -> &'static str {
 const fn snapshot_rewrap_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore snapshot rewrap <snapshot-directory> <new-snapshot-directory> (--old-snapshot-recovery-kit <private-file> | --old-snapshot-local-credential <private-file> | --old-snapshot-passphrase-stdin) --new-snapshot-recovery-kit <private-file> [--new-snapshot-local-credential <private-file>] [--new-snapshot-passphrase-stdin]\n\n",
+        "  greenbubbles snapshot rewrap <snapshot-directory> <new-snapshot-directory> (--old-snapshot-recovery-kit <private-file> | --old-snapshot-local-credential <private-file> | --old-snapshot-passphrase-stdin) --new-snapshot-recovery-kit <private-file> [--new-snapshot-local-credential <private-file>] [--new-snapshot-passphrase-stdin]\n\n",
         "Authenticates and fully verifies an immutable format-2 source generation, then\n",
         "byte-copies its already encrypted SQLCipher databases into a new generation.\n",
         "The database key and ciphertext bytes do not change; only the snapshot identity\n",
@@ -2945,8 +2945,8 @@ const fn snapshot_rewrap_help() -> &'static str {
 const fn snapshot_retention_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore snapshot retention quarantine <retiring> <replacement> <quarantine-directory> (--retiring-recovery-kit <private-file> | --retiring-local-credential <private-file> | --retiring-snapshot-passphrase-stdin) --replacement-recovery-kit <private-file>\n",
-        "  greenbubbles-restore snapshot retention restore <quarantined> <restored-directory> (--snapshot-recovery-kit <private-file> | --snapshot-local-credential <private-file> | --snapshot-passphrase-stdin)\n\n",
+        "  greenbubbles snapshot retention quarantine <retiring> <replacement> <quarantine-directory> (--retiring-recovery-kit <private-file> | --retiring-local-credential <private-file> | --retiring-snapshot-passphrase-stdin) --replacement-recovery-kit <private-file>\n",
+        "  greenbubbles snapshot retention restore <quarantined> <restored-directory> (--snapshot-recovery-kit <private-file> | --snapshot-local-credential <private-file> | --snapshot-passphrase-stdin)\n\n",
         "Retention moves only a whole verified generation and never deletes it. Quarantine\n",
         "requires a newer linked replacement and proves that replacement through its\n",
         "portable 24-word recovery path. The move is same-filesystem, atomic, fsynced,\n",
@@ -2957,7 +2957,7 @@ const fn snapshot_retention_help() -> &'static str {
 const fn snapshot_retention_quarantine_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore snapshot retention quarantine <retiring> <replacement> <quarantine-directory> (--retiring-recovery-kit <private-file> | --retiring-local-credential <private-file> | --retiring-snapshot-passphrase-stdin) --replacement-recovery-kit <private-file>\n\n",
+        "  greenbubbles snapshot retention quarantine <retiring> <replacement> <quarantine-directory> (--retiring-recovery-kit <private-file> | --retiring-local-credential <private-file> | --retiring-snapshot-passphrase-stdin) --replacement-recovery-kit <private-file>\n\n",
         "The retiring generation must verify with either of its protectors. The replacement\n",
         "must be newer, linked by parent identity or stable source identity, and verify\n",
         "using its portable recovery words. A retiring passphrase is read as stdin line 1.\n",
@@ -2968,7 +2968,7 @@ const fn snapshot_retention_quarantine_help() -> &'static str {
 const fn snapshot_retention_restore_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore snapshot retention restore <quarantined> <restored-directory> (--snapshot-recovery-kit <private-file> | --snapshot-local-credential <private-file> | --snapshot-passphrase-stdin)\n\n",
+        "  greenbubbles snapshot retention restore <quarantined> <restored-directory> (--snapshot-recovery-kit <private-file> | --snapshot-local-credential <private-file> | --snapshot-passphrase-stdin)\n\n",
         "Authenticates the quarantined generation, atomically moves the whole directory to\n",
         "a new non-existing path on the same filesystem, fsyncs both parents, and verifies\n",
         "it again. A passphrase is read as stdin line 1. A failed post-move verification\n",
@@ -3005,7 +3005,7 @@ fn snapshot_subcommand_help(subcommand: &str) -> Result<&'static str, String> {
 const fn connector_policy_direct_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore connector-policy-direct <source-root> <new-policy-file> <conversation-id>... --capabilities list,read,search --fields sender,created-at,type,content (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--max-results <n>] [--max-summary-bytes <n>]\n\n",
+        "  greenbubbles connector-policy-direct <source-root> <new-policy-file> <conversation-id>... --capabilities list,read,search --fields sender,created-at,type,content (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--max-results <n>] [--max-summary-bytes <n>]\n\n",
         "Creates an owner-only policy in the direct SQLite identifier namespace. Every\n",
         "conversation is verified against the selected source before publication. The policy\n",
         "is bound to that source identity and cannot authorize draft or replica-only operations.\n",
@@ -3015,7 +3015,7 @@ const fn connector_policy_direct_help() -> &'static str {
 const fn connector_serve_direct_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore connector-serve-direct <source-root> <policy-file> <audit-log> <socket-path> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n\n",
+        "  greenbubbles connector-serve-direct <source-root> <policy-file> <audit-log> <socket-path> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n\n",
         "Serves policy-scoped ordinary reads directly from live or snapshot SQLite. Requests\n",
         "remain typed, bounded, keyset-paginated, read-only, destination-scoped, and recorded\n",
         "in the same append-only privacy-safe audit format. Replica-only surfaces fail closed.\n",
@@ -3025,7 +3025,7 @@ const fn connector_serve_direct_help() -> &'static str {
 const fn connector_query_direct_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore connector-query-direct <source-root> <policy-file> <audit-log> <private-request-json> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n\n",
+        "  greenbubbles connector-query-direct <source-root> <policy-file> <audit-log> <private-request-json> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n\n",
         "Runs one owner-only JSON connector request directly against live or snapshot SQLite\n",
         "and returns one bounded JSON response. No archive, replica, daemon, or corpus-sized\n",
         "JSON conversion is required; the normal connector policy and audit boundary remains.\n",
@@ -3047,7 +3047,7 @@ fn ai_command_help(command: &str) -> Option<&'static str> {
         "send" => Some(send_command_help()),
         "audit-replica" => Some(concat!(
             "Usage:\n",
-            "  greenbubbles-restore audit-replica <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
+            "  greenbubbles audit-replica <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
             "Runs a read-only, aggregate-only deep audit of the encrypted serving replica.\n",
             "Progress includes replica bytes, canonical/link/change totals, exact row progress,\n",
             "stage and overall percentages, and elapsed time without exposing private content.\n\n",
@@ -3060,7 +3060,7 @@ fn ai_command_help(command: &str) -> Option<&'static str> {
         )),
         "audit-replica-backup" => Some(concat!(
             "Usage:\n",
-            "  greenbubbles-restore audit-replica-backup <pre-migration-backup-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
+            "  greenbubbles audit-replica-backup <pre-migration-backup-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
             "Runs the historical-schema deep audit without migrating or rewriting the backup.\n",
             "It reports the same privacy-safe byte, row, stage, percentage, and elapsed-time\n",
             "progress as the current-replica audit.\n\n",
@@ -3073,7 +3073,7 @@ fn ai_command_help(command: &str) -> Option<&'static str> {
         )),
         "ai-query" => Some(concat!(
             "Usage:\n",
-            "  greenbubbles-restore ai-query <replica-path> <policy-file> <connector-audit-log> <private-request-json> --replica-key-stdin\n\n",
+            "  greenbubbles ai-query <replica-path> <policy-file> <connector-audit-log> <private-request-json> --replica-key-stdin\n\n",
             "Runs one policy-scoped, read-only JSON request against the encrypted replica.\n",
             "The request file must be an owner-only regular file. The replica key is read only\n",
             "from standard input; query text and keys must not be supplied as arguments.\n",
@@ -3084,7 +3084,7 @@ fn ai_command_help(command: &str) -> Option<&'static str> {
         )),
         "ai-export" => Some(concat!(
             "Usage:\n",
-            "  greenbubbles-restore ai-export <replica-path> <policy-file> <connector-audit-log> <new-output-directory> --replica-key-stdin --requester <id> [--destination local|remote] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
+            "  greenbubbles ai-export <replica-path> <policy-file> <connector-audit-log> <new-output-directory> --replica-key-stdin --requester <id> [--destination local|remote] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
             "Exports one atomic, checkpoint-consistent, policy-scoped AI context bundle.\n",
             "The output directory must not already exist. Progress is written to standard error,\n",
             "and the final manifest is written as JSON to standard output.\n\n",
@@ -3099,7 +3099,7 @@ fn ai_command_help(command: &str) -> Option<&'static str> {
         )),
         "audit-ai-context" => Some(concat!(
             "Usage:\n",
-            "  greenbubbles-restore audit-ai-context <AI-context-bundle-directory> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
+            "  greenbubbles audit-ai-context <AI-context-bundle-directory> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
             "Verifies the bundle inventory, permissions, schemas, hashes, counts, identities,\n",
             "references, freshness, checkpoint, and policy binding without printing content.\n\n",
             "Options:\n",
@@ -3110,7 +3110,7 @@ fn ai_command_help(command: &str) -> Option<&'static str> {
         )),
         "ai-memory-export" => Some(concat!(
             "Usage:\n",
-            "  greenbubbles-restore ai-memory-export <AI-context-bundle-directory> <new-output-directory> [--max-messages-per-chunk <n>] [--max-text-bytes-per-chunk <n>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
+            "  greenbubbles ai-memory-export <AI-context-bundle-directory> <new-output-directory> [--max-messages-per-chunk <n>] [--max-text-bytes-per-chunk <n>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
             "Projects an integrity-bound AI context bundle into deterministic, bounded\n",
             "conversation chunks for personal-memory systems. The atomic owner-only output\n",
             "contains Mem0-compatible JSON message batches and QMD-compatible Markdown.\n",
@@ -3126,7 +3126,7 @@ fn ai_command_help(command: &str) -> Option<&'static str> {
         )),
         "audit-ai-memory" => Some(concat!(
             "Usage:\n",
-            "  greenbubbles-restore audit-ai-memory <AI-memory-output-directory> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
+            "  greenbubbles audit-ai-memory <AI-memory-output-directory> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
             "Verifies the projection identity, owner-only inventory, hashes, bounded chunk\n",
             "schemas, source citations, and every Markdown document without printing content.\n\n",
             "Options:\n",
@@ -4366,7 +4366,7 @@ fn run_send_command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let subcommand = arguments
         .next()
-        .ok_or("missing send subcommand; run 'greenbubbles-restore send --help'")?;
+        .ok_or("missing send subcommand; run 'greenbubbles send --help'")?;
     if matches!(arguments.peek().map(String::as_str), Some("--help" | "-h")) {
         println!("{}", send_command_help());
         return Ok(());
@@ -4701,7 +4701,7 @@ fn run_send_command(
         }
         _ => {
             return Err(format!(
-                "unsupported send subcommand: {subcommand}; run 'greenbubbles-restore send --help'"
+                "unsupported send subcommand: {subcommand}; run 'greenbubbles send --help'"
             )
             .into())
         }
@@ -4826,23 +4826,23 @@ fn send_unix_seconds() -> Result<u64, Box<dyn std::error::Error>> {
 const fn send_command_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles-restore send config-template\n",
-        "  greenbubbles-restore send profile-template\n",
-        "  greenbubbles-restore send profile-keygen <new-private-seed-file>\n",
-        "  greenbubbles-restore send profile-sign <unsigned-profile> <new-signed-profile> --signing-key-file <file>\n",
-        "  greenbubbles-restore send profile-verify <signed-profile> [--development-trust-root <file>]\n",
-        "  greenbubbles-restore send matrix-sign <unsigned-matrix> <new-signed-matrix> --signing-key-file <file>\n",
-        "  greenbubbles-restore send matrix-verify <signed-matrix> [--development-trust-root <file>]\n",
-        "  greenbubbles-restore send doctor <config> [--no-helper]\n",
-        "  greenbubbles-restore send selftest <config>\n",
-        "  greenbubbles-restore send approval-binding <config> <draft-file>\n",
-        "  greenbubbles-restore send approve <config> <draft-file> <new-approval-file> --approver <id> [--validity-seconds <60..3600>] --confirm\n",
-        "  greenbubbles-restore send precheck <config> <draft-file> <approval-file> [--no-helper]\n",
-        "  greenbubbles-restore send submit <config> <draft-file> <approval-file> [--attachment-file <path>]\n",
-        "  greenbubbles-restore send draft-attachment <replica> <policy> <audit-log> <draft-directory> --conversation <id> --attachment-file <path> --intent image|file --requester <id> [--expiry-seconds <n>] --replica-key-stdin\n",
-        "  greenbubbles-restore send outbox-status <config>\n",
-        "  greenbubbles-restore send recall-window <config> --idempotency-key <hex>\n",
-        "  greenbubbles-restore send reconcile <config> <draft-file> --idempotency-key <hex> (--replica <path> --replica-key-stdin [--lookback-seconds <n>] | --observation <file>)\n\n",
+        "  greenbubbles send config-template\n",
+        "  greenbubbles send profile-template\n",
+        "  greenbubbles send profile-keygen <new-private-seed-file>\n",
+        "  greenbubbles send profile-sign <unsigned-profile> <new-signed-profile> --signing-key-file <file>\n",
+        "  greenbubbles send profile-verify <signed-profile> [--development-trust-root <file>]\n",
+        "  greenbubbles send matrix-sign <unsigned-matrix> <new-signed-matrix> --signing-key-file <file>\n",
+        "  greenbubbles send matrix-verify <signed-matrix> [--development-trust-root <file>]\n",
+        "  greenbubbles send doctor <config> [--no-helper]\n",
+        "  greenbubbles send selftest <config>\n",
+        "  greenbubbles send approval-binding <config> <draft-file>\n",
+        "  greenbubbles send approve <config> <draft-file> <new-approval-file> --approver <id> [--validity-seconds <60..3600>] --confirm\n",
+        "  greenbubbles send precheck <config> <draft-file> <approval-file> [--no-helper]\n",
+        "  greenbubbles send submit <config> <draft-file> <approval-file> [--attachment-file <path>]\n",
+        "  greenbubbles send draft-attachment <replica> <policy> <audit-log> <draft-directory> --conversation <id> --attachment-file <path> --intent image|file --requester <id> [--expiry-seconds <n>] --replica-key-stdin\n",
+        "  greenbubbles send outbox-status <config>\n",
+        "  greenbubbles send recall-window <config> --idempotency-key <hex>\n",
+        "  greenbubbles send reconcile <config> <draft-file> --idempotency-key <hex> (--replica <path> --replica-key-stdin [--lookback-seconds <n>] | --observation <file>)\n\n",
         "The send adapter drives the real WeChat client's user interface through a\n",
         "privilege-separated, first-party input helper. It is fail-closed at every\n",
         "step: an unsigned or expired calibration profile, an unverified macOS/WeChat\n",

@@ -375,12 +375,15 @@ struct HistorySnapshotCreationSheet: View {
         GroupBox("Verified result") {
           VStack(alignment: .leading, spacing: 9) {
             LabeledContent("Databases", value: result.databaseCount.formatted())
-            LabeledContent("Recovery without WeChat key", value: result.recoveryVerified ? "Verified" : "No")
+            LabeledContent(
+              "Recovery without WeChat key", value: result.recoveryVerified ? "Verified" : "No")
             LabeledContent("Independent encryption", value: "SQLCipher under a new random key")
             LabeledContent("Portable recovery", value: "24-word BIP-39 kit")
             LabeledContent("Recovery-kit file", value: recoveryKitPath)
             LabeledContent("Local convenience", value: completionConvenienceDescription)
-            LabeledContent("Passphrase protector", value: result.hasPassphrase ? "Argon2id enabled" : "Not added")
+            LabeledContent(
+              "Passphrase protector", value: result.hasPassphrase ? "Argon2id enabled" : "Not added"
+            )
           }
           .padding(6)
         }
@@ -495,7 +498,8 @@ struct HistorySnapshotCreationSheet: View {
         hiddenCredentialPath = suggestions.hiddenCredential.path
       }
     } catch {
-      errorMessage = "Could not prepare owner-only default folders. Choose private locations manually."
+      errorMessage =
+        "Could not prepare owner-only default folders. Choose private locations manually."
     }
   }
 
@@ -657,7 +661,9 @@ struct HistorySnapshotCreationSheet: View {
       errorMessage = "Choose the CLI, source, new snapshot directory, and new recovery-kit file."
       return false
     }
-    let pathSet = Set([source, output, kit] + (convenienceMode == .hiddenFile ? [trimmed(hiddenCredentialPath)] : []))
+    let pathSet = Set(
+      [source, output, kit]
+        + (convenienceMode == .hiddenFile ? [trimmed(hiddenCredentialPath)] : []))
     let expectedPathCount = convenienceMode == .hiddenFile ? 4 : 3
     guard pathSet.count == expectedPathCount else {
       errorMessage = "Source, snapshot, recovery-kit, and convenience paths must be distinct."
@@ -711,7 +717,7 @@ struct HistorySnapshotCreationSheet: View {
 
   private func chooseExecutable() {
     let panel = NSOpenPanel()
-    panel.title = "Choose greenbubbles-restore"
+    panel.title = "Choose greenbubbles"
     panel.prompt = "Choose CLI"
     panel.canChooseFiles = true
     panel.canChooseDirectories = false

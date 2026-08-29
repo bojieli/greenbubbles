@@ -497,7 +497,7 @@ do {
       )
       print("  written to \(output.path) (mode 0600, owner-only)")
       print("")
-      print("Use it with:  cat \(output.path) | greenbubbles-restore <args> --passphrase-stdin")
+      print("Use it with:  cat \(output.path) | greenbubbles <args> --passphrase-stdin")
     }
   case .verify:
     guard arguments.passphraseStdin else {

@@ -21,7 +21,7 @@ GreenBubbles therefore uses this hierarchy:
    actual state;
 4. periodic reconciliation recovers missed or duplicate hints.
 
-`greenbubbles notification-hints` reports whether the current process already
+`greenbubbles-discover notification-hints` reports whether the current process already
 has Accessibility trust. It does not prompt, inspect Notification Center, or
 read notification contents. Regardless of trust, its completeness result is
 always false.

@@ -24,7 +24,7 @@ fn ai_commands_expose_help_without_opening_private_inputs() {
         ("audit-ai-memory", "without printing content"),
     ] {
         for help_flag in ["--help", "-h"] {
-            let output = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+            let output = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
                 .args([command, help_flag])
                 .output()
                 .expect("AI CLI help command should run");
@@ -49,7 +49,7 @@ fn ai_commands_expose_help_without_opening_private_inputs() {
 
 #[test]
 fn help_topic_exposes_ai_command_help() {
-    let output = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let output = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .args(["help", "ai-query"])
         .output()
         .expect("AI CLI help topic should run");
@@ -58,5 +58,5 @@ fn help_topic_exposes_ai_command_help() {
     assert!(output.stderr.is_empty());
     assert!(String::from_utf8(output.stdout)
         .expect("help should be UTF-8")
-        .contains("greenbubbles-restore ai-query"));
+        .contains("greenbubbles ai-query"));
 }

@@ -1,0 +1,67 @@
+# This configuration describes the exact macOS arm64 binary distribution.
+# Build- and development-only tools are not shipped; bundled native sources
+# linked into the binaries are covered explicitly in THIRD_PARTY_NOTICES.md.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "BSD-1-Clause",
+    "CC0-1.0",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+targets = ["aarch64-apple-darwin"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+ignore-transitive-dependencies = false
+private = { ignore = true }
+
+# The selected wx-cli crates inherit the workspace's MIT license in intent,
+# but their individual manifests omit `license.workspace = true`. Anchor the
+# clarification to the pinned repository's exact root LICENSE checksum so any
+# upstream change fails closed.
+[wx-context.clarify]
+license = "MIT"
+
+[[wx-context.clarify.git]]
+path = "LICENSE"
+checksum = "4d97412ef3e92a7f816240a39e5aae454dfe64c1b716e3702c21f64aa53e310e"
+
+[wx-db.clarify]
+license = "MIT"
+
+[[wx-db.clarify.git]]
+path = "LICENSE"
+checksum = "4d97412ef3e92a7f816240a39e5aae454dfe64c1b716e3702c21f64aa53e310e"
+
+[wx-decrypt.clarify]
+license = "MIT"
+
+[[wx-decrypt.clarify.git]]
+path = "LICENSE"
+checksum = "4d97412ef3e92a7f816240a39e5aae454dfe64c1b716e3702c21f64aa53e310e"
+
+[wx-keychain.clarify]
+license = "MIT"
+
+[[wx-keychain.clarify.git]]
+path = "LICENSE"
+checksum = "4d97412ef3e92a7f816240a39e5aae454dfe64c1b716e3702c21f64aa53e310e"
+
+[wx-media.clarify]
+license = "MIT"
+
+[[wx-media.clarify.git]]
+path = "LICENSE"
+checksum = "4d97412ef3e92a7f816240a39e5aae454dfe64c1b716e3702c21f64aa53e310e"
+
+[wx-paths.clarify]
+license = "MIT"
+
+[[wx-paths.clarify.git]]
+path = "LICENSE"
+checksum = "4d97412ef3e92a7f816240a39e5aae454dfe64c1b716e3702c21f64aa53e310e"

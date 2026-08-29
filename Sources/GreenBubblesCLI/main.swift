@@ -110,7 +110,7 @@ struct Arguments {
 }
 
 private let usage = """
-  Usage: greenbubbles <command> [options]
+  Usage: greenbubbles-discover <command> [options]
 
   Commands:
     accounts             Find account-scoped database and attachment roots
@@ -257,7 +257,7 @@ do {
   }
 } catch {
   printError(String(describing: error))
-  printError("Run greenbubbles help for usage.")
+  printError("Run greenbubbles-discover help for usage.")
   exit(2)
 }
 

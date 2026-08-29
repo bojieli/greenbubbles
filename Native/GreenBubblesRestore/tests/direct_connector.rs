@@ -4,14 +4,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use greenbubbles_restore::connector::{
+use greenbubbles::connector::{
     audit_connector_log, ConnectorDestination, ConnectorErrorCode, ConnectorOperation,
     ConnectorRequest, ConnectorResult, CONNECTOR_API_VERSION,
 };
-use greenbubbles_restore::direct_connector::DirectConnectorService;
-use greenbubbles_restore::live_query::{LiveQuerySource, QueryDatabaseAccess};
-use greenbubbles_restore::model::EntityDecodeState;
-use greenbubbles_restore::tools::{
+use greenbubbles::direct_connector::DirectConnectorService;
+use greenbubbles::live_query::{LiveQuerySource, QueryDatabaseAccess};
+use greenbubbles::model::EntityDecodeState;
+use greenbubbles::tools::{
     create_direct_tool_policy, ConversationToolScope, ToolCapability, ToolMessageField,
 };
 use rusqlite::{params, Connection};
@@ -362,7 +362,7 @@ fn direct_connector_cli_creates_a_source_bound_owner_only_policy() {
         .parent()
         .unwrap()
         .join("cli-direct-policy.json");
-    let output = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let output = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .args([
             "connector-policy-direct",
             fixture.source.to_str().unwrap(),
@@ -407,7 +407,7 @@ fn direct_connector_cli_creates_a_source_bound_owner_only_policy() {
     .unwrap();
     fs::set_permissions(&request_path, fs::Permissions::from_mode(0o600)).unwrap();
     let audit = fixture.policy.parent().unwrap().join("cli-audit.ndjson");
-    let query = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let query = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .args([
             "connector-query-direct",
             fixture.source.to_str().unwrap(),
@@ -436,7 +436,7 @@ fn direct_connector_cli_creates_a_source_bound_owner_only_policy() {
     assert!(audit_connector_log(&audit).unwrap().chain_verified);
 
     let missing = fixture.policy.parent().unwrap().join("missing-policy.json");
-    let failure = Command::new(env!("CARGO_BIN_EXE_greenbubbles-restore"))
+    let failure = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
         .args([
             "connector-policy-direct",
             fixture.source.to_str().unwrap(),

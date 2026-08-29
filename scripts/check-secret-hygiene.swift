@@ -24,10 +24,17 @@ let stagedMode = CommandLine.arguments.dropFirst().contains("--staged")
 // Rules target secret-shaped material only. Plain 64-hex strings are allowed:
 // pinned build hashes legitimately appear in sources and docs.
 let bannedFileNames: [String] = [
-  "all_keys.json", "wechat-passphrase.json", "signing-key.json", "signing-seed.json",
+  ".env", "all_keys.json", "id_ed25519", "id_rsa", "wechat-passphrase.json",
+  "signing-key.json", "signing-seed.json",
 ]
 let bannedPathComponents: [String] = ["decrypted"]
 let bannedContentRules: [(label: String, pattern: String)] = [
+  ("private-key block", #"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"#),
+  ("AWS access key", #"(?:AKIA|ASIA)[0-9A-Z]{16}"#),
+  ("Google API key", #"AIza[0-9A-Za-z_-]{30,}"#),
+  ("GitHub token", #"gh[pousr]_[A-Za-z0-9_]{30,}"#),
+  ("OpenAI-style API key", #"sk-[A-Za-z0-9_-]{32,}"#),
+  ("Slack token", #"xox[baprs]-[A-Za-z0-9-]{20,}"#),
   ("WCDB raw-key literal", #"x'[0-9a-fA-F]{96}'"#),
   ("JSON passphrase field", #""passphrase"\s*:\s*"[0-9a-fA-F]{64}""#),
   ("JSON enc_key field", #""enc_key"\s*:\s*"[0-9a-fA-F]{64}""#),
@@ -58,7 +65,7 @@ func trackedPaths() throws -> [String] {
     return try runGit(["diff", "--cached", "--name-only", "--diff-filter=ACMR"])
       .split(whereSeparator: \.isNewline).map(String.init)
   }
-  return try runGit(["ls-files"])
+  return try runGit(["ls-files", "--cached", "--others", "--exclude-standard"])
     .split(whereSeparator: \.isNewline).map(String.init)
 }
 
@@ -119,7 +126,7 @@ func run() throws {
     throw HygieneError.violations(violations.map { "  \($0)" }.joined(separator: "\n"))
   }
 
-  let scope = stagedMode ? "staged" : "tracked"
+  let scope = stagedMode ? "staged" : "tracked and untracked, non-ignored"
   print("Secret hygiene check passed (\(scope) files clean).")
 }
 

@@ -4,12 +4,12 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
-use greenbubbles_restore::tools::{
+use greenbubbles::tools::{
     create_all_conversations_tool_policy_with_cached_moments, create_tool_policy,
     CachedMomentField, CachedMomentsToolScope, ConversationToolScope, DraftState, LocalToolService,
     ToolAuditOutcome, ToolCapability, ToolDataDestination, ToolMessageField,
 };
-use greenbubbles_restore::{
+use greenbubbles::{
     CanonicalConversation, CanonicalMessage, ConversationKind, DirectionEvidence,
     EntityDecodeState, MessageDirection, MessageOrderingBasis, RestorationCompletion,
     RestorationIntegrity, RestorationReport, SemanticDecodeState, TypedPayload,

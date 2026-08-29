@@ -29,7 +29,8 @@ struct HistorySnapshotCreationClientTests {
     #expect(kit.words == recoveryWords)
     #expect(kit.sha256.count == 64)
     #expect(runner.invocations.count == 1)
-    #expect(!String(decoding: runner.invocations[0].standardInput, as: UTF8.self).contains("abandon"))
+    #expect(
+      !String(decoding: runner.invocations[0].standardInput, as: UTF8.self).contains("abandon"))
     var metadata = stat()
     #expect(lstat(fixture.recoveryKitURL.path, &metadata) == 0)
     #expect(metadata.st_mode & 0o077 == 0)
@@ -270,7 +271,7 @@ private final class SnapshotCreationFixture: @unchecked Sendable {
     )
     sourceURL = rootURL.appending(path: "source", directoryHint: .isDirectory)
     outputURL = rootURL.appending(path: "new-snapshot", directoryHint: .isDirectory)
-    executableURL = rootURL.appending(path: "greenbubbles-restore")
+    executableURL = rootURL.appending(path: "greenbubbles")
     recoveryKitURL = rootURL.appending(path: "recovery-kit.txt")
     localCredentialURL = rootURL.appending(path: ".snapshot-local-unlock")
     try makeSnapshotPrivateDirectory(rootURL)

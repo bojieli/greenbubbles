@@ -5,7 +5,7 @@ the encrypted canonical replica:
 
 ```text
 cargo run --release --locked --manifest-path Native/GreenBubblesRestore/Cargo.toml \
-  --bin greenbubbles-restore -- \
+  --bin greenbubbles -- \
   synthetic-benchmark private/benchmark-work \
   --samples 7 --small-messages 100 --large-messages 5000 --burst-messages 100
 ```

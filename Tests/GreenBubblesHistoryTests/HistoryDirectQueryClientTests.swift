@@ -166,7 +166,7 @@ struct HistoryDirectQueryClientTests {
     )
     let fixture = try DirectQueryFixture(response: response)
     defer { fixture.remove() }
-    let passphrase = "correct horse battery staple"
+    let passphrase = "correct 🐴 battery staple"
     let query = "bounded phrase"
 
     let page = try await HistoryDirectQueryClient().search(
@@ -181,6 +181,20 @@ struct HistoryDirectQueryClientTests {
     #expect(try fixture.arguments().last == "--snapshot-passphrase-stdin")
     #expect(!fixture.argumentsText().contains(passphrase))
     #expect(!fixture.argumentsText().contains(query))
+  }
+
+  @Test("rejects a malformed UTF-8 passphrase before invoking the CLI")
+  func rejectsMalformedUTF8Passphrase() async throws {
+    let fixture = try DirectQueryFixture(response: conversationResponse)
+    defer { fixture.remove() }
+    let malformedPassphrase = Array(repeating: UInt8(ascii: "a"), count: 12) + [0xED, 0xA0, 0x80]
+
+    await #expect(throws: HistoryDirectQueryError.invalidKey) {
+      _ = try await HistoryDirectQueryClient().conversations(
+        configuration: fixture.configuration(mode: .snapshotPassphrase),
+        keyUTF8: malformedPassphrase
+      )
+    }
   }
 
   @Test("sends only search text through stdin when a recovery kit unlocks the snapshot")
@@ -370,7 +384,7 @@ private struct DirectQueryFixture {
       directoryHint: .isDirectory
     )
     sourceURL = rootURL.appending(path: "source", directoryHint: .isDirectory)
-    executableURL = rootURL.appending(path: "fake-greenbubbles-restore")
+    executableURL = rootURL.appending(path: "fake-greenbubbles")
     recoveryKitURL = rootURL.appending(path: "snapshot-recovery-kit.txt")
     localCredentialURL = rootURL.appending(path: ".snapshot-local-unlock")
     argumentsURL = rootURL.appending(path: "arguments")
@@ -400,7 +414,7 @@ private struct DirectQueryFixture {
       directoryHint: .isDirectory
     )
     sourceURL = rootURL.appending(path: "source", directoryHint: .isDirectory)
-    executableURL = rootURL.appending(path: "fake-greenbubbles-restore")
+    executableURL = rootURL.appending(path: "fake-greenbubbles")
     recoveryKitURL = rootURL.appending(path: "snapshot-recovery-kit.txt")
     localCredentialURL = rootURL.appending(path: ".snapshot-local-unlock")
     argumentsURL = rootURL.appending(path: "arguments")

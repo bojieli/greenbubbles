@@ -490,7 +490,7 @@ private func validateExecutable(_ url: URL) throws {
     access(url.path, X_OK) == 0
   else {
     throw HistoryLiveMediaError.invalidConfiguration(
-      "choose the local greenbubbles-restore executable")
+      "choose the local greenbubbles executable")
   }
 }
 

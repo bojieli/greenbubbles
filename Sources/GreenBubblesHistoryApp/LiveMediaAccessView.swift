@@ -95,7 +95,7 @@ struct LiveMediaAccessView: View {
               .privacySensitive()
               .disabled(isResolving)
             Label(
-              "The key is sent only to greenbubbles-restore over standard input. It is cleared from this form before the request and is not saved in settings, arguments, requests, logs, or previews.",
+              "The key is sent only to greenbubbles over standard input. It is cleared from this form before the request and is not saved in settings, arguments, requests, logs, or previews.",
               systemImage: "key.horizontal"
             )
             .font(.caption)

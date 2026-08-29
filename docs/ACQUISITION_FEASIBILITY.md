@@ -13,7 +13,7 @@ decision on 2026-08-27; the resulting gated path is documented in
 The reusable inspection command is:
 
 ```sh
-swift run greenbubbles acquisition-surfaces
+swift run greenbubbles-discover acquisition-surfaces
 ```
 
 It accepts only the exact signed WeChat macOS build pinned by GreenBubbles:

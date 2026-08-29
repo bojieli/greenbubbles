@@ -3,10 +3,10 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Mutex;
 
-use greenbubbles_restore::tools::{
+use greenbubbles::tools::{
     create_tool_policy_with_cached_moments, CachedMomentField, CachedMomentsToolScope,
 };
-use greenbubbles_restore::{
+use greenbubbles::{
     audit::{audit_archive, audit_archive_with_progress},
     connector::{
         ConnectorDestination, ConnectorOperation, ConnectorRequest, ConnectorResult,
@@ -77,7 +77,7 @@ fn restores_cached_moments_and_interactions_without_claiming_cache_completeness(
         client_build: None,
         acquisition: None,
         entries: vec![SnapshotEntry {
-            source: greenbubbles_restore::manifest::PathReference {
+            source: greenbubbles::manifest::PathReference {
                 opaque_id: "source".to_string(),
                 path: None,
             },
@@ -85,7 +85,7 @@ fn restores_cached_moments_and_interactions_without_claiming_cache_completeness(
             logical_path: "sns/sns.db".to_string(),
             relative_path: "sets/0000/database.db".to_string(),
             role: SnapshotFileRole::Database,
-            fingerprint: greenbubbles_restore::manifest::SourceFileFingerprint {
+            fingerprint: greenbubbles::manifest::SourceFileFingerprint {
                 device_id: 1,
                 file_id: 2,
                 byte_count: metadata.len() as i64,
@@ -478,7 +478,7 @@ fn unreadable_cached_table_rows_are_omitted_without_aborting_the_archive_or_repl
         client_build: None,
         acquisition: None,
         entries: vec![SnapshotEntry {
-            source: greenbubbles_restore::manifest::PathReference {
+            source: greenbubbles::manifest::PathReference {
                 opaque_id: "source".to_string(),
                 path: None,
             },
@@ -486,7 +486,7 @@ fn unreadable_cached_table_rows_are_omitted_without_aborting_the_archive_or_repl
             logical_path: "sns/sns.db".to_string(),
             relative_path: "sets/0000/database.db".to_string(),
             role: SnapshotFileRole::Database,
-            fingerprint: greenbubbles_restore::manifest::SourceFileFingerprint {
+            fingerprint: greenbubbles::manifest::SourceFileFingerprint {
                 device_id: 1,
                 file_id: 3,
                 byte_count: metadata.len() as i64,

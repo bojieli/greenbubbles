@@ -85,7 +85,7 @@ The explicitly diagnostic `diagnose-available` command retains its stricter
 `diagnosticSubset` label because it is intended for bounded inspection rather
 than publication. Diagnostic batches remain ineligible for replica mutation.
 
-Before a passphrase is requested, `greenbubbles-restore preflight <snapshot>`
+Before a passphrase is requested, `greenbubbles preflight <snapshot>`
 loads and validates the cross-language manifest, verifies the digest of every
 copied database/WAL/SHM entry, and reads only the first 16 bytes of each copied
 database through a regular-file, single-link, no-symlink descriptor. It reports

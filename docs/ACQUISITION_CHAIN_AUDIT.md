@@ -1,13 +1,13 @@
 # Independent acquisition-chain audit
 
-`greenbubbles-restore audit-acquisition-chain` verifies that an incremental or
+`greenbubbles audit-acquisition-chain` verifies that an incremental or
 integrity-scan snapshot is an exact continuation of a supplied authoritative
 baseline:
 
 ```sh
 cargo run --locked \
   --manifest-path Native/GreenBubblesRestore/Cargo.toml \
-  --bin greenbubbles-restore -- \
+  --bin greenbubbles -- \
   audit-acquisition-chain <previous-snapshot> <current-snapshot>
 ```
 

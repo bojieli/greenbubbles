@@ -16,7 +16,7 @@ gap without changing or weakening the canonical bundle.
 ## Projection contract
 
 ```text
-greenbubbles-restore ai-memory-export \
+greenbubbles ai-memory-export \
   <audited-context-bundle> <new-memory-generation> \
   [--max-messages-per-chunk 64] \
   [--max-text-bytes-per-chunk 49152] \
@@ -44,7 +44,7 @@ The output path must be new and its parent must be owner-only. Files use mode
 After copying and before indexing, run the aggregate-only verifier:
 
 ```text
-greenbubbles-restore audit-ai-memory <memory-generation> \
+greenbubbles audit-ai-memory <memory-generation> \
   [--progress-file <owner-only-new-events.ndjson>] \
   [--progress-json | --quiet-progress]
 ```

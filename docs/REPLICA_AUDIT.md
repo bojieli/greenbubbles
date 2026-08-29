@@ -4,7 +4,7 @@
 key-gated integrity pass for a serving replica:
 
 ```sh
-greenbubbles-restore audit-replica \
+greenbubbles audit-replica \
   <encrypted-replica.db> --replica-key-stdin \
   --progress-file <owner-only-new-progress.ndjson>
 ```

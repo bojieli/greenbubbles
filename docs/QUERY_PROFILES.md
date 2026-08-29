@@ -4,18 +4,18 @@ Query profiles let the bounded read-only CLI remember which SQLite source to
 open and how to unlock it. After one local setup, ordinary commands become:
 
 ```sh
-greenbubbles-restore source status
-greenbubbles-restore conversations list
-greenbubbles-restore messages list --conversation <id>
-greenbubbles-restore messages search --query-stdin
-greenbubbles-restore conversations list --profile archive
+greenbubbles source status
+greenbubbles conversations list
+greenbubbles messages list --conversation <id>
+greenbubbles messages search --query-stdin
+greenbubbles conversations list --profile archive
 ```
 
 The existing explicit form remains available for scripts and one-off sources:
 
 ```sh
-greenbubbles-restore conversations list <source-root> --decrypted
-cat <private-key-file> | greenbubbles-restore conversations list \
+greenbubbles conversations list <source-root> --decrypted
+cat <private-key-file> | greenbubbles conversations list \
   <source-root> --passphrase-stdin
 ```
 
@@ -31,7 +31,7 @@ The default file is:
 ~/.greenbubbles/query-profiles.json
 ```
 
-Use `greenbubbles-restore profile path` to print the effective location. An
+Use `greenbubbles profile path` to print the effective location. An
 advanced installation may set `GREENBUBBLES_QUERY_PROFILES_FILE` to another
 absolute path. The selected file is still subject to all ownership and
 permission checks.
@@ -55,7 +55,7 @@ umask, then edit only the placeholder paths and modes you need:
 
 ```sh
 umask 077
-greenbubbles-restore profile template \
+greenbubbles profile template \
   > "$HOME/.greenbubbles/query-profiles.json"
 chmod 600 "$HOME/.greenbubbles/query-profiles.json"
 ${EDITOR:-vi} "$HOME/.greenbubbles/query-profiles.json"
@@ -132,11 +132,11 @@ does not make the backup unreadable.
 The management commands never print credential contents:
 
 ```sh
-greenbubbles-restore profile list
-greenbubbles-restore profile show live
-greenbubbles-restore profile validate
-greenbubbles-restore profile validate archive
-greenbubbles-restore profile set-default archive
+greenbubbles profile list
+greenbubbles profile show live
+greenbubbles profile validate
+greenbubbles profile validate archive
+greenbubbles profile set-default archive
 ```
 
 `profile validate` loads the selected private credential, opens the required
@@ -149,23 +149,23 @@ totals. `set-default` atomically rewrites the existing configuration with mode
 Omit both the source and access arguments to use `defaultProfile`:
 
 ```sh
-greenbubbles-restore conversations list --limit 100
-greenbubbles-restore messages list \
+greenbubbles conversations list --limit 100
+greenbubbles messages list \
   --conversation <conversation-id> --limit 100
 ```
 
 Choose another configured source with `--profile`:
 
 ```sh
-greenbubbles-restore source status --profile archive
-greenbubbles-restore conversations list --profile archive
+greenbubbles source status --profile archive
+greenbubbles conversations list --profile archive
 ```
 
 For search, stdin contains only the search text because the profile credential
 is read from its separate file:
 
 ```sh
-greenbubbles-restore messages search \
+greenbubbles messages search \
   --profile archive --query-stdin --limit 50 \
   < <owner-only-query-file>
 ```

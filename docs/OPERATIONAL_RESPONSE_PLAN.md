@@ -1,26 +1,30 @@
 # Operational response plan
 
-Status: **private-development draft; owner and counsel/security approval absent**
+Status: **operational for the public research-alpha release**
 
 This playbook defines fail-closed technical and evidence-handling actions for
-GreenBubbles incidents. It is not legal advice, does not authorize publication,
-and does not complete Phase 0.5 until the repository owner names the responsible
-people, obtains the required review, and approves the communication decisions.
+GreenBubbles incidents. It is not legal advice. The repository owner approved
+it for the 0.1.1 public boundary on 2026-08-29; broader active capabilities or
+distribution targets require a fresh review.
 
-## Required owners before public release
+## Owners and intake
 
-Record these outside public source control before any release:
+The public release is maintained by a single owner:
 
-- repository/product decision owner;
-- security intake owner and a monitored private contact channel;
-- privacy/data-exposure response owner;
-- qualified counsel for the intended jurisdictions and distribution model;
-- repository host and release-artifact administrator;
-- backup delegate and escalation deadlines for each role.
+- **Repository, product, security, privacy, and release owner:** Bojie Li
+  (GitHub [`@bojieli`](https://github.com/bojieli)).
+- **Private security intake:**
+  [GitHub private vulnerability reporting](https://github.com/bojieli/greenbubbles/security/advisories/new).
+- **Initial acknowledgement target:** three business days for a complete
+  security report; credible critical reports are contained immediately when
+  seen.
+- **Legal escalation:** qualified external counsel is engaged when a complaint,
+  notice, jurisdictional duty, or contemplated response requires legal advice.
 
-No placeholder is an escalation path. Until these roles exist, the repository
-stays private, produces no public binaries or release assets, and exposes no
-active-read or action adapter.
+There is no backup maintainer for 0.1.1. If the owner is unavailable, new
+releases and public response promises remain on hold rather than silently
+transferring authority. Active reads and sending remain unavailable in public
+builds regardless of incident state.
 
 ## Events covered
 
@@ -42,9 +46,11 @@ Activate this playbook for any of the following:
 The first responder performs only reversible containment until the event is
 classified:
 
-1. Keep the repository private and place any contemplated release or publication
-   on hold. Do not publish a workaround, fixture, binary, schema detail, or
-   captured artifact while review is pending.
+1. Place new releases and affected publication on hold. Withdraw or draft an
+   affected GitHub Release when necessary, and restrict repository visibility
+   if a credible private-data or credential exposure requires it. Do not
+   publish a workaround, fixture, binary, schema detail, or captured artifact
+   while review is pending.
 2. Leave active reads and write actions unavailable. If a future adapter exists,
    activate its independent kill switch before diagnosis and do not rely on an
    AI process to enforce the stop.
@@ -141,7 +147,7 @@ not reduce a real private-data or account-safety event by itself.
 - Fix the root invariant, add a regression, run the complete affected audit and
   release checks, and document which prior evidence or artifacts are invalidated.
 - Coordinate disclosure and credit with the reporter only through the approved
-  owner; do not promise a public release date while publication remains gated.
+  owner; do not promise a public release date while a release hold is active.
 
 ## Complaint, takedown, or platform-policy notice
 
@@ -190,12 +196,12 @@ not automatically restore public-release, active-read, or action authorization.
 
 ## Approval record
 
-Before this becomes operational rather than a draft, record privately:
-
-- approved revision and date;
-- named role assignments and backup contacts;
-- monitored intake and escalation channels;
-- applicable jurisdictions and counsel approval scope;
-- repository-host and release-account procedures;
-- notification decision authority and target response times;
-- next scheduled review and the events that force an immediate review.
+- Approved revision: public 0.1.1 boundary, 2026-08-29.
+- Decision and notification authority: Bojie Li.
+- Monitored intake: GitHub private vulnerability reporting.
+- Repository host and release administrator: GitHub account `bojieli`.
+- Review cadence: every public release, dependency/native-source change,
+  distribution-target change, security incident, complaint/takedown, or
+  material WeChat compatibility/acquisition change.
+- Counsel scope: external and event-specific; no absence of counsel response is
+  interpreted as approval.

@@ -43,7 +43,7 @@ public enum SnapshotAccountBindingError: Error, Equatable, CustomStringConvertib
       return "A database is not contained by a WeChat account db_storage directory: \(sourceID)"
     case .ambiguousAccountRoots:
       return
-        "Multiple WeChat accounts were selected; run `greenbubbles accounts` and pass "
+        "Multiple WeChat accounts were selected; run `greenbubbles-discover accounts` and pass "
         + "exactly one opaque ID with `--account`"
     case .invalidAccountDirectory:
       return "The selected WeChat account directory has no usable account identifier"

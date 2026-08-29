@@ -28,7 +28,7 @@ The reusable command enforces the complete pinned fingerprint and fails closed
 for another build:
 
 ```sh
-swift run greenbubbles integration-surfaces
+swift run greenbubbles-discover integration-surfaces
 ```
 
 Its versioned JSON contains no absolute application path. Every boundary is

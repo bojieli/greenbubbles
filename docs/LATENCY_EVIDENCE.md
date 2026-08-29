@@ -13,7 +13,7 @@ snapshot path. The handoff is also private. A safe local shell should set
 symlinks, hard links, oversized files, and files that change while read.
 
 ```sh
-greenbubbles-restore compose-latency-evidence \
+greenbubbles compose-latency-evidence \
   <private-snapshot-report.json> \
   <private-offline-report.json> \
   <private-follower-report.json> \
@@ -61,7 +61,7 @@ diagnostic evidence but cannot by itself satisfy the plan's real-client
 Store reviewed format-1 samples in one owner-only JSON array, then run:
 
 ```sh
-greenbubbles-restore summarize-latency-evidence \
+greenbubbles summarize-latency-evidence \
   <private-latency-sample-array.json>
 ```
 

@@ -5,12 +5,12 @@ use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use greenbubbles_restore::connector::{
+use greenbubbles::connector::{
     ConnectorConversationView, ConnectorDestination, ConnectorErrorCode, ConnectorOperation,
     ConnectorRequest, ConnectorResponse, ConnectorResult, CONNECTOR_API_VERSION,
 };
-use greenbubbles_restore::tools::MinimizedMessage;
-use greenbubbles_restore::transport::send_unix_request;
+use greenbubbles::tools::MinimizedMessage;
+use greenbubbles::transport::send_unix_request;
 use serde::{Deserialize, Serialize};
 
 const PAGE_SIZE: usize = 500;

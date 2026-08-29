@@ -13,7 +13,7 @@ completed successfully, publish its canonical directory with a strictly
 increasing owner-controlled generation:
 
 ```sh
-greenbubbles-restore replica-publish \
+greenbubbles replica-publish \
   <replica-eligible-archive> <private-handoff.json> --generation 1
 ```
 
@@ -53,7 +53,7 @@ The replica key remains distinct from the WeChat passphrase and enters only
 through standard input:
 
 ```sh
-greenbubbles-restore replica-follow \
+greenbubbles replica-follow \
   <private-handoff.json> <private-follow-state.json> <encrypted-replica.db> \
   --replica-key-stdin --poll-milliseconds 1000
 ```
@@ -74,7 +74,7 @@ Supervisors can inspect exact generation lag and checkpoint age without
 receiving an account ID, source fingerprint, archive path, or message content:
 
 ```sh
-greenbubbles-restore replica-follow-status \
+greenbubbles replica-follow-status \
   <private-handoff.json> <private-follow-state.json> <encrypted-replica.db> \
   --replica-key-stdin
 ```

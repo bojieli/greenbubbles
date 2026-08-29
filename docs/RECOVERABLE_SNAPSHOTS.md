@@ -39,7 +39,7 @@ Create a recovery kit in an owner-only directory before creating the snapshot:
 ```sh
 umask 077
 mkdir -m 700 -p /private/greenbubbles-recovery
-greenbubbles-restore snapshot recovery-kit create \
+greenbubbles snapshot recovery-kit create \
   /private/greenbubbles-recovery/family-a.txt
 ```
 
@@ -70,7 +70,7 @@ the same account open the snapshot without reading the recovery words on every
 launch:
 
 ```sh
-greenbubbles-restore snapshot local-credential create \
+greenbubbles snapshot local-credential create \
   /private/greenbubbles-local/.family-a-unlock
 ```
 
@@ -108,7 +108,7 @@ random database key, and wraps it under every selected protector.
 
 ```sh
 { cat wechat-key.txt; cat snapshot-passphrase.txt; } | \
-  greenbubbles-restore snapshot create \
+  greenbubbles snapshot create \
   <WeChat-db_storage-root> <new-snapshot-directory> \
   --source-passphrase-stdin \
   --snapshot-recovery-kit /private/greenbubbles-recovery/family-a.txt \
@@ -129,7 +129,7 @@ passphrase is enabled, it is stdin line 1; otherwise stdin is empty:
 
 ```sh
 cat snapshot-passphrase.txt | \
-  greenbubbles-restore snapshot create \
+  greenbubbles snapshot create \
   <plaintext-db_storage-root> <new-snapshot-directory> \
   --source-decrypted \
   --snapshot-recovery-kit /private/greenbubbles-recovery/family-a.txt \
@@ -147,7 +147,7 @@ the independent protector files named explicitly:
 
 ```sh
 { cat wechat-key.txt; cat snapshot-passphrase.txt; } | \
-  greenbubbles-restore snapshot create-capture \
+  greenbubbles snapshot create-capture \
   <stable-acquisition-snapshot> <new-snapshot-directory> \
   --source-passphrase-stdin \
   --snapshot-recovery-kit /private/greenbubbles-recovery/family-a.txt \
@@ -198,14 +198,14 @@ cross-database atomicity limitation.
 Run verification after copying the snapshot to its intended recovery location:
 
 ```sh
-greenbubbles-restore snapshot verify <snapshot-directory> \
+greenbubbles snapshot verify <snapshot-directory> \
   --snapshot-local-credential /private/greenbubbles-local/.family-a-unlock
 
-greenbubbles-restore snapshot verify <snapshot-directory> \
+greenbubbles snapshot verify <snapshot-directory> \
   --snapshot-recovery-kit /private/greenbubbles-recovery/family-a.txt
 
 cat snapshot-passphrase.txt | \
-  greenbubbles-restore snapshot verify <snapshot-directory> \
+  greenbubbles snapshot verify <snapshot-directory> \
   --snapshot-passphrase-stdin
 ```
 
@@ -234,18 +234,18 @@ specific drill, not a reason to discard the only recovery key.
 The same bounded adapter serves live and snapshot data:
 
 ```sh
-greenbubbles-restore source status <snapshot-directory> \
+greenbubbles source status <snapshot-directory> \
   --snapshot-local-credential /private/greenbubbles-local/.family-a-unlock
 
-greenbubbles-restore conversations list <snapshot-directory> \
+greenbubbles conversations list <snapshot-directory> \
   --snapshot-local-credential /private/greenbubbles-local/.family-a-unlock \
   --limit 100
 
-greenbubbles-restore messages list <snapshot-directory> \
+greenbubbles messages list <snapshot-directory> \
   --snapshot-local-credential /private/greenbubbles-local/.family-a-unlock \
   --conversation <wxid-or-chatroom-id> --limit 100
 
-greenbubbles-restore message get <snapshot-directory> \
+greenbubbles message get <snapshot-directory> \
   --snapshot-local-credential /private/greenbubbles-local/.family-a-unlock \
   --conversation <wxid-or-chatroom-id> \
   --message <opaque-id-from-messages-list>
@@ -297,7 +297,7 @@ convenience to a snapshot that currently has only recovery words:
 
 ```sh
 cat new-snapshot-passphrase.txt | \
-  greenbubbles-restore snapshot rewrap \
+  greenbubbles snapshot rewrap \
   <snapshot-directory> <new-snapshot-directory> \
   --old-snapshot-local-credential /private/greenbubbles-local/.old-unlock \
   --new-snapshot-recovery-kit /private/greenbubbles-recovery/new-family.txt \
@@ -325,7 +325,7 @@ key second:
 
 ```sh
 { cat greenbubbles-recovery-key.txt; cat next-recovery-key.txt; } | \
-  greenbubbles-restore snapshot rekey \
+  greenbubbles snapshot rekey \
   <snapshot-directory> <new-snapshot-directory> \
   --old-snapshot-key-stdin --new-snapshot-key-stdin
 ```
@@ -346,7 +346,7 @@ one. GreenBubbles retention is deliberately a recoverable quarantine operation,
 not an age-based delete:
 
 ```sh
-greenbubbles-restore snapshot retention quarantine \
+greenbubbles snapshot retention quarantine \
   <retiring-snapshot> <newer-replacement> <owner-only-quarantine-directory> \
   --retiring-local-credential /private/greenbubbles-local/.old-unlock \
   --replacement-recovery-kit /private/greenbubbles-recovery/new-family.txt
@@ -369,7 +369,7 @@ passphrase-only replacement verification is intentionally insufficient.
 Restore during the cooling period with:
 
 ```sh
-greenbubbles-restore snapshot retention restore \
+greenbubbles snapshot retention restore \
   <quarantined-snapshot> <new-restored-directory> \
   --snapshot-recovery-kit /private/greenbubbles-recovery/old-family.txt
 ```

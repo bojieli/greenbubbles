@@ -108,19 +108,21 @@ public enum HistorySnapshotCreationError: Error, Equatable, LocalizedError {
 
   public var errorDescription: String? {
     switch self {
-    case .invalidExecutable: "Choose a real local greenbubbles-restore executable."
+    case .invalidExecutable: "Choose a real local greenbubbles executable."
     case .invalidSource: "Choose a current-user-owned real SQLite source directory."
     case .unsafeOutput:
       "Choose a new snapshot path beneath a current-user-owned owner-only directory."
     case .unsafeProtector:
       "Recovery and convenience files must be single-link owner-only files in owner-only directories."
     case .invalidRecoveryKit: "The recovery kit is not the confirmed 24-word kit."
-    case .invalidSourceKey: "The encrypted source key must be 32 raw bytes or 64 hexadecimal characters."
+    case .invalidSourceKey:
+      "The encrypted source key must be 32 raw bytes or 64 hexadecimal characters."
     case .invalidPassphrase:
       "The optional snapshot passphrase must be 12–1024 UTF-8 bytes with no line break."
     case .responseTooLarge: "The local snapshot command exceeded its fixed response bound."
     case .timedOut: "The local snapshot command exceeded its two-hour safety deadline."
-    case .commandFailed: "The local snapshot command failed. The portable recovery kit was not deleted."
+    case .commandFailed:
+      "The local snapshot command failed. The portable recovery kit was not deleted."
     case .invalidResponse: "The local snapshot command returned an invalid bounded response."
     }
   }

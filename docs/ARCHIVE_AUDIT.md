@@ -1,6 +1,6 @@
 # Independent restoration-archive audit
 
-`greenbubbles-restore audit-archive` independently reopens a completed local
+`greenbubbles audit-archive` independently reopens a completed local
 archive and verifies that its ledgers, coverage verdict, relationships, and
 recorded artifact files still agree. It does not trust `report.json` merely
 because the restoration process wrote it successfully.
@@ -11,7 +11,7 @@ synchronization:
 ```sh
 cargo run --locked \
   --manifest-path Native/GreenBubblesRestore/Cargo.toml \
-  --bin greenbubbles-restore -- \
+  --bin greenbubbles -- \
   audit-archive <owner-only-restoration-archive>
 ```
 

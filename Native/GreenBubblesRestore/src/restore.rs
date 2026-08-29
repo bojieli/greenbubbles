@@ -1170,7 +1170,7 @@ pub fn restore_catalog_with_progress(
         }));
     let coverage = RestorationCoverage {
         format_version: 4,
-        decoder_name: "greenbubbles-restore".to_string(),
+        decoder_name: "greenbubbles".to_string(),
         decoder_version: env!("CARGO_PKG_VERSION").to_string(),
         snapshot_manifest_format_version: catalog.manifest.manifest_format_version,
         schema_profile_fingerprint,
