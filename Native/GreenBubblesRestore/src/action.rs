@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -10,7 +10,27 @@ pub const ACTION_SAFETY_CONTRACT_VERSION: u32 = 1;
 pub enum ActionCapability {
     TextSend,
     ReplySend,
+    /// Send one local image, which the client re-encodes: the recipient does
+    /// not receive the approved bytes, only a client-produced derivative.
+    ImageSend,
+    /// Send one local file byte-for-byte.
     FileSend,
+}
+
+impl ActionCapability {
+    /// Whether this capability carries a file rather than text.
+    pub fn carries_attachment(self) -> bool {
+        matches!(
+            self,
+            ActionCapability::ImageSend | ActionCapability::FileSend
+        )
+    }
+
+    /// Whether the client transmits the approved bytes unchanged. False for
+    /// images, so no audit record can claim a byte-for-byte match.
+    pub fn preserves_bytes(self) -> bool {
+        !matches!(self, ActionCapability::ImageSend)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,6 +57,7 @@ pub enum ActionGuardDenial {
     ClientBuildMismatch,
     AccountNotAllowed,
     ConversationNotAllowed,
+    RecipientTitleNotAllowed,
     CapabilityNotAllowed,
     ApprovalMalformed,
     ApprovalBindingMismatch,
@@ -72,6 +93,14 @@ pub struct ActionGateEvidence {
 pub struct ActionAllowList {
     pub account_ids: BTreeSet<String>,
     pub conversation_ids: BTreeSet<String>,
+    /// The recipient title the owner authorized for each allow-listed
+    /// conversation. This exists because the opaque conversation identifier is
+    /// not what routes a message: the send path proves a recipient by matching
+    /// this human-readable title on screen, so authorizing the identifier alone
+    /// would leave the destination unconstrained. A conversation with no
+    /// authorized title here can never be sent to.
+    #[serde(default)]
+    pub recipient_titles: BTreeMap<String, String>,
     pub capabilities: BTreeSet<ActionCapability>,
 }
 
@@ -101,6 +130,10 @@ pub struct ActionAttemptIntent {
     pub draft_id: String,
     pub account_id: String,
     pub conversation_id: String,
+    /// The recipient title the adapter will require the recipient gate to match
+    /// before anything is typed. Carried here so policy authorizes the value
+    /// that actually selects the destination.
+    pub recipient_title: String,
     pub adapter: ActionAdapterBinding,
     pub idempotency_key: String,
     pub approval: ExternalApprovalEvidence,
@@ -216,6 +249,19 @@ pub fn assess_action_attempt(
     {
         denials.insert(ActionGuardDenial::ConversationNotAllowed);
     }
+    // Fail closed: an allow-listed conversation with no authorized title, or a
+    // title that disagrees with the authorized one, is refused. Otherwise a
+    // draft could name an allow-listed identifier while directing the send at
+    // whatever different conversation its title matched.
+    if intent.recipient_title.is_empty()
+        || context
+            .allow_list
+            .recipient_titles
+            .get(&intent.conversation_id)
+            != Some(&intent.recipient_title)
+    {
+        denials.insert(ActionGuardDenial::RecipientTitleNotAllowed);
+    }
     if !context.allow_list.capabilities.contains(&intent.capability) {
         denials.insert(ActionGuardDenial::CapabilityNotAllowed);
     }
@@ -324,6 +370,7 @@ fn action_capability_name(capability: ActionCapability) -> &'static str {
     match capability {
         ActionCapability::TextSend => "textSend",
         ActionCapability::ReplySend => "replySend",
+        ActionCapability::ImageSend => "imageSend",
         ActionCapability::FileSend => "fileSend",
     }
 }
@@ -358,6 +405,7 @@ mod tests {
             draft_id: sha('b'),
             account_id: "disposable-account".to_string(),
             conversation_id: "allow-listed-test-conversation".to_string(),
+            recipient_title: "Allow Listed Test".to_string(),
             adapter: adapter.clone(),
             idempotency_key: sha('c'),
             approval: ExternalApprovalEvidence {
@@ -379,6 +427,10 @@ mod tests {
             allow_list: ActionAllowList {
                 account_ids: BTreeSet::from(["disposable-account".to_string()]),
                 conversation_ids: BTreeSet::from(["allow-listed-test-conversation".to_string()]),
+                recipient_titles: BTreeMap::from([(
+                    "allow-listed-test-conversation".to_string(),
+                    "Allow Listed Test".to_string(),
+                )]),
                 capabilities: BTreeSet::from([ActionCapability::TextSend]),
             },
             rate: ActionRateState {

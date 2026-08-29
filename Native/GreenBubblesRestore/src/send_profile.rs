@@ -50,7 +50,7 @@ pub struct WindowRelativePoint {
 }
 
 impl WindowRelativePoint {
-    fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
         self.x_parts_per_million <= PARTS_PER_MILLION
             && self.y_parts_per_million <= PARTS_PER_MILLION
     }
@@ -67,7 +67,7 @@ pub struct WindowRelativeRect {
 }
 
 impl WindowRelativeRect {
-    fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
         self.width_parts_per_million > 0
             && self.height_parts_per_million > 0
             && u64::from(self.x_parts_per_million) + u64::from(self.width_parts_per_million)
@@ -91,6 +91,9 @@ pub struct CalibrationAnchors {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CalibrationOcrRegions {
+    /// GATE 0: the search field, read back to prove the click actually took
+    /// focus before anything destructive is typed anywhere.
+    pub search: WindowRelativeRect,
     /// GATE 1: the opened conversation's title.
     pub title: WindowRelativeRect,
     /// GATE 2: the compose box, read back after pasting the body.
@@ -105,6 +108,31 @@ pub struct CalibrationOcrRegions {
 pub struct CalibrationSelfTest {
     pub focus_indicator: String,
     pub minimum_title_confidence_parts_per_million: u32,
+}
+
+/// The extra anchors and regions an attachment send needs. A profile without
+/// this section simply cannot stage an attachment on that build, which is how
+/// "attachments are unavailable until someone measures and signs them" is
+/// expressed as data rather than as code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CalibrationAttachments {
+    /// The compose-toolbar control that opens the file panel. Only used by the
+    /// panel fallback; the pasteboard path needs no anchor at all.
+    pub attach_control: WindowRelativePoint,
+    /// The confirm control on the send-confirmation sheet, when the build
+    /// raises one.
+    pub confirm_send_button: WindowRelativePoint,
+    /// Where a staged attachment's name appears in the compose area.
+    pub compose_attachment: WindowRelativeRect,
+    /// Where the confirmation sheet shows the file it is about to send.
+    pub confirm_sheet: WindowRelativeRect,
+    /// Whether this build raises a confirmation sheet at all.
+    pub presents_confirmation_sheet: bool,
+    /// Whether the compose box accepts a pasted file reference on this build.
+    /// Answering this is the whole point of the A0 spike; a profile that says
+    /// false forces the panel fallback.
+    pub compose_accepts_pasted_file: bool,
 }
 
 /// Everything the release key signs. The signature is deliberately outside
@@ -122,6 +150,9 @@ pub struct CalibrationProfileBody {
     pub anchors: CalibrationAnchors,
     pub ocr_regions: CalibrationOcrRegions,
     pub selftest: CalibrationSelfTest,
+    /// Absent until someone has measured this build's attachment surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<CalibrationAttachments>,
     pub issued_at_unix_seconds: u64,
     pub expires_at_unix_seconds: u64,
 }
@@ -373,6 +404,7 @@ pub fn calibration_profile_signing_bytes(body: &CalibrationProfileBody) -> Optio
         body.anchors.first_result_row,
     );
     push_point(&mut writer, "anchor.composeBox", body.anchors.compose_box);
+    push_rect(&mut writer, "region.search", body.ocr_regions.search);
     push_rect(&mut writer, "region.title", body.ocr_regions.title);
     push_rect(&mut writer, "region.compose", body.ocr_regions.compose);
     push_rect(
@@ -386,6 +418,33 @@ pub fn calibration_profile_signing_bytes(body: &CalibrationProfileBody) -> Optio
         .number(u128::from(
             body.selftest.minimum_title_confidence_parts_per_million,
         ))
+        .flag(body.attachments.is_some());
+    if let Some(attachments) = &body.attachments {
+        push_point(
+            &mut writer,
+            "anchor.attachControl",
+            attachments.attach_control,
+        );
+        push_point(
+            &mut writer,
+            "anchor.confirmSendButton",
+            attachments.confirm_send_button,
+        );
+        push_rect(
+            &mut writer,
+            "region.composeAttachment",
+            attachments.compose_attachment,
+        );
+        push_rect(
+            &mut writer,
+            "region.confirmSheet",
+            attachments.confirm_sheet,
+        );
+        writer
+            .flag(attachments.presents_confirmation_sheet)
+            .flag(attachments.compose_accepts_pasted_file);
+    }
+    writer
         .number(u128::from(body.issued_at_unix_seconds))
         .number(u128::from(body.expires_at_unix_seconds));
     writer.finish()
@@ -426,11 +485,18 @@ fn structurally_valid_profile(body: &CalibrationProfileBody) -> bool {
         && body.anchors.search_box.valid()
         && body.anchors.first_result_row.valid()
         && body.anchors.compose_box.valid()
+        && body.ocr_regions.search.valid()
         && body.ocr_regions.title.valid()
         && body.ocr_regions.compose.valid()
         && body.ocr_regions.newest_outgoing.valid()
         && !body.selftest.focus_indicator.is_empty()
         && body.selftest.minimum_title_confidence_parts_per_million <= PARTS_PER_MILLION
+        && body.attachments.as_ref().is_none_or(|attachments| {
+            attachments.attach_control.valid()
+                && attachments.confirm_send_button.valid()
+                && attachments.compose_attachment.valid()
+                && attachments.confirm_sheet.valid()
+        })
         && body.issued_at_unix_seconds < body.expires_at_unix_seconds
 }
 
@@ -721,6 +787,12 @@ mod tests {
                 },
             },
             ocr_regions: CalibrationOcrRegions {
+                search: WindowRelativeRect {
+                    x_parts_per_million: 40_000,
+                    y_parts_per_million: 15_000,
+                    width_parts_per_million: 200_000,
+                    height_parts_per_million: 35_000,
+                },
                 title: WindowRelativeRect {
                     x_parts_per_million: 440_000,
                     y_parts_per_million: 20_000,
@@ -744,6 +816,7 @@ mod tests {
                 focus_indicator: "search_caret".to_string(),
                 minimum_title_confidence_parts_per_million: 900_000,
             },
+            attachments: None,
             issued_at_unix_seconds: 1_000,
             expires_at_unix_seconds: 100_000,
         }

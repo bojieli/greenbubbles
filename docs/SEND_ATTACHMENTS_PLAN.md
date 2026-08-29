@@ -1,6 +1,8 @@
 # Plan: image and file sending
 
-Status: **plan for review. No implementation.** This document specifies how the
+Status: **implemented (A1–A5); A0 spike partially answered against the live
+client.** The plan below is the design of record; §13 records what the live run
+actually found, including one incident and the fix it forced. This document specifies how the
 send adapter (`SEND_ADAPTER.md`) would gain image and file sending, what it
 would cost in privilege, and which questions must be answered by a read-only
 spike before any code is written. It does not open the capability.
@@ -335,3 +337,478 @@ attachment; video, voice, and sticker sends; forwarding an artifact already in
 the replica; reading any file the owner has not named in an approved draft;
 enumerating directories; and any attachment send that has not passed both the
 text rollout gate and the attachment rollout gate.
+
+---
+
+## 13. Live findings and one incident (2026-08-29)
+
+The A0 spike ran against the owner's own live client, on their explicit
+instruction, in dry-run mode only. No message and no attachment was ever sent:
+all three runs ended `attempted: false`.
+
+### What was confirmed
+
+- **The environment is reachable.** Both TCC grants present, WeChat 4.1.13.269579
+  running and signed in, window located, background capture and Apple Vision
+  recognition working at confidence 1.0.
+- **The client is unsandboxed.** `codesign -d --entitlements` on the installed
+  bundle returns nothing, so an open panel would belong to WeChat's own process
+  (§2, Path B). Still re-detected at runtime rather than assumed.
+- **GATE 1 works exactly as designed.** With the wrong conversation open it read
+  the on-screen title, compared it to the approved recipient, and aborted before
+  touching any compose box. That gate is what kept a misfire from becoming a
+  message.
+- **Synthesized events are not self-detected.** Measured, not assumed:
+  `collision-probe` reports `synthesizedEventsCountAsHumanInput: false`, so the
+  helper's own clicks and keys never trip its own collision guard.
+
+### The incident
+
+While the owner was typing a message to a real contact, three spike runs pasted
+the search key into the client and interleaved with their typing.
+
+**Cause.** The collision guard had been loosened, during this same session, from
+"any recent input aborts" to "only input while the target is frontmost aborts",
+so that a spike could run on a machine that was in use. Two things made that
+wrong:
+
+1. `NSWorkspace.frontmostApplication` is unreliable when sampled from a non-GUI
+   process; it read "not frontmost" while the person was typing in the client.
+2. More fundamentally, **a background click does not merely avoid raising the
+   target — it moves keyboard focus inside it.** A person typing into the
+   compose box can find their next keystrokes arriving in the search box the
+   moment the skill focuses it. Interference does not require a window to come
+   forward, so "the target is not frontmost" was never evidence of safety.
+
+**Fix.** The guard is now stricter than it was originally:
+
+- the machine must be idle for a full window (5 s) before the skill touches
+  anything, rather than merely "no input in the last 1.5 s";
+- the target being frontmost *raises* the requirement (15 s) and can never waive
+  it;
+- the check runs before **every** focus change, not only at stage boundaries,
+  because taking focus is itself the interfering act;
+- the policy is a pure, unit-tested function (`HumanCollisionPolicy`) rather than
+  untestable code inside the effector, and the tests pin both directions.
+
+**Standing lesson.** A safety guard must not be relaxed to make a test run. If
+the guard blocks the test, the environment is telling the truth: the machine is
+in use and the adapter should wait.
+
+### Still open
+
+Q1, Q2, and Q5 (does the compose box accept a pasted file reference; does paste
+distinguish image-as-image from image-as-file; is there a confirmation sheet)
+remain unanswered, because answering them requires driving the live client and
+the machine has been in use. They need one quiet window on an idle machine,
+targeting File Transfer only.
+
+---
+
+## 14. Mechanism findings that change the picture (2026-08-29, second live session)
+
+> **Superseded in part by §17.** The central claim below — that a background
+> click cannot move keyboard focus — was wrong. The click was malformed. Read
+> §17 before relying on anything in this section.
+
+A second live session, on an idle machine, answered the question the incident
+raised and produced a harder result than expected. All runs were dry runs;
+nothing was sent.
+
+### Background clicks do not move keyboard focus
+
+`CGEvent.postToPid` delivers **keystrokes** to whatever field the target already
+has focused, but a posted **click does not move that focus**. Measured
+directly: the skill clicked the search box and pasted, and the text landed in
+the compose box of the conversation that was already open.
+
+This falsifies the design's stated methodology — "mouse focuses, keyboard acts"
+(`SEND_INTEGRATION_DESIGN.md` §3) — for background operation on WeChat
+4.1.13 / macOS 26. The earlier spike's claim that a background click focuses the
+Qt search and compose boxes does not reproduce.
+
+The consequence is severe and is exactly what the incident was: **every
+keystroke the skill sends goes wherever the person last put the caret.** A
+select-all plus delete there destroys their unsent text.
+
+### GATE 0 makes the failure non-destructive
+
+Addressing now pastes **without clearing first**, then reads the search field
+back and requires the search key to appear in it. A click that missed is caught
+before anything destructive happens, and the worst case degrades from "the
+person's draft is deleted" to "a few stray words appear in a field they can
+clear". Verified live: the run aborts with `addressingFocusFailed`, having
+touched nothing else.
+
+### A keyboard shortcut *does* move focus
+
+Posting **Cmd+F** to the target moves focus to the search field in the
+background — no raise, no cursor movement, focus ring and caret confirmed by
+capture. Pasting then lands in the search field, as intended.
+
+This is a strictly better addressing primitive than clicking: it has no
+coordinate to mis-aim, so it cannot land in the wrong field at all. If
+background addressing is pursued further, it should be keyboard-only and the
+`searchBox` anchor should be deleted rather than re-measured.
+
+### But the search does not execute while the client is inactive
+
+With "File Transfer" sitting in the focused search field, **the results list
+never filtered**. WeChat appears to run the search only when its window is key.
+Waiting did not help.
+
+So background addressing can focus the field and enter the text, but cannot
+complete: there is no result to select, and GATE 1 therefore never sees the
+right title.
+
+### Where that leaves the send path
+
+On this build, **a fully background send cannot complete.** The options are:
+
+1. **Keep it closed.** Current behaviour, and the honest default: GATE 0 and
+   GATE 1 both refuse, non-destructively.
+2. **Accept a brief foreground activation** for the addressing step only — the
+   "burst" model of `AI_DESKTOP_AGENT_HANDOFF.md` §4.5. This trades the
+   zero-interference property for a working path and needs an explicit owner
+   decision, because it is a different product.
+3. **Address without the search box**, if a conversation can be opened by some
+   other route that works while inactive. Unexplored.
+
+None of these is a code change to make unilaterally. Attachments are unaffected
+as a capability — the staging, gates, and reconciliation all stand — but they
+inherit this limitation, because every attachment send has to address a
+recipient first.
+
+---
+
+## 15. Q1, Q2 and Q5 answered live (2026-08-29, third session)
+
+Answered against File Transfer, the owner's own self-chat, with the compose box
+already focused. Nothing was sent: the compose area was cleared after each
+probe and no Return was ever pressed.
+
+**Q1 — does the compose box accept a pasted file reference?** **Yes.** Writing a
+`fileURL` to the pasteboard and pressing Cmd+V stages the file. Path A is
+viable, and it needs no anchor, no panel, and no cursor.
+
+**Q2 — does paste distinguish image-as-image from image-as-file?** **Yes,
+automatically, by type**, and the two look different on screen:
+
+| Pasted | Staged as | On-screen evidence |
+| --- | --- | --- |
+| `.png` | inline image thumbnail | **no text at all** |
+| `.txt` | file chip | the name and size, e.g. `gbspike-probe.txt` / `65B` |
+
+**Q5 — is there a confirmation sheet?** None appeared for either kind on this
+build. `presentsConfirmationSheet` stays false in the measured profile, and the
+sheet-handling code remains for builds that do raise one.
+
+### The gap this exposed, and the fix
+
+GATE 2a as first written required the display name to be read back out of the
+compose area. That works for a file chip and **can never work for an image**,
+which stages as a bare thumbnail carrying no text. Every image send would have
+failed the gate.
+
+The gate is now kind-specific, which is what §4 originally called for:
+
+- **file** — the compose region must change *and* the chip must carry the
+  approved name;
+- **image** — the compose region's pixels must change, which is the only
+  evidence available, and the outcome records `attachmentNameMatched: false`
+  rather than implying a match that was never made.
+
+That required a new perception primitive, `regionFingerprint`, because text
+recognition has nothing to read in a thumbnail.
+
+### What this means overall
+
+The attachment mechanism is **solved and measured**: staging works, both kinds
+are distinguishable, and each has a gate matched to what is actually observable.
+What remains blocked is addressing (§14) — reaching a chosen conversation — and
+that blocks text and attachment sends alike.
+
+A `send-to-the-currently-open-conversation` mode would sidestep addressing
+entirely: the title gate already proves which conversation is open, and every
+other gate is unchanged. It is a weaker product, but it is one that works today
+and is worth an explicit decision.
+
+---
+
+## 16. The addressing decision, and what focus actually costs (2026-08-29)
+
+The owner chose the mode that works today, in the background, with attachments:
+**send to the conversation the client already has open.**
+
+### The mode
+
+`SendAddressingMode::CurrentConversation` skips navigation entirely. The skill
+reads the window, runs GATE 1 against the title, and refuses if the open
+conversation is not the approved recipient. It is not merely a workaround; it is
+the **safest** mode available, because it performs **no input whatsoever before
+the recipient gate**. A misfire is a read-only abort that cannot disturb
+anything the person was doing — the property the search mode could never offer.
+
+A capability in this mode carries an **empty search key**, so there is nothing
+to type even if the state machine were wrong, and the binding digest covers the
+mode itself.
+
+### What focus costs, measured
+
+Three further live measurements shaped the implementation:
+
+1. **A posted click does not take focus** — established earlier.
+2. **A posted click appears to *lose* whatever focus existed.** After the skill
+   clicked, subsequent pastes landed nowhere at all: neither the compose box nor
+   the search field received them.
+3. **Lost focus cannot be recovered from the background.** Cmd+F followed by
+   Escape, then a paste, put text in neither field.
+
+Keystrokes therefore land only while the client already has a focused text
+field, which is the state the *person* leaves behind when they are in a
+conversation.
+
+### What that means for the skill
+
+In `currentConversation` mode the skill now **clicks nothing and clears
+nothing**. It pastes into the focus that already exists and lets GATE 2 decide
+whether that was really the compose box.
+
+Clearing is likewise conditional. A select-all plus delete into an unknown field
+is precisely the destructive act this whole session has been about, and in a
+chat window an unknown field might be the message list. So the compose box is
+cleared only once GATE 2 has *proven* where the caret is. When the gate fails,
+the run aborts without clearing and says so, leaving at worst some stray text
+rather than risking a destructive keystroke.
+
+### The resulting contract with the user
+
+The mode sends to the conversation you are in, which means the product's
+precondition is honest and small: **have the conversation open, with the compose
+box focused** — exactly the state you are in when you are about to type. GATE 1
+proves the recipient, GATE 2 proves the content, and either failing is
+non-destructive.
+
+---
+
+## 17. Correction: the click was malformed, and background sending works
+
+The conclusion in §14 was wrong, and the error was mine rather than the
+platform's.
+
+### What was actually broken
+
+The synthesized click omitted `kCGMouseEventClickState`. Without it a Qt control
+treats the down/up pair as stray button traffic and never takes focus from it,
+which is exactly the symptom §14 recorded: the click reached the process, moved
+no caret, and left the next keystroke to land wherever the person had last put
+it. Adding the click state — plus a `mouseMoved` prelude and a short gap between
+events, so the pair is legible as a press and a release — makes it work.
+
+Measured with `focus-probe`, which clicks an anchor, pastes a marker, and reads
+the region back:
+
+| Anchor | Click takes focus |
+| --- | --- |
+| compose box | **yes** |
+| search box | no |
+
+So the design's original methodology — *mouse focuses, keyboard acts* — holds
+after all, for the anchor that matters. The search box still does not take focus
+from a background click, so search-based addressing remains unusable, but the
+chosen no-navigation mode never needed it.
+
+### End-to-end validation, fully autonomous
+
+All three payload kinds now complete the dry run against File Transfer with no
+human involvement: the runner waits for the machine to go idle, then runs.
+
+| Payload | GATE 1 title | GATE 2 | Attempted | Stage reached |
+| --- | --- | --- | --- | --- |
+| text | matched, conf 1.0 | `composeMatched` | no | `contentVerify` |
+| image | matched, conf 1.0 | region changed, no name (as designed) | no | `contentVerify` |
+| file | matched, conf 1.0 | region changed **and** name matched | no | `contentVerify` |
+
+Every run stopped before Return, cleared the compose box, restored the
+clipboard, and left the client exactly as it was found.
+
+### What the earlier failure bought
+
+The wrong conclusion still produced the two gates that make the path safe, and
+both are worth keeping now that the click works:
+
+- **GATE 0** catches a click that misses, instead of typing into whatever the
+  person was using.
+- **The empty-compose precondition** means the skill never sends a select-all or
+  a delete at all: it refuses rather than overwriting an unsent draft, and it
+  refuses before clicking anything.
+
+### Standing lesson
+
+"The platform cannot do this" is a conclusion that needs the same scrutiny as a
+passing test. Here it was three live sessions of accumulating theory — clicks
+do not focus, focus cannot be restored, background sending is impossible — on
+top of one missing field in an event. Check the boring explanation first.
+
+---
+
+## 18. Exercising the four blocking gaps (2026-08-29)
+
+The gaps recorded as blocking a merge were worked through. Three are now
+exercised; one is exercised in part, and the remainder is stated precisely.
+
+### Gap 4 — replica-backed paths: **exercised**
+
+`tests/send_replica_integration.rs` builds a synthetic archive, bootstraps a
+real encrypted replica, and runs both paths against it: an owner attachment
+draft created through the connector's own recipient resolution and reloaded
+through the same owner-only loader the send adapter uses, and reconciliation
+resolving a text send by body digest, a file send by the recorded name, and an
+image send by presence only. It also pins the negatives: a body the replica does
+not hold is never matched, a file send never settles on presence alone, and a
+replica for another account is refused.
+
+### Gap 3 — packaging: **exercised** except notarization
+
+`scripts/package-send-helper.sh` ran end to end with an ad-hoc identity. It
+assembled the bundle, wrote provenance and an SBOM, signed inside-out, and built
+and signed the disk image. `codesign --verify --deep --strict` reports the
+bundle valid and satisfying its designated requirement, the helper carries
+`flags=0x10002(adhoc,runtime)`, and library validation is not disabled.
+Notarization is the one step that cannot run without a real Apple ID.
+
+### Gap 2 — XPC: **exercised**
+
+The helper was registered as a launchd agent publishing its Mach service, and
+the client called it over real XPC, receiving a decoded status. The peer
+requirement was checked in both directions: a client signed with the expected
+identifier is served, and one signed as `me.impostor.Client` is refused.
+
+Registering under launchd also demonstrated something the design predicted: the
+agent has **its own TCC identity** and does not inherit the terminal's grants,
+so `accessibilityGranted` and `screenRecordingGranted` both came back false.
+That is the guided-onboarding step, working as described.
+
+### Gap 1 — an actual send: **exercised in two halves**
+
+*The effector half* was exercised live earlier: text, image, and file each
+passed GATE 1 and GATE 2 against the real client and stopped before Return.
+
+*The control-plane half* — everything after Return, which had never run — was
+exercised through the real `send submit`, outbox, and audit journal:
+
+| Step | Result |
+| --- | --- |
+| dispatch | `dispatched: true`, `attempted: true`, `visualConfirmation: confirmed` |
+| settle | **parked**, not completed: a helper's capture is evidence, never a verdict |
+| audit | three chained events; the journal contains no message body |
+| recall window | open, 104 s remaining, four-step procedure |
+| reconcile | `observedSent` — the only path that creates it — and the parked entry cleared |
+| replay | the same approval refused with `approvalInvalid` and `idempotencyConflict` |
+
+What remains unexercised is the two halves joined: a single run in which the
+real effector presses Return and the real control plane settles that outcome.
+Doing it needs the client parked on the approved conversation and the launchd
+agent holding its own TCC grants.
+
+### Four defects the exercise found
+
+1. **The evidence envelope had drifted between languages.** Swift emitted
+   `attachmentRegionChanged`; the Rust contract did not know the field, and with
+   `deny_unknown_fields` the control plane rejected *every* outcome the helper
+   produced. A real send could never have completed. The field is added, and the
+   canonical vectors now pin the outcome envelope so the drift class is caught
+   in CI rather than in the field.
+2. **Window selection was wrong.** The locator chose the largest window; the
+   client keeps untitled shells around, one of which was larger than the chat
+   window and blank, so every calibration region read nothing. It now prefers
+   the titled window.
+3. **Capture and geometry could describe different windows.** The frame came
+   from the locator while the capture independently chose the largest window,
+   so the gates could read one window's pixels against another's coordinates.
+   Both are now bound to one window number.
+4. **The self-test defeated itself.** It clicked the search box and then read
+   the conversation title — harmless while clicks did nothing, and wrong the
+   moment clicks began taking focus, because focusing search blanks the pane it
+   then read. Calibration is a geometry question, so the self-test is now
+   read-only.
+
+Defects 2 and 3 were only visible because the client drifted into a state the
+happy path never produces. That is an argument for exercising against a real
+client in states nobody designed for, not only against fixtures.
+
+## 19. Recipient binding: the allow list did not constrain the recipient
+
+Re-reviewing the branch for merge readiness turned up a defect worse than the
+four above, because it defeated the containment the whole design rests on.
+
+The allow list authorized an opaque `conversationId`. What actually routes a
+message is something else: in `currentConversation` addressing the skill types
+nothing until GATE 1 matches the recipient's **human-readable title** on screen,
+and that title came from the draft's `recipient.humanLabel`. Nothing checked the
+two against each other. Precheck verified that `recipient.conversationId`
+equalled `conversationId`, and that the label was non-empty — never that the
+label was the one belonging to that conversation.
+
+So a draft naming the allow-listed `filehelper` while carrying the title of a
+different person passed every control-plane check — `guardDenials: []`,
+`failures: []` — and would then have addressed, composed, and sent to whoever
+that title matched, while the outbox, the audit chain, and the recall window all
+recorded `filehelper`. The allow list was authorizing a value the send path
+never used for routing, and the audit trail would have been confidently wrong
+about the one fact that matters most.
+
+Drafts the connector produces are consistent by construction, because both
+fields come from the same replica resolution. The exposure arrived with
+`emit_action_draft`, a debugging tool added during this work that wrote draft
+files directly; it widened the trust surface without the guard widening to
+match. That tool has since been removed. `tool-draft` is the supported way to
+produce a draft — including for the no-navigation addressing mode, where the
+conversation is named explicitly rather than resolved by search — because it
+goes through the connector under the tool policy and the audit log, and so
+cannot disagree with itself about who the recipient is.
+
+The fix binds policy to the value that selects the destination. The allow list
+now carries `recipientTitles`, one owner-authorized title per allow-listed
+conversation; the attempt intent carries the title the recipient gate will be
+required to match; and the guard refuses anything else as
+`recipientTitleNotAllowed`, before a keystroke is delivered. It fails closed in
+both directions: a conversation with no authorized title cannot be sent to, and
+a title configured for a conversation that is not allow-listed is a
+configuration error.
+
+Locking it shut also closed a second, older drift. The vectors now publish the
+whole failure taxonomy, and Swift asserts its own set is identical. That test
+failed on its first run: the helper could emit `composeNotEmpty` — the refusal
+that protects a human's half-typed message — and the control plane had no such
+code, so that protective refusal would have arrived as a decode failure. Rust
+has the code now.
+
+The lesson is the one from §18, sharpened: an allow list is only as good as the
+binding between what it names and what the mechanism actually obeys. Worth
+asking of the rest of the system wherever an opaque identifier is authorized but
+something human-readable does the routing.
+
+## 20. Third pass: what the recipient binding exposed
+
+Binding policy to the title raised the obvious next question — how exactly is
+that title compared, and can anyone else control it?
+
+Comparison is sound: exact equality after whitespace folding, never a prefix or
+substring, so `Mike` cannot satisfy a gate expecting `Mike Chen`. But titles are
+display names, and a remote party controls their own. GATE 1 proves the open
+conversation is *titled* what was authorized, not that it is the conversation
+whose identifier was authorized. That gap cannot be closed with a string.
+
+What bounds it is that reconciliation queries only the approved
+`conversationId`. A message delivered to a lookalike is never found there, so
+the entry reaches `observedFailed` at grace expiry instead of being confirmed.
+The system cannot currently prevent a title collision, but it never lies about
+one, and that is the property worth protecting. It is documented as a limitation
+rather than fixed, because fixing it needs an identity signal the remote party
+does not control, and that is a design decision rather than a patch.
+
+The pass also found `replyTarget` unenforced. `replySend` was already refused
+outright, but a `textSend` draft carrying a reply target was accepted and would
+have posted as a standalone message — the right body to the right recipient, and
+not the action the owner approved. Now refused as `draftInvalid`.

@@ -75,6 +75,9 @@ public enum SendKey: String, Equatable, Sendable {
   case selectAll
   case paste
   case escape
+  /// Cmd+Shift+G in an open panel. Used only by the panel fallback, and only
+  /// ever followed by a pasted path, so no text is ever typed key by key.
+  case goToFolder
 }
 
 /// The tools the bounded capability manifest can grant.
@@ -85,6 +88,11 @@ public enum SendTool: String, Equatable, Sendable, CaseIterable {
   case clipboardWrite
   case windowRead
   case windowCapture
+  /// Put a reference to one already-staged file on the pasteboard. The helper
+  /// never reads the file's contents; it hands WeChat a path.
+  case clipboardWriteFileReference
+  /// Navigate an open panel to one already-staged path.
+  case openPanelNavigate
 }
 
 /// The engine's least-privilege confinement: one application, a fixed set of
@@ -132,6 +140,13 @@ public protocol ScreenPerception: AnyObject {
   func windowFrame() throws(SendFailure) -> WindowFrame
   /// On-device text recognition inside one window-relative region.
   func recognizeText(in rect: CGRect) throws(SendFailure) -> RecognizedRegionText
+  /// A content digest of one region's pixels.
+  ///
+  /// Needed because an image staged into the compose area is a *thumbnail with
+  /// no filename*, measured live on WeChat 4.1.13: text recognition returns
+  /// nothing to compare against. Comparing the region before and after staging
+  /// is the only on-screen evidence an image send can offer.
+  func regionFingerprint(in rect: CGRect) throws(SendFailure) -> String
   /// How many captures have been taken, for gate evidence.
   var captureCount: UInt32 { get }
 }
@@ -143,6 +158,12 @@ public protocol InputEffector: AnyObject {
   func click(at point: CGPoint) throws(SendFailure)
   func press(_ key: SendKey) throws(SendFailure)
   func writeClipboard(_ text: String) throws(SendFailure)
+  /// Places a reference to one file on the pasteboard. The path is always the
+  /// staged copy named by the capability, never a path the helper chose.
+  func writeClipboardFileReference(_ path: String) throws(SendFailure)
+  /// The number of windows the target process currently owns, used to detect
+  /// that an open panel or a confirmation sheet actually appeared.
+  func targetWindowCount() -> Int
   func restoreClipboard()
   /// Whether real user activity has been observed on the target since the run
   /// started. Takeover always wins.
@@ -221,6 +242,7 @@ public struct MechanicalSendSkill {
     var stage = SendStage.precheck
     var attempted = false
     var confirmation = VisualConfirmation.notAttempted
+    var attachmentBaseline = ""
     let started = clock()
     do {
       try capability.validate(nowUnixNanoseconds: started)
@@ -243,13 +265,38 @@ public struct MechanicalSendSkill {
           .windowNotFound, detail: "the located window is too small to be the chat window")
       }
 
-      stage = .address
-      try yieldToHuman(&evidence)
-      try clearAndPaste(capability.searchKey, at: profile.anchors.searchBox, in: frame)
-      effector.settle(milliseconds: pacing.afterSearchMilliseconds)
-      try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
-      try effector.click(at: WindowGeometry.point(profile.anchors.firstResultRow, in: frame))
-      effector.settle(milliseconds: pacing.afterClickMilliseconds)
+      // In the no-navigation mode the skill performs no input at all before
+      // the recipient gate: it reads the screen, checks the title, and refuses
+      // if the wrong conversation is open. A misfire is therefore read-only and
+      // cannot disturb whatever the person was doing.
+      if capability.addressingMode.typesBeforeRecipientGate {
+        stage = .address
+        try yieldToHuman(&evidence)
+        // Addressing pastes *without* clearing first. A click that fails to
+        // take focus leaves the caret wherever the person left it, and a
+        // select-all plus delete there would destroy their unsent text.
+        // Pasting only ever adds, and GATE 0 below catches the miss.
+        try focusAndPaste(capability.searchKey, at: profile.anchors.searchBox, in: frame)
+        effector.settle(milliseconds: pacing.afterSearchMilliseconds)
+
+        // GATE 0: prove the click actually focused the search field by reading
+        // the key back out of it. Without this, a failed focus silently sends
+        // the rest of the skill's keystrokes into whatever the person was using.
+        let echoed = try recognize(profile.ocrRegions.search, in: frame)
+        evidence.searchKeyEchoed = SendText.normalized(echoed.text)
+          .localizedCaseInsensitiveContains(SendText.normalized(capability.searchKey))
+        guard evidence.searchKeyEchoed else {
+          throw SendFailure(
+            .addressingFocusFailed,
+            detail: "the search field did not echo the search key, so the click missed its target"
+          )
+        }
+
+        try yieldToHuman(&evidence)
+        try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
+        try effector.click(at: WindowGeometry.point(profile.anchors.firstResultRow, in: frame))
+        effector.settle(milliseconds: pacing.afterClickMilliseconds)
+      }
 
       stage = .recipientVerify
       try yieldToHuman(&evidence)
@@ -269,23 +316,88 @@ public struct MechanicalSendSkill {
       }
 
       stage = .compose
-      try clearAndPaste(capability.body, at: profile.anchors.composeBox, in: frame)
+      // The compose box must be empty before the skill uses it. Two reasons:
+      // it must never overwrite an unsent draft the person left there, and
+      // requiring it empty means the skill never has to send a destructive
+      // keystroke — it only ever pastes. Checked before anything is clicked, so
+      // a refusal here touches nothing at all.
+      let existing = try recognize(profile.ocrRegions.compose, in: frame)
+      guard SendText.normalized(existing.text).isEmpty else {
+        throw SendFailure(
+          .composeNotEmpty,
+          detail: "the compose box already holds unsent text"
+        )
+      }
+      var composeFocusProven = false
+      if let attachment = capability.attachment {
+        // Recorded before staging so GATE 2a can prove the region changed,
+        // which is the only evidence an image thumbnail offers.
+        attachmentBaseline = try fingerprint(
+          try requireAttachmentRegions().composeAttachment,
+          in: frame
+        )
+        try stageAttachment(attachment, in: frame, evidence: &evidence)
+      } else {
+        try focusAndPaste(capability.body, at: profile.anchors.composeBox, in: frame)
+      }
 
       stage = .contentVerify
-      let composed = try recognize(profile.ocrRegions.compose, in: frame)
-      evidence.composeMatched = SendText.matches(composed.text, capability.body)
-      guard evidence.composeMatched else {
-        try clearCompose(in: frame)
-        throw SendFailure(
-          .contentVerifyFailed,
-          detail: "the composed text did not match the approved body"
-        )
+      if let attachment = capability.attachment {
+        // GATE 2a. An attachment's bytes never appear on screen, so this proves
+        // *which* file was staged, not what it contains. The digest half of the
+        // gate already ran in the control plane, against the staged copy.
+        //
+        // What is provable differs by kind, measured live: a file stages as a
+        // chip carrying its name and size, which can be read back and matched;
+        // an image stages as a bare thumbnail with no text at all, so the only
+        // available evidence is that the compose region changed. The weaker
+        // case is recorded as such rather than dressed up as a name match.
+        let regions = try requireAttachmentRegions()
+        let after = try fingerprint(regions.composeAttachment, in: frame)
+        evidence.attachmentRegionChanged = after != attachmentBaseline
+        evidence.attachmentStaged = evidence.attachmentRegionChanged
+        if capability.capability == .imageSend {
+          evidence.attachmentNameMatched = false
+          evidence.composeMatched = evidence.attachmentStaged
+          composeFocusProven = evidence.attachmentStaged
+          guard evidence.attachmentStaged else {
+            try clearComposeIfFocusProven(in: frame, focusProven: false)
+            throw SendFailure(
+              .attachmentVerifyFailed,
+              detail: "the compose area did not change, so no image was staged"
+            )
+          }
+        } else {
+          let staged = try recognize(regions.composeAttachment, in: frame)
+          evidence.attachmentNameMatched = SendText.normalized(staged.text)
+            .localizedCaseInsensitiveContains(SendText.normalized(attachment.displayFileName))
+          evidence.composeMatched = evidence.attachmentNameMatched
+          composeFocusProven = evidence.attachmentStaged
+          guard evidence.attachmentStaged, evidence.attachmentNameMatched else {
+            try clearComposeIfFocusProven(in: frame, focusProven: composeFocusProven)
+            throw SendFailure(
+              .attachmentVerifyFailed,
+              detail: "the staged attachment's name was not read back from the compose area"
+            )
+          }
+        }
+      } else {
+        let composed = try recognize(profile.ocrRegions.compose, in: frame)
+        evidence.composeMatched = SendText.matches(composed.text, capability.body)
+        guard evidence.composeMatched else {
+          try clearCompose(in: frame)
+          throw SendFailure(
+            .contentVerifyFailed,
+            detail: "the composed text did not match the approved body"
+          )
+        }
       }
 
       guard capability.permitSend else {
         // The dry-run stage stops exactly here, with both gates satisfied and
         // the compose box cleared so nothing is left behind for a human to
-        // send by accident.
+        // send by accident. GATE 2 has just proven where the caret is, so
+        // clearing is safe on this path in either mode.
         try clearCompose(in: frame)
         evidence.captureCount = perception.captureCount
         evidence.elapsedMilliseconds = elapsedMilliseconds(since: started)
@@ -305,14 +417,54 @@ public struct MechanicalSendSkill {
       try manifest.authorize(.pressKey, bundleIdentifier: targetBundleIdentifier)
       try effector.press(.returnKey)
       attempted = true
+      if capability.attachment != nil,
+        let attachments = profile.attachments,
+        attachments.presentsConfirmationSheet
+      {
+        // Some builds raise a sheet before an attachment goes out. It is an
+        // extra verification point, not an obstacle: the sheet must name the
+        // same file before it is confirmed.
+        effector.settle(milliseconds: pacing.afterClickMilliseconds)
+        let sheet = try recognize(attachments.confirmSheet, in: frame)
+        let named = SendText.normalized(sheet.text)
+          .localizedCaseInsensitiveContains(
+            SendText.normalized(capability.attachment?.displayFileName ?? "")
+          )
+        if named {
+          try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
+          try effector.click(at: WindowGeometry.point(attachments.confirmSendButton, in: frame))
+          evidence.confirmationSheetConfirmed = true
+        } else {
+          // Refuse to confirm a sheet that names something else, and leave it
+          // on screen for the owner rather than dismissing it blind.
+          effector.restoreClipboard()
+          evidence.captureCount = perception.captureCount
+          evidence.elapsedMilliseconds = elapsedMilliseconds(since: started)
+          return outcome(
+            capability,
+            stage: .sendVerify,
+            attempted: true,
+            confirmation: .unconfirmed,
+            failure: .attachmentVerifyFailed,
+            evidence: evidence
+          )
+        }
+      }
       effector.settle(milliseconds: pacing.afterReturnMilliseconds)
 
       stage = .sendVerify
       let afterCompose = try recognize(profile.ocrRegions.compose, in: frame)
       evidence.composeCleared = SendText.normalized(afterCompose.text).isEmpty
       let bubble = try recognize(profile.ocrRegions.newestOutgoing, in: frame)
-      evidence.newestOutgoingMatched = SendText.normalized(bubble.text)
-        .contains(SendText.normalized(capability.body))
+      if let attachment = capability.attachment {
+        // The bubble shows a name and a size, never the bytes, so this is the
+        // strongest on-screen claim available: the right file appeared.
+        evidence.newestOutgoingMatched = SendText.normalized(bubble.text)
+          .localizedCaseInsensitiveContains(SendText.normalized(attachment.displayFileName))
+      } else {
+        evidence.newestOutgoingMatched = SendText.normalized(bubble.text)
+          .contains(SendText.normalized(capability.body))
+      }
       confirmation =
         evidence.composeCleared && evidence.newestOutgoingMatched ? .confirmed : .unconfirmed
       // The body must not be left sitting in the user's pasteboard once the
@@ -355,39 +507,47 @@ public struct MechanicalSendSkill {
     }
   }
 
-  /// Locates and focuses the search box, confirms by capture, and never sends.
-  /// This is the gate every calibration profile passes before first use.
+  /// Validates the calibration profile against the live window, read-only.
+  ///
+  /// It deliberately does **not** click anything. An earlier version clicked
+  /// the search box and then read the conversation title, which was measured
+  /// self-defeating once background clicks began taking focus: focusing search
+  /// changes what the right-hand pane shows, so the very region the test then
+  /// read went blank. Calibration is a geometry question, and geometry is
+  /// answered by looking.
   public func runCalibrationSelfTest() -> CalibrationSelfTestReport {
     var drift: [String] = []
-    var focused = false
     var confidence: UInt32 = 0
     var digest = String(repeating: "0", count: 64)
     var failure: SendFailureCode?
+    var located = false
     do {
       try manifest.authorize(.windowRead, bundleIdentifier: targetBundleIdentifier)
       let frame = try perception.windowFrame()
       digest = frame.digest
-      if !frame.isPlausibleMainWindow {
-        drift.append("window is smaller than a signed-in chat window")
+      guard frame.isPlausibleMainWindow else {
+        drift.append("the located window is smaller than a signed-in chat window")
         throw SendFailure(.windowNotFound)
       }
-      try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
-      try effector.click(at: WindowGeometry.point(profile.anchors.searchBox, in: frame))
-      effector.settle(milliseconds: pacing.afterClickMilliseconds)
+      located = true
+      // The title region must carry the open conversation's name. If it does
+      // not, the profile's coordinates no longer describe this build or this
+      // window, and every later gate would be reading the wrong pixels.
       let title = try recognize(profile.ocrRegions.title, in: frame)
       confidence = title.confidencePartsPerMillion
-      focused = true
-      if confidence < profile.selftest.minimumTitleConfidencePartsPerMillion {
+      if SendText.normalized(title.text).isEmpty {
+        drift.append("the title region recognized no text at the profile's coordinates")
+        failure = .calibrationDrift
+      } else if confidence < profile.selftest.minimumTitleConfidencePartsPerMillion {
         drift.append(
           "title region confidence \(confidence) is below the profile minimum "
             + "\(profile.selftest.minimumTitleConfidencePartsPerMillion)"
         )
         failure = .calibrationDrift
       }
-      if SendText.normalized(title.text).isEmpty {
-        drift.append("title region recognized no text at the profile's coordinates")
-        failure = .calibrationDrift
-      }
+      // The compose region must at least be readable; an unreadable crop means
+      // the region falls outside the window.
+      _ = try recognize(profile.ocrRegions.compose, in: frame)
     } catch let error as SendFailure {
       failure = error.code
       if !error.detail.isEmpty { drift.append(error.detail) }
@@ -397,7 +557,7 @@ public struct MechanicalSendSkill {
     return CalibrationSelfTestReport(
       calibrationProfileID: profile.profileID,
       passed: failure == nil,
-      searchBoxFocused: focused,
+      searchBoxFocused: located,
       titleConfidencePartsPerMillion: confidence,
       windowFrameDigest: digest,
       driftReport: drift,
@@ -406,11 +566,40 @@ public struct MechanicalSendSkill {
     )
   }
 
+  /// Focuses a field and pastes into it without clearing it first.
+  ///
+  /// Used for addressing, where a mis-aimed click must never be destructive.
+  /// The search field is transient, so an appended paste is recoverable and is
+  /// caught immediately by GATE 0.
+  private func focusAndPaste(
+    _ text: String,
+    at anchor: WindowRelativePoint,
+    in frame: WindowFrame
+  ) throws(SendFailure) {
+    guard !effector.humanActivityObserved() else {
+      throw SendFailure(.humanCollision, detail: "user activity observed before taking focus")
+    }
+    try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
+    try effector.click(at: WindowGeometry.point(anchor, in: frame))
+    effector.settle(milliseconds: pacing.afterClickMilliseconds)
+    try manifest.authorize(.clipboardWrite, bundleIdentifier: targetBundleIdentifier)
+    try effector.writeClipboard(text)
+    try manifest.authorize(.hotkey, bundleIdentifier: targetBundleIdentifier)
+    try effector.press(.paste)
+    effector.settle(milliseconds: pacing.afterPasteMilliseconds)
+  }
+
   private func clearAndPaste(
     _ text: String,
     at anchor: WindowRelativePoint,
     in frame: WindowFrame
   ) throws(SendFailure) {
+    // Checked again here rather than only at the stage boundary: focusing a
+    // field is itself interference, so the machine must still be idle at the
+    // moment we take focus, not merely when the stage began.
+    guard !effector.humanActivityObserved() else {
+      throw SendFailure(.humanCollision, detail: "user activity observed before taking focus")
+    }
     try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
     try effector.click(at: WindowGeometry.point(anchor, in: frame))
     effector.settle(milliseconds: pacing.afterClickMilliseconds)
@@ -423,6 +612,105 @@ public struct MechanicalSendSkill {
     try effector.writeClipboard(text)
     try effector.press(.paste)
     effector.settle(milliseconds: pacing.afterPasteMilliseconds)
+  }
+
+  /// Places the staged file into the compose area.
+  ///
+  /// The pasteboard path is preferred because it is mechanically identical to
+  /// the text send that is already gated: focus the compose box and press
+  /// Cmd+V. The panel fallback is used only when the signed profile says this
+  /// build does not accept a pasted file reference, and it is navigated
+  /// keyboard-first so no coordinate inside the panel is ever guessed.
+  private func stageAttachment(
+    _ attachment: ActionAttachment,
+    in frame: WindowFrame,
+    evidence: inout HelperGateEvidence
+  ) throws(SendFailure) {
+    let attachments = try requireAttachmentRegions()
+    if attachments.composeAcceptsPastedFile {
+      guard !effector.humanActivityObserved() else {
+        throw SendFailure(.humanCollision, detail: "user activity observed before pasting")
+      }
+      // The compose box was verified empty above, so focusing it is all that
+      // is needed; nothing has to be deleted.
+      try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
+      try effector.click(at: WindowGeometry.point(profile.anchors.composeBox, in: frame))
+      effector.settle(milliseconds: pacing.afterClickMilliseconds)
+      try manifest.authorize(
+        .clipboardWriteFileReference,
+        bundleIdentifier: targetBundleIdentifier
+      )
+      try effector.writeClipboardFileReference(attachment.stagedPath)
+      try manifest.authorize(.hotkey, bundleIdentifier: targetBundleIdentifier)
+      try effector.press(.paste)
+      effector.settle(milliseconds: pacing.afterPasteMilliseconds)
+      return
+    }
+    try stageAttachmentThroughPanel(attachment, in: frame, evidence: &evidence)
+  }
+
+  /// The panel fallback: click attach, prove a panel appeared, then navigate it
+  /// with Go to Folder and a pasted path.
+  private func stageAttachmentThroughPanel(
+    _ attachment: ActionAttachment,
+    in frame: WindowFrame,
+    evidence: inout HelperGateEvidence
+  ) throws(SendFailure) {
+    let attachments = try requireAttachmentRegions()
+    guard !effector.humanActivityObserved() else {
+      throw SendFailure(.humanCollision, detail: "user activity observed before taking focus")
+    }
+    let windowsBefore = effector.targetWindowCount()
+    try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
+    try effector.click(at: WindowGeometry.point(attachments.attachControl, in: frame))
+    effector.settle(milliseconds: pacing.afterSearchMilliseconds)
+    // The click that opens the panel is the dangerous step: a neighbouring
+    // control would do something else entirely. Requiring a new window before
+    // going further turns that into a gate rather than a hope.
+    guard effector.targetWindowCount() > windowsBefore else {
+      try manifest.authorize(.pressKey, bundleIdentifier: targetBundleIdentifier)
+      try? effector.press(.escape)
+      throw SendFailure(
+        .attachPanelNotPresented,
+        detail: "the attach control did not present a file panel"
+      )
+    }
+    try manifest.authorize(.openPanelNavigate, bundleIdentifier: targetBundleIdentifier)
+    try effector.press(.goToFolder)
+    effector.settle(milliseconds: pacing.afterKeyMilliseconds)
+    try manifest.authorize(.clipboardWrite, bundleIdentifier: targetBundleIdentifier)
+    try effector.writeClipboard(attachment.stagedPath)
+    try effector.press(.paste)
+    effector.settle(milliseconds: pacing.afterKeyMilliseconds)
+    try effector.press(.returnKey)
+    effector.settle(milliseconds: pacing.afterSearchMilliseconds)
+    try effector.press(.returnKey)
+    effector.settle(milliseconds: pacing.afterPasteMilliseconds)
+    evidence.attachmentStaged = true
+  }
+
+  /// The attachment section of the active profile, or a refusal. A build whose
+  /// profile has no attachment section cannot send one.
+  private func requireAttachmentRegions() throws(SendFailure) -> CalibrationAttachments {
+    guard let attachments = profile.attachments else {
+      throw SendFailure(
+        .profileInvalid,
+        detail: "the active calibration profile has no attachment section"
+      )
+    }
+    return attachments
+  }
+
+  /// Clears the compose box only when the caret's location has been proven.
+  private func clearComposeIfFocusProven(
+    in frame: WindowFrame,
+    focusProven: Bool
+  ) throws(SendFailure) {
+    guard focusProven else {
+      effector.restoreClipboard()
+      return
+    }
+    try clearCompose(in: frame)
   }
 
   private func clearCompose(in frame: WindowFrame) throws(SendFailure) {
@@ -443,6 +731,15 @@ public struct MechanicalSendSkill {
     evidence.humanActivityObserved = true
     if let frame { try? clearCompose(in: frame) }
     throw SendFailure(.humanCollision, detail: "real user activity was observed on the client")
+  }
+
+  /// A content digest of one window-relative region.
+  private func fingerprint(
+    _ region: WindowRelativeRect,
+    in frame: WindowFrame
+  ) throws(SendFailure) -> String {
+    try manifest.authorize(.windowCapture, bundleIdentifier: targetBundleIdentifier)
+    return try perception.regionFingerprint(in: WindowGeometry.rect(region, in: frame))
   }
 
   private func recognize(
@@ -482,5 +779,53 @@ public struct MechanicalSendSkill {
       evidence: evidence,
       observedAtUnixNanoseconds: clock()
     )
+  }
+}
+
+/// When real user activity counts as a collision with an in-flight skill.
+///
+/// This is a policy, not a measurement, so it lives here where it can be tested
+/// rather than inside the effector where it cannot.
+///
+/// The rule is deliberately strict, and it was made stricter after a live
+/// incident: a background click does not merely avoid raising the target, it
+/// *moves keyboard focus inside it*. A person typing into the compose box can
+/// therefore find their keystrokes arriving in the search box the instant the
+/// skill focuses it — interference without any window ever coming forward.
+///
+/// So the machine must be idle before the skill touches anything, and any
+/// input at all during a run aborts it. Scoping the check to "is the target
+/// frontmost" is not sound: that signal is unreliable when sampled from a
+/// non-GUI process, and treating "not frontmost" as permission to act is
+/// exactly what produced the incident. Frontmost is used only to make the
+/// requirement *stricter*, never to waive it.
+public enum HumanCollisionPolicy {
+  /// How long the machine must have been idle before the skill may act.
+  /// A background sender can afford to wait; a person mid-sentence cannot.
+  public static let defaultIdleThresholdSeconds: TimeInterval = 5
+
+  /// The longer idle window required when the target application is frontmost,
+  /// which means the person is most likely working in it right now.
+  public static let frontmostIdleThresholdSeconds: TimeInterval = 15
+
+  /// Whether an in-flight skill must yield.
+  ///
+  /// - Parameters:
+  ///   - targetIsFrontmost: whether the client is frontmost. Only ever raises
+  ///     the bar; it can never lower it.
+  ///   - idleSecondsByEventType: seconds since the last hardware event of each
+  ///     sampled type.
+  ///   - thresholdSeconds: the idle window required on a quiet machine.
+  ///   - frontmostThresholdSeconds: the idle window required when the target is
+  ///     frontmost.
+  public static func mustYield(
+    targetIsFrontmost: Bool,
+    idleSecondsByEventType: [TimeInterval],
+    thresholdSeconds: TimeInterval = defaultIdleThresholdSeconds,
+    frontmostThresholdSeconds: TimeInterval = frontmostIdleThresholdSeconds
+  ) -> Bool {
+    let required =
+      targetIsFrontmost ? max(thresholdSeconds, frontmostThresholdSeconds) : thresholdSeconds
+    return idleSecondsByEventType.contains { $0 < required }
   }
 }

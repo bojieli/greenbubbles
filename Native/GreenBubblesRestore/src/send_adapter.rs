@@ -37,10 +37,11 @@ use crate::model::{MessageDirection, TypedPayload};
 use crate::replica::{search_replica_messages, ReplicaMessageFilter};
 use crate::secret::ReplicaKey;
 use crate::send_contract::{
-    capability_binding_sha256, normalized_send_text_sha256, ActionCapabilityEnvelope,
-    CalibrationSelfTestReport, HelperCapabilityStatus, HelperGateEvidence, HelperSendOutcome,
-    SendCompletionKind, SendCompletionOutcome, SendFailureCode, SendRolloutStage, SendStage,
-    VisualConfirmation, SEND_CONTRACT_VERSION,
+    capability_binding_sha256, normalized_send_text_sha256, ActionAttachment,
+    ActionCapabilityEnvelope, CalibrationSelfTestReport, HelperCapabilityStatus,
+    HelperGateEvidence, HelperSendOutcome, SendAddressingMode, SendCompletionKind,
+    SendCompletionOutcome, SendFailureCode, SendRolloutStage, SendStage, VisualConfirmation,
+    SEND_CONTRACT_VERSION,
 };
 use crate::send_outbox::{
     OutboxEntry, OutboxEntryState, SendCompletionRecord, SendOutbox, SendOutboxRecovery,
@@ -50,6 +51,9 @@ use crate::send_profile::{
     bind_profile_to_compatibility, compatibility_decision, load_calibration_profile,
     load_compatibility_matrix, CompatibilityDecision, SendTrustRoot, SendTrustTier,
     SignedCalibrationProfile, VerifiedCalibrationProfile, VerifiedCompatibilityMatrix,
+};
+use crate::send_staging::{
+    discard_staging_directory, reviewed_uniform_type_identifier, stage_attachment, StagedAttachment,
 };
 use crate::tools::summarize_decoded_payload;
 use crate::RestoreError;
@@ -112,6 +116,22 @@ pub struct SendAdapterConfig {
     pub adapter: ActionAdapterBinding,
     pub allow_list: ActionAllowList,
     pub self_send_conversation_id: String,
+    /// How the recipient is reached. Defaults to `currentConversation`, the
+    /// mode that works in the background today: the skill types nothing until
+    /// the recipient gate has proven which conversation is open.
+    #[serde(default = "current_conversation_addressing")]
+    pub addressing_mode: SendAddressingMode,
+    /// Attachments have their own stage ladder, orthogonal to the text one.
+    /// Both must be open before a file or image can leave the machine.
+    #[serde(default = "dry_run_stage")]
+    pub attachment_rollout_stage: SendRolloutStage,
+    /// A separate, tighter capacity than text: an attachment send is louder and
+    /// less reversible.
+    #[serde(default = "one_attempt")]
+    pub maximum_attachment_attempts_per_window: u64,
+    /// Where single-use staging directories are created. One per attempt,
+    /// removed when the attempt reaches a terminal state.
+    pub staging_root: PathBuf,
     #[serde(default)]
     pub search_key_overrides: BTreeMap<String, String>,
     pub attempt_window_seconds: u64,
@@ -157,6 +177,7 @@ impl SendAdapterConfig {
             self.audit_log_path.as_path(),
             self.draft_directory.as_path(),
             self.helper.dispatcher_executable.as_path(),
+            self.staging_root.as_path(),
         ]
         .iter()
         .all(|path| path.is_absolute())
@@ -180,10 +201,29 @@ impl SendAdapterConfig {
             || self.capability_validity_seconds > 3_600
             || self.reconciliation_grace_seconds == 0
             || self.recall_window_seconds == 0
+            || self.maximum_attachment_attempts_per_window == 0
+            || !self.staging_root.is_absolute()
             || !timeouts_valid
             || !paths_absolute
             || self.allow_list.capabilities.is_empty()
             || self.allow_list.account_ids != BTreeSet::from([self.account_id.clone()])
+            // Every allow-listed conversation must carry the recipient title the
+            // owner authorized, and no title may be configured for a
+            // conversation that is not allow-listed. Without this the allow list
+            // would authorize an identifier while leaving the on-screen
+            // recipient that actually receives the message unconstrained.
+            || self
+                .allow_list
+                .recipient_titles
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                != self.allow_list.conversation_ids
+            || self
+                .allow_list
+                .recipient_titles
+                .values()
+                .any(|title| title.trim().is_empty())
         {
             return Err(SendFailureCode::ConfigurationInvalid);
         }
@@ -212,6 +252,28 @@ impl SendAdapterConfig {
             }
         }
         Ok(())
+    }
+
+    /// Whether the attachment ladder permits sending this capability at all.
+    /// Text is unaffected; an attachment needs *both* ladders open.
+    pub fn stage_permits_capability(
+        &self,
+        capability: ActionCapability,
+        conversation_id: &str,
+    ) -> bool {
+        if !self.stage_permits_send_to(conversation_id) {
+            return false;
+        }
+        if !capability.carries_attachment() {
+            return true;
+        }
+        match self.attachment_rollout_stage {
+            SendRolloutStage::DryRun => false,
+            SendRolloutStage::SelfSend => conversation_id == self.self_send_conversation_id,
+            SendRolloutStage::AllowListed => {
+                self.allow_list.conversation_ids.contains(conversation_id)
+            }
+        }
     }
 
     /// Whether this stage may press Return for this conversation at all.
@@ -365,6 +427,26 @@ pub struct SendRecallWindowReport {
     pub checked_at_unix_nanoseconds: u128,
 }
 
+/// How strong the evidence linking a replica row to the attempt is. Recorded
+/// verbatim in the report, because an image send cannot be matched as
+/// precisely as a text send and the audit trail must say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SendMatchStrength {
+    /// The message body's normalized digest matched exactly.
+    BodyDigest,
+    /// An outgoing attachment carrying the approved display name was found.
+    AttachmentFileName,
+    /// An outgoing attachment of the right kind was found in the window, but
+    /// the client re-encoded it, so no name or digest could be compared. This
+    /// is the weakest accepted evidence and is only ever used for an image
+    /// send, where the single-flight outbox guarantees the adapter had no other
+    /// attempt in the same window.
+    AttachmentPresenceOnly,
+    /// Nothing matched.
+    None,
+}
+
 /// Where a reconciliation observation came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -386,6 +468,15 @@ pub struct SendReconciliationObservation {
     pub source_fingerprint: String,
     pub outgoing_message_found: bool,
     pub normalized_body_matched: bool,
+    /// True when the matched row carries an artifact reference.
+    #[serde(default)]
+    pub attachment_reference_found: bool,
+    /// True when the approved display name was read back from the replica.
+    #[serde(default)]
+    pub display_file_name_matched: bool,
+    /// How strong the link between the row and the attempt is.
+    #[serde(default = "no_match")]
+    pub match_strength: SendMatchStrength,
     pub canonical_id: Option<String>,
     pub scanned_message_count: u64,
     pub observed_at_unix_nanoseconds: u128,
@@ -627,11 +718,14 @@ impl SendAdapter {
         &self,
         now_unix_nanoseconds: u128,
     ) -> Result<(SendOutbox, SendOutboxRecovery), RestoreError> {
-        SendOutbox::open(
+        let (outbox, recovery) = SendOutbox::open(
             &self.config.outbox_directory,
             &self.config.account_id,
             now_unix_nanoseconds,
-        )
+        )?;
+        let state = outbox.state(now_unix_nanoseconds)?;
+        self.sweep_staging_root(&state);
+        Ok((outbox, recovery))
     }
 
     /// The deterministic one-use idempotency key for an approved draft. Making
@@ -672,12 +766,21 @@ impl SendAdapter {
         )
     }
 
+    /// The reviewed capability this draft exercises. Stated by the draft, never
+    /// inferred from the attachment's type.
+    pub fn draft_capability(draft: &ActionDraft) -> ActionCapability {
+        draft
+            .attachment_intent
+            .unwrap_or(ActionCapability::TextSend)
+    }
+
     fn attempt_intent(&self, draft: &ActionDraft, approval_id: &str) -> ActionAttemptIntent {
         ActionAttemptIntent {
-            capability: ActionCapability::TextSend,
+            capability: Self::draft_capability(draft),
             draft_id: draft.draft_id.clone(),
             account_id: self.config.account_id.clone(),
             conversation_id: draft.conversation_id.clone(),
+            recipient_title: draft.recipient.human_label.clone(),
             adapter: self.config.adapter.clone(),
             idempotency_key: self.idempotency_key(&draft.draft_id, approval_id),
             approval: ExternalApprovalEvidence {
@@ -710,23 +813,58 @@ impl SendAdapter {
         if self.config.global_kill_switch_engaged || compatibility.field_kill_switch_engaged {
             failures.insert(SendFailureCode::KillSwitchEngaged);
         }
+        let capability = Self::draft_capability(draft);
+        let payload_valid = match capability {
+            ActionCapability::TextSend => {
+                !draft.rendered_text.is_empty() && draft.attachments.is_empty()
+            }
+            ActionCapability::ImageSend | ActionCapability::FileSend => {
+                draft.rendered_text.is_empty() && draft.attachments.len() == 1
+            }
+            ActionCapability::ReplySend => false,
+        };
         if draft.account_id != self.config.account_id
-            || draft.rendered_text.is_empty()
+            || !payload_valid
             || hex::encode(Sha256::digest(draft.rendered_text.as_bytes()))
                 != draft.rendered_text_sha256
-            || !draft.attachments.is_empty()
             || draft.recipient.conversation_id != draft.conversation_id
             || draft.recipient.human_label.is_empty()
+            // Threading is not implemented. A draft the owner approved as a
+            // reply to one message would be posted as a standalone message,
+            // which is not the action they approved, so it is refused rather
+            // than silently downgraded.
+            || draft.reply_target.is_some()
             || now_unix_nanoseconds >= draft.expires_at_unix_nanoseconds
         {
             failures.insert(SendFailureCode::DraftInvalid);
+        }
+        // An attachment needs a reviewed type and an active profile that knows
+        // how to stage one; both are refused rather than guessed at.
+        if capability.carries_attachment() {
+            if let Some(attachment) = draft.attachments.first() {
+                if reviewed_uniform_type_identifier(capability, &attachment.display_file_name)
+                    .is_err()
+                {
+                    failures.insert(SendFailureCode::UnsupportedAttachmentType);
+                }
+                if !attachment.byte_count.is_some_and(|count| count > 0) {
+                    failures.insert(SendFailureCode::AttachmentInvalid);
+                }
+            }
+            if profile.profile.body.attachments.is_none() {
+                failures.insert(SendFailureCode::ProfileInvalid);
+            }
         }
         let idempotency_key = self.idempotency_key(&draft.draft_id, &approval.approval_id);
         let action_id = self.action_id(&draft.draft_id, &approval.approval_id);
         let mut intent = self.attempt_intent(draft, &approval.approval_id);
         intent.approval = approval.clone();
         let guard = assess_action_attempt(
-            &self.guard_context(outbox_state, now_unix_nanoseconds),
+            &self.guard_context(
+                outbox_state,
+                self.maximum_attempts_for(capability),
+                now_unix_nanoseconds,
+            ),
             &intent,
         );
         if !guard.permitted {
@@ -771,7 +909,9 @@ impl SendAdapter {
             }
         }
         // A development-signed profile is usable for rehearsal only.
-        let stage_permits = self.config.stage_permits_send_to(&draft.conversation_id);
+        let stage_permits = self
+            .config
+            .stage_permits_capability(capability, &draft.conversation_id);
         let permit_send = stage_permits
             && self.config.rollout_stage.permits_return()
             && profile.trust_tier == SendTrustTier::Release;
@@ -814,15 +954,29 @@ impl SendAdapter {
         }
     }
 
+    /// The window capacity for one capability. Attachments get their own,
+    /// tighter allowance because an attachment send is louder and less
+    /// reversible than a line of text.
+    fn maximum_attempts_for(&self, capability: ActionCapability) -> u64 {
+        if capability.carries_attachment() {
+            self.config
+                .maximum_attachment_attempts_per_window
+                .min(self.config.maximum_attempts_per_window)
+        } else {
+            self.config.maximum_attempts_per_window
+        }
+    }
+
     fn guard_context(
         &self,
         outbox_state: &SendOutboxState,
+        maximum_attempts: u64,
         now_unix_nanoseconds: u128,
     ) -> ActionGuardContext {
         let window = outbox_state.rate_window.rolled(
             now_unix_nanoseconds,
             u128::from(self.config.attempt_window_seconds).saturating_mul(1_000_000_000),
-            self.config.maximum_attempts_per_window,
+            maximum_attempts,
         );
         ActionGuardContext {
             format_version: ACTION_SAFETY_CONTRACT_VERSION,
@@ -885,9 +1039,33 @@ impl SendAdapter {
         draft: &ActionDraft,
         approval: &ExternalApprovalEvidence,
         profile: &VerifiedCalibrationProfile,
+        staged: Option<&StagedAttachment>,
         permit_send: bool,
         now_unix_nanoseconds: u128,
     ) -> Result<ActionCapabilityEnvelope, SendFailureCode> {
+        let action_capability = Self::draft_capability(draft);
+        // The staged attachment and the draft's stated intent must agree, or
+        // nothing is minted: this is the seam where a file could otherwise be
+        // substituted for the one that was approved.
+        let attachment: Option<ActionAttachment> =
+            match (action_capability.carries_attachment(), staged) {
+                (false, None) => None,
+                (true, Some(staged)) => {
+                    let approved = draft
+                        .attachments
+                        .first()
+                        .ok_or(SendFailureCode::AttachmentInvalid)?;
+                    if staged.sha256 != approved.sha256
+                        || staged.display_file_name != approved.display_file_name
+                        || approved.byte_count != Some(staged.byte_count)
+                        || staged.bytes_preserved_in_transit != action_capability.preserves_bytes()
+                    {
+                        return Err(SendFailureCode::AttachmentDigestMismatch);
+                    }
+                    Some(staged.as_action_attachment())
+                }
+                _ => return Err(SendFailureCode::AttachmentInvalid),
+            };
         let idempotency_key = self.idempotency_key(&draft.draft_id, &approval.approval_id);
         let valid_until = now_unix_nanoseconds.saturating_add(
             u128::from(self.config.capability_validity_seconds).saturating_mul(1_000_000_000),
@@ -909,7 +1087,14 @@ impl SendAdapter {
             idempotency_key,
             account_id: self.config.account_id.clone(),
             conversation_id: draft.conversation_id.clone(),
-            search_key: self.config.search_key_for(draft),
+            capability: action_capability,
+            addressing_mode: self.config.addressing_mode,
+            // Nothing is typed before the recipient gate in the no-navigation
+            // mode, so the capability carries nothing to type.
+            search_key: match self.config.addressing_mode {
+                SendAddressingMode::Search => self.config.search_key_for(draft),
+                SendAddressingMode::CurrentConversation => String::new(),
+            },
             expected_title: draft.recipient.human_label.clone(),
             body_sha256: draft.rendered_text_sha256.clone(),
             normalized_body_sha256: normalized_send_text_sha256(&draft.rendered_text),
@@ -917,6 +1102,7 @@ impl SendAdapter {
             client_build_profile_id: self.config.adapter.client_build_profile_id.clone(),
             calibration_profile_id: profile.profile.body.profile_id.clone(),
             calibration_profile_sha256: profile.canonical_sha256.clone(),
+            attachment,
             rollout_stage: self.config.rollout_stage,
             permit_send,
             issued_at_unix_nanoseconds: now_unix_nanoseconds,
@@ -936,6 +1122,7 @@ impl SendAdapter {
         draft: &ActionDraft,
         approval: &ExternalApprovalEvidence,
         dispatcher: &dyn SendDispatcher,
+        attachment_source: Option<&Path>,
         now_unix_nanoseconds: u128,
     ) -> Result<SendAttemptReport, RestoreError> {
         let (profile, matrix) = self.verified_artifacts(now_unix_nanoseconds)?;
@@ -950,6 +1137,7 @@ impl SendAdapter {
             &profile,
             &compatibility,
             dispatcher,
+            attachment_source,
             now_unix_nanoseconds,
         )
     }
@@ -957,6 +1145,7 @@ impl SendAdapter {
     /// The orchestration proper, with the signed artifacts already verified.
     /// Kept crate-visible so the unit tests can exercise a release-tier
     /// profile without a release key being pinned into the test binary.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn execute_with_artifacts(
         &self,
         draft: &ActionDraft,
@@ -964,6 +1153,7 @@ impl SendAdapter {
         profile: &VerifiedCalibrationProfile,
         compatibility: &CompatibilityDecision,
         dispatcher: &dyn SendDispatcher,
+        attachment_source: Option<&Path>,
         now_unix_nanoseconds: u128,
     ) -> Result<SendAttemptReport, RestoreError> {
         let helper_status = dispatcher
@@ -1018,14 +1208,50 @@ impl SendAdapter {
             });
         }
 
+        // Staging happens only after PRECHECK has passed, and before anything
+        // is minted or reserved: a refusal here has touched no client state and
+        // consumed no capacity.
+        let staged = match Self::draft_capability(draft).carries_attachment() {
+            false => None,
+            true => {
+                let source = attachment_source
+                    .ok_or_else(|| failure_error(SendFailureCode::AttachmentStagingFailed))?;
+                let approved = draft
+                    .attachments
+                    .first()
+                    .ok_or_else(|| failure_error(SendFailureCode::AttachmentInvalid))?;
+                match stage_attachment(
+                    source,
+                    &self.config.staging_root,
+                    approved,
+                    Self::draft_capability(draft),
+                ) {
+                    Ok(staged) => Some(staged),
+                    Err(error) => {
+                        self.append_audit(
+                            draft,
+                            &precheck.action_id,
+                            ConnectorAuditStage::ApprovalRecorded,
+                            ConnectorAuditOutcome::Denied,
+                            operation_name(precheck.permit_send),
+                            0,
+                            now_unix_nanoseconds,
+                        )?;
+                        return Err(error);
+                    }
+                }
+            }
+        };
         let capability = self
             .mint_capability(
                 draft,
                 approval,
                 profile,
+                staged.as_ref(),
                 precheck.permit_send,
                 now_unix_nanoseconds,
             )
+            .inspect_err(|_| self.discard_staged(staged.as_ref()))
             .map_err(failure_error)?;
         let entry = OutboxEntry {
             action_id: capability.action_id.clone(),
@@ -1038,6 +1264,20 @@ impl SendAdapter {
             conversation_id: capability.conversation_id.clone(),
             body_sha256: capability.body_sha256.clone(),
             normalized_body_sha256: capability.normalized_body_sha256.clone(),
+            capability: capability.capability,
+            attachment_sha256: capability
+                .attachment
+                .as_ref()
+                .map(|attachment| attachment.sha256.clone()),
+            display_file_name: capability
+                .attachment
+                .as_ref()
+                .map(|attachment| attachment.display_file_name.clone()),
+            staging_directory: capability
+                .attachment
+                .as_ref()
+                .map(|attachment| attachment.staging_directory.clone()),
+            bytes_preserved_in_transit: capability.capability.preserves_bytes(),
             rollout_stage: capability.rollout_stage,
             permit_send: capability.permit_send,
             state: OutboxEntryState::Reserved,
@@ -1126,6 +1366,11 @@ impl SendAdapter {
             },
             settled_at,
         )?;
+        // The staged copy is kept while an attempt is unreconciled, because the
+        // client may still be reading it; a terminal outcome retires it.
+        if matches!(record.outcome, SendCompletionOutcome::Completed(_)) {
+            self.discard_staged(staged.as_ref());
+        }
         self.append_audit(
             draft,
             &capability.action_id,
@@ -1207,7 +1452,25 @@ impl SendAdapter {
         let grace_nanoseconds =
             u128::from(self.config.reconciliation_grace_seconds).saturating_mul(1_000_000_000);
         let grace_elapsed = now_unix_nanoseconds.saturating_sub(attempted_at) >= grace_nanoseconds;
-        let kind = if observation.outgoing_message_found && observation.normalized_body_matched {
+        // What counts as proof depends on what the client preserved. A text
+        // send must match its digest; a file send must match its name; an image
+        // send can only be matched by presence, because the client re-encoded
+        // it, and that weaker evidence is recorded as such.
+        let matched = match observation.match_strength {
+            SendMatchStrength::BodyDigest => {
+                !entry.capability.carries_attachment() && observation.normalized_body_matched
+            }
+            SendMatchStrength::AttachmentFileName => {
+                entry.capability.carries_attachment()
+                    && observation.attachment_reference_found
+                    && observation.display_file_name_matched
+            }
+            SendMatchStrength::AttachmentPresenceOnly => {
+                !entry.bytes_preserved_in_transit && observation.attachment_reference_found
+            }
+            SendMatchStrength::None => false,
+        };
+        let kind = if observation.outgoing_message_found && matched {
             Some(SendCompletionKind::ObservedSent)
         } else if grace_elapsed {
             Some(SendCompletionKind::ObservedFailed)
@@ -1215,6 +1478,10 @@ impl SendAdapter {
             None
         };
         if let Some(kind) = kind {
+            // A resolved attempt retires its staged copy; nothing needs it now.
+            if let Some(directory) = entry.staging_directory.as_ref() {
+                discard_staging_directory(Path::new(directory), &self.config.staging_root);
+            }
             let key = observation.idempotency_key.clone();
             outbox.transaction(
                 |state| {
@@ -1440,6 +1707,34 @@ impl SendAdapter {
         })
     }
 
+    /// Retires one staged attachment, if there was one.
+    fn discard_staged(&self, staged: Option<&StagedAttachment>) {
+        if let Some(staged) = staged {
+            discard_staging_directory(&staged.staging_directory, &self.config.staging_root);
+        }
+    }
+
+    /// Removes every staging directory no live outbox entry still refers to.
+    /// Running this after recovery means a crash mid-attempt cannot leave a
+    /// copy of the owner's file lying around.
+    fn sweep_staging_root(&self, state: &SendOutboxState) {
+        let live = state
+            .in_flight
+            .iter()
+            .chain(&state.pending_reconciliation)
+            .filter_map(|entry| entry.staging_directory.clone())
+            .collect::<BTreeSet<_>>();
+        let Ok(entries) = fs::read_dir(&self.config.staging_root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !live.contains(&path.display().to_string()) {
+                discard_staging_directory(&path, &self.config.staging_root);
+            }
+        }
+    }
+
     /// The current outbox projection, after running recovery.
     pub fn outbox_status(
         &self,
@@ -1534,6 +1829,9 @@ pub fn observe_send_in_replica(
     let mut scanned = 0_u64;
     let mut source_fingerprint = String::new();
     let mut matched: Option<String> = None;
+    let mut match_strength = SendMatchStrength::None;
+    let mut attachment_reference_found = false;
+    let mut display_file_name_matched = false;
     let mut any_outgoing = false;
     for _ in 0..MAXIMUM_RECONCILIATION_PAGES {
         let page = search_replica_messages(
@@ -1552,20 +1850,56 @@ pub fn observe_send_in_replica(
         for message in &page.items {
             scanned = scanned.saturating_add(1);
             any_outgoing = true;
-            let TypedPayload::Decoded(value) = &message.typed_payload else {
-                continue;
+            let summary = match &message.typed_payload {
+                TypedPayload::Decoded(value) => {
+                    let (_, summary, truncated) =
+                        summarize_decoded_payload(value, RECONCILIATION_SUMMARY_BYTES);
+                    summary.filter(|_| !truncated)
+                }
+                TypedPayload::Unknown { .. } => None,
             };
-            let (_, summary, truncated) =
-                summarize_decoded_payload(value, RECONCILIATION_SUMMARY_BYTES);
-            let Some(summary) = summary.filter(|_| !truncated) else {
+            if entry.capability.carries_attachment() {
+                // An attachment send is matched through the artifact the client
+                // actually recorded, never through message text.
+                if message.artifact_references.is_empty() {
+                    continue;
+                }
+                attachment_reference_found = true;
+                let named = entry.display_file_name.as_ref().is_some_and(|name| {
+                    summary.as_ref().is_some_and(|summary| {
+                        summary.to_lowercase().contains(&name.to_lowercase())
+                    })
+                });
+                if named {
+                    display_file_name_matched = true;
+                    match_strength = SendMatchStrength::AttachmentFileName;
+                    matched = Some(message.canonical_id.clone());
+                    break;
+                }
+                // The client re-encodes an image, so its name does not survive.
+                // Presence of an outgoing artifact inside the attempt window is
+                // then the strongest available evidence, and it is labelled so.
+                if !entry.bytes_preserved_in_transit
+                    && matches!(match_strength, SendMatchStrength::None)
+                {
+                    match_strength = SendMatchStrength::AttachmentPresenceOnly;
+                    matched = Some(message.canonical_id.clone());
+                }
+                continue;
+            }
+            let Some(summary) = summary else {
                 continue;
             };
             if normalized_send_text_sha256(&summary) == entry.normalized_body_sha256 {
                 matched = Some(message.canonical_id.clone());
+                match_strength = SendMatchStrength::BodyDigest;
                 break;
             }
         }
-        if matched.is_some() {
+        if matches!(
+            match_strength,
+            SendMatchStrength::BodyDigest | SendMatchStrength::AttachmentFileName
+        ) {
             break;
         }
         match page.next_cursor {
@@ -1581,7 +1915,10 @@ pub fn observe_send_in_replica(
         source: SendObservationSource::EncryptedReplica,
         source_fingerprint,
         outgoing_message_found: any_outgoing,
-        normalized_body_matched: matched.is_some(),
+        normalized_body_matched: match_strength == SendMatchStrength::BodyDigest,
+        attachment_reference_found,
+        display_file_name_matched,
+        match_strength,
         canonical_id: matched,
         scanned_message_count: scanned,
         observed_at_unix_nanoseconds: now_unix_nanoseconds,
@@ -1678,6 +2015,9 @@ fn guard_failures(decision: &ActionGuardDecision) -> BTreeSet<SendFailureCode> {
             | ActionGuardDenial::ApprovalNotYetValid
             | ActionGuardDenial::ApprovalExpired
             | ActionGuardDenial::ApprovalAlreadyConsumed => SendFailureCode::ApprovalInvalid,
+            ActionGuardDenial::RecipientTitleNotAllowed => {
+                SendFailureCode::RecipientTitleNotAllowed
+            }
             ActionGuardDenial::AccountNotAllowed
             | ActionGuardDenial::ConversationNotAllowed
             | ActionGuardDenial::CapabilityNotAllowed
@@ -1690,6 +2030,27 @@ fn guard_failures(decision: &ActionGuardDecision) -> BTreeSet<SendFailureCode> {
             }
         })
         .collect()
+}
+
+/// Search addressing is measured non-functional in the background, so the
+/// no-navigation mode is the default.
+fn current_conversation_addressing() -> SendAddressingMode {
+    SendAddressingMode::CurrentConversation
+}
+
+/// Attachments start closed even when text sending is open.
+fn dry_run_stage() -> SendRolloutStage {
+    SendRolloutStage::DryRun
+}
+
+/// One attachment per window unless the owner deliberately widens it.
+fn one_attempt() -> u64 {
+    1
+}
+
+/// Absent evidence is no evidence.
+fn no_match() -> SendMatchStrength {
+    SendMatchStrength::None
 }
 
 fn operation_name(permit_send: bool) -> &'static str {
@@ -1751,8 +2112,8 @@ mod tests {
     use crate::send_contract::{HelperGateEvidence, SendStage, VisualConfirmation};
     use crate::send_profile::{
         sign_calibration_profile, verify_calibration_profile, CalibrationAnchors,
-        CalibrationOcrRegions, CalibrationProfileBody, CalibrationSelfTest, CompatibilityState,
-        SendTrustRoot, WindowRelativePoint, WindowRelativeRect,
+        CalibrationAttachments, CalibrationOcrRegions, CalibrationProfileBody, CalibrationSelfTest,
+        CompatibilityState, SendTrustRoot, WindowRelativePoint, WindowRelativeRect,
     };
     use crate::tools::ToolSourceDatabaseFreshness;
 
@@ -1867,6 +2228,7 @@ mod tests {
                 compose_box: point,
             },
             ocr_regions: CalibrationOcrRegions {
+                search: rect,
                 title: rect,
                 compose: rect,
                 newest_outgoing: rect,
@@ -1875,6 +2237,14 @@ mod tests {
                 focus_indicator: "search_caret".to_string(),
                 minimum_title_confidence_parts_per_million: 900_000,
             },
+            attachments: Some(CalibrationAttachments {
+                attach_control: point,
+                confirm_send_button: point,
+                compose_attachment: rect,
+                confirm_sheet: rect,
+                presents_confirmation_sheet: true,
+                compose_accepts_pasted_file: true,
+            }),
             issued_at_unix_seconds: 0,
             expires_at_unix_seconds: 4_000_000_000,
         }
@@ -1904,6 +2274,17 @@ mod tests {
         }
     }
 
+    /// The authorized on-screen title for a test conversation. `filehelper`
+    /// presents as "File Transfer"; any other allow-listed conversation in
+    /// these tests uses its own identifier as its title.
+    fn recipient_title(conversation_id: &str) -> String {
+        if conversation_id == CONVERSATION {
+            "File Transfer".to_string()
+        } else {
+            conversation_id.to_string()
+        }
+    }
+
     fn draft(now: u128) -> ActionDraft {
         ActionDraft {
             format_version: 1,
@@ -1926,6 +2307,7 @@ mod tests {
             rendered_text: BODY.to_string(),
             rendered_text_sha256: hex::encode(Sha256::digest(BODY.as_bytes())),
             attachments: Vec::new(),
+            attachment_intent: None,
             connector_version: "1".to_string(),
             api_version: "1".to_string(),
             source_fingerprint: sha('c'),
@@ -1977,10 +2359,18 @@ mod tests {
             },
             allow_list: ActionAllowList {
                 account_ids: BTreeSet::from([ACCOUNT.to_string()]),
+                recipient_titles: conversations
+                    .iter()
+                    .map(|conversation| (conversation.clone(), recipient_title(conversation)))
+                    .collect(),
                 conversation_ids: conversations,
                 capabilities: BTreeSet::from([ActionCapability::TextSend]),
             },
             self_send_conversation_id: CONVERSATION.to_string(),
+            addressing_mode: SendAddressingMode::CurrentConversation,
+            attachment_rollout_stage: stage,
+            maximum_attachment_attempts_per_window: 1,
+            staging_root: root.path().join("staging"),
             search_key_overrides: BTreeMap::new(),
             attempt_window_seconds: 3_600,
             maximum_attempts_per_window: 3,
@@ -2058,7 +2448,12 @@ mod tests {
             evidence: HelperGateEvidence {
                 title_confidence_parts_per_million: 1_000_000,
                 title_matched: failure != Some(SendFailureCode::RecipientVerifyFailed),
+                search_key_echoed: true,
                 compose_matched: failure != Some(SendFailureCode::ContentVerifyFailed),
+                attachment_name_matched: false,
+                attachment_staged: false,
+                attachment_region_changed: false,
+                confirmation_sheet_confirmed: false,
                 compose_cleared: attempted,
                 newest_outgoing_matched: attempted,
                 ambiguous_search_result: false,
@@ -2090,7 +2485,7 @@ mod tests {
             && profile.trust_tier == SendTrustTier::Release;
         let capability = fixture
             .adapter
-            .mint_capability(draft, approval, profile, permit_send, now)
+            .mint_capability(draft, approval, profile, None, permit_send, now)
             .unwrap();
         let dispatcher = ScriptedDispatcher::new(status, make_outcome(&capability));
         let report = fixture
@@ -2101,6 +2496,7 @@ mod tests {
                 profile,
                 &supported_decision(),
                 &dispatcher,
+                None,
                 now,
             )
             .unwrap();
@@ -2425,6 +2821,9 @@ mod tests {
             source_fingerprint: sha('f'),
             outgoing_message_found: true,
             normalized_body_matched: true,
+            attachment_reference_found: false,
+            display_file_name_matched: false,
+            match_strength: SendMatchStrength::BodyDigest,
             canonical_id: Some(sha('9')),
             scanned_message_count: 3,
             observed_at_unix_nanoseconds: now + 1_000_000_000,
@@ -2534,7 +2933,15 @@ mod tests {
             ScriptedDispatcher::new(Some(ready_status()), Err(SendFailureCode::EngineStall));
         let report = fixture
             .adapter
-            .execute_with_artifacts(&draft, &approval, &profile, &decision, &dispatcher, now)
+            .execute_with_artifacts(
+                &draft,
+                &approval,
+                &profile,
+                &decision,
+                &dispatcher,
+                None,
+                now,
+            )
             .unwrap();
         assert_eq!(*dispatcher.execute_calls.borrow(), 0);
         assert!(report
@@ -2630,6 +3037,9 @@ mod tests {
             source_fingerprint: sha('f'),
             outgoing_message_found: false,
             normalized_body_matched: false,
+            attachment_reference_found: false,
+            display_file_name_matched: false,
+            match_strength: SendMatchStrength::None,
             canonical_id: None,
             scanned_message_count: 0,
             observed_at_unix_nanoseconds: now + 1,
@@ -2702,7 +3112,7 @@ mod tests {
         // digest is checked on both sides of the boundary.
         assert!(fixture
             .adapter
-            .mint_capability(&draft, &approval, &profile, false, now)
+            .mint_capability(&draft, &approval, &profile, None, false, now)
             .is_err());
         let dispatcher =
             ScriptedDispatcher::new(Some(ready_status()), Err(SendFailureCode::EngineStall));
@@ -2714,6 +3124,7 @@ mod tests {
                 &profile,
                 &supported_decision(),
                 &dispatcher,
+                None,
                 now,
             )
             .unwrap();
@@ -2725,6 +3136,623 @@ mod tests {
             .contains(&SendFailureCode::DraftInvalid));
     }
 
+    /// Builds an attachment draft plus the file it approves, and allow-lists
+    /// the capability, which a configuration must always do explicitly.
+    fn attachment_fixture(
+        fixture: &mut Fixture,
+        now: u128,
+        capability: ActionCapability,
+        name: &str,
+    ) -> (ActionDraft, PathBuf, Vec<u8>) {
+        fixture
+            .adapter
+            .config
+            .allow_list
+            .capabilities
+            .insert(capability);
+        let contents = b"an approved attachment payload".repeat(8);
+        let source = fixture._root.path().join(name);
+        fs::write(&source, &contents).unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).unwrap();
+        let mut draft = draft(now);
+        draft.rendered_text = String::new();
+        draft.rendered_text_sha256 = hex::encode(Sha256::digest(b""));
+        draft.attachment_intent = Some(capability);
+        draft.attachments = vec![crate::connector::DraftAttachment {
+            artifact_id: "artifact".to_string(),
+            kind: crate::model::ArtifactKind::Image,
+            role: crate::model::ArtifactRole::Original,
+            digest_kind: "sourceSha256".to_string(),
+            sha256: hex::encode(Sha256::digest(&contents)),
+            byte_count: Some(contents.len() as u64),
+            display_file_name: name.to_string(),
+        }];
+        (draft, source, contents)
+    }
+
+    #[test]
+    fn an_attachment_dry_run_stages_the_file_and_retires_the_copy() {
+        let now = 10_000_000_000_000_u128;
+        let mut fixture = fixture(SendRolloutStage::DryRun, false);
+        let profile = verified_profile(SendTrustTier::Development);
+        let (draft, source, contents) =
+            attachment_fixture(&mut fixture, now, ActionCapability::ImageSend, "photo.png");
+        let approval = approval_for(&fixture.adapter, &draft, now, '1');
+        let dispatcher = ScriptedDispatcher::new(
+            Some(ready_status()),
+            Ok(HelperSendOutcome {
+                format_version: SEND_CONTRACT_VERSION,
+                capability_id: sha('0'),
+                capability_binding_sha256: sha('0'),
+                helper_version: "1.0.0".to_string(),
+                engine_version: "1.0.0".to_string(),
+                calibration_profile_id: PROFILE_ID.to_string(),
+                stage_reached: SendStage::ContentVerify,
+                attempted: false,
+                visual_confirmation: VisualConfirmation::NotAttempted,
+                failure: None,
+                evidence: HelperGateEvidence {
+                    title_confidence_parts_per_million: 1_000_000,
+                    title_matched: true,
+                    search_key_echoed: true,
+                    compose_matched: true,
+                    attachment_name_matched: true,
+                    attachment_staged: true,
+                    attachment_region_changed: true,
+                    confirmation_sheet_confirmed: false,
+                    compose_cleared: true,
+                    newest_outgoing_matched: false,
+                    ambiguous_search_result: false,
+                    human_activity_observed: false,
+                    window_frame_digest: sha('e'),
+                    capture_count: 4,
+                    elapsed_milliseconds: 900,
+                },
+                observed_at_unix_nanoseconds: 2,
+            }),
+        );
+        // The scripted outcome cannot know the capability identity in advance,
+        // so this run proves the mismatch guard fires; what matters here is
+        // that staging happened and was retired either way.
+        let report = fixture
+            .adapter
+            .execute_with_artifacts(
+                &draft,
+                &approval,
+                &profile,
+                &supported_decision(),
+                &dispatcher,
+                Some(source.as_path()),
+                now,
+            )
+            .unwrap();
+        assert!(report.precheck.permitted, "{:?}", report.precheck.failures);
+        assert!(!report.attempted);
+        assert_eq!(*dispatcher.execute_calls.borrow(), 1);
+        // Nothing is left of the staged copy once the attempt is terminal.
+        let staging = fixture.adapter.config.staging_root.clone();
+        let leftovers = fs::read_dir(&staging)
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert_eq!(leftovers, 0, "a terminal attempt left a staged copy behind");
+        // The owner's original is untouched.
+        assert_eq!(fs::read(&source).unwrap(), contents);
+    }
+
+    #[test]
+    fn an_attachment_whose_file_changed_since_approval_is_refused_before_dispatch() {
+        let now = 10_000_000_000_000_u128;
+        let mut fixture = fixture(SendRolloutStage::DryRun, false);
+        let profile = verified_profile(SendTrustTier::Development);
+        let (draft, source, _) =
+            attachment_fixture(&mut fixture, now, ActionCapability::FileSend, "report.pdf");
+        let approval = approval_for(&fixture.adapter, &draft, now, '1');
+        fs::write(&source, b"a different file entirely").unwrap();
+        let dispatcher =
+            ScriptedDispatcher::new(Some(ready_status()), Err(SendFailureCode::EngineStall));
+        let error = fixture
+            .adapter
+            .execute_with_artifacts(
+                &draft,
+                &approval,
+                &profile,
+                &supported_decision(),
+                &dispatcher,
+                Some(source.as_path()),
+                now,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("attachmentDigestMismatch"));
+        assert_eq!(*dispatcher.execute_calls.borrow(), 0);
+        let staging = fixture.adapter.config.staging_root.clone();
+        assert_eq!(
+            fs::read_dir(&staging)
+                .map(|entries| entries.count())
+                .unwrap_or(0),
+            0
+        );
+    }
+
+    #[test]
+    fn a_draft_approved_as_a_reply_is_refused_rather_than_sent_unthreaded() {
+        // Threading is unimplemented, so this draft would post as a standalone
+        // message. The body and recipient would be right and the action would
+        // still be the wrong one.
+        let now = 10_000_000_000_000_u128;
+        let fixture = fixture(SendRolloutStage::SelfSend, false);
+        let mut draft = draft(now);
+        draft.reply_target = Some(crate::connector::DraftReplyTarget {
+            canonical_id: sha('e'),
+            canonical_record_sha256: sha('f'),
+            sender_id: None,
+            created_at_unix: None,
+        });
+        let approval = approval_for(&fixture.adapter, &draft, now, '1');
+        let profile = verified_profile(SendTrustTier::Development);
+        let dispatcher =
+            ScriptedDispatcher::new(Some(ready_status()), Err(SendFailureCode::EngineStall));
+        let report = fixture
+            .adapter
+            .execute_with_artifacts(
+                &draft,
+                &approval,
+                &profile,
+                &supported_decision(),
+                &dispatcher,
+                None,
+                now,
+            )
+            .unwrap();
+        assert!(report
+            .precheck
+            .failures
+            .contains(&SendFailureCode::DraftInvalid));
+        assert_eq!(*dispatcher.execute_calls.borrow(), 0);
+    }
+
+    #[test]
+    fn a_draft_naming_an_allow_listed_conversation_but_a_different_recipient_is_refused() {
+        // The opaque conversation identifier is not what routes a message: the
+        // recipient gate matches the human-readable title on screen. A draft
+        // that keeps the allow-listed identifier while swapping the title would
+        // otherwise send to whatever different conversation that title matched,
+        // and the outbox would record the allow-listed one.
+        let now = 10_000_000_000_000_u128;
+        let fixture = fixture(SendRolloutStage::SelfSend, false);
+        let mut draft = draft(now);
+        draft.recipient.human_label = "Some Other Person".to_string();
+        let approval = approval_for(&fixture.adapter, &draft, now, '1');
+        let profile = verified_profile(SendTrustTier::Development);
+        let dispatcher =
+            ScriptedDispatcher::new(Some(ready_status()), Err(SendFailureCode::EngineStall));
+        let report = fixture
+            .adapter
+            .execute_with_artifacts(
+                &draft,
+                &approval,
+                &profile,
+                &supported_decision(),
+                &dispatcher,
+                None,
+                now,
+            )
+            .unwrap();
+        assert!(
+            report
+                .precheck
+                .failures
+                .contains(&SendFailureCode::RecipientTitleNotAllowed),
+            "a swapped recipient title must be refused before any input: {:?}",
+            report.precheck.failures
+        );
+        // Nothing reached the client: the refusal happens in policy, before the
+        // helper is asked to do anything at all.
+        assert_eq!(*dispatcher.execute_calls.borrow(), 0);
+        assert!(!report.dispatched);
+    }
+
+    #[test]
+    fn an_allow_listed_conversation_with_no_authorized_title_is_a_configuration_error() {
+        // Fail closed. A conversation whose authorized title was never
+        // configured cannot be sent to, rather than falling back to trusting
+        // whatever title the draft carries.
+        let mut fixture = fixture(SendRolloutStage::SelfSend, false);
+        fixture.adapter.config.allow_list.recipient_titles.clear();
+        assert_eq!(
+            fixture.adapter.config.validate(),
+            Err(SendFailureCode::ConfigurationInvalid)
+        );
+    }
+
+    #[test]
+    fn an_authorized_title_for_a_conversation_that_is_not_allow_listed_is_refused() {
+        let mut fixture = fixture(SendRolloutStage::SelfSend, false);
+        fixture
+            .adapter
+            .config
+            .allow_list
+            .recipient_titles
+            .insert("someone-else".to_string(), "Someone Else".to_string());
+        assert_eq!(
+            fixture.adapter.config.validate(),
+            Err(SendFailureCode::ConfigurationInvalid)
+        );
+    }
+
+    #[test]
+    fn an_attachment_capability_absent_from_the_allow_list_is_refused() {
+        let now = 10_000_000_000_000_u128;
+        let mut fixture = fixture(SendRolloutStage::DryRun, false);
+        let profile = verified_profile(SendTrustTier::Development);
+        let (draft, source, _) =
+            attachment_fixture(&mut fixture, now, ActionCapability::FileSend, "report.pdf");
+        // Undo the allow-listing the fixture did: a configuration that lists
+        // only textSend must refuse a file send outright.
+        fixture
+            .adapter
+            .config
+            .allow_list
+            .capabilities
+            .remove(&ActionCapability::FileSend);
+        let approval = approval_for(&fixture.adapter, &draft, now, '1');
+        let dispatcher =
+            ScriptedDispatcher::new(Some(ready_status()), Err(SendFailureCode::EngineStall));
+        let report = fixture
+            .adapter
+            .execute_with_artifacts(
+                &draft,
+                &approval,
+                &profile,
+                &supported_decision(),
+                &dispatcher,
+                Some(source.as_path()),
+                now,
+            )
+            .unwrap();
+        assert!(!report.precheck.permitted);
+        assert!(report
+            .precheck
+            .guard_denials
+            .contains(&ActionGuardDenial::CapabilityNotAllowed));
+        assert_eq!(*dispatcher.execute_calls.borrow(), 0);
+    }
+
+    #[test]
+    fn an_attachment_is_refused_while_the_attachment_stage_is_closed() {
+        let now = 10_000_000_000_000_u128;
+        let mut fixture = fixture(SendRolloutStage::SelfSend, false);
+        // Text sending is open; attachments are not.
+        fixture.adapter.config.attachment_rollout_stage = SendRolloutStage::DryRun;
+        let profile = verified_profile(SendTrustTier::Release);
+        let (draft, source, _) =
+            attachment_fixture(&mut fixture, now, ActionCapability::FileSend, "report.pdf");
+        let approval = approval_for(&fixture.adapter, &draft, now, '1');
+        let dispatcher =
+            ScriptedDispatcher::new(Some(ready_status()), Err(SendFailureCode::EngineStall));
+        let report = fixture
+            .adapter
+            .execute_with_artifacts(
+                &draft,
+                &approval,
+                &profile,
+                &supported_decision(),
+                &dispatcher,
+                Some(source.as_path()),
+                now,
+            )
+            .unwrap();
+        assert!(!report.precheck.permit_send);
+        assert_eq!(*dispatcher.execute_calls.borrow(), 0);
+    }
+
+    #[test]
+    fn a_forwarding_draft_without_a_stated_intent_can_never_send_an_attachment() {
+        let now = 10_000_000_000_000_u128;
+        let mut fixture = fixture(SendRolloutStage::DryRun, false);
+        let profile = verified_profile(SendTrustTier::Development);
+        let (mut draft, source, _) =
+            attachment_fixture(&mut fixture, now, ActionCapability::FileSend, "report.pdf");
+        // Exactly what the connector can produce: attachments, but no intent.
+        draft.attachment_intent = None;
+        let approval = approval_for(&fixture.adapter, &draft, now, '1');
+        let dispatcher =
+            ScriptedDispatcher::new(Some(ready_status()), Err(SendFailureCode::EngineStall));
+        let report = fixture
+            .adapter
+            .execute_with_artifacts(
+                &draft,
+                &approval,
+                &profile,
+                &supported_decision(),
+                &dispatcher,
+                Some(source.as_path()),
+                now,
+            )
+            .unwrap();
+        assert!(!report.precheck.permitted);
+        assert!(report
+            .precheck
+            .failures
+            .contains(&SendFailureCode::DraftInvalid));
+        assert_eq!(*dispatcher.execute_calls.borrow(), 0);
+    }
+
+    #[test]
+    fn an_image_send_records_that_the_recipient_receives_a_derivative() {
+        let now = 10_000_000_000_000_u128;
+        let mut fixture = fixture(SendRolloutStage::DryRun, false);
+        let profile = verified_profile(SendTrustTier::Development);
+        let (draft, source, _) =
+            attachment_fixture(&mut fixture, now, ActionCapability::ImageSend, "photo.png");
+        let approval = approval_for(&fixture.adapter, &draft, now, '1');
+        let staged = stage_attachment(
+            &source,
+            &fixture.adapter.config.staging_root,
+            &draft.attachments[0],
+            ActionCapability::ImageSend,
+        )
+        .unwrap();
+        assert!(!staged.bytes_preserved_in_transit);
+        let capability = fixture
+            .adapter
+            .mint_capability(&draft, &approval, &profile, Some(&staged), false, now)
+            .unwrap();
+        assert_eq!(capability.capability, ActionCapability::ImageSend);
+        assert!(capability.body.is_empty());
+        let attachment = capability.attachment.as_ref().unwrap();
+        assert_eq!(attachment.display_file_name, "photo.png");
+        assert_eq!(attachment.uniform_type_identifier, "public.png");
+        assert!(capability.validate(now).is_ok());
+        // Swapping the staged file for another one invalidates the binding.
+        let mut tampered = capability.clone();
+        tampered.attachment.as_mut().unwrap().sha256 = sha('9');
+        assert!(tampered.validate(now).is_err());
+    }
+
+    #[test]
+    fn a_capability_can_never_carry_a_body_and_an_attachment_at_once() {
+        let now = 10_000_000_000_000_u128;
+        let mut fixture = fixture(SendRolloutStage::DryRun, false);
+        let profile = verified_profile(SendTrustTier::Development);
+        let (draft, source, _) =
+            attachment_fixture(&mut fixture, now, ActionCapability::FileSend, "report.pdf");
+        let approval = approval_for(&fixture.adapter, &draft, now, '1');
+        let staged = stage_attachment(
+            &source,
+            &fixture.adapter.config.staging_root,
+            &draft.attachments[0],
+            ActionCapability::FileSend,
+        )
+        .unwrap();
+        let mut capability = fixture
+            .adapter
+            .mint_capability(&draft, &approval, &profile, Some(&staged), false, now)
+            .unwrap();
+        capability.body = "a caption".to_string();
+        capability.body_sha256 = hex::encode(Sha256::digest(capability.body.as_bytes()));
+        capability.normalized_body_sha256 = normalized_send_text_sha256(&capability.body);
+        capability.binding_sha256 = capability_binding_sha256(&capability).unwrap();
+        assert_eq!(
+            capability.validate(now).unwrap_err(),
+            SendFailureCode::CapabilityMismatch
+        );
+    }
+
+    /// Drives an attachment attempt to the parked state so reconciliation can
+    /// be exercised against it.
+    fn parked_attachment_attempt(
+        fixture: &mut Fixture,
+        capability: ActionCapability,
+        name: &str,
+        now: u128,
+    ) -> (ActionDraft, SendAttemptReport) {
+        let profile = verified_profile(SendTrustTier::Release);
+        let (draft, source, _) = attachment_fixture(fixture, now, capability, name);
+        fixture.adapter.config.attachment_rollout_stage = SendRolloutStage::SelfSend;
+        let approval = approval_for(&fixture.adapter, &draft, now, '1');
+        let staged = stage_attachment(
+            &source,
+            &fixture.adapter.config.staging_root,
+            &draft.attachments[0],
+            capability,
+        )
+        .unwrap();
+        let minted = fixture
+            .adapter
+            .mint_capability(&draft, &approval, &profile, Some(&staged), true, now)
+            .unwrap();
+        let dispatcher = ScriptedDispatcher::new(
+            Some(ready_status()),
+            Ok(outcome(
+                &minted.capability_id,
+                &minted.binding_sha256,
+                true,
+                None,
+                SendStage::SendVerify,
+            )),
+        );
+        let report = fixture
+            .adapter
+            .execute_with_artifacts(
+                &draft,
+                &approval,
+                &profile,
+                &supported_decision(),
+                &dispatcher,
+                Some(source.as_path()),
+                now,
+            )
+            .unwrap();
+        (draft, report)
+    }
+
+    #[test]
+    fn a_file_send_is_only_observed_sent_when_its_name_is_found_in_the_replica() {
+        let now = 10_000_000_000_000_u128;
+        let mut fixture = fixture(SendRolloutStage::SelfSend, false);
+        let (draft, report) =
+            parked_attachment_attempt(&mut fixture, ActionCapability::FileSend, "report.pdf", now);
+        assert!(report.awaiting_reconciliation, "{:?}", report.failure);
+
+        let base = SendReconciliationObservation {
+            format_version: SEND_CONTRACT_VERSION,
+            idempotency_key: report.idempotency_key.clone(),
+            account_id: ACCOUNT.to_string(),
+            conversation_id: CONVERSATION.to_string(),
+            source: SendObservationSource::EncryptedReplica,
+            source_fingerprint: sha('f'),
+            outgoing_message_found: true,
+            normalized_body_matched: false,
+            attachment_reference_found: true,
+            display_file_name_matched: false,
+            match_strength: SendMatchStrength::AttachmentPresenceOnly,
+            canonical_id: Some(sha('9')),
+            scanned_message_count: 2,
+            observed_at_unix_nanoseconds: now + 1,
+        };
+        // Presence alone is not enough for a file send: its name survives, so
+        // the absence of a name match means this is not our message.
+        let weak = fixture
+            .adapter
+            .reconcile(&base, Some(&draft), now + 1)
+            .unwrap();
+        assert!(!weak.resolved);
+
+        let named = SendReconciliationObservation {
+            display_file_name_matched: true,
+            match_strength: SendMatchStrength::AttachmentFileName,
+            ..base
+        };
+        let resolved = fixture
+            .adapter
+            .reconcile(&named, Some(&draft), now + 2)
+            .unwrap();
+        assert!(resolved.resolved);
+        assert_eq!(
+            resolved.lifecycle_state,
+            Some(ActionLifecycleState::ObservedSent)
+        );
+        // The staged copy is retired once the attempt is settled.
+        assert_eq!(
+            fs::read_dir(&fixture.adapter.config.staging_root)
+                .map(|entries| entries.count())
+                .unwrap_or(0),
+            0
+        );
+    }
+
+    #[test]
+    fn an_image_send_may_be_observed_sent_on_presence_alone_and_says_so() {
+        let now = 10_000_000_000_000_u128;
+        let mut fixture = fixture(SendRolloutStage::SelfSend, false);
+        let (draft, report) =
+            parked_attachment_attempt(&mut fixture, ActionCapability::ImageSend, "photo.png", now);
+        assert!(report.awaiting_reconciliation, "{:?}", report.failure);
+        let observation = SendReconciliationObservation {
+            format_version: SEND_CONTRACT_VERSION,
+            idempotency_key: report.idempotency_key.clone(),
+            account_id: ACCOUNT.to_string(),
+            conversation_id: CONVERSATION.to_string(),
+            source: SendObservationSource::EncryptedReplica,
+            source_fingerprint: sha('f'),
+            outgoing_message_found: true,
+            normalized_body_matched: false,
+            attachment_reference_found: true,
+            display_file_name_matched: false,
+            // The client re-encoded the image, so the name did not survive.
+            match_strength: SendMatchStrength::AttachmentPresenceOnly,
+            canonical_id: Some(sha('9')),
+            scanned_message_count: 1,
+            observed_at_unix_nanoseconds: now + 1,
+        };
+        let resolved = fixture
+            .adapter
+            .reconcile(&observation, Some(&draft), now + 1)
+            .unwrap();
+        assert!(resolved.resolved);
+        assert_eq!(
+            resolved.lifecycle_state,
+            Some(ActionLifecycleState::ObservedSent)
+        );
+        // The weaker evidence is preserved verbatim in the report.
+        assert_eq!(
+            resolved.observation.match_strength,
+            SendMatchStrength::AttachmentPresenceOnly
+        );
+    }
+
+    #[test]
+    fn a_text_send_can_never_be_settled_by_attachment_evidence() {
+        let now = 10_000_000_000_000_u128;
+        let fixture = fixture(SendRolloutStage::SelfSend, false);
+        let profile = verified_profile(SendTrustTier::Release);
+        let draft = draft(now);
+        let approval = approval_for(&fixture.adapter, &draft, now, '1');
+        let (report, _) = run(
+            &fixture,
+            &profile,
+            &draft,
+            &approval,
+            now,
+            |capability| {
+                Ok(outcome(
+                    &capability.capability_id,
+                    &capability.binding_sha256,
+                    true,
+                    None,
+                    SendStage::SendVerify,
+                ))
+            },
+            Some(ready_status()),
+        );
+        let observation = SendReconciliationObservation {
+            format_version: SEND_CONTRACT_VERSION,
+            idempotency_key: report.idempotency_key.clone(),
+            account_id: ACCOUNT.to_string(),
+            conversation_id: CONVERSATION.to_string(),
+            source: SendObservationSource::EncryptedReplica,
+            source_fingerprint: sha('f'),
+            outgoing_message_found: true,
+            normalized_body_matched: false,
+            attachment_reference_found: true,
+            display_file_name_matched: true,
+            match_strength: SendMatchStrength::AttachmentFileName,
+            canonical_id: Some(sha('9')),
+            scanned_message_count: 1,
+            observed_at_unix_nanoseconds: now + 1,
+        };
+        let report = fixture
+            .adapter
+            .reconcile(&observation, Some(&draft), now + 1)
+            .unwrap();
+        assert!(
+            !report.resolved,
+            "an attachment must not settle a text send"
+        );
+    }
+
+    #[test]
+    fn the_no_navigation_mode_mints_a_capability_with_nothing_to_type() {
+        let now = 10_000_000_000_000_u128;
+        let fixture = fixture(SendRolloutStage::DryRun, false);
+        let profile = verified_profile(SendTrustTier::Development);
+        let draft = draft(now);
+        let approval = approval_for(&fixture.adapter, &draft, now, '1');
+        let capability = fixture
+            .adapter
+            .mint_capability(&draft, &approval, &profile, None, false, now)
+            .unwrap();
+        assert_eq!(
+            capability.addressing_mode,
+            SendAddressingMode::CurrentConversation
+        );
+        // Nothing is typed before the recipient gate, so nothing to type is
+        // carried; the expected title still binds the recipient.
+        assert!(capability.search_key.is_empty());
+        assert_eq!(capability.expected_title, "File Transfer");
+        assert!(capability.validate(now).is_ok());
+    }
+
     #[test]
     fn the_minted_capability_binds_the_recipient_the_control_plane_resolved() {
         let now = 10_000_000_000_000_u128;
@@ -2734,10 +3762,9 @@ mod tests {
         let approval = approval_for(&fixture.adapter, &draft, now, '1');
         let capability = fixture
             .adapter
-            .mint_capability(&draft, &approval, &profile, false, now)
+            .mint_capability(&draft, &approval, &profile, None, false, now)
             .unwrap();
         assert_eq!(capability.expected_title, "File Transfer");
-        assert_eq!(capability.search_key, "File Transfer");
         assert!(!capability.permit_send);
         assert_eq!(capability.calibration_profile_id, PROFILE_ID);
         assert!(capability.validate(now).is_ok());

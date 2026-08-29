@@ -15,6 +15,7 @@ import GreenBubblesSendKit
 final class MacOSInputEffector: InputEffector {
   private enum VirtualKey: CGKeyCode {
     case a = 0x00
+    case g = 0x05
     case v = 0x09
     case returnKey = 0x24
     case delete = 0x33
@@ -25,22 +26,30 @@ final class MacOSInputEffector: InputEffector {
   private let pasteboard: NSPasteboard
   private var savedPasteboardItems: [String]?
   private let humanIdleThresholdSeconds: TimeInterval
+  private let frontmostProcessIdentifier: @Sendable () -> pid_t?
 
   init(
     processIdentifier: pid_t,
     pasteboard: NSPasteboard = .general,
-    humanIdleThresholdSeconds: TimeInterval = 1.5
+    humanIdleThresholdSeconds: TimeInterval = HumanCollisionPolicy.defaultIdleThresholdSeconds,
+    frontmostProcessIdentifier: @escaping @Sendable () -> pid_t? = {
+      NSWorkspace.shared.frontmostApplication?.processIdentifier
+    }
   ) {
     self.processIdentifier = processIdentifier
     self.pasteboard = pasteboard
     self.humanIdleThresholdSeconds = humanIdleThresholdSeconds
+    self.frontmostProcessIdentifier = frontmostProcessIdentifier
   }
 
   func click(at point: CGPoint) throws(SendFailure) {
     guard let source = CGEventSource(stateID: .privateState) else {
       throw SendFailure(.engineUnavailable, detail: "could not create a private event source")
     }
-    for type in [CGEventType.leftMouseDown, .leftMouseUp] {
+    // A synthetic click needs its click state set, or a Qt control treats the
+    // pair as stray button traffic and never takes focus from it. Measured:
+    // without this the click reaches the process but moves no caret.
+    for type in [CGEventType.mouseMoved, .leftMouseDown, .leftMouseUp] {
       guard
         let event = CGEvent(
           mouseEventSource: source,
@@ -51,7 +60,13 @@ final class MacOSInputEffector: InputEffector {
       else {
         throw SendFailure(.engineUnavailable, detail: "could not synthesize a mouse event")
       }
+      if type != .mouseMoved {
+        event.setIntegerValueField(.mouseEventClickState, value: 1)
+      }
       event.postToPid(processIdentifier)
+      // Qt coalesces same-tick events; a short gap makes the pair legible as a
+      // press and release rather than a single ambiguous transition.
+      Thread.sleep(forTimeInterval: 0.02)
     }
   }
 
@@ -63,6 +78,7 @@ final class MacOSInputEffector: InputEffector {
       case .escape: (.escape, [])
       case .selectAll: (.a, .maskCommand)
       case .paste: (.v, .maskCommand)
+      case .goToFolder: (.g, [.maskCommand, .maskShift])
       }
     guard let source = CGEventSource(stateID: .privateState) else {
       throw SendFailure(.engineUnavailable, detail: "could not create a private event source")
@@ -82,6 +98,37 @@ final class MacOSInputEffector: InputEffector {
     }
   }
 
+  /// Puts a reference to one already-staged file on the pasteboard.
+  ///
+  /// The helper writes a URL, not bytes: it never opens or reads the file, so a
+  /// compromised helper gains a path rather than a copy. The path is always the
+  /// staged copy the capability named.
+  func writeClipboardFileReference(_ path: String) throws(SendFailure) {
+    savePasteboardIfNeeded()
+    let url = URL(fileURLWithPath: path)
+    var isDirectory: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+      !isDirectory.boolValue
+    else {
+      throw SendFailure(.attachmentStagingFailed, detail: "the staged attachment is not a file")
+    }
+    pasteboard.clearContents()
+    guard pasteboard.writeObjects([url as NSURL]) else {
+      throw SendFailure(.engineUnavailable, detail: "the pasteboard refused the file reference")
+    }
+  }
+
+  /// How many windows the target process currently owns. Used to prove that an
+  /// open panel or a confirmation sheet actually appeared before acting on it.
+  func targetWindowCount() -> Int {
+    let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
+    guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]]
+    else { return 0 }
+    return windows.filter { window in
+      window[kCGWindowOwnerPID as String] as? pid_t == processIdentifier
+    }.count
+  }
+
   func writeClipboard(_ text: String) throws(SendFailure) {
     if savedPasteboardItems == nil {
       savedPasteboardItems =
@@ -92,6 +139,14 @@ final class MacOSInputEffector: InputEffector {
     guard pasteboard.setString(text, forType: .string) else {
       throw SendFailure(.engineUnavailable, detail: "the pasteboard refused the payload")
     }
+  }
+
+  /// Snapshots the user's pasteboard once per run, so every exit path can put
+  /// it back exactly as it was.
+  private func savePasteboardIfNeeded() {
+    guard savedPasteboardItems == nil else { return }
+    savedPasteboardItems =
+      pasteboard.pasteboardItems?.compactMap { $0.string(forType: .string) } ?? []
   }
 
   /// Puts back whatever the user had copied. The skill calls this on every
@@ -105,7 +160,15 @@ final class MacOSInputEffector: InputEffector {
     savedPasteboardItems = nil
   }
 
-  /// True when real hardware input happened within the idle threshold.
+  /// True when the user is actually working *in the target client*.
+  ///
+  /// Synthesized events are posted from a private source directly to one
+  /// process, so they never appear in the HID system state this reads: the
+  /// check sees the human, not the helper. That is measured, not assumed —
+  /// `collision-probe` reports `synthesizedEventsCountAsHumanInput: false`.
+  ///
+  /// Superseded note: true when real hardware input happened within the idle
+  /// threshold.
   /// Synthesized events are posted from a private event source and to a
   /// specific process, so they never appear in the HID system state this
   /// reads — the check sees the human, not the helper.
@@ -113,10 +176,13 @@ final class MacOSInputEffector: InputEffector {
     let types: [CGEventType] = [
       .keyDown, .flagsChanged, .leftMouseDown, .rightMouseDown, .scrollWheel,
     ]
-    return types.contains { type in
-      CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: type)
-        < humanIdleThresholdSeconds
-    }
+    return HumanCollisionPolicy.mustYield(
+      targetIsFrontmost: frontmostProcessIdentifier() == processIdentifier,
+      idleSecondsByEventType: types.map { type in
+        CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: type)
+      },
+      thresholdSeconds: humanIdleThresholdSeconds
+    )
   }
 
   func settle(milliseconds: UInt64) {

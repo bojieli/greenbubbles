@@ -32,7 +32,10 @@ struct CrossLanguageVectorTests {
 
     let calibrationProfile: Signed<CalibrationProfileBody>
     let compatibilityMatrix: Signed<CompatibilityMatrixBody>
+    let failureCodes: [String]
     let actionCapability: ActionCapabilityEnvelope
+    let attachmentCapability: ActionCapabilityEnvelope
+    let helperSendOutcome: HelperSendOutcome
     let normalizedText: [NormalizationCase]
     let developmentSigning: DevelopmentSigning
   }
@@ -69,6 +72,36 @@ struct CrossLanguageVectorTests {
     let capability = try loadVectors().actionCapability
     #expect(capability.computedBindingSHA256 == capability.bindingSHA256)
     try capability.validate(nowUnixNanoseconds: capability.issuedAtUnixNanoseconds + 1)
+  }
+
+  @Test("the attachment capability binding matches the shared fixture")
+  func attachmentCapabilityBinding() throws {
+    let capability = try loadVectors().attachmentCapability
+    #expect(capability.computedBindingSHA256 == capability.bindingSHA256)
+    #expect(capability.capability == .imageSend)
+    #expect(capability.body.isEmpty)
+    let attachment = try #require(capability.attachment)
+    #expect(attachment.displayFileName == "photo.png")
+    #expect(attachment.uniformTypeIdentifier == "public.png")
+    try capability.validate(nowUnixNanoseconds: capability.issuedAtUnixNanoseconds + 1)
+    // The image capability records that the recipient gets a derivative.
+    #expect(!capability.capability.preservesBytes)
+  }
+
+  @Test("the helper outcome envelope matches the shared fixture")
+  func helperOutcomeEnvelope() throws {
+    // Both sides decode strictly, so this fails the moment one language gains
+    // an evidence field the other lacks. That drift shipped once: Swift emitted
+    // attachmentRegionChanged, Rust did not know it, and the control plane
+    // rejected every outcome the helper produced.
+    let vectors = try loadVectors()
+    let outcome = vectors.helperSendOutcome
+    #expect(outcome.attempted)
+    #expect(outcome.evidence.composeCleared)
+    #expect(outcome.evidence.newestOutgoingMatched)
+    #expect(!outcome.evidence.attachmentRegionChanged)
+    #expect(outcome.stageReached == .sendVerify)
+    #expect(outcome.capabilityID == vectors.actionCapability.capabilityID)
   }
 
   @Test("the text normalizer matches the shared fixture")
@@ -252,6 +285,25 @@ struct CrossLanguageVectorTests {
         trustRoot: trustRoot,
         nowUnixSeconds: profile.body.expiresAtUnixSeconds
       )
+    }
+  }
+
+  @Test("the failure taxonomy is identical in both languages")
+  func failureTaxonomyMatches() throws {
+    // The helper decodes codes the control plane emits and vice versa. A code
+    // present on one side only would surface as a decode failure during a real
+    // send, which is exactly when it must not happen.
+    let vectors = try loadVectors()
+    let rust = Set(vectors.failureCodes)
+    let swift = Set(SendFailureCode.allCases.map(\.rawValue))
+    #expect(
+      rust == swift,
+      "only in Rust: \(rust.subtracting(swift).sorted()); only in Swift: \(swift.subtracting(rust).sorted())"
+    )
+    // Each code must name exactly one operator action, so a failure is always
+    // actionable rather than merely reported.
+    for code in SendFailureCode.allCases {
+      #expect(!code.operatorAction.isEmpty)
     }
   }
 }

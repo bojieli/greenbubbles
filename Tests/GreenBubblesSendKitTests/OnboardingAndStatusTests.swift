@@ -120,6 +120,8 @@ struct OnboardingAndStatusTests {
         idempotencyKey: String(repeating: "5", count: 64),
         accountID: "account",
         conversationID: "filehelper",
+        capability: .textSend,
+        addressingMode: .search,
         searchKey: "File Transfer",
         expectedTitle: "File Transfer",
         body: body,
@@ -128,6 +130,7 @@ struct OnboardingAndStatusTests {
         clientBuildProfileID: "wechat-macos-4.1.13-269579",
         calibrationProfileID: "profile",
         calibrationProfileSHA256: String(repeating: "6", count: 64),
+        attachment: nil,
         rolloutStage: stage,
         permitSend: permitSend,
         issuedAtUnixNanoseconds: 1_000,
@@ -145,5 +148,64 @@ struct OnboardingAndStatusTests {
       try capability.validate(nowUnixNanoseconds: 2_000)
     }
     #expect(refusal?.code == .capabilityMismatch)
+  }
+}
+
+/// The human-collision policy decides when an in-flight skill may touch the
+/// client at all. Getting it wrong in the lax direction types over a person
+/// mid-sentence, which is exactly what a live run did before this was
+/// tightened, so the tests pin both directions.
+struct HumanCollisionPolicyTests {
+  @Test("recent input anywhere blocks the skill, even when the target is not frontmost")
+  func recentInputAnywhereBlocks() {
+    // The lesson from the incident: a background click moves keyboard focus
+    // inside the target, so input elsewhere is not proof of safety.
+    #expect(
+      HumanCollisionPolicy.mustYield(
+        targetIsFrontmost: false,
+        idleSecondsByEventType: [0.4, 30, 30]
+      ))
+  }
+
+  @Test("the machine must be idle for the full window before the skill acts")
+  func idleWindowIsRequired() {
+    #expect(
+      HumanCollisionPolicy.mustYield(
+        targetIsFrontmost: false,
+        idleSecondsByEventType: [4.9]
+      ))
+    #expect(
+      !HumanCollisionPolicy.mustYield(
+        targetIsFrontmost: false,
+        idleSecondsByEventType: [5.1]
+      ))
+  }
+
+  @Test("a frontmost target raises the bar rather than lowering it")
+  func frontmostOnlyRaisesTheBar() {
+    // Idle long enough for a quiet machine, but not for one the person is
+    // looking at right now.
+    #expect(
+      HumanCollisionPolicy.mustYield(
+        targetIsFrontmost: true,
+        idleSecondsByEventType: [8]
+      ))
+    #expect(
+      !HumanCollisionPolicy.mustYield(
+        targetIsFrontmost: true,
+        idleSecondsByEventType: [16]
+      ))
+    // Frontmost can never make an otherwise-blocked run permissible.
+    for idle in [0.1, 1.0, 4.9] {
+      #expect(
+        HumanCollisionPolicy.mustYield(targetIsFrontmost: true, idleSecondsByEventType: [idle]))
+      #expect(
+        HumanCollisionPolicy.mustYield(targetIsFrontmost: false, idleSecondsByEventType: [idle]))
+    }
+  }
+
+  @Test("no sampled events is never a collision")
+  func noSamplesIsNotACollision() {
+    #expect(!HumanCollisionPolicy.mustYield(targetIsFrontmost: true, idleSecondsByEventType: []))
   }
 }

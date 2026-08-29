@@ -218,6 +218,49 @@ must contain the self-send conversation and at most two entries in total. A
 wider allow list than the stage permits is a configuration error, not something
 to silently intersect.
 
+The allow list authorizes a **conversation identifier and the recipient title
+that identifier presents on screen**, as `recipientTitles`:
+
+```json
+"allowList": {
+  "accountIds": ["…"],
+  "conversationIds": ["filehelper"],
+  "recipientTitles": { "filehelper": "File Transfer" },
+  "capabilities": ["textSend"]
+}
+```
+
+Both halves are load-bearing, because the opaque identifier is not what routes a
+message. The send path proves a recipient by matching the human-readable title
+in GATE 1, so a draft that kept an allow-listed identifier while carrying a
+different title would direct the send at whatever conversation that title
+matched, while the outbox and audit recorded the allow-listed one. Policy
+therefore refuses any draft whose title is not the authorized one for its
+conversation (`recipientTitleNotAllowed`), before a single keystroke is
+delivered. A conversation with no authorized title configured cannot be sent to
+at all: an allow list that does not cover its conversations exactly, or that
+maps one to a blank title, is rejected as `configurationInvalid`.
+
+**Known limitation — a title can collide.** Titles are display names, and a
+remote party controls their own. GATE 1 proves the open conversation is *titled*
+what was authorized; it cannot prove it is the conversation whose identifier was
+authorized. A contact who renames themselves to an allow-listed title, and who
+happens to be the open conversation when a send runs, would pass the recipient
+gate. Two properties bound this. Title comparison is exact after whitespace
+folding, never a prefix or substring, so a lookalike must be an exact
+impersonation rather than a near miss. And reconciliation queries only the
+approved `conversationId`, so a message delivered elsewhere is never observed
+there: the entry reaches `observedFailed` at grace expiry rather than being
+confirmed. Misdelivery is therefore detected and never falsely reported as
+sent — but it is not prevented, and preventing it needs an identity signal the
+remote party does not control. Keep the allow list to conversations whose titles
+you control, and treat an `observedFailed` on a send you believed succeeded as a
+recipient question, not a transport one.
+
+A draft carrying a `replyTarget` is refused as `draftInvalid`. Threading is not
+implemented, so such a draft would post as a standalone message: the right body
+to the right recipient, but not the action that was approved.
+
 ## 9. Operator runbook
 
 ```sh
@@ -327,6 +370,34 @@ allow list and denies, which is the fail-closed answer.
 `SEND_ATTACHMENTS_PLAN.md` specifies how the capability would be added, what it
 costs in privilege, and which questions a read-only spike must answer first.
 `GATE_READINESS.md` P4-FILE keeps it a separate gate.
+
+## 11b. Addressing: the conversation already open
+
+The adapter reaches its recipient by **not navigating**. `currentConversation`
+addressing verifies that the conversation the client already has open *is* the
+approved recipient, and refuses otherwise. It is the default, and it is the
+safest mode available: the skill performs **no input at all before GATE 1**, so
+a wrong conversation produces a read-only abort that cannot disturb anything the
+person was doing.
+
+Two preconditions make it non-destructive, both checked before anything is
+clicked or typed:
+
+* GATE 1 must read the approved title out of the live window.
+* The compose box must be **empty**. The skill refuses rather than overwriting
+  an unsent draft, and because it never has to clear anything, it never sends a
+  select-all or a delete at all.
+
+Search-based addressing (`SendAddressingMode::Search`) is retained but is not
+usable on this build: the search field does not take focus from a background
+click, and the client does not run its search while its window is inactive.
+GATE 0 catches the first of those non-destructively.
+
+Validated live on 2026-08-29 against File Transfer, autonomously, for all three
+payload kinds — text, image, and file — each passing GATE 1 and GATE 2 and
+stopping before Return. `SEND_ATTACHMENTS_PLAN.md` §17 records the measurements,
+including the malformed-click bug that made an earlier session believe
+background sending was impossible.
 
 ## 12. What is still gated
 

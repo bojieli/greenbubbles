@@ -19,6 +19,9 @@ final class MacOSScreenPerception: ScreenPerception {
   private let captureTimeout: TimeInterval
   private let recognitionLanguages: [String]
   private var captures: UInt32 = 0
+  /// The most recent full-window capture, kept only so the read-only
+  /// measurement harness can write it out. Never transmitted anywhere.
+  private(set) var lastCapturedImage: CGImage?
 
   init(
     processIdentifier: pid_t,
@@ -44,9 +47,27 @@ final class MacOSScreenPerception: ScreenPerception {
     return frame
   }
 
+  /// Digests one region's pixels. Used where recognition has nothing to read:
+  /// an image staged into the compose area is a bare thumbnail.
+  func regionFingerprint(in rect: CGRect) throws(SendFailure) -> String {
+    let frame = try windowFrame()
+    let image = try captureWindow()
+    captures &+= 1
+    guard let cropped = crop(image, to: rect, window: frame),
+      let data = cropped.dataProvider?.data as Data?
+    else {
+      throw SendFailure(
+        .calibrationDrift,
+        detail: "the profile's region falls outside the captured window"
+      )
+    }
+    return SendDigest.sha256Hex(data)
+  }
+
   func recognizeText(in rect: CGRect) throws(SendFailure) -> RecognizedRegionText {
     let frame = try windowFrame()
     let image = try captureWindow()
+    lastCapturedImage = image
     captures &+= 1
     guard let cropped = crop(image, to: rect, window: frame) else {
       throw SendFailure(
@@ -64,22 +85,33 @@ final class MacOSScreenPerception: ScreenPerception {
     let semaphore = DispatchSemaphore(value: 0)
     let box = CaptureResultBox()
     let processIdentifier = processIdentifier
+    guard let target = WeChatTarget.locate(bundleIdentifier: bundleIdentifier),
+      let targetWindowNumber = target.windowNumber
+    else {
+      throw SendFailure(.windowNotFound, detail: "the client's main window was not found")
+    }
     Task { @Sendable in
       do {
         let content = try await SCShareableContent.excludingDesktopWindows(
           true,
           onScreenWindowsOnly: false
         )
+        // The captured window must be *the same window* the frame describes.
+        // Selecting independently was measured producing a frame from the chat
+        // window and an image from a blank shell, after which every region the
+        // gates read was the wrong pixels. Matching on the window number the
+        // locator chose makes that impossible.
         let candidates = content.windows.filter { window in
           window.owningApplication?.processID == processIdentifier
             && window.frame.width > 0
             && window.frame.height > 0
         }
-        guard
-          let window = candidates.max(by: {
+        let window =
+          candidates.first { CGWindowID($0.windowID) == targetWindowNumber }
+          ?? candidates.max(by: {
             $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height
           })
-        else {
+        guard let window else {
           box.store(.failure(SendFailure(.windowNotFound, detail: "no capturable window")))
           semaphore.signal()
           return

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use greenbubbles_restore::{
     acquisition_audit::audit_acquisition_chain,
-    action::ExternalApprovalEvidence,
+    action::{ActionCapability, ExternalApprovalEvidence},
     ai_context::{
         audit_ai_context_with_progress, export_ai_context, load_ai_query_request, query_ai_context,
     },
@@ -24,8 +24,10 @@ use greenbubbles_restore::{
     archive::{create_conversation_policy, read_conversation_page},
     audit::audit_archive_with_progress,
     benchmark::{run_synthetic_benchmark, SyntheticBenchmarkConfig},
-    connector::load_action_draft,
-    connector::{audit_connector_log, ConnectorDestination, ConnectorService},
+    connector::{
+        audit_connector_log, load_action_draft, ConnectorDestination, ConnectorService,
+        DraftAttachment,
+    },
     diagnostic::{profile_archive_payloads_with_progress, profile_archive_schema_with_progress},
     direct_connector::DirectConnectorService,
     follow::{
@@ -47,6 +49,7 @@ use greenbubbles_restore::{
         DEFAULT_PAGE_LIMIT, DEFAULT_SEARCH_LIMIT, MAX_PAGE_LIMIT, MAX_SEARCH_QUERY_BYTES,
     },
     merge::merge_incremental_archive,
+    model::{ArtifactKind, ArtifactRole},
     operator::{restore_snapshot_and_publish_with_progress, OfflineRestorePublishOptions},
     preflight_snapshot_with_progress, prepare_available_catalog_with_progress,
     prepare_catalog_batch_with_progress, prepare_catalog_with_progress,
@@ -87,6 +90,7 @@ use greenbubbles_restore::{
         sign_compatibility_matrix, signing_key_public_hex, CalibrationProfileBody,
         CompatibilityMatrixBody, SendTrustRoot,
     },
+    send_staging::reviewed_uniform_type_identifier,
     snapshot_protector::{SnapshotLocalCredential, SnapshotPassphrase, SnapshotRecoveryWords},
     tools::{
         create_all_conversations_tool_policy_with_cached_moments, create_direct_tool_policy,
@@ -4543,7 +4547,7 @@ fn run_send_command(
             let draft_path = required_path(arguments.next(), "immutable draft")?;
             let approval_path = required_path(arguments.next(), "approval evidence")?;
             let remaining = arguments.collect::<Vec<_>>();
-            validate_command_options(&remaining, &[], &["--no-helper"])?;
+            validate_command_options(&remaining, &["--attachment-file"], &["--no-helper"])?;
             let adapter = SendAdapter::load(&config)?;
             let draft = load_action_draft(&draft_path)?;
             let approval: ExternalApprovalEvidence =
@@ -4560,7 +4564,15 @@ fn run_send_command(
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 let dispatcher = ProcessSendDispatcher::new(&adapter.config().helper)?;
-                let report = adapter.execute(&draft, &approval, &dispatcher, now)?;
+                let attachment_source =
+                    option_string(&remaining, "--attachment-file")?.map(PathBuf::from);
+                let report = adapter.execute(
+                    &draft,
+                    &approval,
+                    &dispatcher,
+                    attachment_source.as_deref(),
+                    now,
+                )?;
                 println!("{}", serde_json::to_string_pretty(&report)?);
             }
         }
@@ -4572,6 +4584,64 @@ fn run_send_command(
             let key = required_option(&remaining, "--idempotency-key")?;
             let report = adapter.recall_window(&key, send_unix_nanoseconds()?)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        "draft-attachment" => {
+            let replica = required_path(arguments.next(), "replica path")?;
+            let policy = required_path(arguments.next(), "connector policy")?;
+            let audit = required_path(arguments.next(), "connector audit log")?;
+            let drafts = required_path(arguments.next(), "draft directory")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            validate_command_options(
+                &remaining,
+                &[
+                    "--conversation",
+                    "--attachment-file",
+                    "--intent",
+                    "--requester",
+                    "--expiry-seconds",
+                ],
+                &["--replica-key-stdin"],
+            )?;
+            if !remaining.iter().any(|value| value == "--replica-key-stdin") {
+                return Err("attachment draft creation requires --replica-key-stdin".into());
+            }
+            let conversation = required_option(&remaining, "--conversation")?;
+            let source = PathBuf::from(required_option(&remaining, "--attachment-file")?);
+            let requester = required_option(&remaining, "--requester")?;
+            let intent = match required_option(&remaining, "--intent")?.as_str() {
+                "image" => ActionCapability::ImageSend,
+                "file" => ActionCapability::FileSend,
+                other => {
+                    return Err(
+                        format!("unsupported --intent {other}; expected image or file").into(),
+                    )
+                }
+            };
+            let expiry = option_u64(&remaining, "--expiry-seconds")?.unwrap_or(3_600);
+            let attachment = describe_local_attachment(&source, intent)?;
+            let key = ReplicaKey::read_stdin()?;
+            let service = ConnectorService::open(&replica, &key, &policy, &audit, &drafts)?;
+            let draft = service.create_owner_attachment_draft(
+                &conversation,
+                attachment,
+                intent,
+                &requester,
+                expiry,
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "draftId": draft.draft_id,
+                    "conversationId": draft.conversation_id,
+                    "humanRecipient": draft.recipient.human_label,
+                    "attachmentIntent": draft.attachment_intent,
+                    "displayFileName": draft.attachments[0].display_file_name,
+                    "byteCount": draft.attachments[0].byte_count,
+                    "sha256": draft.attachments[0].sha256,
+                    "bytesPreservedInTransit": intent.preserves_bytes(),
+                    "expiresAtUnixNanoseconds": draft.expires_at_unix_nanoseconds,
+                }))?
+            );
         }
         "outbox-status" => {
             let config = required_path(arguments.next(), "send configuration")?;
@@ -4654,6 +4724,58 @@ fn send_dispatcher(
     )?)))
 }
 
+/// Describes a local file well enough for a draft to bind it: the reviewed
+/// type, the exact digest, the byte count, and the name that will be shown.
+/// Reading happens here, in the control plane, never in the helper.
+fn describe_local_attachment(
+    source: &Path,
+    intent: ActionCapability,
+) -> Result<DraftAttachment, Box<dyn std::error::Error>> {
+    let display_file_name = source
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or("the attachment path has no usable file name")?
+        .to_string();
+    let uniform_type_identifier = reviewed_uniform_type_identifier(intent, &display_file_name)
+        .map_err(|code| {
+            format!(
+                "{display_file_name} is not in the reviewed attachment set: {}",
+                code.operator_action()
+            )
+        })?;
+    let bytes = read_owner_only_document(source)?;
+    if bytes.is_empty() {
+        return Err("an attachment must not be empty".into());
+    }
+    let kind = if uniform_type_identifier.starts_with("public.p")
+        || uniform_type_identifier.contains("jpeg")
+        || uniform_type_identifier.contains("gif")
+        || uniform_type_identifier.contains("heic")
+        || uniform_type_identifier.contains("webp")
+        || uniform_type_identifier.contains("tiff")
+        || uniform_type_identifier.contains("bmp")
+    {
+        ArtifactKind::Image
+    } else {
+        ArtifactKind::Document
+    };
+    Ok(DraftAttachment {
+        artifact_id: hex::encode(<sha2::Sha256 as sha2::Digest>::digest(
+            display_file_name.as_bytes(),
+        )),
+        kind,
+        role: if kind == ArtifactKind::Image {
+            ArtifactRole::Original
+        } else {
+            ArtifactRole::FilePayload
+        },
+        digest_kind: "sourceSha256".to_string(),
+        sha256: hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&bytes)),
+        byte_count: Some(bytes.len() as u64),
+        display_file_name,
+    })
+}
+
 fn load_send_trust_root(remaining: &[String]) -> Result<SendTrustRoot, Box<dyn std::error::Error>> {
     match option_string(remaining, "--development-trust-root")? {
         Some(path) => Ok(SendTrustRoot::load_development(&PathBuf::from(path))?),
@@ -4716,7 +4838,8 @@ const fn send_command_help() -> &'static str {
         "  greenbubbles-restore send approval-binding <config> <draft-file>\n",
         "  greenbubbles-restore send approve <config> <draft-file> <new-approval-file> --approver <id> [--validity-seconds <60..3600>] --confirm\n",
         "  greenbubbles-restore send precheck <config> <draft-file> <approval-file> [--no-helper]\n",
-        "  greenbubbles-restore send submit <config> <draft-file> <approval-file>\n",
+        "  greenbubbles-restore send submit <config> <draft-file> <approval-file> [--attachment-file <path>]\n",
+        "  greenbubbles-restore send draft-attachment <replica> <policy> <audit-log> <draft-directory> --conversation <id> --attachment-file <path> --intent image|file --requester <id> [--expiry-seconds <n>] --replica-key-stdin\n",
         "  greenbubbles-restore send outbox-status <config>\n",
         "  greenbubbles-restore send recall-window <config> --idempotency-key <hex>\n",
         "  greenbubbles-restore send reconcile <config> <draft-file> --idempotency-key <hex> (--replica <path> --replica-key-stdin [--lookback-seconds <n>] | --observation <file>)\n\n",
@@ -4726,6 +4849,11 @@ const fn send_command_help() -> &'static str {
         "build pair, a missing TCC grant, a recipient whose on-screen title does not\n",
         "match the approved draft, or an unreconciled earlier attempt all keep the\n",
         "send path shut. `observedSent` is created only by replica reconciliation.\n\n",
+        "Attachments are a separate capability with their own stage ladder: both\n",
+        "the text ladder and the attachment ladder must be open, the capability must\n",
+        "be allow-listed, and the calibration profile must carry a measured\n",
+        "attachment section. An image is re-encoded by the client, so the recipient\n",
+        "receives a derivative of the approved file and no record claims otherwise.\n\n",
         "Rollout stages:\n",
         "  dryRun       Run every step including both verification gates, stop before Return\n",
         "  selfSend     Send only to the account's own File Transfer conversation\n",
@@ -4761,9 +4889,16 @@ fn send_config_template() -> Result<String, Box<dyn std::error::Error>> {
         "allowList": {
             "accountIds": ["REPLACE-WITH-THE-REPLICA-ACCOUNT-ID"],
             "conversationIds": ["filehelper"],
+            // The recipient title the send path must see on screen before it
+            // types anything. Authorizing the identifier alone would leave the
+            // actual destination unconstrained.
+            "recipientTitles": {"filehelper": "File Transfer"},
             "capabilities": ["textSend"]
         },
         "selfSendConversationId": "filehelper",
+        "attachmentRolloutStage": "dryRun",
+        "maximumAttachmentAttemptsPerWindow": 1,
+        "stagingRoot": format!("{home}/.greenbubbles/send/staging"),
         "searchKeyOverrides": {},
         "attemptWindowSeconds": 3600,
         "maximumAttemptsPerWindow": 3,
@@ -4810,6 +4945,10 @@ fn send_profile_template() -> Result<String, Box<dyn std::error::Error>> {
             "composeBox": {"xPartsPerMillion": 715000, "yPartsPerMillion": 870000}
         },
         "ocrRegions": {
+            "search": {
+                "xPartsPerMillion": 40000, "yPartsPerMillion": 15000,
+                "widthPartsPerMillion": 200000, "heightPartsPerMillion": 35000
+            },
             "title": {
                 "xPartsPerMillion": 440000, "yPartsPerMillion": 20000,
                 "widthPartsPerMillion": 300000, "heightPartsPerMillion": 50000
