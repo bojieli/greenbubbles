@@ -36,6 +36,19 @@ First public source-and-binary research release.
   `Native/GreenBubbles` so the source layout follows the primary CLI name.
 - Reframed the project around private, local AI context and created a concise
   public-facing entry point.
+- Reorganized and substantially rewrote the public documentation. The README
+  now opens with the measured corpus that motivated the project, shows a real
+  query-envelope shape, carries measured numbers from `docs/MEASUREMENTS.md`,
+  and states what remains unproven.
+- Added `docs/README.md` as a task-oriented index, plus dedicated FAQ, known
+  limitations, comparison, threat-model, roadmap, auditing, replica-operations,
+  and privacy documents.
+- Consolidated the connector contract and consumer example, replica operations,
+  restoration pipeline, audit guides, and measurement evidence into one
+  current document for each subject; archived superseded plans and feasibility
+  records now identify what replaced them.
+- Added a branded application and project icon plus two accessible diagrams
+  showing the disclosure boundary and the read path.
 - Hardened CI and release permissions, pinned external Actions, and added
   fail-closed public-release and secret-hygiene checks.
 - Updated Rust package metadata and versioning for the MIT-licensed release.
@@ -44,6 +57,8 @@ First public source-and-binary research release.
 
 - Replaced deprecated secure UTF-8 validation with zeroizable byte validation
   and added malformed and Unicode regression coverage.
+- Corrected the release workflow's Hardened Runtime assertion to recognize the
+  `CodeDirectory ... flags=...runtime...` form emitted by `codesign`.
 
 ## 0.1.0 - 2026-08-29
 
