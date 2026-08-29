@@ -3,6 +3,34 @@
 GreenBubbles is an experimental, local-first bridge for making a user's own
 WeChat data available to narrowly scoped AI tools on macOS.
 
+## Start here
+
+For normal use, begin with the [GreenBubbles user guide](docs/USER_GUIDE.md).
+It explains how to build and launch the History app, select the correct
+`db_storage` directory, browse live SQLite without restoration, understand the
+reported database size, create a 24-word recoverable snapshot, reopen it with
+Keychain or a hidden credential, and run a recovery drill.
+
+The shortest GUI path is:
+
+```sh
+cargo build --release \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml
+swift build --product greenbubbles-history
+swift run greenbubbles-history
+```
+
+In the app, choose **Browse Live or Snapshot…** for read-only paging, or
+**Create Recoverable Snapshot…** for a durable SQLCipher copy independent of
+the WeChat key. Select
+`Native/GreenBubblesRestore/target/release/greenbubbles-restore` when prompted
+for the local CLI.
+
+Use the [recoverable snapshot guide](docs/RECOVERABLE_SNAPSHOTS.md) for advanced
+CLI creation, protector rotation, rekeying, and retention. Use the
+[architecture document](docs/LIVE_QUERY_ARCHITECTURE.md) for design rationale,
+security boundaries, measurements, and acceptance evidence.
+
 The project currently implements passive, read-only discovery, consistent
 database snapshots, and an offline restoration engine. That pipeline does
 **not** inject code into WeChat, call private network APIs, or send messages.
@@ -21,6 +49,18 @@ debugger-based acquisition on 2026-08-27. See
 
 The current passive-read slice provides:
 
+- bounded conversation and message pages directly from live encrypted
+  WeChat SQLite/WCDB through typed, keyset-paginated JSON commands, without
+  first producing JSONL, a replica, a staging database, or media derivatives;
+- serves those same ordinary reads through a source-bound AI connector policy
+  and append-only audit, either as a one-shot JSON CLI request or an owner-only
+  Unix socket, while retaining replica-only enrichment on the legacy backend;
+- inspects exact-message image, voice, video, and document availability lazily
+  and materializes only one explicitly selected candidate into a new private
+  output file;
+- creates optional logical SQLite snapshots under a random key wrapped by
+  portable 24-word recovery and an optional local convenience credential, then
+  proves recovery without the WeChat key before atomic publication;
 - discovers known WeChat application and sandbox locations on macOS;
 - inventories likely databases, SQLite sidecars, indexes, and media by metadata;
 - redacts filesystem paths by default;
@@ -51,9 +91,11 @@ The current passive-read slice provides:
 - produces policy-scoped AI context as checkpoint-consistent static JSONL and
   one-shot JSON queries, with normalized contacts, chat metadata, per-record
   source-database freshness, explicit coverage, and a repository agent skill;
-- includes a native SwiftUI history browser with private bundle verification,
-  large-corpus SQLite/FTS indexing, coverage-aware chat/contact/search views,
-  relationship navigation, and policy-reverified Quick Look media previews;
+- includes a native SwiftUI history browser whose primary path queries live or
+  independently encrypted snapshot SQLite databases in bounded pages, while
+  retaining private bundle verification, large-corpus SQLite/FTS indexing,
+  relationship navigation, and policy-reverified Quick Look media previews as
+  the explicit exported-history workflow;
 - inventories the pinned signed app bundle's URL, extension, XPC, app-group,
   and internal-service metadata without live-process interaction, while keeping
   authenticated reads explicitly unavailable.
@@ -74,6 +116,10 @@ account's database root automatically. See
 [docs/PASSPHRASE_ACQUISITION.md](docs/PASSPHRASE_ACQUISITION.md).
 
 See [PLAN.md](PLAN.md) for the phased roadmap and safety gates.
+The accepted direct-query and independently recoverable snapshot design is in
+[docs/LIVE_QUERY_ARCHITECTURE.md](docs/LIVE_QUERY_ARCHITECTURE.md), with an
+operator guide in
+[docs/RECOVERABLE_SNAPSHOTS.md](docs/RECOVERABLE_SNAPSHOTS.md).
 The implemented downstream protocol and validation evidence are in
 [docs/SOURCE_CONNECTOR_CONTRACT.md](docs/SOURCE_CONNECTOR_CONTRACT.md),
 [docs/DOWNSTREAM_CONSUMER.md](docs/DOWNSTREAM_CONSUMER.md), and
@@ -147,6 +193,278 @@ without `--overwrite`); `verify` re-checks a stored
 passphrase from standard input against every database's page-1 HMAC. The
 passphrase never appears on the command line, in JSON reports, or in logs. See
 [docs/PASSPHRASE_ACQUISITION.md](docs/PASSPHRASE_ACQUISITION.md).
+
+## Direct bounded queries
+
+Ordinary browsing no longer needs a full restoration. The native CLI opens the
+selected SQLite/WCDB files read-only, enforces `PRAGMA query_only`, selects one
+bounded page, closes the statements, and returns a versioned JSON envelope:
+
+```sh
+cat <owner-only-wechat-key-file> | cargo run \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  source status <WeChat-db_storage-root> --passphrase-stdin
+
+cat <owner-only-wechat-key-file> | cargo run \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  conversations list <WeChat-db_storage-root> \
+  --passphrase-stdin --limit 100
+
+cat <owner-only-wechat-key-file> | cargo run \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  messages list <WeChat-db_storage-root> \
+  --passphrase-stdin --conversation <wxid-or-chatroom-id> --limit 100
+
+cat <owner-only-wechat-key-file> | cargo run \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  message get <WeChat-db_storage-root> \
+  --passphrase-stdin --conversation <wxid-or-chatroom-id> \
+  --message <opaque-id-from-messages-list>
+```
+
+Use the opaque `page.nextCursor` returned by one response as `--cursor` on the
+next request. Limits are mandatory in effect: the default is 100 and the hard
+maximum is 500. There is deliberately no `--all`. Message ordering includes
+shard and row identity so equal timestamps or server IDs are not skipped.
+`message get` binds an opaque list or search identity to its source and
+conversation, then performs bounded equality lookups against the read-only
+message shards. A native FTS hit is hydrated from exactly one matching source
+row; fallback search returns the normal source-message identity. An absent or
+ambiguous mapping fails explicitly.
+
+Search prefers WeChat's compatible native FTS database. If it is absent or
+incompatible, GreenBubbles writes no replacement index during an ordinary
+query. Instead, one response decodes at most 500 source messages and 16
+conversations, reports `fallbackSearchSourceWindowBounded`, and returns an
+opaque continuation even when that window contains no match. Callers must
+follow `page.nextCursor` until `hasMore` becomes false for complete fallback
+coverage.
+
+`source status` restores nothing. It authenticates the core databases, then
+reports each relative `.db` size and aggregate database, WAL, SHM, rollback
+journal, and total SQLite storage bytes. It returns no absolute paths or
+content. This distinguishes the compact source corpus from JSON field/base64
+expansion, staging databases, indexes, and eager media derivatives.
+
+`--decrypted` explicitly permits the same commands against plaintext fixture or
+export databases. For a GreenBubbles recoverable snapshot, prefer
+the app's macOS Keychain unlock or `--snapshot-local-credential <file>` for
+ordinary use, `--snapshot-passphrase-stdin` for the optional Argon2id protector,
+or `--snapshot-recovery-kit <file>` for a portable recovery drill. Legacy
+format-1 snapshots still accept `--snapshot-key-stdin`. These access modes are
+mutually exclusive. See command `--help` and
+[docs/LIVE_QUERY_ARCHITECTURE.md](docs/LIVE_QUERY_ARCHITECTURE.md) for response,
+consistency, cursor, and WAL semantics.
+
+### Policy-scoped direct connector
+
+AI callers that need conversation, field, time-window, local/remote-destination,
+result, summary-byte, and audit enforcement no longer need a restored archive
+or replica for ordinary reads. First create a policy in the live-source
+identifier namespace:
+
+```sh
+cat <owner-only-wechat-key-file> | greenbubbles-restore \
+  connector-policy-direct <WeChat-db_storage-root> \
+  <new-owner-only-policy.json> <wxid-or-chatroom-id>... \
+  --capabilities list,read,search \
+  --fields sender,created-at,type,content \
+  --passphrase-stdin --max-results 100 --max-summary-bytes 4096
+```
+
+The command authenticates the source and verifies every selected conversation
+before atomically creating the owner-only policy. The policy is bound to the
+opaque source identity; an archive/replica policy uses a different identifier
+namespace and is deliberately not accepted.
+
+Put one `greenbubbles.connector.v1` request in a mode-`0600` file, then run a
+one-shot request that returns JSON and exits:
+
+```sh
+cat <owner-only-wechat-key-file> | greenbubbles-restore \
+  connector-query-direct <WeChat-db_storage-root> \
+  <owner-only-policy.json> <audit.ndjson> <request.json> \
+  --passphrase-stdin
+```
+
+`listConversations`, `getMessages`, `searchMessages`, and `getMessage` use the
+same bounded read-only adapter as the resource CLI. Conversation and message
+pages use source/policy/filter-bound keyset cursors; policy time limits are
+pushed into SQLite/FTS predicates where one conversation is selected. The
+audit records identities, outcomes, counts, and released byte counts, never
+message bodies or search text. `connector-serve-direct` exposes the identical
+handler over a private Unix socket for repeated requests.
+
+Direct ordinary reads now include bounded contact display names for
+conversations and authorized message senders. Full normalized membership and
+relationship enrichment, change feeds, cached Moments, verified replica
+artifact paths, and non-executing draft workflows remain explicitly
+replica-only and fail closed on the direct connector. Use the replica connector
+only when one of those richer surfaces is actually required.
+
+## Lazy exact-message attachments
+
+Message browsing does not eagerly copy or decode media. The preferred attachment
+form consumes an opaque identity returned by `messages list` or `messages
+search`, hydrates only that exact row, and derives its media locator from decoded
+content. The process argument list therefore contains neither a document title
+nor a server ID. Choose one kind and one normal database access mode:
+
+```sh
+cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  attachment inspect <WeChat-account-root> \
+  --conversation <wxid-or-chatroom-id> \
+  --message <opaque-message-id> --kind image \
+  --passphrase-stdin
+```
+
+Inspection writes nothing and returns only an opaque preferred attachment ID,
+candidate count, source byte count, and detected format—never the source path.
+Materialize exactly that candidate explicitly:
+
+```sh
+cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  attachment materialize <WeChat-account-root> \
+  --conversation <wxid-or-chatroom-id> \
+  --message <opaque-message-id> --kind image \
+  --attachment <opaque-id-from-inspect> --output <new-private-path> \
+  --passphrase-stdin
+```
+
+Use `--kind voice`, `video`, or `document` for the other supported types. Images
+use their decoded MD5 and support legacy XOR plus V1/V2 WeChat decoding. Voice
+uses bounded exact-ID reads from read-only `VoiceInfo` shards and attempts SILK
+to Ogg Opus conversion, retaining raw SILK if conversion fails. Video and
+document lookup prefers bounded read-only `hardlink.db` metadata, then a
+fixed-depth scan confined to the exact conversation; document fallback uses the
+decoded title basename without exposing that title as an argument. Video and
+documents stream to output rather than loading the whole file into memory.
+
+Candidate identities bind the source, conversation, exact message, kind, file
+or row identity, and current version/content evidence. Materialization
+re-inventories and revalidates that identity, atomically creates exactly one
+owner-only output outside the protected source, refuses overwrite, and leaves no
+partial output on failure. JSON reports format, byte count, and SHA-256 but
+releases neither source nor output paths. Fixed bounds are 128 MiB for an image,
+32 MiB per voice payload and 128 MiB cumulative voice candidates/output, 2 GiB
+for video, 512 MiB for a document, 256 candidates, 4,096 directories, and
+100,000 filesystem entries.
+
+For compatibility, image-only lookup can still use `--conversation <id> --md5
+<32-hex-md5>` with no database access option. Message-bound lookup requires
+exactly one of `--passphrase-stdin`, `--snapshot-recovery-kit`,
+`--snapshot-local-credential`, `--snapshot-passphrase-stdin`,
+`--snapshot-key-stdin`, or `--decrypted`.
+Database-only snapshots can resolve database-resident voice payloads; they do
+not imply that external account media was captured.
+
+## Independently recoverable snapshots
+
+The preserved Swift acquisition snapshot described below is a consistent copy
+of WeChat's encrypted files and therefore still needs the WeChat key. It is
+useful as capture evidence, but it is not the new durable recovery format.
+
+`greenbubbles-restore snapshot create` performs a logical SQLite backup of each
+database and encrypts the destination under a random 256-bit data key distinct
+from WeChat. A standard 24-word BIP-39 kit wraps that data key; optional
+Argon2id passphrase and owner-only local credentials wrap the same key for
+convenient reopening. The History app can keep the random local credential in
+macOS Keychain as a `WhenUnlockedThisDeviceOnly` item. It
+creates no plaintext database staging file. Each database is closed without a
+required WAL, reopened with only the recovered key, checked for a non-plaintext
+header and SQLite integrity, hashed, and published as part of a new immutable
+directory only after verification:
+
+```sh
+greenbubbles-restore snapshot recovery-kit create \
+  <new-owner-only-portable-recovery-file>
+
+greenbubbles-restore snapshot local-credential create \
+  <new-owner-only-hidden-local-file>
+
+{ cat <owner-only-wechat-key-file>; \
+  cat <owner-only-snapshot-passphrase-file>; } | \
+  cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  snapshot create <WeChat-db_storage-root> <new-snapshot-directory> \
+  --source-passphrase-stdin \
+  --snapshot-recovery-kit <owner-only-portable-recovery-file> \
+  --snapshot-local-credential <owner-only-hidden-local-file> \
+  --snapshot-passphrase-stdin
+
+cat <owner-only-wechat-key-file> | \
+  cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  snapshot create-capture <preserved-acquisition-snapshot> \
+  <new-snapshot-directory> \
+  --source-passphrase-stdin \
+  --snapshot-recovery-kit <owner-only-portable-recovery-file> \
+  --snapshot-local-credential <owner-only-hidden-local-file>
+
+greenbubbles-restore snapshot verify <snapshot-directory> \
+  --snapshot-local-credential <owner-only-hidden-local-file>
+
+greenbubbles-restore snapshot verify <snapshot-directory> \
+  --snapshot-recovery-kit <owner-only-portable-recovery-file>
+
+cat <owner-only-snapshot-passphrase-file> | \
+  greenbubbles-restore snapshot verify <snapshot-directory> \
+  --snapshot-passphrase-stdin
+
+cat <new-owner-only-snapshot-passphrase-file> | \
+  greenbubbles-restore snapshot rewrap \
+  <snapshot-directory> <new-snapshot-directory> \
+  --old-snapshot-local-credential <owner-only-hidden-local-file> \
+  --new-snapshot-recovery-kit <new-owner-only-portable-recovery-file> \
+  --new-snapshot-local-credential <new-owner-only-hidden-local-file> \
+  --new-snapshot-passphrase-stdin
+
+{ cat <owner-only-recovery-key-file>; cat <new-recovery-key-file>; } | \
+  cargo run --manifest-path Native/GreenBubblesRestore/Cargo.toml \
+  --bin greenbubbles-restore -- \
+  snapshot rekey <snapshot-directory> <new-snapshot-directory> \
+  --old-snapshot-key-stdin --new-snapshot-key-stdin
+```
+
+When both source-key and snapshot-passphrase flags are used for creation, stdin
+line 1 is the WeChat key and line 2 is the snapshot passphrase. The portable
+protector is a checksummed 24-word English BIP-39 mnemonic. The
+words are not the SQLCipher key; HKDF-SHA-256 and XChaCha20-Poly1305 use them to
+unwrap the independently random database key. Keep an offline copy and run
+`snapshot verify` with the recovery kit as a drill. A Keychain entry, hidden
+local file, or memorized passphrase is convenience, not the only backup; none
+contains the recovery words or plaintext database key.
+Full operational and threat-model details are in
+[docs/RECOVERABLE_SNAPSHOTS.md](docs/RECOVERABLE_SNAPSHOTS.md).
+Format-2 protector rotation uses `snapshot rewrap`: it preserves the database
+key, copies the existing encrypted database bytes unchanged, writes a new
+authenticated protector manifest, verifies both new unlock paths, and leaves
+the source untouched. The older `snapshot rekey` command remains for format-1
+raw-key database-key rotation; it streams logical pages into a separate
+new-key SQLCipher generation and likewise never rewrites the only generation
+in place.
+
+Verified retention uses `snapshot retention quarantine`. It accepts only a
+whole explicitly selected generation, requires a newer linked replacement to
+pass a portable 24-word recovery drill, performs an atomic same-filesystem move,
+fsyncs and re-verifies the quarantined generation, and rolls back on failure.
+`snapshot retention restore` reverses that recoverable move. GreenBubbles does
+not automatically purge snapshots or recursively delete them by age.
+
+For a controlled conversion window, prefer `snapshot create-capture` after the
+Swift snapshotter has captured each database with its WAL/SHM through APFS
+copy-on-write clone (or verified read-only byte-copy fallback). The converter
+hash-verifies the complete capture before use and again before publication,
+rejects incremental fragments, and reads captured SQLCipher directly into the
+separately keyed SQLCipher generation. This avoids holding a live read open
+while every durable destination is produced. It does not claim that WeChat's
+many independent databases shared one globally atomic commit instant.
 
 `inventory` reports opaque path identifiers by default. For local debugging,
 `--include-paths` may be used explicitly. Do not paste that output into issues
@@ -679,13 +997,46 @@ request when the damaged data leaves authorization unprovable.
 
 ### AI-friendly CLI and static context
 
-The preferred AI integration is the one-shot CLI plus the repository skill.
-`ai-query` accepts one owner-only JSON request and returns a stable response
-containing both the policy-minimized result and the replica's current freshness,
-database coverage, and limitation codes. It reuses the connector authorization
-and body-free audit boundary, but opens the encrypted replica directly for the
-duration of the command; no daemon is required. Draft, approval, send,
-synchronization, and other mutating operations are rejected by this interface.
+The preferred ordinary-read AI integration is `connector-query-direct` plus the
+repository skill. It accepts one owner-only `greenbubbles.connector.v1` request,
+queries live or recoverable-snapshot SQLite directly, appends a body-free audit
+event, returns one bounded JSON response, and exits. No daemon, JSONL conversion,
+archive, staging database, or serving replica is required.
+
+Use the older replica-backed `ai-query` only when the answer requires restored
+coverage evidence, normalized contact/conversation enrichment, cached Moments,
+verified artifact paths, change feeds, or another explicitly replica-only
+surface. It remains a one-shot policy-minimized query and rejects mutating
+operations.
+
+Direct connector request:
+
+```json
+{
+  "apiVersion": "greenbubbles.connector.v1",
+  "requestId": "local-agent-search-1",
+  "requesterId": "local-agent",
+  "destination": "local",
+  "operation": {
+    "kind": "searchMessages",
+    "query": "requested document",
+    "conversationId": "wxid-or-chatroom-id",
+    "cursor": null,
+    "limit": 20
+  }
+}
+```
+
+```sh
+chmod 600 /private/greenbubbles-tools/direct-request.json
+cat <owner-only-wechat-key-file> | greenbubbles-restore \
+  connector-query-direct <WeChat-db_storage-root> \
+  /private/greenbubbles-tools/direct-policy.json \
+  /private/greenbubbles-tools/direct-audit.ndjson \
+  /private/greenbubbles-tools/direct-request.json --passphrase-stdin
+```
+
+Replica-backed `ai-query` request:
 
 ```json
 {
@@ -813,9 +1164,43 @@ swift run greenbubbles-history
 swift run greenbubbles-history --bundle /absolute/path/to/ai-context-bundle
 ```
 
-Open the private five-file directory created by `ai-export` from the launch
-option, the owner-only file panel, a drag/drop operation, or a macOS open event.
-The browser
+The primary welcome action, **Browse Live or Snapshot**, opens the bounded
+SQLite client. Choose the `greenbubbles-restore` executable, a live WeChat
+database root or recoverable snapshot directory, and one of these explicit
+access modes:
+
+- live encrypted, using the WeChat database key;
+- snapshot Keychain unlock, using a device-only convenience credential;
+- snapshot hidden-file unlock, using the owner-only convenience credential;
+- snapshot passphrase, derived with Argon2id and retained only for the session;
+- snapshot recovery words, using the portable owner-only recovery-kit file;
+- legacy snapshot raw key compatibility; or
+- plaintext SQLite, visibly labeled as an explicit exceptional mode.
+
+Live keys, legacy raw keys, and passphrases are sent to the local CLI only
+through standard input. For either protector-file mode, Swift retains only the
+selected path; it never loads the words, local wrapping secret, or unwrapped
+database key. Keychain mode materializes its random credential into a new
+owner-only temporary file only for the open session and never persists that
+path. Search text is also sent only through standard input. The UI first runs content-free `source status`,
+shows measured database/WAL/SHM/journal sizes, then loads conversations,
+messages, and search results in pages of at most 100. Search uses native FTS
+when compatible or resumable bounded source windows otherwise. It has no
+unrestricted load-all action and creates no archive, replica, staging database,
+search index, or media derivative for ordinary browsing.
+
+**Create Recoverable Snapshot** creates the 24-word owner-only recovery kit
+before conversion, displays the words once, and requires four randomly selected
+word confirmations. It then converts directly into independently encrypted
+SQLCipher databases with no plaintext staging. macOS Keychain is the default
+convenience unlock; an owner-only hidden file and no-local-copy mode are also
+available. The 24-word path remains mandatory in every case.
+
+**Open Exported History Bundle** remains available for workflows that require
+an audited policy projection, normalized contacts and relationships, richer
+enrichment, or an offline handoff. Open the private five-file directory created
+by `ai-export` from the launch option, the owner-only file panel, a drag/drop
+operation, or a macOS open event. The exported-history path
 independently checks exact inventory, owner-only permissions, schemas, hashes,
 counts, identities, references, freshness, bundle/checkpoint/policy binding,
 and then atomically creates a private SQLite/FTS index. Import shows phase,
@@ -823,7 +1208,7 @@ overall and phase percentages, current-file and whole-bundle sizes, and record
 counts; reopening a generation still validates every source file before reusing
 its bound index.
 
-The native UI provides coverage/status dashboards, conversation and contact
+The exported-history UI provides coverage/status dashboards, conversation and contact
 navigation, Chinese/multilingual message search, keyset-paged timelines,
 account-bound incoming/outgoing/unknown direction, a distinct `You` identity,
 relationship links, and typed image/audio/

@@ -1,10 +1,18 @@
 # Native macOS history browser
 
-GreenBubbles includes a native, read-only macOS history browser for audited AI
-context bundles. The browser is the human-facing counterpart to the CLI and
-repository skill: it visualizes the same normalized, policy-scoped records and
-does not open WeChat databases, acquire database keys, run an agent server, or
-send messages.
+GreenBubbles includes a native, read-only macOS history browser with two
+explicit source modes:
+
+- bounded direct queries against owner-authorized live WeChat SQLite/WCDB or an
+  independently encrypted GreenBubbles snapshot; and
+- audited, exported AI context bundles with a private derived SQLite/FTS index.
+
+For setup and ordinary operation, start with the
+[GreenBubbles user guide](USER_GUIDE.md). This document describes the browser's
+implementation and trust boundaries. The app never acquires a database key,
+runs an agent server, or sends messages. In direct mode it invokes the local
+`greenbubbles-restore` helper, which opens the selected databases read-only and
+returns only bounded JSON pages.
 
 ## Technology decision
 
@@ -17,21 +25,33 @@ The recommended production stack is:
 - CryptoKit SHA-256 for independent bundle and media verification;
 - Quick Look for images, animated images, video, audio, PDF, Office documents,
   and other system-supported formats; and
-- the existing `greenbubbles-restore` one-shot CLI for policy-scoped live media
-  resolution.
+- the existing `greenbubbles-restore` one-shot CLI for bounded live/snapshot
+  queries, recoverable snapshot creation, and policy-scoped exported-bundle
+  media resolution.
 
 This is preferable to Electron for a private, local-first archive because it
 does not add a browser runtime, web-origin boundary, or JavaScript dependency
 chain. Tauri would reuse more Rust in the UI shell and is a reasonable
 cross-platform choice, but GreenBubbles currently targets macOS and benefits
 materially from native Quick Look, file panels, accessibility, media handling,
-window conventions, and future security-scoped bookmarks. The Rust restoration
+window conventions, and future security-scoped bookmarks. The Rust native
 engine remains the source of truth; the Swift application consumes its stable
-JSON/JSONL contracts.
+bounded-JSON and explicit exported-JSONL contracts.
 
 ## Data flow and trust boundary
 
 ```text
+live WeChat SQLite/WCDB or recoverable snapshot
+              |
+              | greenbubbles-restore read-only resource commands
+              v
+bounded conversation/message/search JSON pages
+              |
+              v
+SwiftUI overview / chats / search / exact hydration
+
+or, for an explicit exported-history workflow:
+
 encrypted replica + owner policy
               |
               | greenbubbles-restore ai-export
@@ -54,6 +74,42 @@ policy + descriptor + digest revalidation
               v
 private session-only copy -> native Quick Look
 ```
+
+Direct mode passes live keys and snapshot passphrases only through standard
+input. Recovery-kit and local-unlock modes pass private file paths, never their
+contents or the unwrapped SQLCipher key. Search text also uses standard input.
+The app retains a live key or passphrase only while that source is open and
+clears it when switching or closing. Keychain mode retrieves only a random
+snapshot-local wrapper credential and materializes it in an owner-only
+session-directory file that is removed on close.
+
+## Direct live and snapshot behavior
+
+Opening a direct source first runs `source status`, then requests the first
+100-conversation keyset page. The Overview reports database, WAL, SHM, journal,
+and total SQLite bytes. Chats request 100 messages at a time and use the opaque
+`nextCursor`; equal timestamps and server IDs remain total because native
+ordering also binds shard and row identity. Search returns at most 100 hits in
+the UI, prefers compatible native WeChat FTS read-only, and otherwise advances
+through a fixed no-write source window. Selecting a search result hydrates that
+exact source-bound message rather than loading neighboring history.
+
+Every direct response is checked for the expected schema, operation, source
+mode, source identity, response-size cap, and bounded process lifetime. The UI
+surfaces consistency and shard warnings and does not interpret incomplete
+coverage as proof that a message is absent. Live pages are statement-consistent
+per database, not globally atomic across WeChat's independent databases. A
+recoverable snapshot provides a stable immutable generation when cross-page
+repeatability matters.
+
+The graphical snapshot wizard creates the mandatory owner-only 24-word kit
+before conversion, displays it once, challenges four random positions, and
+requires confirmation of an independent copy. It can add a Keychain or hidden-
+file convenience credential and an optional Argon2id passphrase. Native
+snapshot creation writes logical pages directly into already-keyed SQLCipher
+destinations and publishes only after recovery verification without the WeChat
+key. See [RECOVERABLE_SNAPSHOTS.md](RECOVERABLE_SNAPSHOTS.md) for the full
+protector and retention contract.
 
 Opening a static bundle never requires a replica key. A media preview is a
 separate, explicit local action because static bundle records intentionally do
@@ -133,16 +189,19 @@ selection.
 
 The application uses a native three-column navigation layout:
 
-- **Overview** shows verified bundle/checkpoint evidence, conversation/contact/
-  message/media counts, database freshness counts, and prominent source-
-  coverage limitations.
+- **Direct Overview** shows source identity, access mode, actual SQLite/WAL
+  storage, consistency scope, and prominent warnings without restoration.
+- **Exported Overview** shows verified bundle/checkpoint evidence,
+  conversation/contact/message/media counts, database freshness counts, and
+  prominent source-coverage limitations.
 - **Chats** provides human-label and participant filtering, latest-message
-  dates, message counts, group/direct/business/system affordances, and stale
-  badges.
-- **Contacts** shows normalized display names, whether a local profile was
-  available, per-conversation names and roles, and navigation into shared
-  chats.
-- **Search** queries normalized authorized text, sender names, and conversation
+  dates, group/direct labels, and keyset-paged timelines. Exported mode also
+  includes message counts, business/system affordances, and stale badges.
+- **Contacts** is an exported-history surface showing normalized display names,
+  whether a local profile was available, per-conversation names and roles, and
+  navigation into shared chats.
+- **Search** uses native/fallback bounded source search in direct mode. Exported
+  mode queries normalized authorized text, sender names, and conversation
   labels, then opens a result with nearby message context.
 - **Timeline** renders incoming/outgoing/unknown direction distinctly, shows
   timestamps and logical payload kinds, retains policy-truncation warnings,
@@ -166,13 +225,20 @@ cannot select commands or alter policy.
 Build or run the native SwiftUI executable from the repository root:
 
 ```sh
+cargo build --release \
+  --manifest-path Native/GreenBubblesRestore/Cargo.toml
 swift build --product greenbubbles-history
 swift run greenbubbles-history
 swift run greenbubbles-history --bundle /absolute/path/to/ai-context-bundle
 ```
 
-Open a new output directory produced by `greenbubbles-restore ai-export`, or
-drag that directory into the empty browser window. The explicit `--bundle`
+For direct browsing or snapshot creation, select
+`Native/GreenBubblesRestore/target/release/greenbubbles-restore` as the local
+CLI and choose **Browse Live or Snapshot…** or **Create Recoverable Snapshot…**.
+
+For exported-history mode, open a new output directory produced by
+`greenbubbles-restore ai-export`, or drag that directory into the empty browser
+window. The explicit `--bundle`
 launch option, file panel, drag/drop path, and macOS directory/`manifest.json`
 open events all converge on the same verifier. The directory and every file
 must retain their owner-only permissions. The private derived index is stored
@@ -220,8 +286,13 @@ Chinese search, keyset pagination, exact artifact lookup, index reuse, source
 tampering, validation-to-store path replacement, post-open mutation, large-
 corpus transactions, and cancellation without index publication.
 
-The live-media suite uses a synthetic one-shot CLI process to prove stdin-only
-key delivery, policy-response parsing, bounded process capture, identity and
+The direct-query and snapshot-creation client suites prove stdin-only secret
+and search delivery, protector-file permission checks, bounded output and
+deadlines, operation/source-mode binding, keyset paging, exact message
+hydration, recovery-kit integrity, mandatory portable protection, Keychain
+materialization, cancellation, and post-publication handling. The live-media
+suite uses a synthetic one-shot CLI process to prove stdin-only key delivery,
+policy-response parsing, bounded process capture, identity and
 digest checks, request-envelope binding, cancellation, byte-progress reporting,
 private-copy permissions, and malformed-key rejection. Tests contain no real
 messages, identities, paths, keys, or media.

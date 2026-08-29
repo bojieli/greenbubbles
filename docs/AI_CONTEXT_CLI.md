@@ -6,9 +6,22 @@ long-running connector process, direct SQL, or access to restoration secrets.
 The repository skill in `skills/greenbubbles-context` gives an agent the concise
 operating instructions for this surface.
 
+For ordinary conversation and message reads, the preferred policy-scoped path
+is now `connector-query-direct`. It runs one typed request against live or
+recoverable-snapshot SQLite, returns JSON, appends the normal chained audit, and
+exits without creating a JSONL archive or encrypted replica. The resource
+commands remain the simplest choice when the invoking owner does not require a
+separate AI policy boundary.
+
 ## Trust and authorization boundary
 
-`ai-query` and `ai-export` reuse the existing owner-created tool policy. The
+`connector-query-direct` uses a source-bound owner-created policy for ordinary
+list/search/get operations. It enforces capability, source conversation, time,
+field, result/summary, and local/remote destination bounds. A direct policy is
+not interchangeable with the archive/replica policy because those identifiers
+are account-scoped one-way hashes.
+
+`ai-query` and `ai-export` reuse the existing replica tool policy. The
 policy binds one account and grants operations, normalized fields, inclusive
 time ranges, and local or remote-model release independently per conversation.
 Cached Moments remain an independent scope. Both commands use the encrypted
@@ -26,6 +39,35 @@ returned as untrusted source content and cannot select another operation or
 expand policy.
 
 ## One-shot query format
+
+For direct ordinary reads, put a `greenbubbles.connector.v1` request in an
+owner-only file:
+
+```json
+{
+  "apiVersion": "greenbubbles.connector.v1",
+  "requestId": "unique-caller-request",
+  "requesterId": "local-agent",
+  "destination": "local",
+  "operation": {
+    "kind": "getMessages",
+    "conversationId": "wxid-or-chatroom-id",
+    "cursor": null,
+    "limit": 50
+  }
+}
+```
+
+```text
+greenbubbles-restore connector-query-direct \
+  <source-root> <direct-policy.json> <audit.ndjson> <request.json> \
+  --passphrase-stdin
+```
+
+The direct backend supports `capabilities`, `status`, `listConversations`,
+`searchMessages`, `getMessages`, and `getMessage`. Use the replica query below
+only for restored coverage/enrichment, changes, cached Moments, artifacts, or
+other explicitly replica-only data.
 
 The request schema remains `greenbubbles.ai-query.v1`:
 

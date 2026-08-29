@@ -1,14 +1,46 @@
 # Versioned local connector API
 
-GreenBubbles serves the encrypted canonical replica through one deterministic
-policy boundary. CLI scripts and the owner-only Unix socket use the same
-`greenbubbles.connector.v1` request and response types. The service has no
-WeChat database passphrase, source snapshot root, active-read adapter, or write
-adapter; those privileges cannot be reached by changing request content.
+GreenBubbles exposes one deterministic `greenbubbles.connector.v1` policy and
+response boundary through two deliberately separate read backends:
+
+- the direct backend serves ordinary conversation/message list, search, and
+  exact-get operations from live or recoverable-snapshot SQLite, with bounded
+  optional contact display-name enrichment;
+- the encrypted canonical replica retains change feeds, cached surfaces,
+  restored contact/conversation enrichment, verified artifact paths, and
+  non-executing draft workflows.
+
+CLI scripts and owner-only Unix sockets use the same request and response
+envelopes. Selecting the direct process does not grant replica-only operations;
+selecting the replica process still gives it no WeChat passphrase, live source
+root, active-read adapter, or write adapter. Request content cannot switch a
+process between those privilege sets.
 
 ## Starting the service
 
-Create a mode-`0600` policy with `tool-policy`, then start the serving process:
+For ordinary reads, create a policy bound to the selected SQLite source, then
+use either a one-shot request or a reusable socket:
+
+```text
+greenbubbles-restore connector-policy-direct <source-root> <new-policy.json> \
+  <conversation-id>... --capabilities list,read,search \
+  --fields sender,created-at,type,content --passphrase-stdin
+
+greenbubbles-restore connector-query-direct <source-root> <policy.json> \
+  <audit.ndjson> <private-request.json> --passphrase-stdin
+
+greenbubbles-restore connector-serve-direct <source-root> <policy.json> \
+  <audit.ndjson> <connector.sock> --passphrase-stdin
+```
+
+The direct policy uses WeChat source conversation identifiers and is bound to
+the opaque source identity. Replica policies use account-scoped one-way
+identifiers. GreenBubbles never treats the two namespaces as interchangeable.
+The direct process consumes the key before serving, holds it only in memory,
+and opens each SQLite connection read-only with `query_only`.
+
+For replica-only surfaces, create a mode-`0600` policy with `tool-policy`, then
+start the replica serving process:
 
 ```text
 printf '%s\n' "$REPLICA_KEY" |
@@ -53,6 +85,10 @@ and verifies the same descriptor before and after the bounded read:
 ```text
 greenbubbles-restore connector-call private/connector.sock private/request.json
 ```
+
+`connector-query-direct` applies the same owner/single-link/no-follow request
+file validation but needs no daemon. Its response is the normal connector
+envelope, not a corpus export.
 
 Requests and responses reject an unsupported API version. Replica message
 cursors bind the query, account, random replica generation, source fingerprint,
@@ -109,6 +145,31 @@ capabilities remain unavailable until their controlling Phase 0.5 gates pass.
 and revision, acquisition mode, decoder version, latest synchronization and
 integrity-scan timing, media phase, replica coverage health, and the enabled
 conversation/operation scope.
+
+`listConversations` accepts optional `cursor` and `limit` fields. Its opaque
+cursor binds the current source identity, exact policy digest, destination, and
+last conversation key. Direct and replica backends both cap the page by policy;
+neither operation has an unrestricted list-all response. Direct message/search
+cursors remain bound to the source, conversation or filter, and ordering key.
+
+On the direct backend, only `capabilities`, `status`, `listConversations`,
+`getMessages`, `searchMessages`, and `getMessage` are available. Direct status
+reports `ordinaryReadsUseDirectSqlite: true` plus the source mode and opaque
+identity, and reports the authorized conversation scope as a count rather than
+an unbounded ID array. Enumerate that scope only through paginated
+`listConversations`. Coverage, changes, cached Moments, full restored
+membership/relationship enrichment, verified artifact paths, drafts,
+acquisition, and refresh return a typed
+`replicaOnlyOperation` failure and a denied audit event.
+
+Direct `listConversations` prefers the selected conversation contact's remark,
+nickname, then alias for `humanLabel`; it never substitutes the last message
+sender as a group label. A resolved name sets `entityDecodeState` to `complete`.
+Otherwise the raw conversation ID remains the label, state is `rawOnly`, and
+`directContactDisplayNameUnavailable` is reported. Direct messages may include
+`senderDisplayName`, but only when the policy already authorizes the `sender`
+field. Contact failures are non-fatal and appear as `directQuery.*` limitation
+codes.
 
 ## Deterministic authorization and minimization
 

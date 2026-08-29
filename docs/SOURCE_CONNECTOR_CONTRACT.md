@@ -6,9 +6,11 @@ WeChat's data model.
 
 ## Identity and capability discovery
 
-A consumer starts with `capabilities`, `status`, and `coverage` through the
-versioned `greenbubbles.connector.v1` envelope. It must bind local state to the
-opaque account ID and treat each capability independently. In particular:
+A consumer starts with `capabilities` and `status` through the versioned
+`greenbubbles.connector.v1` envelope. The replica backend also provides
+`coverage`; the direct ordinary-read backend explicitly reports that coverage
+as replica-only. A consumer must bind local state to the opaque account/source
+ID and treat each capability independently. In particular:
 
 - conversation passive read does not grant cached-Moments read;
 - either passive read does not grant authenticated active read;
@@ -26,7 +28,7 @@ A conversation consumer needs explicit `listConversations` and
 The race-safe bootstrap sequence is:
 
 1. Drain `getChanges` to a replica-generation-bound high-water cursor.
-2. Call `listConversations`.
+2. Page `listConversations(cursor, limit)` until `nextCursor` is null.
 3. Page `getMessages` for every returned conversation.
 4. For locally materialized attachments, call
    `getArtifact(conversationId, artifactId)` only when the policy exposes the
@@ -41,6 +43,15 @@ Message pagination cursors bind the exact account, replica generation, filter,
 source fingerprint, and checkpoint revision. A synchronization intentionally
 invalidates an in-progress message page; the bootstrap must retry rather than
 mix checkpoints.
+
+This change-stream bootstrap is a replica protocol. A consumer that only needs
+interactive ordinary reads should use `connector-query-direct` or
+`connector-serve-direct`: those paths query live/snapshot SQLite with the same
+conversation, field, time, destination, result, and audit controls, but expose
+no change-feed claim. Their conversation cursor binds the source, exact policy
+digest, destination, and last key. Live pages are statement-consistent as
+reported by the direct query adapter; use a recoverable snapshot when a stable
+multi-page generation is required.
 
 ## Change stream
 
