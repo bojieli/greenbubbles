@@ -89,7 +89,10 @@ jobs:
 
           cp README.md NOTICE.md "$staging/"
           for doc in docs/USER_GUIDE.md docs/SEND_ADAPTER.md docs/AI_TOOL_BOUNDARY.md; do
-            [ -f "$doc" ] && cp "$doc" "$staging/docs/"
+            # An `&&` list as the last statement in the loop body would make the
+            # loop — and so the step, under `set -e` — fail on the first absent
+            # file rather than skipping it.
+            if [ -f "$doc" ]; then cp "$doc" "$staging/docs/"; fi
           done
 
           tar -czf "dist/$name.tar.gz" -C dist "$name"
