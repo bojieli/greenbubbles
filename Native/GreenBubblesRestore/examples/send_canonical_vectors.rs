@@ -13,7 +13,7 @@
 use greenbubbles_restore::action::ActionCapability;
 use greenbubbles_restore::send_contract::{
     capability_binding_sha256, normalized_send_text, normalized_send_text_sha256, ActionAttachment,
-    ActionCapabilityEnvelope, SendRolloutStage, SEND_CONTRACT_VERSION,
+    ActionCapabilityEnvelope, SendAddressingMode, SendRolloutStage, SEND_CONTRACT_VERSION,
 };
 use greenbubbles_restore::send_profile::{
     calibration_profile_signing_bytes, compatibility_matrix_signing_bytes,
@@ -142,6 +142,7 @@ fn main() {
         account_id: "canonical-account".to_string(),
         conversation_id: "filehelper".to_string(),
         capability: ActionCapability::TextSend,
+        addressing_mode: SendAddressingMode::Search,
         search_key: "File Transfer".to_string(),
         expected_title: "File Transfer".to_string(),
         body_sha256: hex::encode(Sha256::digest(body.as_bytes())),

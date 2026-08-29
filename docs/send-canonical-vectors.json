@@ -2,8 +2,9 @@
   "actionCapability": {
     "accountId": "canonical-account",
     "actionId": "2222222222222222222222222222222222222222222222222222222222222222",
+    "addressingMode": "search",
     "approvalId": "4444444444444444444444444444444444444444444444444444444444444444",
-    "bindingSha256": "feb0ce71954d57a7850d1080d45a65f18e7605e0aa03ddda2fda120e6dd52422",
+    "bindingSha256": "7b203888de745f2cbd0e9c3778a493dab5cae264570959fe791ae954561aebab",
     "body": "hello  from\nthe adapter ",
     "bodySha256": "19ad208b47df6099573a7afce2161695c4b380c9233d00220005b51880ed7f23",
     "calibrationProfileId": "wechat-4.1.13.269579-macos-26",
@@ -26,6 +27,7 @@
   "attachmentCapability": {
     "accountId": "canonical-account",
     "actionId": "2222222222222222222222222222222222222222222222222222222222222222",
+    "addressingMode": "search",
     "approvalId": "4444444444444444444444444444444444444444444444444444444444444444",
     "attachment": {
       "byteCount": 182931,
@@ -35,7 +37,7 @@
       "stagingDirectory": "/Users/owner/.greenbubbles/send/staging/0f1e2d3c",
       "uniformTypeIdentifier": "public.png"
     },
-    "bindingSha256": "55547cc649f3899d073949c72427cf0df6e718766c7bad84862d499fb1ae413b",
+    "bindingSha256": "e94f554f1a566c64da6487e3a955fdcce283505a67a46de23728a6ed1dd99b6a",
     "body": "",
     "bodySha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "calibrationProfileId": "wechat-4.1.13.269579-macos-26",

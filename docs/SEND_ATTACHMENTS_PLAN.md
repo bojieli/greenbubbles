@@ -528,3 +528,59 @@ A `send-to-the-currently-open-conversation` mode would sidestep addressing
 entirely: the title gate already proves which conversation is open, and every
 other gate is unchanged. It is a weaker product, but it is one that works today
 and is worth an explicit decision.
+
+---
+
+## 16. The addressing decision, and what focus actually costs (2026-08-29)
+
+The owner chose the mode that works today, in the background, with attachments:
+**send to the conversation the client already has open.**
+
+### The mode
+
+`SendAddressingMode::CurrentConversation` skips navigation entirely. The skill
+reads the window, runs GATE 1 against the title, and refuses if the open
+conversation is not the approved recipient. It is not merely a workaround; it is
+the **safest** mode available, because it performs **no input whatsoever before
+the recipient gate**. A misfire is a read-only abort that cannot disturb
+anything the person was doing — the property the search mode could never offer.
+
+A capability in this mode carries an **empty search key**, so there is nothing
+to type even if the state machine were wrong, and the binding digest covers the
+mode itself.
+
+### What focus costs, measured
+
+Three further live measurements shaped the implementation:
+
+1. **A posted click does not take focus** — established earlier.
+2. **A posted click appears to *lose* whatever focus existed.** After the skill
+   clicked, subsequent pastes landed nowhere at all: neither the compose box nor
+   the search field received them.
+3. **Lost focus cannot be recovered from the background.** Cmd+F followed by
+   Escape, then a paste, put text in neither field.
+
+Keystrokes therefore land only while the client already has a focused text
+field, which is the state the *person* leaves behind when they are in a
+conversation.
+
+### What that means for the skill
+
+In `currentConversation` mode the skill now **clicks nothing and clears
+nothing**. It pastes into the focus that already exists and lets GATE 2 decide
+whether that was really the compose box.
+
+Clearing is likewise conditional. A select-all plus delete into an unknown field
+is precisely the destructive act this whole session has been about, and in a
+chat window an unknown field might be the message list. So the compose box is
+cleared only once GATE 2 has *proven* where the caret is. When the gate fails,
+the run aborts without clearing and says so, leaving at worst some stray text
+rather than risking a destructive keystroke.
+
+### The resulting contract with the user
+
+The mode sends to the conversation you are in, which means the product's
+precondition is honest and small: **have the conversation open, with the compose
+box focused** — exactly the state you are in when you are about to type. GATE 1
+proves the recipient, GATE 2 proves the content, and either failing is
+non-destructive.

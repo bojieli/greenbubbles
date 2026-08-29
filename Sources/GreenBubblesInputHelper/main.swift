@@ -190,6 +190,56 @@ case "keys":
     Thread.sleep(forTimeInterval: 0.15)
   }
   print("posted \(arguments.count - 1) keys")
+case "ocr":
+  // Read-only calibration aid: prints what the gates actually read out of one
+  // named region of the signed profile.
+  func opt(_ name: String) -> String? {
+    guard let i = arguments.firstIndex(of: name), i + 1 < arguments.count else { return nil }
+    return arguments[i + 1]
+  }
+  guard let profilePath = opt("--profile"), let regionName = opt("--region") else {
+    FileHandle.standardError.write(Data("usage: ocr --profile <f> --region <name>\n".utf8))
+    exit(2)
+  }
+  do {
+    let data = try Data(contentsOf: URL(fileURLWithPath: profilePath))
+    let signed = try SendCodec.decode(SignedCalibrationProfile.self, from: data)
+    guard let target = WeChatTarget.locate(bundleIdentifier: "com.tencent.xinWeChat"),
+      let frame = target.frame
+    else { throw SendFailure(.wechatNotRunning) }
+    let regions = signed.body.ocrRegions
+    let region: WindowRelativeRect? =
+      switch regionName {
+      case "search": regions.search
+      case "title": regions.title
+      case "compose": regions.compose
+      case "newestOutgoing": regions.newestOutgoing
+      case "composeAttachment": signed.body.attachments?.composeAttachment
+      default: nil
+      }
+    guard let region else {
+      FileHandle.standardError.write(Data("unknown region: \(regionName)\n".utf8))
+      exit(2)
+    }
+    let perception = MacOSScreenPerception(
+      processIdentifier: target.processIdentifier,
+      bundleIdentifier: "com.tencent.xinWeChat"
+    )
+    let read = try perception.recognizeText(in: WindowGeometry.rect(region, in: frame))
+    let report: [String: Any] = [
+      "region": regionName,
+      "text": read.text,
+      "confidencePartsPerMillion": read.confidencePartsPerMillion,
+      "candidateCount": read.candidateCount,
+    ]
+    print(
+      String(
+        decoding: try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]),
+        as: UTF8.self))
+  } catch {
+    FileHandle.standardError.write(Data("ocr failed: \(error)\n".utf8))
+    exit(2)
+  }
 case "onboarding":
   let plan = OnboardingPlan.make(from: service.currentStatus())
   for step in plan.steps where !step.granted {

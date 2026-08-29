@@ -237,7 +237,8 @@ struct MechanicalSendSkillTests {
     issuedAt: UInt64 = 1_000,
     validUntil: UInt64 = 9_000,
     capability: ActionCapability = .textSend,
-    attachment: ActionAttachment? = nil
+    attachment: ActionAttachment? = nil,
+    addressingMode: SendAddressingMode = .search
   ) -> ActionCapabilityEnvelope {
     func build(binding: String) -> ActionCapabilityEnvelope {
       ActionCapabilityEnvelope(
@@ -250,7 +251,8 @@ struct MechanicalSendSkillTests {
         accountID: "account",
         conversationID: "filehelper",
         capability: capability,
-        searchKey: title,
+        addressingMode: addressingMode,
+        searchKey: addressingMode == .search ? title : "",
         expectedTitle: title,
         body: attachment == nil ? body : "",
         bodySHA256: SendDigest.sha256Hex(Data((attachment == nil ? body : "").utf8)),
@@ -862,5 +864,61 @@ extension MechanicalSendSkillTests {
     #expect(outcome.evidence.attachmentRegionChanged)
     #expect(!outcome.evidence.attachmentNameMatched)
     #expect(!outcome.attempted)
+  }
+}
+
+extension MechanicalSendSkillTests {
+  @Test("the no-navigation mode performs no input at all before the recipient gate")
+  func currentConversationModeTypesNothingBeforeTheGate() {
+    // The wrong conversation is open. This must be a read-only refusal: the
+    // person's client is untouched, because nothing was clicked or typed.
+    let profile = profile()
+    let effector = FakeEffector()
+    let perception = perception(profile, titleText: "Someone Else")
+    let outcome = makeSkill(profile: profile, effector: effector, perception: perception)
+      .execute(capability(permitSend: true, addressingMode: .currentConversation))
+    #expect(outcome.failure == .recipientVerifyFailed)
+    #expect(outcome.stageReached == .recipientVerify)
+    #expect(!outcome.attempted)
+    // Read-only: not one click, keystroke, or pasteboard write happened.
+    #expect(effector.actions.filter { $0 != "restoreClipboard" }.isEmpty)
+  }
+
+  @Test("the no-navigation mode sends into the conversation already open")
+  func currentConversationModeSendsIntoTheOpenConversation() {
+    let profile = profile()
+    let effector = FakeEffector()
+    let perception = perception(profile)
+    let outcome = makeSkill(profile: profile, effector: effector, perception: perception)
+      .execute(capability(permitSend: false, addressingMode: .currentConversation))
+    #expect(outcome.failure == nil)
+    #expect(outcome.evidence.titleMatched)
+    #expect(outcome.evidence.composeMatched)
+    #expect(outcome.stageReached == .contentVerify)
+    // The search box is never touched, so the search key is never pasted.
+    #expect(!effector.pastedTexts.contains(title))
+    #expect(effector.pastedTexts == [body])
+  }
+
+  @Test("the no-navigation mode carries an attachment without addressing")
+  func currentConversationModeStagesAnAttachment() {
+    let profile = profile()
+    let effector = FakeEffector()
+    let perception = perception(profile)
+    perception.fingerprints = ["empty", "thumbnail"]
+    let outcome = makeSkill(profile: profile, effector: effector, perception: perception)
+      .execute(
+        capability(
+          permitSend: false,
+          capability: .imageSend,
+          attachment: stagedAttachment,
+          addressingMode: .currentConversation
+        ))
+    #expect(outcome.failure == nil)
+    #expect(outcome.evidence.attachmentRegionChanged)
+    #expect(
+      effector.actions.contains(
+        "fileReference(/Users/owner/.greenbubbles/send/staging/0f1e2d3c/photo.png)"
+      ))
   }
 }

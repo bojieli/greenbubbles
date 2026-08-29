@@ -39,8 +39,9 @@ use crate::secret::ReplicaKey;
 use crate::send_contract::{
     capability_binding_sha256, normalized_send_text_sha256, ActionAttachment,
     ActionCapabilityEnvelope, CalibrationSelfTestReport, HelperCapabilityStatus,
-    HelperGateEvidence, HelperSendOutcome, SendCompletionKind, SendCompletionOutcome,
-    SendFailureCode, SendRolloutStage, SendStage, VisualConfirmation, SEND_CONTRACT_VERSION,
+    HelperGateEvidence, HelperSendOutcome, SendAddressingMode, SendCompletionKind,
+    SendCompletionOutcome, SendFailureCode, SendRolloutStage, SendStage, VisualConfirmation,
+    SEND_CONTRACT_VERSION,
 };
 use crate::send_outbox::{
     OutboxEntry, OutboxEntryState, SendCompletionRecord, SendOutbox, SendOutboxRecovery,
@@ -115,6 +116,11 @@ pub struct SendAdapterConfig {
     pub adapter: ActionAdapterBinding,
     pub allow_list: ActionAllowList,
     pub self_send_conversation_id: String,
+    /// How the recipient is reached. Defaults to `currentConversation`, the
+    /// mode that works in the background today: the skill types nothing until
+    /// the recipient gate has proven which conversation is open.
+    #[serde(default = "current_conversation_addressing")]
+    pub addressing_mode: SendAddressingMode,
     /// Attachments have their own stage ladder, orthogonal to the text one.
     /// Both must be open before a file or image can leave the machine.
     #[serde(default = "dry_run_stage")]
@@ -1059,7 +1065,13 @@ impl SendAdapter {
             account_id: self.config.account_id.clone(),
             conversation_id: draft.conversation_id.clone(),
             capability: action_capability,
-            search_key: self.config.search_key_for(draft),
+            addressing_mode: self.config.addressing_mode,
+            // Nothing is typed before the recipient gate in the no-navigation
+            // mode, so the capability carries nothing to type.
+            search_key: match self.config.addressing_mode {
+                SendAddressingMode::Search => self.config.search_key_for(draft),
+                SendAddressingMode::CurrentConversation => String::new(),
+            },
             expected_title: draft.recipient.human_label.clone(),
             body_sha256: draft.rendered_text_sha256.clone(),
             normalized_body_sha256: normalized_send_text_sha256(&draft.rendered_text),
@@ -1994,6 +2006,12 @@ fn guard_failures(decision: &ActionGuardDecision) -> BTreeSet<SendFailureCode> {
         .collect()
 }
 
+/// Search addressing is measured non-functional in the background, so the
+/// no-navigation mode is the default.
+fn current_conversation_addressing() -> SendAddressingMode {
+    SendAddressingMode::CurrentConversation
+}
+
 /// Attachments start closed even when text sending is open.
 fn dry_run_stage() -> SendRolloutStage {
     SendRolloutStage::DryRun
@@ -2308,6 +2326,7 @@ mod tests {
                 capabilities: BTreeSet::from([ActionCapability::TextSend]),
             },
             self_send_conversation_id: CONVERSATION.to_string(),
+            addressing_mode: SendAddressingMode::CurrentConversation,
             attachment_rollout_stage: stage,
             maximum_attachment_attempts_per_window: 1,
             staging_root: root.path().join("staging"),
@@ -3564,6 +3583,28 @@ mod tests {
     }
 
     #[test]
+    fn the_no_navigation_mode_mints_a_capability_with_nothing_to_type() {
+        let now = 10_000_000_000_000_u128;
+        let fixture = fixture(SendRolloutStage::DryRun, false);
+        let profile = verified_profile(SendTrustTier::Development);
+        let draft = draft(now);
+        let approval = approval_for(&fixture.adapter, &draft, now, '1');
+        let capability = fixture
+            .adapter
+            .mint_capability(&draft, &approval, &profile, None, false, now)
+            .unwrap();
+        assert_eq!(
+            capability.addressing_mode,
+            SendAddressingMode::CurrentConversation
+        );
+        // Nothing is typed before the recipient gate, so nothing to type is
+        // carried; the expected title still binds the recipient.
+        assert!(capability.search_key.is_empty());
+        assert_eq!(capability.expected_title, "File Transfer");
+        assert!(capability.validate(now).is_ok());
+    }
+
+    #[test]
     fn the_minted_capability_binds_the_recipient_the_control_plane_resolved() {
         let now = 10_000_000_000_000_u128;
         let fixture = fixture(SendRolloutStage::DryRun, false);
@@ -3575,7 +3616,6 @@ mod tests {
             .mint_capability(&draft, &approval, &profile, None, false, now)
             .unwrap();
         assert_eq!(capability.expected_title, "File Transfer");
-        assert_eq!(capability.search_key, "File Transfer");
         assert!(!capability.permit_send);
         assert_eq!(capability.calibration_profile_id, PROFILE_ID);
         assert!(capability.validate(now).is_ok());

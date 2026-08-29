@@ -35,6 +35,29 @@ public enum ActionCapability: String, Codable, Sendable, CaseIterable {
   public var preservesBytes: Bool { self != .imageSend }
 }
 
+/// How the skill reaches the conversation it will send to.
+public enum SendAddressingMode: String, Codable, Sendable, CaseIterable {
+  /// Type the search key, select the first result, then verify the title.
+  ///
+  /// Measured non-functional in the background on WeChat 4.1.13 / macOS 26: a
+  /// posted click does not move keyboard focus, and the client does not run its
+  /// search while its window is inactive. Retained because the gates and the
+  /// state machine are correct and a future build, or a foreground mode, may
+  /// make it work again.
+  case search
+  /// Do not navigate at all. Verify that the conversation the client already
+  /// has open *is* the approved recipient, and refuse otherwise.
+  ///
+  /// This is the mode that works today in the background, and it is also the
+  /// safest: the skill performs **no input whatsoever** until the recipient
+  /// gate has passed, so a wrong conversation produces a read-only abort that
+  /// cannot disturb anything the person was doing.
+  case currentConversation
+
+  /// Whether this mode types into the client before the recipient is proven.
+  public var typesBeforeRecipientGate: Bool { self == .search }
+}
+
 /// One staged local attachment. The control plane copied the approved file into
 /// a single-use directory and hashed *that copy*, so this digest describes the
 /// exact bytes about to be handed over.
@@ -241,6 +264,10 @@ public struct ActionCapabilityEnvelope: Codable, Equatable, Sendable {
   public let conversationID: String
   /// Which reviewed capability this action exercises.
   public let capability: ActionCapability
+  /// How the recipient is reached.
+  public let addressingMode: SendAddressingMode
+  /// Empty, and unused, in `currentConversation` mode, so there is nothing to
+  /// type even if the state machine were wrong.
   public let searchKey: String
   public let expectedTitle: String
   public let body: String
@@ -275,6 +302,7 @@ public struct ActionCapabilityEnvelope: Codable, Equatable, Sendable {
     case calibrationProfileID = "calibrationProfileId"
     case calibrationProfileSHA256 = "calibrationProfileSha256"
     case capability
+    case addressingMode
     case attachment
     case rolloutStage
     case permitSend
@@ -293,6 +321,7 @@ public struct ActionCapabilityEnvelope: Codable, Equatable, Sendable {
     accountID: String,
     conversationID: String,
     capability: ActionCapability,
+    addressingMode: SendAddressingMode,
     searchKey: String,
     expectedTitle: String,
     body: String,
@@ -317,6 +346,7 @@ public struct ActionCapabilityEnvelope: Codable, Equatable, Sendable {
     self.accountID = accountID
     self.conversationID = conversationID
     self.capability = capability
+    self.addressingMode = addressingMode
     self.searchKey = searchKey
     self.expectedTitle = expectedTitle
     self.body = body
@@ -346,6 +376,7 @@ public struct ActionCapabilityEnvelope: Codable, Equatable, Sendable {
     writer.text(accountID)
     writer.text(conversationID)
     writer.text(capability.rawValue)
+    writer.text(addressingMode.rawValue)
     writer.text(searchKey)
     writer.text(expectedTitle)
     writer.text(bodySHA256)
@@ -388,8 +419,8 @@ public struct ActionCapabilityEnvelope: Codable, Equatable, Sendable {
       && !conversationID.isEmpty
       && !clientBuildProfileID.isEmpty
       && !calibrationProfileID.isEmpty
-      && !searchKey.isEmpty
       && searchKey.utf8.count <= SendContract.maximumSearchKeyBytes
+      && (addressingMode.typesBeforeRecipientGate != searchKey.isEmpty)
       && !expectedTitle.isEmpty
       && expectedTitle.utf8.count <= SendContract.maximumExpectedTitleBytes
       && body.utf8.count <= SendContract.maximumBodyBytes

@@ -265,32 +265,38 @@ public struct MechanicalSendSkill {
           .windowNotFound, detail: "the located window is too small to be the chat window")
       }
 
-      stage = .address
-      try yieldToHuman(&evidence)
-      // Addressing pastes *without* clearing first. A click that fails to take
-      // focus leaves the caret wherever the person left it, and a select-all
-      // plus delete there would destroy their unsent text. Pasting only ever
-      // adds, and GATE 0 below catches the miss before anything else happens.
-      try focusAndPaste(capability.searchKey, at: profile.anchors.searchBox, in: frame)
-      effector.settle(milliseconds: pacing.afterSearchMilliseconds)
+      // In the no-navigation mode the skill performs no input at all before
+      // the recipient gate: it reads the screen, checks the title, and refuses
+      // if the wrong conversation is open. A misfire is therefore read-only and
+      // cannot disturb whatever the person was doing.
+      if capability.addressingMode.typesBeforeRecipientGate {
+        stage = .address
+        try yieldToHuman(&evidence)
+        // Addressing pastes *without* clearing first. A click that fails to
+        // take focus leaves the caret wherever the person left it, and a
+        // select-all plus delete there would destroy their unsent text.
+        // Pasting only ever adds, and GATE 0 below catches the miss.
+        try focusAndPaste(capability.searchKey, at: profile.anchors.searchBox, in: frame)
+        effector.settle(milliseconds: pacing.afterSearchMilliseconds)
 
-      // GATE 0: prove the click actually focused the search field by reading
-      // the key back out of it. Without this, a failed focus silently sends the
-      // rest of the skill's keystrokes into whatever the person was using.
-      let echoed = try recognize(profile.ocrRegions.search, in: frame)
-      evidence.searchKeyEchoed = SendText.normalized(echoed.text)
-        .localizedCaseInsensitiveContains(SendText.normalized(capability.searchKey))
-      guard evidence.searchKeyEchoed else {
-        throw SendFailure(
-          .addressingFocusFailed,
-          detail: "the search field did not echo the search key, so the click missed its target"
-        )
+        // GATE 0: prove the click actually focused the search field by reading
+        // the key back out of it. Without this, a failed focus silently sends
+        // the rest of the skill's keystrokes into whatever the person was using.
+        let echoed = try recognize(profile.ocrRegions.search, in: frame)
+        evidence.searchKeyEchoed = SendText.normalized(echoed.text)
+          .localizedCaseInsensitiveContains(SendText.normalized(capability.searchKey))
+        guard evidence.searchKeyEchoed else {
+          throw SendFailure(
+            .addressingFocusFailed,
+            detail: "the search field did not echo the search key, so the click missed its target"
+          )
+        }
+
+        try yieldToHuman(&evidence)
+        try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
+        try effector.click(at: WindowGeometry.point(profile.anchors.firstResultRow, in: frame))
+        effector.settle(milliseconds: pacing.afterClickMilliseconds)
       }
-
-      try yieldToHuman(&evidence)
-      try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
-      try effector.click(at: WindowGeometry.point(profile.anchors.firstResultRow, in: frame))
-      effector.settle(milliseconds: pacing.afterClickMilliseconds)
 
       stage = .recipientVerify
       try yieldToHuman(&evidence)
@@ -310,6 +316,13 @@ public struct MechanicalSendSkill {
       }
 
       stage = .compose
+      // In the no-navigation mode the compose box is already focused, because
+      // the person was just there. Measured live: a posted click does not take
+      // focus, and worse, it loses whatever focus existed, after which no
+      // keystroke lands anywhere. So this mode clicks nothing and clears
+      // nothing — it pastes into the focus that already exists and lets GATE 2
+      // decide whether that was really the compose box.
+      let mayTakeFocus = capability.addressingMode.typesBeforeRecipientGate
       if let attachment = capability.attachment {
         // Recorded before staging so GATE 2a can prove the region changed,
         // which is the only evidence an image thumbnail offers.
@@ -317,9 +330,16 @@ public struct MechanicalSendSkill {
           try requireAttachmentRegions().composeAttachment,
           in: frame
         )
-        try stageAttachment(attachment, in: frame, evidence: &evidence)
-      } else {
+        try stageAttachment(
+          attachment,
+          in: frame,
+          takingFocus: mayTakeFocus,
+          evidence: &evidence
+        )
+      } else if mayTakeFocus {
         try clearAndPaste(capability.body, at: profile.anchors.composeBox, in: frame)
+      } else {
+        try pasteIntoExistingFocus(capability.body)
       }
 
       stage = .contentVerify
@@ -375,7 +395,8 @@ public struct MechanicalSendSkill {
       guard capability.permitSend else {
         // The dry-run stage stops exactly here, with both gates satisfied and
         // the compose box cleared so nothing is left behind for a human to
-        // send by accident.
+        // send by accident. GATE 2 has just proven where the caret is, so
+        // clearing is safe on this path in either mode.
         try clearCompose(in: frame)
         evidence.captureCount = perception.captureCount
         evidence.elapsedMilliseconds = elapsedMilliseconds(since: started)
@@ -594,25 +615,29 @@ public struct MechanicalSendSkill {
   private func stageAttachment(
     _ attachment: ActionAttachment,
     in frame: WindowFrame,
+    takingFocus: Bool,
     evidence: inout HelperGateEvidence
   ) throws(SendFailure) {
     let attachments = try requireAttachmentRegions()
     if attachments.composeAcceptsPastedFile {
       guard !effector.humanActivityObserved() else {
-        throw SendFailure(.humanCollision, detail: "user activity observed before taking focus")
+        throw SendFailure(.humanCollision, detail: "user activity observed before pasting")
       }
-      try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
-      try effector.click(at: WindowGeometry.point(profile.anchors.composeBox, in: frame))
-      effector.settle(milliseconds: pacing.afterClickMilliseconds)
-      try manifest.authorize(.hotkey, bundleIdentifier: targetBundleIdentifier)
-      try effector.press(.selectAll)
-      try effector.press(.delete)
-      effector.settle(milliseconds: pacing.afterKeyMilliseconds)
+      if takingFocus {
+        try manifest.authorize(.click, bundleIdentifier: targetBundleIdentifier)
+        try effector.click(at: WindowGeometry.point(profile.anchors.composeBox, in: frame))
+        effector.settle(milliseconds: pacing.afterClickMilliseconds)
+        try manifest.authorize(.hotkey, bundleIdentifier: targetBundleIdentifier)
+        try effector.press(.selectAll)
+        try effector.press(.delete)
+        effector.settle(milliseconds: pacing.afterKeyMilliseconds)
+      }
       try manifest.authorize(
         .clipboardWriteFileReference,
         bundleIdentifier: targetBundleIdentifier
       )
       try effector.writeClipboardFileReference(attachment.stagedPath)
+      try manifest.authorize(.hotkey, bundleIdentifier: targetBundleIdentifier)
       try effector.press(.paste)
       effector.settle(milliseconds: pacing.afterPasteMilliseconds)
       return
@@ -670,6 +695,34 @@ public struct MechanicalSendSkill {
       )
     }
     return attachments
+  }
+
+  /// Pastes into whatever already holds focus, taking none itself.
+  ///
+  /// Deliberately does not clear first: with focus unproven, a select-all plus
+  /// delete could land in a message list or another field. Pasting only ever
+  /// adds, and GATE 2 decides whether it landed where it was meant to.
+  private func pasteIntoExistingFocus(_ text: String) throws(SendFailure) {
+    guard !effector.humanActivityObserved() else {
+      throw SendFailure(.humanCollision, detail: "user activity observed before pasting")
+    }
+    try manifest.authorize(.clipboardWrite, bundleIdentifier: targetBundleIdentifier)
+    try effector.writeClipboard(text)
+    try manifest.authorize(.hotkey, bundleIdentifier: targetBundleIdentifier)
+    try effector.press(.paste)
+    effector.settle(milliseconds: pacing.afterPasteMilliseconds)
+  }
+
+  /// Clears the compose box only when the caret's location has been proven.
+  private func clearComposeIfFocusProven(
+    in frame: WindowFrame,
+    focusProven: Bool
+  ) throws(SendFailure) {
+    guard focusProven else {
+      effector.restoreClipboard()
+      return
+    }
+    try clearCompose(in: frame)
   }
 
   private func clearCompose(in frame: WindowFrame) throws(SendFailure) {

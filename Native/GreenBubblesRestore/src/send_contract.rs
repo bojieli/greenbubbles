@@ -324,6 +324,43 @@ pub enum SendCompletionOutcome {
     AwaitingReconciliation,
 }
 
+/// How the skill reaches the conversation it will send to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SendAddressingMode {
+    /// Type the search key, select the first result, then verify the title.
+    ///
+    /// Measured non-functional in the background on WeChat 4.1.13 / macOS 26: a
+    /// posted click does not move keyboard focus, and the client does not run
+    /// its search while its window is inactive. Retained because the gates and
+    /// the state machine are correct and a future build, or a foreground mode,
+    /// may make it work again.
+    Search,
+    /// Do not navigate at all. Verify that the conversation the client already
+    /// has open *is* the approved recipient, and refuse otherwise.
+    ///
+    /// This is the mode that works today in the background, and it is also the
+    /// safest: the skill performs **no input whatsoever** until the recipient
+    /// gate has passed, so a wrong conversation produces a read-only abort that
+    /// cannot disturb anything the person was doing.
+    CurrentConversation,
+}
+
+impl SendAddressingMode {
+    /// Whether this mode types into the client before the recipient is proven.
+    pub fn types_before_recipient_gate(self) -> bool {
+        matches!(self, SendAddressingMode::Search)
+    }
+
+    /// Canonical name used in the binding digest.
+    pub fn canonical_name(self) -> &'static str {
+        match self {
+            SendAddressingMode::Search => "search",
+            SendAddressingMode::CurrentConversation => "currentConversation",
+        }
+    }
+}
+
 /// One staged local attachment. The control plane has already copied the
 /// approved file into a single-use staging directory and re-hashed *that copy*,
 /// so the digest here describes the exact bytes the helper will hand over and
@@ -392,7 +429,12 @@ pub struct ActionCapabilityEnvelope {
     /// Which reviewed capability this action exercises. Text carries a body;
     /// image and file carry an attachment. Never both.
     pub capability: ActionCapability,
-    /// What to type into the search box to address the conversation.
+    /// How the recipient is reached. `currentConversation` types nothing before
+    /// the recipient gate.
+    pub addressing_mode: SendAddressingMode,
+    /// What to type into the search box. Empty, and unused, in
+    /// `currentConversation` mode, so there is nothing to type even if the
+    /// state machine were wrong.
     pub search_key: String,
     /// GATE 1: the opened conversation title must equal this.
     pub expected_title: String,
@@ -431,6 +473,7 @@ pub fn capability_binding_bytes(capability: &ActionCapabilityEnvelope) -> Option
         .text(&capability.account_id)
         .text(&capability.conversation_id)
         .text(action_capability_name(capability.capability))
+        .text(capability.addressing_mode.canonical_name())
         .text(&capability.search_key)
         .text(&capability.expected_title)
         .text(&capability.body_sha256)
@@ -478,8 +521,8 @@ impl ActionCapabilityEnvelope {
             || self.conversation_id.is_empty()
             || self.client_build_profile_id.is_empty()
             || self.calibration_profile_id.is_empty()
-            || self.search_key.is_empty()
             || self.search_key.len() > MAXIMUM_SEARCH_KEY_BYTES
+            || (self.addressing_mode.types_before_recipient_gate() == self.search_key.is_empty())
             || self.expected_title.is_empty()
             || self.expected_title.len() > MAXIMUM_EXPECTED_TITLE_BYTES
             || self.body.len() > MAXIMUM_SEND_BODY_BYTES
@@ -699,6 +742,7 @@ mod tests {
             account_id: "account".to_string(),
             conversation_id: "filehelper".to_string(),
             capability: ActionCapability::TextSend,
+            addressing_mode: SendAddressingMode::Search,
             search_key: "File Transfer".to_string(),
             expected_title: "File Transfer".to_string(),
             body_sha256: hex::encode(Sha256::digest(body.as_bytes())),
@@ -790,6 +834,10 @@ mod tests {
             Box::new(|value| value.account_id.push('x')),
             Box::new(|value| value.conversation_id.push('x')),
             Box::new(|value| value.capability = ActionCapability::FileSend),
+            Box::new(|value| {
+                value.addressing_mode = SendAddressingMode::CurrentConversation;
+                value.search_key = String::new();
+            }),
             Box::new(|value| value.search_key.push('x')),
             Box::new(|value| value.expected_title.push('x')),
             Box::new(|value| value.body_sha256 = sha('a')),
@@ -811,6 +859,23 @@ mod tests {
                 SendFailureCode::CapabilityMismatch
             );
         }
+    }
+
+    #[test]
+    fn current_conversation_mode_can_carry_no_search_key_at_all() {
+        let mut capability = capability(false);
+        capability.addressing_mode = SendAddressingMode::CurrentConversation;
+        capability.binding_sha256 = capability_binding_sha256(&capability).unwrap();
+        // A search key alongside the no-navigation mode is a contradiction:
+        // there is nothing to type, so carrying something to type is refused.
+        assert_eq!(
+            capability.validate(2_000).unwrap_err(),
+            SendFailureCode::CapabilityMismatch
+        );
+        capability.search_key = String::new();
+        capability.binding_sha256 = capability_binding_sha256(&capability).unwrap();
+        assert!(capability.validate(2_000).is_ok());
+        assert!(!capability.addressing_mode.types_before_recipient_gate());
     }
 
     #[test]

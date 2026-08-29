@@ -121,6 +121,7 @@ struct OnboardingAndStatusTests {
         accountID: "account",
         conversationID: "filehelper",
         capability: .textSend,
+        addressingMode: .search,
         searchKey: "File Transfer",
         expectedTitle: "File Transfer",
         body: body,
