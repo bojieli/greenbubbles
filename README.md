@@ -245,10 +245,9 @@ The key is stable, so databases WeChat creates later need no second capture —
 `greenbubbles-acquire verify --passphrase-stdin` re-derives and re-checks them
 without attaching to anything.
 
-[The acquisition guide](docs/PASSPHRASE_ACQUISITION.md) has the full mechanism,
-every failure mode, and what to do when preflight blocks. The capture and
-derivation are ported from the MIT-licensed
-[`TANGandXUE/wcdb-key-tool`](https://github.com/TANGandXUE/wcdb-key-tool).
+For more detail — the full mechanism, every failure mode, and what to do when
+preflight blocks — see
+[acquiring your database key](docs/PASSPHRASE_ACQUISITION.md).
 
 ## First run
 
