@@ -218,18 +218,27 @@ struct HistoryBundleLoaderTests {
   func cancelsIndexing() async throws {
     let fixture = try HistoryBundleFixture(extraMessageCount: 20_500)
     defer { fixture.remove() }
-    let gate = ProgressGate()
+    let reachedIndexing = Latch()
+    let cancelIssued = Latch()
     let load = Task {
       try await HistoryBundleLoader().load(
         bundleURL: fixture.bundleURL,
         indexDirectory: fixture.indexURL,
         progress: { update in
-          if update.phase == .indexingMessages { gate.signal() }
+          guard update.phase == .indexingMessages else { return }
+          // Park the loader inside indexing until the cancellation has been
+          // issued. Without this handshake the race runs both ways: a loaded
+          // machine never reaches indexing before the deadline, and an idle
+          // one finishes the whole index before cancel() lands. Neither
+          // outcome says anything about the behaviour under test.
+          reachedIndexing.open()
+          cancelIssued.wait()
         }
       )
     }
-    #expect(gate.wait() == .success)
+    #expect(await reachedIndexing.waitOffCooperativePool())
     load.cancel()
+    cancelIssued.open()
     await #expect(throws: CancellationError.self) {
       _ = try await load.value
     }
@@ -248,15 +257,43 @@ private final class ProgressRecorder: @unchecked Sendable {
   }
 }
 
-private final class ProgressGate: @unchecked Sendable {
-  private let semaphore = DispatchSemaphore(value: 0)
+/// A one-way latch: `open()` releases every current and future waiter, so a
+/// progress callback that fires repeatedly parks only until the latch opens.
+private final class Latch: @unchecked Sendable {
+  private let condition = NSCondition()
+  private var isOpen = false
 
-  func signal() {
-    semaphore.signal()
+  func open() {
+    condition.lock()
+    isOpen = true
+    condition.broadcast()
+    condition.unlock()
   }
 
-  func wait() -> DispatchTimeoutResult {
-    semaphore.wait(timeout: .now() + 5)
+  /// Blocks the calling thread until the latch opens. Returns false if the
+  /// deadline passes first, so a genuine hang still fails rather than hanging
+  /// the suite.
+  @discardableResult
+  func wait(timeout: TimeInterval = 120) -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    condition.lock()
+    defer { condition.unlock() }
+    while !isOpen {
+      if !condition.wait(until: deadline) { return false }
+    }
+    return true
+  }
+
+  /// The same wait, moved off Swift's cooperative pool. That pool has only as
+  /// many threads as the machine has cores, so blocking one of them here —
+  /// while the rest of the suite runs in parallel — can starve the very task
+  /// that is meant to open the latch.
+  func waitOffCooperativePool(timeout: TimeInterval = 120) async -> Bool {
+    await withCheckedContinuation { continuation in
+      DispatchQueue.global().async {
+        continuation.resume(returning: self.wait(timeout: timeout))
+      }
+    }
   }
 }
 

@@ -1,0 +1,158 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # A release publishes only what CI already accepts. Calling the workflow
+  # rather than restating its steps keeps the release gate and the everyday
+  # build from drifting apart.
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: verify
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Resolve the release tag
+        id: tag
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag || github.ref_name }}"
+          case "$tag" in
+            v[0-9]*) ;;
+            *)
+              echo "error: '$tag' is not a v-prefixed release tag" >&2
+              exit 1
+              ;;
+          esac
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >>"$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Show toolchain versions
+        run: |
+          swift --version
+          rustc --version
+          cargo --version
+
+      - name: Build the Swift release executables
+        run: swift build -c release
+
+      - name: Build the restoration engine
+        working-directory: Native/GreenBubblesRestore
+        run: cargo build --locked --release
+
+      - name: Assemble the distribution archive
+        id: archive
+        run: |
+          set -euo pipefail
+          version="${{ steps.tag.outputs.version }}"
+          name="greenbubbles-${version}-macos-arm64"
+          staging="dist/$name"
+          mkdir -p "$staging/bin" "$staging/docs"
+
+          for product in \
+            greenbubbles \
+            greenbubbles-acquire \
+            greenbubbles-history \
+            greenbubbles-public-article \
+            greenbubbles-send \
+            greenbubbles-input-helper; do
+            cp ".build/release/$product" "$staging/bin/"
+          done
+
+          for product in greenbubbles-restore greenbubbles-change-consumer; do
+            cp "Native/GreenBubblesRestore/target/release/$product" "$staging/bin/"
+          done
+
+          cp README.md NOTICE.md "$staging/"
+          for doc in docs/USER_GUIDE.md docs/SEND_ADAPTER.md docs/AI_TOOL_BOUNDARY.md; do
+            # An `&&` list as the last statement in the loop body would make the
+            # loop — and so the step, under `set -e` — fail on the first absent
+            # file rather than skipping it.
+            if [ -f "$doc" ]; then cp "$doc" "$staging/docs/"; fi
+          done
+
+          tar -czf "dist/$name.tar.gz" -C dist "$name"
+          ( cd dist && shasum -a 256 "$name.tar.gz" >"$name.tar.gz.sha256" )
+
+          echo "name=$name" >>"$GITHUB_OUTPUT"
+          echo "archive=dist/$name.tar.gz" >>"$GITHUB_OUTPUT"
+          echo "checksum=dist/$name.tar.gz.sha256" >>"$GITHUB_OUTPUT"
+
+      - name: Confirm the archived helper carries no diagnostic bypass
+        run: |
+          set -euo pipefail
+          # The same invariant CI enforces on the build tree, re-checked on the
+          # binary that is actually about to be published.
+          if strings "dist/${{ steps.archive.outputs.name }}/bin/greenbubbles-input-helper" |
+            grep -q 'focus-probe --profile'; then
+            echo "error: the archived helper contains the debug diagnostics" >&2
+            exit 1
+          fi
+          echo "archived helper contains no diagnostic bypass"
+
+      - name: Compose the release notes
+        id: notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.tag.outputs.tag }}"
+          {
+            echo "## Artifacts"
+            echo
+            echo "\`${{ steps.archive.outputs.name }}.tar.gz\` — macOS arm64 executables."
+            echo "Verify with the published \`.sha256\` before use."
+            echo
+            echo "> **These binaries are unsigned and not notarized.** macOS Gatekeeper"
+            echo "> will refuse them until they are cleared locally. Signing needs a"
+            echo "> Developer ID certificate and notarization needs an Apple ID, neither"
+            echo "> of which is available to CI."
+            echo
+            echo "> **The send path ships closed.** No release verifying key is committed,"
+            echo "> so every release-signed calibration profile is refused and the adapter"
+            echo "> stays in its dry-run stage until an operator configures it deliberately."
+            echo
+            echo "## Changes"
+            echo
+          } >release-notes.md
+
+          gh api "repos/${{ github.repository }}/releases/generate-notes" \
+            -f tag_name="$tag" \
+            --jq '.body' >>release-notes.md
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${{ steps.tag.outputs.tag }}" \
+            --title "${{ steps.tag.outputs.tag }}" \
+            --notes-file release-notes.md \
+            --prerelease \
+            --verify-tag \
+            "${{ steps.archive.outputs.archive }}" \
+            "${{ steps.archive.outputs.checksum }}"
