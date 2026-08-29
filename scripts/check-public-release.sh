@@ -21,6 +21,14 @@ require_file LICENSE
 require_file THIRD_PARTY_NOTICES.md
 require_file NOTICE.md
 require_file CHANGELOG.md
+require_file PRIVACY.md
+require_file SECURITY.md
+require_file assets/greenbubbles-icon.svg
+require_file assets/how-it-works.svg
+require_file assets/what-the-ai-sees.svg
+require_file docs/README.md
+require_file docs/KNOWN_LIMITATIONS.md
+require_file docs/THREAT_MODEL.md
 require_file docs/DISTRIBUTION_INVENTORY.md
 require_file docs/PUBLIC_RELEASE_CHECKLIST.md
 require_file Native/GreenBubbles/about.toml

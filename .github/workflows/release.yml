@@ -272,6 +272,27 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$app"
           [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
             "$app/Contents/Info.plist")" = "${{ steps.tag.outputs.version }}" ]
+          [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' \
+            "$app/Contents/Info.plist")" = "GreenBubbles.icns" ]
+
+          icon="$app/Contents/Resources/GreenBubbles.icns"
+          [ -s "$icon" ]
+          verified_iconset="$RUNNER_TEMP/verified-GreenBubbles.iconset"
+          rm -rf "$verified_iconset"
+          iconutil -c iconset "$icon" -o "$verified_iconset"
+          for required_icon in \
+            icon_16x16.png \
+            icon_16x16@2x.png \
+            icon_32x32.png \
+            icon_128x128.png \
+            icon_256x256.png \
+            icon_512x512.png \
+            icon_512x512@2x.png; do
+            [ -s "$verified_iconset/$required_icon" ] || {
+              echo "error: the application icon is missing $required_icon" >&2
+              exit 1
+            }
+          done
 
       - name: Package the signed CLI archive
         run: |
@@ -370,12 +391,18 @@ jobs:
           # Rebuild the disk image from the now-stapled app so both the inner
           # app and the outer distribution remain verifiable offline.
           rm -f "${{ steps.archive.outputs.dmg }}"
+          dmg_staging="$RUNNER_TEMP/greenbubbles-dmg-root"
+          rm -rf "$dmg_staging"
+          mkdir -p "$dmg_staging"
+          /usr/bin/ditto "$app" "$dmg_staging/GreenBubbles.app"
+          /bin/ln -s /Applications "$dmg_staging/Applications"
           hdiutil create -quiet \
             -volname GreenBubbles \
-            -srcfolder "$app" \
+            -srcfolder "$dmg_staging" \
             -ov \
             -format UDZO \
             "${{ steps.archive.outputs.dmg }}"
+          rm -rf "$dmg_staging"
           codesign --force \
             --keychain "$GREENBUBBLES_RELEASE_KEYCHAIN" \
             --timestamp \
@@ -453,8 +480,42 @@ jobs:
             exit 1
           }
           xcrun stapler validate "${{ steps.archive.outputs.dmg }}"
+          codesign --verify --strict --verbose=2 "${{ steps.archive.outputs.dmg }}"
           spctl --assess --type open --context context:primary-signature -vvv \
             "${{ steps.archive.outputs.dmg }}"
+
+          mount_point="$RUNNER_TEMP/greenbubbles-release-mount"
+          mkdir -p "$mount_point"
+          mounted=
+          cleanup_mount() {
+            if [ -n "$mounted" ]; then
+              hdiutil detach -quiet "$mount_point" || true
+            fi
+          }
+          trap cleanup_mount EXIT
+          hdiutil attach -quiet -readonly -nobrowse \
+            -mountpoint "$mount_point" \
+            "${{ steps.archive.outputs.dmg }}"
+          mounted=yes
+
+          mounted_app="$mount_point/GreenBubbles.app"
+          [ -d "$mounted_app" ] || {
+            echo "error: the disk image does not contain GreenBubbles.app" >&2
+            exit 1
+          }
+          [ -L "$mount_point/Applications" ] \
+            && [ "$(readlink "$mount_point/Applications")" = "/Applications" ] || {
+              echo "error: the disk image does not contain the Applications shortcut" >&2
+              exit 1
+            }
+          [ -s "$mounted_app/Contents/Resources/GreenBubbles.icns" ]
+          codesign --verify --deep --strict --verbose=2 "$mounted_app"
+          xcrun stapler validate "$mounted_app"
+          spctl --assess --type execute --verbose=4 "$mounted_app"
+
+          hdiutil detach -quiet "$mount_point"
+          mounted=
+          trap - EXIT
 
       - name: Write release checksums
         run: |

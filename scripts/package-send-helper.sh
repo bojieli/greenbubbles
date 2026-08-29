@@ -124,6 +124,27 @@ cp Native/GreenBubbles/target/release/greenbubbles "$app_bundle/Contents/MacOS/"
 cp .build/release/greenbubbles-input-helper "$helper_bundle/Contents/MacOS/"
 cp LICENSE NOTICE.md THIRD_PARTY_NOTICES.md "$app_bundle/Contents/Resources/"
 
+echo "==> generating the application icon"
+icon_source="assets/greenbubbles-icon.svg"
+icon_base="$output_directory/GreenBubbles-icon-1024.png"
+iconset="$output_directory/GreenBubbles.iconset"
+[ -f "$icon_source" ] || fail "application icon source is missing: $icon_source"
+rm -f "$icon_base"
+rm -rf "$iconset"
+mkdir -p "$iconset"
+/usr/bin/sips -s format png -z 1024 1024 "$icon_source" --out "$icon_base" >/dev/null
+for size in 16 32 128 256 512; do
+  double_size=$((size * 2))
+  /usr/bin/sips -z "$size" "$size" "$icon_base" \
+    --out "$iconset/icon_${size}x${size}.png" >/dev/null
+  /usr/bin/sips -z "$double_size" "$double_size" "$icon_base" \
+    --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+done
+/usr/bin/iconutil -c icns "$iconset" \
+  -o "$app_bundle/Contents/Resources/GreenBubbles.icns"
+rm -f "$icon_base"
+rm -rf "$iconset"
+
 echo "==> recording the build provenance"
 git_commit=$(git rev-parse HEAD)
 cat >"$app_bundle/Contents/Resources/build-provenance.json" <<PROVENANCE
@@ -176,9 +197,15 @@ if codesign --display --entitlements - "$helper_bundle" 2>&1 |
 fi
 
 disk_image="$output_directory/GreenBubbles.dmg"
+dmg_staging="$output_directory/GreenBubbles-dmg-root"
 echo "==> building $disk_image"
 rm -f "$disk_image"
-hdiutil create -quiet -volname GreenBubbles -srcfolder "$app_bundle" -ov -format UDZO "$disk_image"
+rm -rf "$dmg_staging"
+mkdir -p "$dmg_staging"
+/usr/bin/ditto "$app_bundle" "$dmg_staging/GreenBubbles.app"
+/bin/ln -s /Applications "$dmg_staging/Applications"
+hdiutil create -quiet -volname GreenBubbles -srcfolder "$dmg_staging" -ov -format UDZO "$disk_image"
+rm -rf "$dmg_staging"
 codesign --force --timestamp --sign "$signing_identity" "$disk_image"
 
 if [ -n "$notary_profile" ]; then
