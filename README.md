@@ -1,264 +1,395 @@
-# GreenBubbles
+<p align="center">
+  <img src="assets/greenbubbles-icon.svg" width="132" alt="GreenBubbles icon">
+</p>
 
-### Let your AI understand the people who matter—without giving your conversations to another cloud.
+<h1 align="center">GreenBubbles</h1>
 
-[![CI](https://github.com/bojieli/greenbubbles/actions/workflows/ci.yml/badge.svg)](https://github.com/bojieli/greenbubbles/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/bojieli/greenbubbles?include_prereleases)](https://github.com/bojieli/greenbubbles/releases)
-[![License: MIT](https://img.shields.io/badge/license-MIT-22c55e)](LICENSE)
-![Platform](https://img.shields.io/badge/platform-macOS%2014%2B-black)
-![Status](https://img.shields.io/badge/status-research%20alpha-f59e0b)
+<p align="center">
+  <strong>Your WeChat history, readable by an AI, without leaving your Mac.</strong><br>
+  A local-first bridge between your own WeChat data and the narrow slice of it you choose to expose.
+</p>
 
-Your AI can search the web, write code, and help plan your day. But ask it who
-you promised to call, what a friend is worried about, or why a family decision
-was made, and it usually knows nothing.
+<p align="center">
+  <a href="docs/USER_GUIDE.md">Get started</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#where-the-project-actually-is">Project status</a> ·
+  <a href="docs/README.md">Documentation</a> ·
+  <a href="CONTRIBUTING.md">Contribute</a>
+</p>
 
-That context already exists. It lives in years of conversations with real
-people—often inside closed systems controlled by giant apps. For a huge part
-of the world, much of it lives in WeChat.
+<p align="center">
+  <a href="https://github.com/bojieli/greenbubbles/actions/workflows/ci.yml"><img src="https://github.com/bojieli/greenbubbles/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/bojieli/greenbubbles/releases"><img src="https://img.shields.io/github/v/release/bojieli/greenbubbles?include_prereleases" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e" alt="License: MIT"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%2014%2B-black" alt="Platform: macOS 14+">
+  <img src="https://img.shields.io/badge/status-research%20alpha-f59e0b" alt="Status: research alpha">
+</p>
 
-An AI contact should be more than a name and a phone number. It should remember
-the thread of a relationship: the promise made last month, the document a
-colleague sent, the concern a friend mentioned, and the reason a family chose
-one path over another. Today, those memories are abundant—but sealed away from
-the AI that could help you honor them.
+I have 1,855,548 WeChat messages on this Mac, and my AI tools cannot read one
+of them. They sit as 2.98 GB of SQLCipher databases including 6,292 message tables, with
+about 59 GB of images, voice notes and documents beside them. WeChat can open
+all of it. It does not offer that context to other tools; the matching database
+key lives inside the running client rather than in an export you can request.
 
-**GreenBubbles asks a simple question: what if your AI could understand the
-relationships you already have, while your history, credentials, and control
-remain on your Mac?**
+The export tools that exist solve the wrong half of this. They decrypt the
+database and write the whole corpus to JSON — which is exactly the artifact you
+should least want sitting on disk, and exactly the wrong thing to hand a model.
+A full dump is not context. It is a liability with a search box.
 
-GreenBubbles is an experimental, local-first bridge between an owner's own
-WeChat data and narrowly scoped AI tools. It can browse and search local
-history, create independently recoverable encrypted snapshots, restore a
-lossless archive, and expose only policy-approved context to an AI—with
-citations, freshness evidence, and an audit trail.
+GreenBubbles takes the opposite approach: leave everything where it is, and open it
+read-only.
 
-> [!IMPORTANT]
-> GreenBubbles is a research alpha for technical users, not a finished consumer
-> app. It requires owner-authorized local data and, for encrypted history, the
-> matching database key. The public binaries are Developer ID signed and Apple
-> notarized, but the acquisition and compatibility caveats remain essential.
+<p align="center">
+  <img src="assets/what-the-ai-sees.svg" alt="What stays on your Mac versus what a model receives. The left panel holds the whole corpus: 1,855,548 messages across 6,292 tables, 2.98 GB of encrypted databases, about 59 GB of media, and the WeChat database key, all opened read-only. A policy and audit gate admits only the conversations, fields, time range and destination you approved. The right panel is what the model gets: one bounded result page, the approved fields only, a citation for every message, and an explicit note about what the page does not cover." width="900">
+</p>
 
-## What GreenBubbles unlocks
+## What one query actually looks like
 
-| Goal                      | Local capability                                                                           |
-| ------------------------- | ------------------------------------------------------------------------------------------ |
-| Remember the conversation | Read one bounded page or search window directly from live or snapshotted history           |
-| Understand the person     | Preserve contacts, participants, reply relationships, timestamps, and source identity      |
-| Keep context private      | Apply conversation, field, time, and destination policy before anything reaches an AI      |
-| Preserve your history     | Create an encrypted snapshot with portable 24-word recovery, independent of the WeChat key |
-| Keep answers grounded     | Carry source citations, checkpoint identity, freshness, omissions, and truncation evidence |
-| Explore visually          | Browse live or snapshot history in a native SwiftUI app                                    |
-| Build local memory        | Export deterministic, bounded conversation chunks for approved memory and retrieval tools  |
+Everything below is one process that starts, answers, and exits. No daemon, no
+index build, no upload.
 
-GreenBubbles is **not** a WeChat server, a cloud sync service, a bot account, or
-an access-control bypass. It works with data the owner is authorized to access
-on their own Mac.
+```console
+$ greenbubbles messages search --profile personal --query-stdin --limit 1
+```
+
+```json
+{
+  "schema": "greenbubbles.query.v1",
+  "formatVersion": 1,
+  "operation": "messages.search",
+  "ok": true,
+  "source": { "mode": "liveEncrypted", "identity": "sha256:0f3a…" },
+  "consistency": {
+    "guarantee": "nativeFtsAndContactReadStatements",
+    "databaseCount": 2,
+    "crossDatabaseAtomic": false,
+    "coverageComplete": false,
+    "observedAtUnixMilliseconds": 1787880000000
+  },
+  "page": { "limit": 1, "returned": 1, "hasMore": true, "nextCursor": "…" },
+  "warnings": [{
+    "code": "nativeSearchIndexFreshnessUnverified",
+    "message": "results come from WeChat's native FTS database; its lag relative to message shards is not independently proven"
+  }, {
+    "code": "contactDisplayNameUnresolved",
+    "message": "one or more contact display names were unavailable; raw identifiers were retained",
+    "count": 1
+  }],
+  "items": [{
+    "id": "…",
+    "conversationId": "wxid_…",
+    "sender": "wxid_…",
+    "createdAtUnix": 1787879900,
+    "sortSequence": 9042,
+    "messageLocalId": 271,
+    "messageType": 1,
+    "messageTypeLabel": "text",
+    "messageSubtype": 0,
+    "messageSubtypeLabel": "text",
+    "snippet": "…",
+    "snippetTruncated": false
+  }]
+}
+```
+
+Four things in that response are the point of the project:
+
+- **`nextCursor`, not an offset.** The next page resumes after the exact
+  compound ordering key instead of relying on a shifting row number. For a
+  stable run across live mutations, query a snapshot generation.
+- **`crossDatabaseAtomic: false`.** A page that touches more than one database
+  is not one atomic instant, and saying so is more useful than pretending
+  otherwise.
+- **`warnings`.** A contact name that could not be resolved is reported. The
+  raw identifier stays. Nothing is silently dropped.
+- **A stable id per message.** Every citation an assistant produces can be
+  fetched back and checked.
+
+The search query arrives on standard input rather than in `argv`, so what you
+searched for does not land in your shell history or in `ps` output. So does the
+database key.
 
 ## How it works
 
-```mermaid
-flowchart LR
-    A["WeChat data on your Mac"] --> B["Read-only local adapter"]
-    B --> C["History browser"]
-    B --> D["Bounded CLI queries"]
-    B --> E["Encrypted recoverable snapshot"]
-    D --> F["Policy + audit boundary"]
-    E --> F
-    F --> G["Your approved AI tool"]
-```
+<p align="center">
+  <img src="assets/how-it-works.svg" alt="The read path. WeChat's own SQLCipher databases are opened read-only with query_only enabled. One adapter performs keyset pagination, typed decoding and bound enforcement, feeding three destinations: the native history browser, a bounded JSON page on the command line, and a recoverable snapshot encrypted under its own key. Only the command-line page passes through the policy and audit gate to reach an AI tool." width="960">
+</p>
 
-The ordinary path is deliberately narrow:
+The read path is deliberately narrow:
 
-1. GreenBubbles opens owner-selected SQLite/WCDB files read-only.
-2. A caller requests a bounded page, search window, or exact message.
-3. Optional policy decides which conversations, fields, dates, and destination
-   are allowed.
-4. The response records its source, coverage, freshness, limitations, and
-   citations.
-5. Keys stay outside model prompts and are supplied to local processes through
-   standard input or owner-only credential files.
+1. GreenBubbles opens the account's SQLite/WCDB files with
+   `SQLITE_OPEN_READ_ONLY` and `PRAGMA query_only = ON`.
+2. A caller asks for one page, one search window, or one exact message. There
+   is no `--all`, and no way to pass SQL.
+3. Each statement finishes before anything is serialized, so no read
+   transaction is held open while a model thinks and WeChat's WAL is not pinned
+   across caller work.
+4. Optional policy decides which conversations, fields, dates and destination
+   are permitted, and appends a hash-chained, body-free audit event.
+5. The response carries its source, coverage, freshness and limitations
+   alongside the content.
 
-There is no background upload service. Normal browsing does not first copy the
-whole corpus into JSON, a vector database, or a cloud.
+Attachments are resolved only when you ask for one by name. A message page
+returns references, not 59 GB of decoded media.
 
-## Quick start
+## Install
 
-### Requirements
-
-- macOS 14 or later on Apple silicon for the prebuilt release;
-- an owner-authorized WeChat <code>db_storage</code> directory;
-- the matching 32-byte database key for encrypted live data.
-
-### Download the signed app
+Requires macOS 14 or later on Apple silicon.
 
 Download the latest `GreenBubbles-*-macos-arm64.dmg` from
-[GitHub Releases](https://github.com/bojieli/greenbubbles/releases). Every app
-executable is Developer ID signed and Apple notarized. The disk image carries a
-stapled ticket for offline Gatekeeper verification.
+[Releases](https://github.com/bojieli/greenbubbles/releases). Every executable
+is Developer ID signed and Apple notarized, and the disk image carries a
+stapled ticket so Gatekeeper can verify it offline. Verify before opening:
 
-The same release also includes a signed and notarized `greenbubbles-*-macos-arm64.zip`
-with the complete command-line tool set, an SBOM, SHA-256 checksums, and Apple's
-notarization logs. Bare command-line executables cannot carry stapled tickets;
-macOS resolves their accepted tickets online on first assessment.
-
-Verify the downloaded files before opening them:
-
-```sh
-shasum -a 256 -c SHA256SUMS-0.1.1.txt
+```console
+grep ' GreenBubbles-0.1.1-macos-arm64.dmg$' SHA256SUMS-0.1.1.txt | \
+  shasum -a 256 -c -
 xcrun stapler validate GreenBubbles-0.1.1-macos-arm64.dmg
-spctl --assess --type open --context context:primary-signature -vvv \
-  GreenBubbles-0.1.1-macos-arm64.dmg
 ```
 
-### Build from source
+The second command needs Apple's command-line developer tools. After
+verification, open the disk image, copy **GreenBubbles** to Applications, and
+launch it. The packaged app selects its bundled `greenbubbles` CLI
+automatically.
 
-Building requires Swift 6, the macOS developer tools, Rust, and Cargo:
+The same release ships `greenbubbles-*-macos-arm64.zip` with the full
+command-line tool set, an SBOM, checksums, and Apple's notarization logs. Bare
+command-line executables cannot carry a stapled ticket, so macOS checks their
+tickets online the first time you run them.
 
-Build the Rust query engine and launch the native history browser:
+### From source
 
-```sh
+Needs Swift 6, the macOS developer tools, and Rust:
+
+```console
 git clone https://github.com/bojieli/greenbubbles.git
 cd greenbubbles
-
-cargo build --locked --release \
-  --manifest-path Native/GreenBubbles/Cargo.toml
+cargo build --locked --release --manifest-path Native/GreenBubbles/Cargo.toml
 swift build --product greenbubbles-history
 swift run greenbubbles-history
 ```
 
-In the app:
+When running from source, point the app at
+`Native/GreenBubbles/target/release/greenbubbles` when it asks for the CLI.
 
-1. Choose **Browse Live or Snapshot…**.
-2. Select
-   <code>Native/GreenBubbles/target/release/greenbubbles</code>.
-3. Select the account's <code>db_storage</code> directory.
-4. Supply the matching key locally and connect.
+## Getting your database key
 
-The selected source should contain directories such as <code>contact</code>,
-<code>session</code>, and <code>message</code>. Do not select the whole WeChat
-container or an individual database file.
+WeChat encrypts its local databases with a 32-byte key it derives at login and
+keeps to itself. There is no export button for it, so GreenBubbles ships a
+helper that captures it from your own running client and proves it works.
+Three commands, about a minute.
 
-For step-by-step setup, snapshot recovery, query profiles, and command-line
-examples, use the [user guide](docs/USER_GUIDE.md).
+**1. Let a debugger attach to your copy of WeChat, then restart WeChat.**
 
-### A necessary truth about the database key
+```console
+sudo codesign --force --deep --sign - /Applications/WeChat.app
+```
 
-GreenBubbles cannot magically open encrypted history. If you do not already
-have the matching key, the optional acquisition helper is an advanced,
-owner-run procedure that temporarily requires re-signing the owner's own
-WeChat app, attaching LLDB, and logging out and back in. That changes the
-client's security posture and may have account, contractual, or legal
-implications.
+macOS refuses to attach to a hardened-runtime binary, so this re-signs the app
+ad hoc to clear that flag. GreenBubbles never runs `codesign` for you. Note
+that this replaces Apple's signature until you reinstall WeChat or it
+auto-updates, and you will repeat this step after an update.
 
-Read the [passphrase acquisition guide](docs/PASSPHRASE_ACQUISITION.md) in full
-before considering it. Never paste a database key, recovery phrase, or private
-message into an AI prompt, issue, or discussion.
+**2. Check that everything the capture needs is in place.**
 
-## Give an AI context—not your entire life
+```console
+sudo greenbubbles-acquire preflight
+```
 
-The project supports three progressively more deliberate integration levels:
+This reports whether WeChat is running, whether the hardened-runtime flag is
+gone, whether `lldb` is available, and how many database salts it found. It
+finds your active account automatically — the one whose databases were written
+most recently — or takes `--db-root <path>`. If re-signing is still needed it
+prints the exact command. Add `--json` for machine-readable output.
 
-- **Direct bounded queries** for one page, search, message, or attachment.
-- **Policy-scoped queries** with explicit conversation, field, time, and
-  destination controls plus append-only audit.
-- **Static memory export** for deliberate ingestion into a local or approved
-  retrieval system, with stable citations back to canonical messages.
+**3. Arm the capture, then log out of WeChat and log back in.**
 
-The repository includes an agent skill at
-[skills/greenbubbles-context](skills/greenbubbles-context/SKILL.md). It teaches
-compatible agents to use bounded commands, preserve citations, surface
-incomplete coverage, and treat message content as untrusted data rather than
+```console
+sudo greenbubbles-acquire capture
+```
+
+The logout is the whole trick. WeChat derives its per-database keys *only*
+while it is opening them, which happens at login, so `capture` sets a
+breakpoint on the system function `CCKeyDerivationPBKDF`, waits (up to five
+minutes, `--timeout-seconds` to change it), reads the 32 bytes as they pass
+through, and detaches. Nothing is injected and nothing stays hooked.
+
+It then derives each database's key locally with PBKDF2-HMAC-SHA512 and checks
+every one against that database's SQLCipher page-1 HMAC, so it reports a key
+only after proving it opens your actual files. On a recent run that was 26 of
+26 databases in 45 seconds.
+
+Because the breakpoint targets a system library rather than WeChat itself, the
+capture is build-agnostic — validated on 4.1.12 and 4.1.13, including 4.1.13's
+habit of replacing its process on logout, which `capture` follows
+automatically.
+
+### Using the key
+
+It lands in `~/.greenbubbles-acquire/passphrase.txt` as mode-`0600` hex, and is
+shaped to be piped straight in:
+
+```console
+cat ~/.greenbubbles-acquire/passphrase.txt |
+  greenbubbles source status <db_storage> --passphrase-stdin
+```
+
+Better, store the path once in a [query profile](docs/QUERY_PROFILES.md) and
+stop typing it:
+
+```console
+greenbubbles conversations list --limit 100
+```
+
+The key is stable, so databases WeChat creates later need no second capture —
+`greenbubbles-acquire verify --passphrase-stdin` re-derives and re-checks them
+without attaching to anything.
+
+[The acquisition guide](docs/PASSPHRASE_ACQUISITION.md) has the full mechanism,
+every failure mode, and what to do when preflight blocks. The capture and
+derivation are ported from the MIT-licensed
+[`TANGandXUE/wcdb-key-tool`](https://github.com/TANGandXUE/wcdb-key-tool).
+
+## First run
+
+Launch the app and choose **Browse Live or Snapshot…**, then select the
+`db_storage` directory for your account — the one containing `contact`,
+`session` and `message`, not the whole WeChat container and not a single `.db`
+file. Supply the key and connect.
+
+Not sure where your account lives?
+
+```console
+greenbubbles-discover accounts --include-paths
+```
+
+The [user guide](docs/USER_GUIDE.md) covers snapshots, query profiles and
+recovery. The [FAQ](docs/FAQ.md) covers what goes wrong.
+
+## How this differs from the export tools
+
+| | GreenBubbles | Typical WeChat exporters |
+| --- | --- | --- |
+| Normal output | one bounded page, cited | the whole corpus as JSON/HTML |
+| Plaintext copy on disk | none by default | the entire history |
+| Reads media | one attachment, when asked | eagerly, or not at all |
+| Backup | encrypted, own key, 24-word recovery | a folder of decrypted files |
+| Gives a model | what one policy allows, audited | whatever you paste |
+| Getting the key | one verified command, then bounded reads | the headline feature |
+
+Exporters are good at what they do, and if you want a readable archive of a
+group chat, use one. GreenBubbles exists because "decrypt everything to disk"
+is the wrong starting posture when the consumer is a language model.
+
+A fuller treatment, including where those tools are the better choice, is in
+[the comparison](docs/COMPARISON.md).
+
+## Where the project actually is
+
+**0.1.1 is a research alpha for technical users.** The read path is
+implemented, tested and bounded; the history browser works; snapshots are
+recoverable and verified. What follows is what is *not* settled, because that
+is the part worth knowing before you install it.
+
+- **No real-corpus latency gate has been met.** The synchronization objective —
+  newly persisted text searchable within 60 seconds at p95 — has never been
+  demonstrated on a live account. Every number in this repository comes from
+  synthetic archives or bounded local samples, and
+  [MEASUREMENTS.md](docs/MEASUREMENTS.md) says so on each table.
+- **Restoration completeness is proven per-archive, not in general.** The
+  auditor proves an archive is internally consistent and its recorded files
+  still exist. It cannot prove that an undiscovered WeChat table was absent, or
+  that a private field's semantics were read correctly.
+- **Compatibility is a moving target.** WeChat 4.1's format is closed and
+  changes. Unknown or partially readable data is reported as a limitation, and
+  the top-level verdict stays `false` — GreenBubbles will not turn partial
+  coverage into a green check.
+- **Only Apple silicon is released.** Intel builds are unverified.
+- **Sending is closed and stays closed.** Experimental code exists; a default
+  build has no pinned release verification key, so it cannot leave dry-run mode.
+  It is not a supported public feature, and the
+  [send adapter guide](docs/SEND_ADAPTER.md) explains why it ships that way.
+
+The read path does not inject code into WeChat, call private WeChat network
+APIs, or contact any server. The optional acquisition path is separate, and is
+never reachable from an AI tool boundary.
+
+## What it costs to run
+
+Recorded on an Apple M2 Max, macOS 26.6.2, 2026-08-27 and 2026-08-29. Full
+protocol, sample counts and evidence boundaries in
+[MEASUREMENTS.md](docs/MEASUREMENTS.md).
+
+| Operation | Median | p95 |
+| --- | ---: | ---: |
+| Search, native FTS absent, one conversation, 500-message window | — | 246 ms |
+| Search, native FTS absent, 16 conversations, 500-message window | — | 352 ms |
+| Replica bootstrap, 5,000 messages | 417 ms | 439 ms |
+| One new message reconciled | 5.4 ms | 5.8 ms |
+| Idle check, nothing changed | 1.2 ms | 1.3 ms |
+
+The slow row is the fallback that runs when WeChat's own full-text index cannot
+be used, decrypting a fixed 500-message window to search it. It was 4.4 seconds
+before the shard connections were reused across the window. At 352 ms it is
+also the reason there is no persistent text cache: a second encrypted copy of
+your messages is not worth 350 milliseconds.
+
+## What this will not do
+
+Boundaries that are not up for negotiation, and the reasoning behind each:
+
+- **Owner-authorized data only.** Your account, your machine, your key.
+- **Read-only for discovery, browsing and restoration.** The source is never
+  written.
+- **No secrets in `argv`.** Keys, passphrases, recovery words and search text
+  all arrive on standard input, because process arguments are world-readable.
+- **No real user data in this repository** — not in tests, fixtures, logs,
+  issues, or model context. Every test runs on synthetic data.
+- **Message text is untrusted input.** A sentence inside a chat cannot widen
+  the policy that released it or select another operation.
+- **Fail closed.** Unknown builds, changed files, ambiguous identity, unsafe
+  paths, malformed policies and write capabilities all stop the operation
+  rather than guessing.
+- **No stealth, anti-detection, account takeover, or access-control bypass.**
+
+A local-first tool can still leak everything if the model, embedder, vector
+store, log collector or crash reporter behind it is remote. GreenBubbles
+controls its own boundary; approving what is downstream of it is your job.
+[The threat model](docs/THREAT_MODEL.md) is explicit about which is which.
+
+Vulnerabilities go to [SECURITY.md](SECURITY.md), never to a public issue.
+
+## Documentation
+
+| Document | Contents |
+| --- | --- |
+| [User guide](docs/USER_GUIDE.md) | First run, browsing, snapshots, recovery, troubleshooting |
+| [FAQ](docs/FAQ.md) | The questions people actually ask, including what breaks |
+| [CLI reference](docs/CLI_REFERENCE.md) · [Query profiles](docs/QUERY_PROFILES.md) | Every command family; repeatable queries without retyping credentials |
+| [Architecture](docs/ARCHITECTURE.md) | Why bounded queries replaced full restoration, with the measurements |
+| [Storage format](docs/STORAGE_FORMAT.md) | What WeChat 4.1 writes on disk and how much of it is understood |
+| [AI context CLI](docs/AI_CONTEXT_CLI.md) · [tool boundary](docs/AI_TOOL_BOUNDARY.md) · [memory](docs/AI_MEMORY_INTEGRATION.md) | The three integration levels, from bounded query to memory export |
+| [Recoverable snapshots](docs/RECOVERABLE_SNAPSHOTS.md) | The key hierarchy, the 24 words, rotation and retention |
+| [Measurements](docs/MEASUREMENTS.md) | Every number, with its machine, date, and what it does not prove |
+| [Known limitations](docs/KNOWN_LIMITATIONS.md) | What is unproven, unsupported, or known broken |
+| [Threat model](docs/THREAT_MODEL.md) · [action safety](docs/ACTION_SAFETY_CONTRACT.md) | Assets, trust boundaries, and the contract governing any outward action |
+| [Auditing](docs/AUDITING.md) | Verifying an archive, replica, acquisition chain, or audit journal |
+| [Roadmap](docs/ROADMAP.md) | What is next, and the gates each step has to pass |
+
+The full index, including the specifications and the archived development
+record, is [docs/README.md](docs/README.md).
+
+The repository also ships an agent skill at
+[`skills/greenbubbles-context`](skills/greenbubbles-context/SKILL.md). It
+teaches a compatible agent to use bounded commands, preserve citations, report
+incomplete coverage, and treat message content as data rather than
 instructions.
-
-Start with:
-
-- [AI context CLI](docs/AI_CONTEXT_CLI.md) for direct and policy-scoped access;
-- [AI tool boundary](docs/AI_TOOL_BOUNDARY.md) for permissions and threat
-  boundaries;
-- [AI memory integration](docs/AI_MEMORY_INTEGRATION.md) for citation-preserving
-  QMD and Mem0 projections.
-
-> [!CAUTION]
-> A local-first tool can still leak data if a downstream model, embedder,
-> vector store, log collector, or crash reporter is remote. GreenBubbles
-> controls its own boundary; you must also approve every downstream
-> destination.
-
-## Current status
-
-| Area                                                        | Status                                                                          |
-| ----------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| Passive discovery and inventory                             | Implemented and tested                                                          |
-| Read-only live/snapshot conversations, messages, and search | Implemented and bounded                                                         |
-| Native history browser                                      | Implemented for macOS                                                           |
-| Exact-message local attachments                             | Implemented with lazy, verified materialization                                 |
-| Recoverable encrypted snapshots                             | Implemented with portable recovery and integrity checks                         |
-| Lossless restoration and encrypted replica                  | Implemented; real-world format coverage remains an ongoing compatibility effort |
-| Policy-scoped AI context and memory export                  | Implemented with audit and citations                                            |
-| Owner-run passphrase acquisition                            | Available, invasive, advanced, and never part of an AI tool boundary            |
-| Sending                                                     | Experimental code exists but public builds ship cryptographically closed        |
-| Signed and notarized application distribution               | Available for Apple silicon through GitHub Releases                            |
-
-The read path does not inject code into WeChat or call private WeChat network
-APIs. The optional acquisition path is separate and explicit. The send adapter
-is also separate: a default build has no pinned release verification key, so it
-cannot leave dry-run mode. Sending is not a supported public feature.
-
-Compatibility with closed, evolving formats is never permanent. Unknown or
-partially readable data is reported as a limitation; GreenBubbles does not
-silently turn incomplete coverage into certainty.
-
-## Safety model
-
-GreenBubbles handles some of the most sensitive data a person owns. Its
-non-negotiable boundaries are:
-
-- owner-authorized accounts and data only;
-- read-only source access for normal discovery, browsing, and restoration;
-- no keys, passphrases, recovery words, or search text in process arguments;
-- no real user artifacts in the repository, tests, logs, or model context;
-- private outputs and credentials with restrictive filesystem permissions;
-- bounded queries instead of unreviewed bulk disclosure;
-- message and article text treated as untrusted input;
-- path redaction and explicit disclosure controls;
-- fail-closed behavior for unknown builds, changed files, ambiguous identity,
-  unsafe paths, malformed policies, and write capabilities;
-- no stealth, anti-detection, account takeover, or control-bypass features.
-
-For vulnerability reporting, see [SECURITY.md](SECURITY.md). For the detailed
-action boundary, see
-[docs/ACTION_SAFETY_CONTRACT.md](docs/ACTION_SAFETY_CONTRACT.md).
-
-## Project map
-
-| Path                                      | Purpose                                                                      |
-| ----------------------------------------- | ---------------------------------------------------------------------------- |
-| <code>Sources/</code>                     | Swift discovery, acquisition, history UI, and closed send-helper components  |
-| <code>Native/GreenBubbles/</code>         | Rust live-query, snapshot, restoration, replica, connector, and audit engine |
-| <code>Tests/</code>                       | Swift synthetic and contract tests                                           |
-| <code>Native/GreenBubbles/tests/</code>   | Rust end-to-end synthetic tests                                              |
-| <code>skills/greenbubbles-context/</code> | Bounded AI-agent usage instructions                                          |
-| <code>docs/</code>                        | Architecture, formats, operations, validation evidence, and research notes   |
-| <code>Packaging/</code>                   | macOS bundle metadata and entitlements                                       |
-
-Useful deep dives:
-
-- [Command-line reference](docs/CLI_REFERENCE.md)
-- [Live query architecture](docs/LIVE_QUERY_ARCHITECTURE.md)
-- [Recoverable snapshots](docs/RECOVERABLE_SNAPSHOTS.md)
-- [Storage format](docs/STORAGE_FORMAT.md)
-- [Restoration specification](docs/RESTORATION_SPEC.md)
-- [Source connector contract](docs/SOURCE_CONNECTOR_CONTRACT.md)
-- [History browser](docs/HISTORY_BROWSER.md)
-- [Send adapter and why it ships closed](docs/SEND_ADAPTER.md)
-- [Distribution inventory](docs/DISTRIBUTION_INVENTORY.md)
-- [Roadmap and safety gates](PLAN.md)
 
 ## Build and test
 
-Run the same core checks used by CI:
+The checks CI runs:
 
-```sh
+```console
 swift format lint --strict --recursive Package.swift Sources Tests
 swift test
 swift build -c release
@@ -271,46 +402,42 @@ cd Native/GreenBubbles
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
-cargo install cargo-audit --locked --version 0.22.2
 cargo audit --file Cargo.lock
 ```
 
-Enable the repository's pre-commit secret guard once per clone:
+Enable the pre-commit secret guard once per clone:
 
-```sh
+```console
 git config core.hooksPath scripts/git-hooks
 ```
 
-The tests use synthetic fixtures. Do not contribute real databases, message
-fragments, media, identifiers, keys, paths, or derived user data.
-
-## Public release status
-
-**GreenBubbles 0.1.1 is the first approved public source-and-binary research
-release.** The repository is MIT-licensed. Binary releases carry the full
-third-party notice bundle, an SBOM, checksums, Developer ID signatures, and
-Apple notarization evidence. The release workflow fails closed if any of those
-requirements or the closed-send invariant is missing.
-
-Public release does not turn ongoing research into a compatibility promise or
-legal advice. Real WeChat formats change, the optional acquisition helper is
-invasive, and unsupported data stays visibly partial. The exact release gates
-and deliberately unresolved research questions are recorded in the
-[public release checklist](docs/PUBLIC_RELEASE_CHECKLIST.md) and
-[distribution inventory](docs/DISTRIBUTION_INVENTORY.md).
+Tests use synthetic fixtures. Do not contribute real databases, message
+fragments, media, identifiers, keys, paths, or anything derived from them.
 
 ## Contributing
 
-Thoughtful research, privacy, compatibility, documentation, and synthetic-test
-contributions are welcome under the MIT License. Read
-[CONTRIBUTING.md](CONTRIBUTING.md) before filing anything. Security reports
-never belong in a public issue.
+Contributions to privacy, compatibility, documentation and synthetic tests are
+all welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). The most useful thing you
+can report is a format GreenBubbles reads incompletely, described structurally,
+with no message content attached.
 
-## License and trademarks
+## Repository layout
 
-GreenBubbles is released under the [MIT License](LICENSE). Binary distributions
-also include [third-party notices](THIRD_PARTY_NOTICES.md) for their resolved
-dependencies and bundled native sources.
+| Path | Contents |
+| --- | --- |
+| `Sources/` | Swift discovery, acquisition, history browser, closed send helper |
+| `Native/GreenBubbles/` | Rust query, snapshot, restoration, replica, connector and audit engine |
+| `Tests/`, `Native/GreenBubbles/tests/` | Swift and Rust synthetic suites |
+| `skills/greenbubbles-context/` | Bounded usage instructions for AI agents |
+| `docs/` | Guides, specifications, measurements, and the archived record |
+| `Packaging/` | macOS bundle metadata and entitlements |
+
+## License
+
+MIT — see [LICENSE](LICENSE). Binary distributions include
+[third-party notices](THIRD_PARTY_NOTICES.md) for the shipped runtime dependency
+graph and bundled native source. See [PRIVACY.md](PRIVACY.md) for the data
+boundary and [SECURITY.md](SECURITY.md) for private vulnerability reporting.
 
 GreenBubbles is an independent research project. It is not affiliated with,
 endorsed by, or sponsored by Tencent or WeChat. WeChat and other product names
