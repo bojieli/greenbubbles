@@ -209,7 +209,7 @@ jobs:
             details="$(codesign --display --verbose=4 "$executable" 2>&1)"
             grep -F "Authority=$APPLE_SIGNING_IDENTITY" <<<"$details" >/dev/null
             grep -F "TeamIdentifier=$APPLE_TEAM_ID" <<<"$details" >/dev/null
-            grep -E '^flags=.*\(.*runtime.*\)' <<<"$details" >/dev/null
+            grep -E '^CodeDirectory .*flags=.*\(.*runtime.*\)' <<<"$details" >/dev/null
             [ "$(lipo -archs "$executable")" = "arm64" ] || {
               echo "error: $executable is not an arm64-only release binary" >&2
               exit 1
@@ -257,7 +257,7 @@ jobs:
             details="$(codesign --display --verbose=4 "$executable" 2>&1)"
             grep -F "Authority=$APPLE_SIGNING_IDENTITY" <<<"$details" >/dev/null
             grep -F "TeamIdentifier=$APPLE_TEAM_ID" <<<"$details" >/dev/null
-            grep -E '^flags=.*\(.*runtime.*\)' <<<"$details" >/dev/null
+            grep -E '^CodeDirectory .*flags=.*\(.*runtime.*\)' <<<"$details" >/dev/null
             [ "$(lipo -archs "$executable")" = "arm64" ] || {
               echo "error: $executable is not an arm64-only release binary" >&2
               exit 1
