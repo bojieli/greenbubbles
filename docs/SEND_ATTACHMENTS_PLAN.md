@@ -736,3 +736,50 @@ agent holding its own TCC grants.
 Defects 2 and 3 were only visible because the client drifted into a state the
 happy path never produces. That is an argument for exercising against a real
 client in states nobody designed for, not only against fixtures.
+
+## 19. Recipient binding: the allow list did not constrain the recipient
+
+Re-reviewing the branch for merge readiness turned up a defect worse than the
+four above, because it defeated the containment the whole design rests on.
+
+The allow list authorized an opaque `conversationId`. What actually routes a
+message is something else: in `currentConversation` addressing the skill types
+nothing until GATE 1 matches the recipient's **human-readable title** on screen,
+and that title came from the draft's `recipient.humanLabel`. Nothing checked the
+two against each other. Precheck verified that `recipient.conversationId`
+equalled `conversationId`, and that the label was non-empty — never that the
+label was the one belonging to that conversation.
+
+So a draft naming the allow-listed `filehelper` while carrying the title of a
+different person passed every control-plane check — `guardDenials: []`,
+`failures: []` — and would then have addressed, composed, and sent to whoever
+that title matched, while the outbox, the audit chain, and the recall window all
+recorded `filehelper`. The allow list was authorizing a value the send path
+never used for routing, and the audit trail would have been confidently wrong
+about the one fact that matters most.
+
+Drafts the connector produces are consistent by construction, because both
+fields come from the same replica resolution. The exposure arrived with
+`emit_action_draft`, a tool added during this work that writes draft files
+directly; it widened the trust surface without the guard widening to match.
+
+The fix binds policy to the value that selects the destination. The allow list
+now carries `recipientTitles`, one owner-authorized title per allow-listed
+conversation; the attempt intent carries the title the recipient gate will be
+required to match; and the guard refuses anything else as
+`recipientTitleNotAllowed`, before a keystroke is delivered. It fails closed in
+both directions: a conversation with no authorized title cannot be sent to, and
+a title configured for a conversation that is not allow-listed is a
+configuration error.
+
+Locking it shut also closed a second, older drift. The vectors now publish the
+whole failure taxonomy, and Swift asserts its own set is identical. That test
+failed on its first run: the helper could emit `composeNotEmpty` — the refusal
+that protects a human's half-typed message — and the control plane had no such
+code, so that protective refusal would have arrived as a decode failure. Rust
+has the code now.
+
+The lesson is the one from §18, sharpened: an allow list is only as good as the
+binding between what it names and what the mechanism actually obeys. Worth
+asking of the rest of the system wherever an opaque identifier is authorized but
+something human-readable does the routing.

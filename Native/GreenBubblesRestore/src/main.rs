@@ -4889,6 +4889,10 @@ fn send_config_template() -> Result<String, Box<dyn std::error::Error>> {
         "allowList": {
             "accountIds": ["REPLACE-WITH-THE-REPLICA-ACCOUNT-ID"],
             "conversationIds": ["filehelper"],
+            // The recipient title the send path must see on screen before it
+            // types anything. Authorizing the identifier alone would leave the
+            // actual destination unconstrained.
+            "recipientTitles": {"filehelper": "File Transfer"},
             "capabilities": ["textSend"]
         },
         "selfSendConversationId": "filehelper",

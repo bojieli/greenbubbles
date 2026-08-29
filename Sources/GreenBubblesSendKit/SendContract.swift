@@ -154,6 +154,7 @@ public enum SendFailureCode: String, Codable, Sendable, CaseIterable {
   case unknownBuild
   case calibrationDrift
   case recipientVerifyFailed
+  case recipientTitleNotAllowed
   case contentVerifyFailed
   case addressingFocusFailed
   case composeNotEmpty
@@ -196,6 +197,8 @@ public enum SendFailureCode: String, Codable, Sendable, CaseIterable {
       "No verified calibration profile is active for this client build; run `send selftest`, and install a signed profile for this WeChat build if it fails."
     case .recipientVerifyFailed:
       "The opened conversation did not match the approved recipient."
+    case .recipientTitleNotAllowed:
+      "The draft's recipient title is not the one authorized for that conversation; add the exact title to the allow list's recipientTitles, or approve a draft resolved from the replica."
     case .contentVerifyFailed: "The composed text did not match the approved body."
     case .addressingFocusFailed:
       "The search box did not take focus, so the recipient was never addressed; nothing destructive was typed and the run stopped."

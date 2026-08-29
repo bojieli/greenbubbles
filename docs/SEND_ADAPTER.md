@@ -218,6 +218,29 @@ must contain the self-send conversation and at most two entries in total. A
 wider allow list than the stage permits is a configuration error, not something
 to silently intersect.
 
+The allow list authorizes a **conversation identifier and the recipient title
+that identifier presents on screen**, as `recipientTitles`:
+
+```json
+"allowList": {
+  "accountIds": ["…"],
+  "conversationIds": ["filehelper"],
+  "recipientTitles": { "filehelper": "File Transfer" },
+  "capabilities": ["textSend"]
+}
+```
+
+Both halves are load-bearing, because the opaque identifier is not what routes a
+message. The send path proves a recipient by matching the human-readable title
+in GATE 1, so a draft that kept an allow-listed identifier while carrying a
+different title would direct the send at whatever conversation that title
+matched, while the outbox and audit recorded the allow-listed one. Policy
+therefore refuses any draft whose title is not the authorized one for its
+conversation (`recipientTitleNotAllowed`), before a single keystroke is
+delivered. A conversation with no authorized title configured cannot be sent to
+at all: an allow list that does not cover its conversations exactly, or that
+maps one to a blank title, is rejected as `configurationInvalid`.
+
 ## 9. Operator runbook
 
 ```sh

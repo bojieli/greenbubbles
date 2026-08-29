@@ -14,7 +14,7 @@ use greenbubbles_restore::action::ActionCapability;
 use greenbubbles_restore::send_contract::{
     capability_binding_sha256, normalized_send_text, normalized_send_text_sha256, ActionAttachment,
     ActionCapabilityEnvelope, HelperGateEvidence, HelperSendOutcome, SendAddressingMode,
-    SendRolloutStage, SendStage, VisualConfirmation, SEND_CONTRACT_VERSION,
+    SendFailureCode, SendRolloutStage, SendStage, VisualConfirmation, SEND_CONTRACT_VERSION,
 };
 use greenbubbles_restore::send_profile::{
     calibration_profile_signing_bytes, compatibility_matrix_signing_bytes,
@@ -257,6 +257,14 @@ fn main() {
         },
         "actionCapability": capability,
         "attachmentCapability": attachment_capability,
+        // Every failure code the control plane can emit. Swift compares this
+        // against its own `CaseIterable` set, so a code added on one side and
+        // not the other fails the build rather than surfacing as an
+        // unrecognized value at run time.
+        "failureCodes": SendFailureCode::all()
+            .iter()
+            .map(|code| serde_json::to_value(code).unwrap())
+            .collect::<Vec<_>>(),
         "helperSendOutcome": outcome,
         "normalizedText": normalization,
         "developmentSigning": {

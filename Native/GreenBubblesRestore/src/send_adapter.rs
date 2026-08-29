@@ -207,6 +207,23 @@ impl SendAdapterConfig {
             || !paths_absolute
             || self.allow_list.capabilities.is_empty()
             || self.allow_list.account_ids != BTreeSet::from([self.account_id.clone()])
+            // Every allow-listed conversation must carry the recipient title the
+            // owner authorized, and no title may be configured for a
+            // conversation that is not allow-listed. Without this the allow list
+            // would authorize an identifier while leaving the on-screen
+            // recipient that actually receives the message unconstrained.
+            || self
+                .allow_list
+                .recipient_titles
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                != self.allow_list.conversation_ids
+            || self
+                .allow_list
+                .recipient_titles
+                .values()
+                .any(|title| title.trim().is_empty())
         {
             return Err(SendFailureCode::ConfigurationInvalid);
         }
@@ -763,6 +780,7 @@ impl SendAdapter {
             draft_id: draft.draft_id.clone(),
             account_id: self.config.account_id.clone(),
             conversation_id: draft.conversation_id.clone(),
+            recipient_title: draft.recipient.human_label.clone(),
             adapter: self.config.adapter.clone(),
             idempotency_key: self.idempotency_key(&draft.draft_id, approval_id),
             approval: ExternalApprovalEvidence {
@@ -1992,6 +2010,9 @@ fn guard_failures(decision: &ActionGuardDecision) -> BTreeSet<SendFailureCode> {
             | ActionGuardDenial::ApprovalNotYetValid
             | ActionGuardDenial::ApprovalExpired
             | ActionGuardDenial::ApprovalAlreadyConsumed => SendFailureCode::ApprovalInvalid,
+            ActionGuardDenial::RecipientTitleNotAllowed => {
+                SendFailureCode::RecipientTitleNotAllowed
+            }
             ActionGuardDenial::AccountNotAllowed
             | ActionGuardDenial::ConversationNotAllowed
             | ActionGuardDenial::CapabilityNotAllowed
@@ -2248,6 +2269,17 @@ mod tests {
         }
     }
 
+    /// The authorized on-screen title for a test conversation. `filehelper`
+    /// presents as "File Transfer"; any other allow-listed conversation in
+    /// these tests uses its own identifier as its title.
+    fn recipient_title(conversation_id: &str) -> String {
+        if conversation_id == CONVERSATION {
+            "File Transfer".to_string()
+        } else {
+            conversation_id.to_string()
+        }
+    }
+
     fn draft(now: u128) -> ActionDraft {
         ActionDraft {
             format_version: 1,
@@ -2322,6 +2354,10 @@ mod tests {
             },
             allow_list: ActionAllowList {
                 account_ids: BTreeSet::from([ACCOUNT.to_string()]),
+                recipient_titles: conversations
+                    .iter()
+                    .map(|conversation| (conversation.clone(), recipient_title(conversation)))
+                    .collect(),
                 conversation_ids: conversations,
                 capabilities: BTreeSet::from([ActionCapability::TextSend]),
             },
@@ -3229,6 +3265,75 @@ mod tests {
                 .map(|entries| entries.count())
                 .unwrap_or(0),
             0
+        );
+    }
+
+    #[test]
+    fn a_draft_naming_an_allow_listed_conversation_but_a_different_recipient_is_refused() {
+        // The opaque conversation identifier is not what routes a message: the
+        // recipient gate matches the human-readable title on screen. A draft
+        // that keeps the allow-listed identifier while swapping the title would
+        // otherwise send to whatever different conversation that title matched,
+        // and the outbox would record the allow-listed one.
+        let now = 10_000_000_000_000_u128;
+        let fixture = fixture(SendRolloutStage::SelfSend, false);
+        let mut draft = draft(now);
+        draft.recipient.human_label = "Some Other Person".to_string();
+        let approval = approval_for(&fixture.adapter, &draft, now, '1');
+        let profile = verified_profile(SendTrustTier::Development);
+        let dispatcher =
+            ScriptedDispatcher::new(Some(ready_status()), Err(SendFailureCode::EngineStall));
+        let report = fixture
+            .adapter
+            .execute_with_artifacts(
+                &draft,
+                &approval,
+                &profile,
+                &supported_decision(),
+                &dispatcher,
+                None,
+                now,
+            )
+            .unwrap();
+        assert!(
+            report
+                .precheck
+                .failures
+                .contains(&SendFailureCode::RecipientTitleNotAllowed),
+            "a swapped recipient title must be refused before any input: {:?}",
+            report.precheck.failures
+        );
+        // Nothing reached the client: the refusal happens in policy, before the
+        // helper is asked to do anything at all.
+        assert_eq!(*dispatcher.execute_calls.borrow(), 0);
+        assert!(!report.dispatched);
+    }
+
+    #[test]
+    fn an_allow_listed_conversation_with_no_authorized_title_is_a_configuration_error() {
+        // Fail closed. A conversation whose authorized title was never
+        // configured cannot be sent to, rather than falling back to trusting
+        // whatever title the draft carries.
+        let mut fixture = fixture(SendRolloutStage::SelfSend, false);
+        fixture.adapter.config.allow_list.recipient_titles.clear();
+        assert_eq!(
+            fixture.adapter.config.validate(),
+            Err(SendFailureCode::ConfigurationInvalid)
+        );
+    }
+
+    #[test]
+    fn an_authorized_title_for_a_conversation_that_is_not_allow_listed_is_refused() {
+        let mut fixture = fixture(SendRolloutStage::SelfSend, false);
+        fixture
+            .adapter
+            .config
+            .allow_list
+            .recipient_titles
+            .insert("someone-else".to_string(), "Someone Else".to_string());
+        assert_eq!(
+            fixture.adapter.config.validate(),
+            Err(SendFailureCode::ConfigurationInvalid)
         );
     }
 

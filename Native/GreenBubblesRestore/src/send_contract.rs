@@ -160,19 +160,46 @@ pub enum VisualConfirmation {
     Unconfirmed,
 }
 
-/// The user-facing failure taxonomy. Every variant keeps the send path closed
-/// and maps to exactly one operator action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum SendFailureCode {
+/// Defines the failure taxonomy once, so the enum and the exhaustive list that
+/// the cross-language vectors publish can never disagree. A variant added here
+/// automatically appears in `all()` and therefore in the Swift parity check.
+macro_rules! send_failure_codes {
+    ($($(#[$meta:meta])* $variant:ident,)+) => {
+        /// The user-facing failure taxonomy. Every variant keeps the send path
+        /// closed and maps to exactly one operator action.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        pub enum SendFailureCode {
+            $($(#[$meta])* $variant,)+
+        }
+
+        impl SendFailureCode {
+            /// Every failure code, in declaration order. Published in the
+            /// canonical vectors and compared against the Swift enum.
+            pub fn all() -> Vec<SendFailureCode> {
+                vec![$(SendFailureCode::$variant,)+]
+            }
+        }
+    };
+}
+
+send_failure_codes! {
     GrantsMissing,
     WechatNotRunning,
     NotLoggedIn,
     UnknownBuild,
     CalibrationDrift,
     RecipientVerifyFailed,
+    /// Policy refused the recipient title before any input: the conversation
+    /// carried no owner-authorized title, or a title that disagreed with it.
+    /// Distinct from `recipientVerifyFailed`, which is the on-screen gate.
+    RecipientTitleNotAllowed,
     ContentVerifyFailed,
     AddressingFocusFailed,
+    /// The conversation already holds unsent text the owner typed. Refusing
+    /// protects that draft: the send path never overwrites a human's compose
+    /// box.
+    ComposeNotEmpty,
     AttachmentInvalid,
     AttachmentStagingFailed,
     AttachmentDigestMismatch,
@@ -219,11 +246,17 @@ impl SendFailureCode {
             SendFailureCode::RecipientVerifyFailed => {
                 "The opened conversation did not match the approved recipient; re-resolve the recipient and approve a new draft."
             }
+            SendFailureCode::RecipientTitleNotAllowed => {
+                "The draft's recipient title is not the one authorized for that conversation; add the exact title to the allow list's recipientTitles, or approve a draft resolved from the replica."
+            }
             SendFailureCode::ContentVerifyFailed => {
                 "The composed text did not match the approved body; approve a new draft."
             }
             SendFailureCode::AddressingFocusFailed => {
                 "The search box did not take focus, so the recipient was never addressed; nothing destructive was typed and the run stopped."
+            }
+            SendFailureCode::ComposeNotEmpty => {
+                "The conversation already has unsent text in its compose box; send or clear it first, so the adapter never overwrites your draft."
             }
             SendFailureCode::AttachmentInvalid => {
                 "The draft's attachment is malformed, too large, or names a path outside its staging directory."

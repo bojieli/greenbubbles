@@ -32,6 +32,7 @@ struct CrossLanguageVectorTests {
 
     let calibrationProfile: Signed<CalibrationProfileBody>
     let compatibilityMatrix: Signed<CompatibilityMatrixBody>
+    let failureCodes: [String]
     let actionCapability: ActionCapabilityEnvelope
     let attachmentCapability: ActionCapabilityEnvelope
     let helperSendOutcome: HelperSendOutcome
@@ -284,6 +285,25 @@ struct CrossLanguageVectorTests {
         trustRoot: trustRoot,
         nowUnixSeconds: profile.body.expiresAtUnixSeconds
       )
+    }
+  }
+
+  @Test("the failure taxonomy is identical in both languages")
+  func failureTaxonomyMatches() throws {
+    // The helper decodes codes the control plane emits and vice versa. A code
+    // present on one side only would surface as a decode failure during a real
+    // send, which is exactly when it must not happen.
+    let vectors = try loadVectors()
+    let rust = Set(vectors.failureCodes)
+    let swift = Set(SendFailureCode.allCases.map(\.rawValue))
+    #expect(
+      rust == swift,
+      "only in Rust: \(rust.subtracting(swift).sorted()); only in Swift: \(swift.subtracting(rust).sorted())"
+    )
+    // Each code must name exactly one operator action, so a failure is always
+    // actionable rather than merely reported.
+    for code in SendFailureCode.allCases {
+      #expect(!code.operatorAction.isEmpty)
     }
   }
 }
