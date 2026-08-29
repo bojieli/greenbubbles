@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="The GreenBubbles icon: two overlapping green message bubbles, the front one carrying a keyhole to indicate that the history behind it stays locally encrypted.">
+  <defs>
+    <linearGradient id="gb-front" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4ADE80"/>
+      <stop offset="1" stop-color="#16A34A"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="#052E16"/>
+  <path d="M132 108h206c30 0 54 24 54 54v104c0 30-24 54-54 54H132c-30 0-54-24-54-54V162c0-30 24-54 54-54z"
+        fill="none" stroke="#166534" stroke-width="22"/>
+  <path d="M186 186h216c31 0 56 25 56 56v112c0 31-25 56-56 56H274l-70 56v-56h-18c-31 0-56-25-56-56V242c0-31 25-56 56-56z"
+        fill="url(#gb-front)"/>
+  <path d="M294 268c22 0 40 18 40 40 0 15-8 28-21 35l6 45h-50l6-45c-13-7-21-20-21-35 0-22 18-40 40-40z" fill="#052E16"/>
+</svg>

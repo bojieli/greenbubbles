@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 560" width="1240" height="560" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" role="img" aria-label="A diagram of the read path. WeChat's own encrypted SQLCipher databases are opened read-only with query_only enabled. A single adapter performs keyset pagination, typed decoding and bound enforcement, and feeds three destinations: the native history browser, a bounded JSON page on the command line, and a recoverable snapshot encrypted under its own key that can be reopened without WeChat. Only the command-line page passes through the policy and audit gate on its way to an AI tool.">
+  <defs>
+    <marker id="h-slate" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#94A3B8"/>
+    </marker>
+    <marker id="h-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#16A34A"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1240" height="560" fill="#FBFCFE"/>
+
+  <text x="620" y="44" text-anchor="middle" font-size="27" font-weight="700" fill="#0F172A">The read path</text>
+  <text x="620" y="74" text-anchor="middle" font-size="17" fill="#64748B">One adapter, three destinations, and exactly one of them can reach a model.</text>
+
+  <!-- source -->
+  <rect x="40" y="222" width="228" height="152" rx="14" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="2"/>
+  <text x="154" y="256" text-anchor="middle" font-size="17" font-weight="700" fill="#0F172A">WeChat's own files</text>
+  <text x="154" y="284" text-anchor="middle" font-size="13.5" fill="#64748B">db_storage, as WeChat</text>
+  <text x="154" y="304" text-anchor="middle" font-size="13.5" fill="#64748B">wrote them</text>
+  <text x="154" y="332" text-anchor="middle" font-size="13.5" fill="#64748B">SQLCipher · WCDB</text>
+  <text x="154" y="352" text-anchor="middle" font-size="13.5" fill="#64748B">26 database groups</text>
+
+  <text x="302" y="286" text-anchor="middle" font-size="12" fill="#64748B">read-only</text>
+  <text x="302" y="303" text-anchor="middle" font-size="12" fill="#64748B">query_only</text>
+  <line x1="272" y1="318" x2="330" y2="318" stroke="#94A3B8" stroke-width="2.5" marker-end="url(#h-slate)"/>
+
+  <!-- adapter -->
+  <rect x="336" y="206" width="252" height="184" rx="14" fill="#F0FDF4" stroke="#16A34A" stroke-width="3"/>
+  <text x="462" y="242" text-anchor="middle" font-size="18" font-weight="700" fill="#15803D">GreenBubbles adapter</text>
+  <text x="462" y="276" text-anchor="middle" font-size="14" fill="#334155">keyset pagination</text>
+  <text x="462" y="302" text-anchor="middle" font-size="14" fill="#334155">typed message decoding</text>
+  <text x="462" y="328" text-anchor="middle" font-size="14" fill="#334155">hard response bounds</text>
+  <text x="462" y="362" text-anchor="middle" font-size="13" fill="#4D7C63">no long-lived transaction</text>
+
+  <!-- fan-out -->
+  <path d="M 592 268 C 616 268 616 158 638 158" fill="none" stroke="#94A3B8" stroke-width="2.5" marker-end="url(#h-slate)"/>
+  <line x1="592" y1="298" x2="638" y2="298" stroke="#94A3B8" stroke-width="2.5" marker-end="url(#h-slate)"/>
+  <path d="M 592 328 C 616 328 616 442 638 442" fill="none" stroke="#94A3B8" stroke-width="2.5" marker-end="url(#h-slate)"/>
+
+  <rect x="644" y="112" width="266" height="92" rx="12" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="2"/>
+  <text x="777" y="146" text-anchor="middle" font-size="16" font-weight="700" fill="#0F172A">History browser</text>
+  <text x="777" y="172" text-anchor="middle" font-size="13.5" fill="#64748B">native SwiftUI, stays on</text>
+  <text x="777" y="190" text-anchor="middle" font-size="13.5" fill="#64748B">this machine</text>
+
+  <rect x="644" y="252" width="266" height="92" rx="12" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="2"/>
+  <text x="777" y="286" text-anchor="middle" font-size="16" font-weight="700" fill="#0F172A">Bounded JSON page</text>
+  <text x="777" y="312" text-anchor="middle" font-size="13.5" fill="#64748B">one page, one search, or</text>
+  <text x="777" y="330" text-anchor="middle" font-size="13.5" fill="#64748B">one exact message</text>
+
+  <rect x="644" y="392" width="266" height="112" rx="12" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="2"/>
+  <text x="777" y="426" text-anchor="middle" font-size="16" font-weight="700" fill="#0F172A">Recoverable snapshot</text>
+  <text x="777" y="452" text-anchor="middle" font-size="13.5" fill="#64748B">encrypted under its own key,</text>
+  <text x="777" y="470" text-anchor="middle" font-size="13.5" fill="#64748B">recoverable from 24 words —</text>
+  <text x="777" y="490" text-anchor="middle" font-size="13.5" font-weight="600" fill="#15803D">no WeChat, no WeChat key</text>
+
+  <!-- gate + model -->
+  <line x1="916" y1="298" x2="954" y2="298" stroke="#16A34A" stroke-width="2.5" marker-end="url(#h-green)"/>
+  <rect x="960" y="232" width="88" height="132" rx="12" fill="#F0FDF4" stroke="#16A34A" stroke-width="3"/>
+  <text x="1004" y="284" text-anchor="middle" font-size="15" font-weight="700" fill="#15803D">policy</text>
+  <text x="1004" y="308" text-anchor="middle" font-size="15" font-weight="700" fill="#15803D">+ audit</text>
+  <text x="1004" y="336" text-anchor="middle" font-size="12.5" fill="#4D7C63">fail closed</text>
+
+  <line x1="1054" y1="298" x2="1092" y2="298" stroke="#16A34A" stroke-width="2.5" marker-end="url(#h-green)"/>
+  <rect x="1098" y="252" width="106" height="92" rx="12" fill="#FFFFFF" stroke="#CBD5E1" stroke-width="2"/>
+  <text x="1151" y="290" text-anchor="middle" font-size="15" font-weight="700" fill="#0F172A">your AI</text>
+  <text x="1151" y="312" text-anchor="middle" font-size="15" font-weight="700" fill="#0F172A">tool</text>
+
+  <text x="620" y="534" text-anchor="middle" font-size="13.5" fill="#94A3B8">Ordinary browsing needs no background service, upload, or whole-corpus copy before answering.</text>
+</svg>
