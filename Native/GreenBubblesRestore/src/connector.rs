@@ -96,7 +96,10 @@ pub enum ConnectorOperation {
         cursor: Option<String>,
         limit: Option<usize>,
     },
-    ListConversations,
+    ListConversations {
+        cursor: Option<String>,
+        limit: Option<usize>,
+    },
     SearchMessages {
         query: String,
         conversation_id: Option<String>,
@@ -170,6 +173,7 @@ pub enum ConnectorResult {
     Coverage(ReplicaCoverageView),
     Changes(ScopedChangePage),
     CachedMoments(ConnectorCachedMomentPage),
+    DirectStatus(DirectConnectorStatus),
     Conversations(ConnectorConversationList),
     Messages(ConnectorMessagePage),
     Message(Option<MinimizedMessage>),
@@ -263,10 +267,31 @@ pub struct ConnectorConversationView {
 pub struct ConnectorConversationList {
     pub account_id: String,
     pub conversations: Vec<ConnectorConversationView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
     #[serde(default)]
     pub omitted_conversation_count: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub limitation_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectConnectorStatus {
+    pub format_version: u32,
+    pub api_version: String,
+    pub connector_version: String,
+    pub source_mode: crate::live_query::QuerySourceMode,
+    pub source_identity: String,
+    pub policy_created_from_source_fingerprint: String,
+    pub enabled_conversation_count: usize,
+    pub locally_enabled_operation_count: usize,
+    pub remotely_enabled_conversation_count: usize,
+    pub ordinary_reads_use_direct_sqlite: bool,
+}
+
+pub trait ConnectorRequestHandler {
+    fn handle_connector_request(&self, request: ConnectorRequest) -> ConnectorResponse;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -565,6 +590,16 @@ struct ConnectorCheckpointBinding {
     checkpoint_revision: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ConnectorConversationCursor {
+    version: u32,
+    source_identity: String,
+    policy_sha256: String,
+    destination: ConnectorDestination,
+    after_conversation_id: String,
+}
+
 impl<'a> ConnectorService<'a> {
     pub fn open(
         replica_path: &Path,
@@ -845,8 +880,8 @@ impl<'a> ConnectorService<'a> {
                     limit.unwrap_or(20),
                 )
                 .map(ConnectorResult::CachedMoments),
-            ConnectorOperation::ListConversations => self
-                .list_conversations(request)
+            ConnectorOperation::ListConversations { cursor, limit } => self
+                .list_conversations(request, cursor.as_deref(), limit.unwrap_or(100))
                 .map(ConnectorResult::Conversations),
             ConnectorOperation::SearchMessages {
                 query,
@@ -1277,12 +1312,20 @@ impl<'a> ConnectorService<'a> {
     fn list_conversations(
         &self,
         request: &ConnectorRequest,
+        cursor: Option<&str>,
+        requested_limit: usize,
     ) -> Result<ConnectorConversationList, ConnectorErrorBody> {
         let destination = ToolDataDestination::from(request.destination);
         let status = replica_status(&self.replica_path, self.key).map_err(integrity_error)?;
         let account_id = status
             .account_id
             .ok_or_else(|| unavailable("replicaUninitialized", "Replica is not initialized"))?;
+        let source_identity = status.current_source_fingerprint.ok_or_else(|| {
+            unavailable(
+                "replicaUninitialized",
+                "Replica has no authoritative checkpoint",
+            )
+        })?;
         let mut conversations = Vec::new();
         let mut limitation_codes = BTreeSet::new();
         let enabled_conversation_ids = self
@@ -1297,12 +1340,35 @@ impl<'a> ConnectorService<'a> {
             })
             .map(|(conversation_id, _)| conversation_id.clone())
             .collect::<BTreeSet<_>>();
-        self.warm_conversation_caches(&enabled_conversation_ids)?;
+        let after = decode_connector_conversation_cursor(
+            cursor,
+            &source_identity,
+            &self.policy_sha256,
+            request.destination,
+        )?;
+        let limit = requested_limit.clamp(1, self.policy.maximum_result_count);
+        let selected_ids = enabled_conversation_ids
+            .iter()
+            .filter(|identifier| {
+                after
+                    .as_deref()
+                    .is_none_or(|after| identifier.as_str() > after)
+            })
+            .take(limit.saturating_add(1))
+            .cloned()
+            .collect::<Vec<_>>();
+        let has_more = selected_ids.len() > limit;
+        let selected_ids = selected_ids
+            .into_iter()
+            .take(limit)
+            .collect::<BTreeSet<_>>();
+        self.warm_conversation_caches(&selected_ids)?;
         for (conversation_id, scope) in &self.policy.conversation_scopes {
             if !scope
                 .capabilities
                 .contains(&ToolCapability::ListConversations)
                 || (destination == ToolDataDestination::RemoteModel && !scope.allow_remote_model)
+                || !selected_ids.contains(conversation_id)
             {
                 continue;
             }
@@ -1336,6 +1402,21 @@ impl<'a> ConnectorService<'a> {
         Ok(ConnectorConversationList {
             account_id,
             conversations,
+            next_cursor: if has_more {
+                selected_ids
+                    .last()
+                    .map(|after| {
+                        encode_connector_conversation_cursor(
+                            &source_identity,
+                            &self.policy_sha256,
+                            request.destination,
+                            after,
+                        )
+                    })
+                    .transpose()?
+            } else {
+                None
+            },
             omitted_conversation_count: 0,
             limitation_codes: limitation_codes.into_iter().collect(),
         })
@@ -2950,6 +3031,12 @@ impl<'a> ConnectorService<'a> {
     }
 }
 
+impl ConnectorRequestHandler for ConnectorService<'_> {
+    fn handle_connector_request(&self, request: ConnectorRequest) -> ConnectorResponse {
+        self.handle(request)
+    }
+}
+
 fn linked_audit_draft<'a>(
     event: &ConnectorAuditEvent,
     drafts: &'a BTreeMap<String, ActionDraft>,
@@ -3314,7 +3401,7 @@ fn write_owner_only_json(path: &Path, value: &impl Serialize) -> Result<(), Rest
     Ok(())
 }
 
-fn append_owner_only_connector_event(
+pub(crate) fn append_owner_only_connector_event(
     path: &Path,
     mut event: ConnectorAuditEvent,
 ) -> Result<(), RestoreError> {
@@ -3361,7 +3448,7 @@ pub fn audit_connector_log(path: &Path) -> Result<ConnectorAuditReport, RestoreE
     audit_connector_log_for_account(path, None)
 }
 
-fn audit_connector_log_for_account(
+pub(crate) fn audit_connector_log_for_account(
     path: &Path,
     expected_account_id: Option<&str>,
 ) -> Result<ConnectorAuditReport, RestoreError> {
@@ -3715,7 +3802,59 @@ fn connector_checkpoint_binding(
     })
 }
 
-fn connector_response(
+pub(crate) fn encode_connector_conversation_cursor(
+    source_identity: &str,
+    policy_sha256: &str,
+    destination: ConnectorDestination,
+    after_conversation_id: &str,
+) -> Result<String, ConnectorErrorBody> {
+    let bytes = serde_json::to_vec(&ConnectorConversationCursor {
+        version: 1,
+        source_identity: source_identity.to_string(),
+        policy_sha256: policy_sha256.to_string(),
+        destination,
+        after_conversation_id: after_conversation_id.to_string(),
+    })
+    .map_err(|_| invalid("conversation cursor could not be encoded"))?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
+pub(crate) fn decode_connector_conversation_cursor(
+    value: Option<&str>,
+    source_identity: &str,
+    policy_sha256: &str,
+    destination: ConnectorDestination,
+) -> Result<Option<String>, ConnectorErrorBody> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty() || value.len() > 4_096 {
+        return Err(invalid(
+            "conversation cursor is empty or outside safe limits",
+        ));
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| invalid("conversation cursor is not valid base64url"))?;
+    if bytes.len() > 4_096 {
+        return Err(invalid("conversation cursor is outside safe limits"));
+    }
+    let cursor: ConnectorConversationCursor = serde_json::from_slice(&bytes)
+        .map_err(|_| invalid("conversation cursor structure is invalid"))?;
+    if cursor.version != 1
+        || cursor.source_identity != source_identity
+        || cursor.policy_sha256 != policy_sha256
+        || cursor.destination != destination
+        || cursor.after_conversation_id.is_empty()
+    {
+        return Err(invalid(
+            "conversation cursor does not belong to this source, policy, and destination",
+        ));
+    }
+    Ok(Some(cursor.after_conversation_id))
+}
+
+pub(crate) fn connector_response(
     request_id: String,
     result: Result<ConnectorResult, ConnectorErrorBody>,
 ) -> ConnectorResponse {
@@ -3737,7 +3876,7 @@ fn connector_response(
     }
 }
 
-fn invalid(message: &str) -> ConnectorErrorBody {
+pub(crate) fn invalid(message: &str) -> ConnectorErrorBody {
     ConnectorErrorBody {
         code: ConnectorErrorCode::InvalidRequest,
         message: message.to_string(),
@@ -3745,7 +3884,7 @@ fn invalid(message: &str) -> ConnectorErrorBody {
     }
 }
 
-fn unauthorized(message: &str) -> ConnectorErrorBody {
+pub(crate) fn unauthorized(message: &str) -> ConnectorErrorBody {
     ConnectorErrorBody {
         code: ConnectorErrorCode::Unauthorized,
         message: message.to_string(),
@@ -3753,7 +3892,7 @@ fn unauthorized(message: &str) -> ConnectorErrorBody {
     }
 }
 
-fn not_found(message: &str) -> ConnectorErrorBody {
+pub(crate) fn not_found(message: &str) -> ConnectorErrorBody {
     ConnectorErrorBody {
         code: ConnectorErrorCode::NotFound,
         message: message.to_string(),
@@ -3761,7 +3900,7 @@ fn not_found(message: &str) -> ConnectorErrorBody {
     }
 }
 
-fn unavailable(code: &str, message: &str) -> ConnectorErrorBody {
+pub(crate) fn unavailable(code: &str, message: &str) -> ConnectorErrorBody {
     ConnectorErrorBody {
         code: ConnectorErrorCode::Unavailable,
         message: format!("{code}: {message}"),
@@ -3785,7 +3924,7 @@ fn retryable_conflict(message: &str) -> ConnectorErrorBody {
     }
 }
 
-fn integrity_error(error: RestoreError) -> ConnectorErrorBody {
+pub(crate) fn integrity_error(error: RestoreError) -> ConnectorErrorBody {
     ConnectorErrorBody {
         code: ConnectorErrorCode::IntegrityFailure,
         message: error.to_string(),

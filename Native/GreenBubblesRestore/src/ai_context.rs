@@ -608,7 +608,7 @@ pub fn export_ai_context(
     service.prepare_external_checkpoint_guard()?;
     let start_health = context_health(&start_status.replica)?;
     require_bound_account_holder(&start_health)?;
-    let list = expect_conversations(reader.call(ConnectorOperation::ListConversations)?)?;
+    let list = list_all_conversations(&mut reader)?;
     let policy = load_tool_policy(policy_path)?;
     let policy_sha256 = hex::encode(Sha256::digest(fs::read(policy_path)?));
 
@@ -1949,6 +1949,11 @@ fn sanitize_query_result(
     Ok(match result {
         ConnectorResult::Capabilities(value) => AiQueryResult::Capabilities(Box::new(value)),
         ConnectorResult::Status(value) => AiQueryResult::Status(Box::new(value)),
+        ConnectorResult::DirectStatus(_) => {
+            return Err(RestoreError::Integrity(
+                "replica AI query received a direct-source status".to_string(),
+            ));
+        }
         ConnectorResult::Coverage(_) => AiQueryResult::Coverage(context.clone()),
         ConnectorResult::Changes(value) => AiQueryResult::Changes(value),
         ConnectorResult::CachedMoments(value) => AiQueryResult::CachedMoments(value),
@@ -2034,7 +2039,7 @@ fn is_read_operation(operation: &ConnectorOperation) -> bool {
             | ConnectorOperation::Coverage
             | ConnectorOperation::GetChanges { .. }
             | ConnectorOperation::GetCachedMoments { .. }
-            | ConnectorOperation::ListConversations
+            | ConnectorOperation::ListConversations { .. }
             | ConnectorOperation::SearchMessages { .. }
             | ConnectorOperation::GetMessages { .. }
             | ConnectorOperation::GetMessage { .. }
@@ -2253,6 +2258,42 @@ fn expect_conversations(
         ConnectorResult::Conversations(value) => Ok(value),
         _ => Err(unexpected_connector_result("conversations")),
     }
+}
+
+fn list_all_conversations(
+    reader: &mut AiConnectorReader<'_, '_>,
+) -> Result<ConnectorConversationList, RestoreError> {
+    let mut cursor = None;
+    let mut combined: Option<ConnectorConversationList> = None;
+    loop {
+        let mut page =
+            expect_conversations(reader.call(ConnectorOperation::ListConversations {
+                cursor: cursor.clone(),
+                limit: Some(EXPORT_PAGE_SIZE),
+            })?)?;
+        let next = page.next_cursor.take();
+        if let Some(combined) = &mut combined {
+            if combined.account_id != page.account_id {
+                return Err(RestoreError::Integrity(
+                    "connector conversation pages changed account identity".to_string(),
+                ));
+            }
+            combined.conversations.append(&mut page.conversations);
+            combined.omitted_conversation_count = combined
+                .omitted_conversation_count
+                .saturating_add(page.omitted_conversation_count);
+            combined.limitation_codes.extend(page.limitation_codes);
+            combined.limitation_codes.sort();
+            combined.limitation_codes.dedup();
+        } else {
+            combined = Some(page);
+        }
+        match next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    combined.ok_or_else(|| unexpected_connector_result("conversations"))
 }
 
 fn unexpected_connector_result(expected: &str) -> RestoreError {

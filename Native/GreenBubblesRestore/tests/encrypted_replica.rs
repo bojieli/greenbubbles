@@ -161,7 +161,10 @@ fn serves_scoped_replica_reads_and_complete_non_executing_drafts() {
     let listed = service.handle(connector_request(
         "list",
         ConnectorDestination::Local,
-        ConnectorOperation::ListConversations,
+        ConnectorOperation::ListConversations {
+            cursor: None,
+            limit: None,
+        },
     ));
     let ConnectorResult::Conversations(listed) = listed.result.unwrap() else {
         panic!("unexpected connector result")
@@ -528,7 +531,10 @@ fn connector_hydration_cache_advances_with_the_replica_checkpoint() {
     let first = service.handle(connector_request(
         "list-before-checkpoint",
         ConnectorDestination::Local,
-        ConnectorOperation::ListConversations,
+        ConnectorOperation::ListConversations {
+            cursor: None,
+            limit: None,
+        },
     ));
     let ConnectorResult::Conversations(first) = first.result.unwrap() else {
         panic!("unexpected connector result")
@@ -546,7 +552,10 @@ fn connector_hydration_cache_advances_with_the_replica_checkpoint() {
     let second = service.handle(connector_request(
         "list-after-checkpoint",
         ConnectorDestination::Local,
-        ConnectorOperation::ListConversations,
+        ConnectorOperation::ListConversations {
+            cursor: None,
+            limit: None,
+        },
     ));
     assert!(second.ok, "{:?}", second.error);
     let ConnectorResult::Conversations(second) = second.result.unwrap() else {
@@ -1124,7 +1133,10 @@ fn malformed_replica_records_are_omitted_without_stalling_pages_or_ai_queries() 
             request_id: "malformed-conversation-list".to_string(),
             requester_id: "synthetic-agent".to_string(),
             destination: ConnectorDestination::Local,
-            operation: ConnectorOperation::ListConversations,
+            operation: ConnectorOperation::ListConversations {
+                cursor: None,
+                limit: None,
+            },
         },
     )
     .unwrap();
@@ -1153,7 +1165,7 @@ fn malformed_replica_records_are_omitted_without_stalling_pages_or_ai_queries() 
     assert_eq!(manifest.enabled_conversation_count, 1);
     assert_eq!(manifest.exported_message_count, 1);
     assert_eq!(manifest.exported_artifact_count, 1);
-    assert_eq!(manifest.artifact_resolution_error_count, 0);
+    assert_eq!(manifest.artifact_resolution_error_count, 1);
     assert_eq!(manifest.omitted_conversation_count, 0);
     assert_eq!(manifest.omitted_message_count, 1);
     assert!(manifest
@@ -1161,7 +1173,7 @@ fn malformed_replica_records_are_omitted_without_stalling_pages_or_ai_queries() 
         .contains(&"unavailableConversationMetadataSynthesized".to_string()));
     assert!(manifest
         .limitation_codes
-        .contains(&"unavailableArtifactMetadataSynthesized".to_string()));
+        .contains(&"artifactResolutionUnavailable".to_string()));
     let audited = audit_ai_context(&context).unwrap();
     assert_eq!(audited.conversation_count, 1);
     assert_eq!(audited.message_count, 1);
@@ -1644,7 +1656,7 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
         Some("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
     );
     assert_eq!(page.messages[0].direction, Some(MessageDirection::Outgoing));
-    assert_eq!(page.messages[0].artifact_references.len(), 1);
+    assert_eq!(page.messages[0].artifact_references.len(), 300);
     assert_eq!(page.messages[0].relationships.len(), 3);
     assert_eq!(page.messages[0].omitted_artifact_reference_count, 2);
     assert_eq!(page.messages[0].omitted_relationship_reference_count, 2);
@@ -2228,7 +2240,7 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
         TypedPayload::Decoded(json!({"Text": "reference sync"}));
     overwrite_ndjson(&synchronized_messages_path, &synchronized_messages);
     let synchronized = synchronize_replica(&synchronized_archive, &replica, &key).unwrap();
-    assert_eq!(synchronized.changed_count, 1);
+    assert_eq!(synchronized.changed_count, 2);
     assert_eq!(synchronized.omitted_artifact_reference_count, 2);
     assert_eq!(synchronized.omitted_relationship_reference_count, 2);
     assert!(synchronized

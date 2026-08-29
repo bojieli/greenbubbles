@@ -285,7 +285,10 @@ fn list_conversations(
     client: &mut ConnectorClient,
 ) -> Result<BTreeMap<String, ConnectorConversationView>, String> {
     let ConnectorResult::Conversations(list) =
-        client.result(ConnectorOperation::ListConversations)?
+        client.result(ConnectorOperation::ListConversations {
+            cursor: None,
+            limit: None,
+        })?
     else {
         return Err("connector returned the wrong result for listConversations".to_string());
     };

@@ -25,16 +25,44 @@ use greenbubbles_restore::{
     benchmark::{run_synthetic_benchmark, SyntheticBenchmarkConfig},
     connector::{audit_connector_log, ConnectorDestination, ConnectorService},
     diagnostic::{profile_archive_payloads_with_progress, profile_archive_schema_with_progress},
+    direct_connector::DirectConnectorService,
     follow::{
         follow_replica_once, publish_replica_handoff, quarantine_retired_replica_archives,
         replica_follower_status, restore_quarantined_replica_archive,
     },
     latency::{compose_latency_evidence_sample, summarize_latency_evidence_samples},
+    live_attachment::{
+        inspect_image_attachment, inspect_message_attachment, materialize_image_attachment,
+        materialize_message_attachment, serialize_attachment_error, AttachmentKind,
+        LiveAttachmentError,
+    },
+    live_query::{
+        find_conversations as find_live_conversations, get_message as get_live_message,
+        get_search_result_message as get_live_search_result_message,
+        list_conversations as list_live_conversations, list_messages as list_live_messages,
+        search_messages as search_live_messages, serialize_query_error, serialize_query_response,
+        source_status as live_source_status, LiveQueryError, LiveQuerySource, QueryDatabaseAccess,
+        DEFAULT_PAGE_LIMIT, DEFAULT_SEARCH_LIMIT, MAX_PAGE_LIMIT, MAX_SEARCH_QUERY_BYTES,
+    },
     merge::merge_incremental_archive,
     operator::{restore_snapshot_and_publish_with_progress, OfflineRestorePublishOptions},
     preflight_snapshot_with_progress, prepare_available_catalog_with_progress,
     prepare_catalog_batch_with_progress, prepare_catalog_with_progress,
     reconcile::reconcile_archives,
+    recoverable_snapshot::{
+        create_recoverable_snapshot, create_recoverable_snapshot_from_stable_capture,
+        create_recoverable_snapshot_from_stable_capture_with_recovery_words_and_optional_protectors,
+        create_recoverable_snapshot_with_recovery_words_and_optional_protectors,
+        quarantine_recoverable_snapshot_generation, recoverable_snapshot_data_root,
+        rekey_recoverable_snapshot, restore_quarantined_snapshot_generation,
+        rewrap_recoverable_snapshot_protectors_with_optional_protectors,
+        unlock_recoverable_snapshot_with_local_credential,
+        unlock_recoverable_snapshot_with_passphrase,
+        unlock_recoverable_snapshot_with_recovery_words, verify_recoverable_snapshot,
+        verify_recoverable_snapshot_with_local_credential,
+        verify_recoverable_snapshot_with_passphrase,
+        verify_recoverable_snapshot_with_recovery_words, RecoverableSnapshotError,
+    },
     replica::{
         audit_replica_backup_with_progress, audit_replica_with_progress,
         bootstrap_replica_with_progress, get_replica_changes, get_replica_message,
@@ -43,23 +71,197 @@ use greenbubbles_restore::{
         synchronize_replica_with_progress, ReplicaCachedMomentFilter,
     },
     restore_catalog_with_progress,
+    snapshot_protector::{SnapshotLocalCredential, SnapshotPassphrase, SnapshotRecoveryWords},
     tools::{
-        create_all_conversations_tool_policy_with_cached_moments,
+        create_all_conversations_tool_policy_with_cached_moments, create_direct_tool_policy,
         create_tool_policy_with_cached_moments, CachedMomentField, CachedMomentsToolScope,
         ConversationToolScope, LocalToolService, ToolCapability, ToolDataDestination,
         ToolMessageField,
     },
     transport::{load_connector_request, send_unix_request, serve_unix},
     DatabaseKeySet, DatabasePassphrase, DatabaseUnlockMaterial, ProgressEvent, ProgressObserver,
-    ProgressPhase, ProgressState, ProgressUnit, ReplicaKey, RestorationOptions,
+    ProgressPhase, ProgressState, ProgressUnit, ReplicaKey, RestorationOptions, RestoreError,
+    SnapshotKey,
 };
 use zeroize::Zeroizing;
 
 fn main() {
+    let query_operation = process_query_operation();
+    let attachment_operation = process_attachment_operation();
     if let Err(error) = run() {
-        eprintln!("error: {error}");
+        if let Some(operation) = query_operation {
+            let (code, message, retryable) = query_error_details(error.as_ref());
+            println!(
+                "{}",
+                serialize_query_error(operation, code, message, retryable)
+            );
+            eprintln!("error: bounded query failed; see the JSON error on standard output");
+        } else if let Some(operation) = attachment_operation {
+            let (code, message, retryable) = attachment_error_details(error.as_ref());
+            println!(
+                "{}",
+                serialize_attachment_error(operation, code, message, retryable)
+            );
+            eprintln!(
+                "error: bounded attachment request failed; see the JSON error on standard output"
+            );
+        } else {
+            eprintln!("error: {error}");
+        }
         std::process::exit(2);
     }
+}
+
+fn process_attachment_operation() -> Option<&'static str> {
+    let arguments = env::args().skip(1).take(2).collect::<Vec<_>>();
+    match arguments.as_slice() {
+        [command, subcommand] if command == "attachment" && subcommand == "inspect" => {
+            Some("attachment.inspect")
+        }
+        [command, subcommand] if command == "attachment" && subcommand == "materialize" => {
+            Some("attachment.materialize")
+        }
+        _ => None,
+    }
+}
+
+fn process_query_operation() -> Option<&'static str> {
+    let arguments = env::args().skip(1).take(2).collect::<Vec<_>>();
+    match arguments.as_slice() {
+        [command, subcommand] if command == "conversations" && subcommand == "list" => {
+            Some("conversations.list")
+        }
+        [command, subcommand] if command == "source" && subcommand == "status" => {
+            Some("source.status")
+        }
+        [command, subcommand] if command == "messages" && subcommand == "list" => {
+            Some("messages.list")
+        }
+        [command, subcommand] if command == "messages" && subcommand == "search" => {
+            Some("messages.search")
+        }
+        [command, subcommand] if command == "message" && subcommand == "get" => Some("message.get"),
+        _ => None,
+    }
+}
+
+fn query_error_details(
+    error: &(dyn std::error::Error + 'static),
+) -> (&'static str, &'static str, bool) {
+    if let Some(error) = error.downcast_ref::<LiveQueryError>() {
+        return match error {
+            LiveQueryError::InvalidArgument(_) => (
+                "invalidQuery",
+                "The bounded query arguments are invalid.",
+                false,
+            ),
+            LiveQueryError::UnsafeSource(_) => (
+                "unsafeSource",
+                "The selected database source failed path or ownership validation.",
+                false,
+            ),
+            LiveQueryError::Database(_) => (
+                "databaseUnavailable",
+                "The database could not complete the bounded read-only operation with the supplied access material.",
+                true,
+            ),
+            LiveQueryError::InvalidCursor(_) => (
+                "invalidCursor",
+                "The cursor is invalid or does not belong to this operation and source.",
+                false,
+            ),
+            LiveQueryError::NotFound(_) => (
+                "messageNotFound",
+                "The selected message is no longer available from this source.",
+                false,
+            ),
+            LiveQueryError::SearchUnavailable(_) => (
+                "searchUnavailable",
+                "No compatible bounded search path is available for this source.",
+                false,
+            ),
+            LiveQueryError::ResponseTooLarge { .. } => (
+                "responseTooLarge",
+                "The projected response exceeded the fixed serialization limit.",
+                false,
+            ),
+        };
+    }
+    if matches!(
+        error.downcast_ref::<RestoreError>(),
+        Some(
+            RestoreError::InvalidPassphrase
+                | RestoreError::InvalidSnapshotKey
+                | RestoreError::InvalidReplicaKey
+        )
+    ) {
+        return (
+            "invalidAccessMaterial",
+            "The supplied key material is not a valid bounded secret input.",
+            false,
+        );
+    }
+    if error.downcast_ref::<RecoverableSnapshotError>().is_some() {
+        return (
+            "invalidSnapshot",
+            "The selected recoverable snapshot failed manifest or storage validation.",
+            false,
+        );
+    }
+    (
+        "invalidRequest",
+        "The query invocation is invalid or incomplete.",
+        false,
+    )
+}
+
+fn attachment_error_details(
+    error: &(dyn std::error::Error + 'static),
+) -> (&'static str, &'static str, bool) {
+    if let Some(error) = error.downcast_ref::<LiveAttachmentError>() {
+        return match error {
+            LiveAttachmentError::InvalidArgument(_) => (
+                "invalidAttachmentRequest",
+                "The bounded attachment arguments are invalid.",
+                false,
+            ),
+            LiveAttachmentError::UnsafeSource(_) => (
+                "unsafeSource",
+                "The selected attachment source failed path or ownership validation.",
+                false,
+            ),
+            LiveAttachmentError::Unavailable(_) => (
+                "attachmentUnavailable",
+                "The requested attachment candidate is not currently available.",
+                true,
+            ),
+            LiveAttachmentError::SourceChanged => (
+                "sourceChanged",
+                "The attachment source changed during the bounded read.",
+                true,
+            ),
+            LiveAttachmentError::Decode(_) => (
+                "decodeFailed",
+                "The selected attachment could not be decoded safely.",
+                false,
+            ),
+            LiveAttachmentError::Output(_) => (
+                "outputRejected",
+                "The decoded attachment output could not be published safely.",
+                false,
+            ),
+            LiveAttachmentError::Io(_) => (
+                "ioUnavailable",
+                "The bounded attachment operation could not complete its file access.",
+                true,
+            ),
+        };
+    }
+    (
+        "invalidAttachmentRequest",
+        "The bounded attachment invocation is invalid or incomplete.",
+        false,
+    )
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -78,6 +280,923 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     match command.as_str() {
+        "source" => {
+            let subcommand = arguments
+                .next()
+                .ok_or("missing source subcommand; expected 'status'")?;
+            if subcommand != "status" {
+                return Err(format!(
+                    "unsupported source subcommand: {subcommand}; expected 'status'"
+                )
+                .into());
+            }
+            if matches!(arguments.peek().map(String::as_str), Some("--help" | "-h")) {
+                println!("{}", source_status_help());
+                return Ok(());
+            }
+            let database_root = required_path(arguments.next(), "WeChat database root")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if remaining
+                .iter()
+                .any(|value| matches!(value.as_str(), "--help" | "-h"))
+            {
+                println!("{}", source_status_help());
+                return Ok(());
+            }
+            validate_command_options(
+                &remaining,
+                &["--snapshot-recovery-kit", "--snapshot-local-credential"],
+                &[
+                    "--passphrase-stdin",
+                    "--snapshot-key-stdin",
+                    "--snapshot-passphrase-stdin",
+                    "--decrypted",
+                ],
+            )?;
+            let access = load_live_query_access(&database_root, &remaining)?;
+            let source = access.open_source(&database_root)?;
+            let response = live_source_status(&source)?;
+            println!("{}", serialize_query_response(&response)?);
+        }
+        "conversations" => {
+            let subcommand = arguments
+                .next()
+                .ok_or("missing conversations subcommand; expected 'list'")?;
+            if subcommand != "list" {
+                return Err(format!(
+                    "unsupported conversations subcommand: {subcommand}; expected 'list'"
+                )
+                .into());
+            }
+            if matches!(arguments.peek().map(String::as_str), Some("--help" | "-h")) {
+                println!("{}", conversations_command_help());
+                return Ok(());
+            }
+            let database_root = required_path(arguments.next(), "WeChat database root")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if remaining
+                .iter()
+                .any(|value| matches!(value.as_str(), "--help" | "-h"))
+            {
+                println!("{}", conversations_command_help());
+                return Ok(());
+            }
+            validate_command_options(
+                &remaining,
+                &[
+                    "--limit",
+                    "--cursor",
+                    "--snapshot-recovery-kit",
+                    "--snapshot-local-credential",
+                ],
+                &[
+                    "--passphrase-stdin",
+                    "--snapshot-key-stdin",
+                    "--snapshot-passphrase-stdin",
+                    "--decrypted",
+                ],
+            )?;
+            let access = load_live_query_access(&database_root, &remaining)?;
+            let source = access.open_source(&database_root)?;
+            let limit = option_usize(&remaining, "--limit")?.unwrap_or(DEFAULT_PAGE_LIMIT);
+            let cursor = option_string(&remaining, "--cursor")?;
+            let response = list_live_conversations(&source, limit, cursor.as_deref())?;
+            println!("{}", serialize_query_response(&response)?);
+        }
+        "messages" => {
+            let subcommand = arguments
+                .next()
+                .ok_or("missing messages subcommand; expected 'list' or 'search'")?;
+            if matches!(arguments.peek().map(String::as_str), Some("--help" | "-h")) {
+                println!("{}", messages_subcommand_help(&subcommand)?);
+                return Ok(());
+            }
+            let database_root = required_path(arguments.next(), "WeChat database root")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if remaining
+                .iter()
+                .any(|value| matches!(value.as_str(), "--help" | "-h"))
+            {
+                println!("{}", messages_subcommand_help(&subcommand)?);
+                return Ok(());
+            }
+            match subcommand.as_str() {
+                "list" => {
+                    validate_command_options(
+                        &remaining,
+                        &[
+                            "--conversation",
+                            "--limit",
+                            "--cursor",
+                            "--snapshot-recovery-kit",
+                            "--snapshot-local-credential",
+                        ],
+                        &[
+                            "--passphrase-stdin",
+                            "--snapshot-key-stdin",
+                            "--snapshot-passphrase-stdin",
+                            "--decrypted",
+                        ],
+                    )?;
+                    let access = load_live_query_access(&database_root, &remaining)?;
+                    let conversation = required_option(&remaining, "--conversation")?;
+                    let source = access.open_source(&database_root)?;
+                    let limit = option_usize(&remaining, "--limit")?.unwrap_or(DEFAULT_PAGE_LIMIT);
+                    let cursor = option_string(&remaining, "--cursor")?;
+                    let response =
+                        list_live_messages(&source, &conversation, limit, cursor.as_deref())?;
+                    println!("{}", serialize_query_response(&response)?);
+                }
+                "search" => {
+                    validate_command_options(
+                        &remaining,
+                        &[
+                            "--conversation",
+                            "--limit",
+                            "--cursor",
+                            "--snapshot-recovery-kit",
+                            "--snapshot-local-credential",
+                        ],
+                        &[
+                            "--passphrase-stdin",
+                            "--snapshot-key-stdin",
+                            "--snapshot-passphrase-stdin",
+                            "--decrypted",
+                            "--query-stdin",
+                        ],
+                    )?;
+                    if !remaining.iter().any(|value| value == "--query-stdin") {
+                        return Err("message search requires --query-stdin".into());
+                    }
+                    let access = load_live_query_access(&database_root, &remaining)?;
+                    let mut query = read_utf8_stdin_limited(MAX_SEARCH_QUERY_BYTES as u64)?;
+                    while query.ends_with(['\n', '\r']) {
+                        query.pop();
+                    }
+                    let source = access.open_source(&database_root)?;
+                    let conversation = option_string(&remaining, "--conversation")?;
+                    let limit =
+                        option_usize(&remaining, "--limit")?.unwrap_or(DEFAULT_SEARCH_LIMIT);
+                    let cursor = option_string(&remaining, "--cursor")?;
+                    let response = search_live_messages(
+                        &source,
+                        &query,
+                        conversation.as_deref(),
+                        limit,
+                        cursor.as_deref(),
+                    )?;
+                    println!("{}", serialize_query_response(&response)?);
+                }
+                _ => {
+                    return Err(format!(
+                        "unsupported messages subcommand: {subcommand}; expected 'list' or 'search'"
+                    )
+                    .into())
+                }
+            }
+        }
+        "message" => {
+            let subcommand = arguments
+                .next()
+                .ok_or("missing message subcommand; expected 'get'")?;
+            if subcommand != "get" {
+                return Err(format!(
+                    "unsupported message subcommand: {subcommand}; expected 'get'"
+                )
+                .into());
+            }
+            if matches!(arguments.peek().map(String::as_str), Some("--help" | "-h")) {
+                println!("{}", message_get_help());
+                return Ok(());
+            }
+            let database_root = required_path(arguments.next(), "WeChat database root")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if remaining
+                .iter()
+                .any(|value| matches!(value.as_str(), "--help" | "-h"))
+            {
+                println!("{}", message_get_help());
+                return Ok(());
+            }
+            validate_command_options(
+                &remaining,
+                &[
+                    "--conversation",
+                    "--message",
+                    "--snapshot-recovery-kit",
+                    "--snapshot-local-credential",
+                ],
+                &[
+                    "--passphrase-stdin",
+                    "--snapshot-key-stdin",
+                    "--snapshot-passphrase-stdin",
+                    "--decrypted",
+                ],
+            )?;
+            let access = load_live_query_access(&database_root, &remaining)?;
+            let conversation = required_option(&remaining, "--conversation")?;
+            let message_id = required_option(&remaining, "--message")?;
+            let source = access.open_source(&database_root)?;
+            let response = match get_live_message(&source, &conversation, &message_id) {
+                Ok(response) => response,
+                Err(LiveQueryError::InvalidCursor(_)) => {
+                    get_live_search_result_message(&source, &conversation, &message_id)?
+                }
+                Err(error) => return Err(error.into()),
+            };
+            println!("{}", serialize_query_response(&response)?);
+        }
+        "attachment" => {
+            let subcommand = arguments
+                .next()
+                .ok_or("missing attachment subcommand; expected 'inspect' or 'materialize'")?;
+            if matches!(arguments.peek().map(String::as_str), Some("--help" | "-h")) {
+                println!("{}", attachment_subcommand_help(&subcommand)?);
+                return Ok(());
+            }
+            let account_root =
+                required_path(arguments.next(), "WeChat account or snapshot source root")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if remaining
+                .iter()
+                .any(|value| matches!(value.as_str(), "--help" | "-h"))
+            {
+                println!("{}", attachment_subcommand_help(&subcommand)?);
+                return Ok(());
+            }
+            match subcommand.as_str() {
+                "inspect" => {
+                    validate_command_options(
+                        &remaining,
+                        &[
+                            "--conversation",
+                            "--md5",
+                            "--message",
+                            "--kind",
+                            "--snapshot-recovery-kit",
+                            "--snapshot-local-credential",
+                        ],
+                        &[
+                            "--passphrase-stdin",
+                            "--snapshot-key-stdin",
+                            "--snapshot-passphrase-stdin",
+                            "--decrypted",
+                        ],
+                    )?;
+                    let conversation = required_option(&remaining, "--conversation")?;
+                    let kind = option_string(&remaining, "--kind")?
+                        .map(|value| value.parse::<AttachmentKind>())
+                        .transpose()?
+                        .unwrap_or(AttachmentKind::Image);
+                    let message_id = option_string(&remaining, "--message")?;
+                    let response = if let Some(message_id) = message_id {
+                        if option_string(&remaining, "--md5")?.is_some() {
+                            return Err(
+                                "--message derives its locator from the exact source row; do not also pass --md5"
+                                    .into(),
+                            );
+                        }
+                        let access = load_live_query_access(&account_root, &remaining)?;
+                        let source = access.open_attachment_source(&account_root)?;
+                        let filesystem_root = attachment_account_root(&account_root);
+                        inspect_message_attachment(
+                            filesystem_root.as_deref(),
+                            &source,
+                            &conversation,
+                            &message_id,
+                            kind,
+                        )?
+                    } else {
+                        if kind != AttachmentKind::Image {
+                            return Err(
+                                "voice, video, and document inspection requires --message"
+                                    .into(),
+                            );
+                        }
+                        reject_database_access_options(&remaining)?;
+                        let source_md5 = required_option(&remaining, "--md5")?;
+                        inspect_image_attachment(&account_root, &conversation, &source_md5)?
+                    };
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                }
+                "materialize" => {
+                    validate_command_options(
+                        &remaining,
+                        &[
+                            "--conversation",
+                            "--md5",
+                            "--message",
+                            "--kind",
+                            "--attachment",
+                            "--output",
+                            "--snapshot-recovery-kit",
+                            "--snapshot-local-credential",
+                        ],
+                        &[
+                            "--passphrase-stdin",
+                            "--snapshot-key-stdin",
+                            "--snapshot-passphrase-stdin",
+                            "--decrypted",
+                        ],
+                    )?;
+                    let conversation = required_option(&remaining, "--conversation")?;
+                    let kind = option_string(&remaining, "--kind")?
+                        .map(|value| value.parse::<AttachmentKind>())
+                        .transpose()?
+                        .unwrap_or(AttachmentKind::Image);
+                    let message_id = option_string(&remaining, "--message")?;
+                    let attachment_id = required_option(&remaining, "--attachment")?;
+                    let output = PathBuf::from(required_option(&remaining, "--output")?);
+                    let response = if let Some(message_id) = message_id {
+                        if option_string(&remaining, "--md5")?.is_some() {
+                            return Err(
+                                "--message derives its locator from the exact source row; do not also pass --md5"
+                                    .into(),
+                            );
+                        }
+                        let access = load_live_query_access(&account_root, &remaining)?;
+                        let source = access.open_attachment_source(&account_root)?;
+                        let filesystem_root = attachment_account_root(&account_root);
+                        materialize_message_attachment(
+                            filesystem_root.as_deref(),
+                            &source,
+                            &conversation,
+                            &message_id,
+                            kind,
+                            &attachment_id,
+                            &output,
+                        )?
+                    } else {
+                        if kind != AttachmentKind::Image {
+                            return Err(
+                                "voice, video, and document materialization requires --message"
+                                    .into(),
+                            );
+                        }
+                        reject_database_access_options(&remaining)?;
+                        let source_md5 = required_option(&remaining, "--md5")?;
+                        materialize_image_attachment(
+                            &account_root,
+                            &conversation,
+                            &source_md5,
+                            &attachment_id,
+                            &output,
+                        )?
+                    };
+                    println!("{}", serde_json::to_string_pretty(&response)?);
+                }
+                _ => {
+                    return Err(format!(
+                        "unsupported attachment subcommand: {subcommand}; expected 'inspect' or 'materialize'"
+                    )
+                    .into())
+                }
+            }
+        }
+        "snapshot" => {
+            let subcommand = arguments
+                .next()
+                .ok_or(
+                    "missing snapshot subcommand; expected 'recovery-kit', 'local-credential', 'create', 'create-capture', 'verify', 'rewrap', 'retention', or 'rekey'",
+                )?;
+            if matches!(arguments.peek().map(String::as_str), Some("--help" | "-h")) {
+                println!("{}", snapshot_subcommand_help(&subcommand)?);
+                return Ok(());
+            }
+            match subcommand.as_str() {
+                "local-credential" => {
+                    let action = arguments.next().ok_or(
+                        "missing local-credential action; expected 'create' or 'validate'",
+                    )?;
+                    if matches!(arguments.peek().map(String::as_str), Some("--help" | "-h")) {
+                        println!("{}", snapshot_local_credential_help());
+                        return Ok(());
+                    }
+                    let path = required_path(arguments.next(), "private local-credential file")?;
+                    let remaining = arguments.collect::<Vec<_>>();
+                    validate_command_options(&remaining, &[], &[])?;
+                    let report = match action.as_str() {
+                        "create" => SnapshotLocalCredential::write_new_private_file(&path)?,
+                        "validate" => SnapshotLocalCredential::validate_private_file(&path)?,
+                        _ => {
+                            return Err(format!(
+                                "unsupported local-credential action: {action}; expected 'create' or 'validate'"
+                            )
+                            .into())
+                        }
+                    };
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                "recovery-kit" => {
+                    let action = arguments
+                        .next()
+                        .ok_or("missing recovery-kit action; expected 'create' or 'validate'")?;
+                    if matches!(arguments.peek().map(String::as_str), Some("--help" | "-h")) {
+                        println!("{}", snapshot_recovery_kit_help());
+                        return Ok(());
+                    }
+                    let path = required_path(arguments.next(), "private recovery-kit file")?;
+                    let remaining = arguments.collect::<Vec<_>>();
+                    validate_command_options(&remaining, &[], &[])?;
+                    let report = match action.as_str() {
+                        "create" => SnapshotRecoveryWords::write_new_private_file(&path)?,
+                        "validate" => SnapshotRecoveryWords::validate_private_file(&path)?,
+                        _ => {
+                            return Err(format!(
+                                "unsupported recovery-kit action: {action}; expected 'create' or 'validate'"
+                            )
+                            .into())
+                        }
+                    };
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                "create" => {
+                    let source_root = required_path(arguments.next(), "WeChat database root")?;
+                    let output = required_path(arguments.next(), "new snapshot directory")?;
+                    let remaining = arguments.collect::<Vec<_>>();
+                    if remaining
+                        .iter()
+                        .any(|value| matches!(value.as_str(), "--help" | "-h"))
+                    {
+                        println!("{}", snapshot_create_help());
+                        return Ok(());
+                    }
+                    validate_command_options(
+                        &remaining,
+                        &[
+                            "--snapshot-recovery-kit",
+                            "--snapshot-local-credential",
+                        ],
+                        &[
+                            "--source-passphrase-stdin",
+                            "--source-decrypted",
+                            "--snapshot-key-stdin",
+                            "--snapshot-passphrase-stdin",
+                        ],
+                    )?;
+                    let raw_key = remaining
+                        .iter()
+                        .any(|value| value == "--snapshot-key-stdin");
+                    let recovery_kit = option_path(&remaining, "--snapshot-recovery-kit")?;
+                    let local_credential =
+                        option_path(&remaining, "--snapshot-local-credential")?;
+                    let passphrase = remaining
+                        .iter()
+                        .any(|value| value == "--snapshot-passphrase-stdin");
+                    if usize::from(raw_key) + usize::from(recovery_kit.is_some()) != 1 {
+                        return Err(
+                            "snapshot create requires exactly one of --snapshot-key-stdin or --snapshot-recovery-kit"
+                                .into(),
+                        );
+                    }
+                    if (local_credential.is_some() || passphrase) && recovery_kit.is_none() {
+                        return Err(
+                            "optional local or passphrase protection requires --snapshot-recovery-kit so 24-word recovery is retained"
+                                .into(),
+                        );
+                    }
+                    let source_access = load_snapshot_create_source_access(&remaining)?;
+                    let manifest = if let Some(recovery_kit) = recovery_kit {
+                        let recovery_words =
+                            SnapshotRecoveryWords::read_private_file(&recovery_kit)?;
+                        let local_credential = local_credential
+                            .as_ref()
+                            .map(|path| SnapshotLocalCredential::read_private_file(path))
+                            .transpose()?;
+                        let passphrase = passphrase
+                            .then(SnapshotPassphrase::read_stdin)
+                            .transpose()?;
+                        create_recoverable_snapshot_with_recovery_words_and_optional_protectors(
+                            &source_root,
+                            source_access.material(),
+                            &output,
+                            &recovery_words,
+                            local_credential.as_ref(),
+                            passphrase.as_ref(),
+                        )?
+                    } else {
+                        let snapshot_key = SnapshotKey::read_stdin()?;
+                        create_recoverable_snapshot(
+                            &source_root,
+                            source_access.material(),
+                            &output,
+                            &snapshot_key,
+                        )?
+                    };
+                    println!("{}", serde_json::to_string_pretty(&manifest)?);
+                }
+                "create-capture" => {
+                    let capture =
+                        required_path(arguments.next(), "stable acquisition snapshot")?;
+                    let output = required_path(arguments.next(), "new snapshot directory")?;
+                    let remaining = arguments.collect::<Vec<_>>();
+                    if remaining
+                        .iter()
+                        .any(|value| matches!(value.as_str(), "--help" | "-h"))
+                    {
+                        println!("{}", snapshot_create_capture_help());
+                        return Ok(());
+                    }
+                    validate_command_options(
+                        &remaining,
+                        &[
+                            "--snapshot-recovery-kit",
+                            "--snapshot-local-credential",
+                        ],
+                        &[
+                            "--source-passphrase-stdin",
+                            "--source-decrypted",
+                            "--snapshot-key-stdin",
+                            "--snapshot-passphrase-stdin",
+                        ],
+                    )?;
+                    let raw_key = remaining
+                        .iter()
+                        .any(|value| value == "--snapshot-key-stdin");
+                    let recovery_kit = option_path(&remaining, "--snapshot-recovery-kit")?;
+                    let local_credential =
+                        option_path(&remaining, "--snapshot-local-credential")?;
+                    let passphrase = remaining
+                        .iter()
+                        .any(|value| value == "--snapshot-passphrase-stdin");
+                    if usize::from(raw_key) + usize::from(recovery_kit.is_some()) != 1 {
+                        return Err(
+                            "snapshot create-capture requires exactly one of --snapshot-key-stdin or --snapshot-recovery-kit"
+                                .into(),
+                        );
+                    }
+                    if (local_credential.is_some() || passphrase) && recovery_kit.is_none() {
+                        return Err(
+                            "optional local or passphrase protection requires --snapshot-recovery-kit so 24-word recovery is retained"
+                                .into(),
+                        );
+                    }
+                    let source_access = load_snapshot_create_source_access(&remaining)?;
+                    let manifest = if let Some(recovery_kit) = recovery_kit {
+                        let recovery_words =
+                            SnapshotRecoveryWords::read_private_file(&recovery_kit)?;
+                        let local_credential = local_credential
+                            .as_ref()
+                            .map(|path| SnapshotLocalCredential::read_private_file(path))
+                            .transpose()?;
+                        let passphrase = passphrase
+                            .then(SnapshotPassphrase::read_stdin)
+                            .transpose()?;
+                        create_recoverable_snapshot_from_stable_capture_with_recovery_words_and_optional_protectors(
+                            &capture,
+                            source_access.material(),
+                            &output,
+                            &recovery_words,
+                            local_credential.as_ref(),
+                            passphrase.as_ref(),
+                        )?
+                    } else {
+                        let snapshot_key = SnapshotKey::read_stdin()?;
+                        create_recoverable_snapshot_from_stable_capture(
+                            &capture,
+                            source_access.material(),
+                            &output,
+                            &snapshot_key,
+                        )?
+                    };
+                    println!("{}", serde_json::to_string_pretty(&manifest)?);
+                }
+                "verify" => {
+                    let snapshot = required_path(arguments.next(), "snapshot directory")?;
+                    let remaining = arguments.collect::<Vec<_>>();
+                    if remaining
+                        .iter()
+                        .any(|value| matches!(value.as_str(), "--help" | "-h"))
+                    {
+                        println!("{}", snapshot_verify_help());
+                        return Ok(());
+                    }
+                    validate_command_options(
+                        &remaining,
+                        &[
+                            "--snapshot-recovery-kit",
+                            "--snapshot-local-credential",
+                        ],
+                        &["--snapshot-key-stdin", "--snapshot-passphrase-stdin"],
+                    )?;
+                    let raw_key = remaining
+                        .iter()
+                        .any(|value| value == "--snapshot-key-stdin");
+                    let recovery_kit = option_path(&remaining, "--snapshot-recovery-kit")?;
+                    let local_credential =
+                        option_path(&remaining, "--snapshot-local-credential")?;
+                    let passphrase = remaining
+                        .iter()
+                        .any(|value| value == "--snapshot-passphrase-stdin");
+                    if usize::from(raw_key)
+                        + usize::from(recovery_kit.is_some())
+                        + usize::from(local_credential.is_some())
+                        + usize::from(passphrase)
+                        != 1
+                    {
+                        return Err(
+                            "snapshot verify requires exactly one of --snapshot-key-stdin, --snapshot-recovery-kit, --snapshot-local-credential, or --snapshot-passphrase-stdin"
+                                .into(),
+                        );
+                    }
+                    let report = if let Some(recovery_kit) = recovery_kit {
+                        let recovery_words =
+                            SnapshotRecoveryWords::read_private_file(&recovery_kit)?;
+                        verify_recoverable_snapshot_with_recovery_words(
+                            &snapshot,
+                            &recovery_words,
+                        )?
+                    } else if let Some(local_credential) = local_credential {
+                        let local_credential =
+                            SnapshotLocalCredential::read_private_file(&local_credential)?;
+                        verify_recoverable_snapshot_with_local_credential(
+                            &snapshot,
+                            &local_credential,
+                        )?
+                    } else if passphrase {
+                        let passphrase = SnapshotPassphrase::read_stdin()?;
+                        verify_recoverable_snapshot_with_passphrase(&snapshot, &passphrase)?
+                    } else {
+                        let snapshot_key = SnapshotKey::read_stdin()?;
+                        verify_recoverable_snapshot(&snapshot, &snapshot_key)?
+                    };
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                }
+                "retention" => {
+                    let action = arguments.next().ok_or(
+                        "missing snapshot retention action; expected 'quarantine' or 'restore'",
+                    )?;
+                    if matches!(arguments.peek().map(String::as_str), Some("--help" | "-h")) {
+                        println!("{}", snapshot_retention_action_help(&action)?);
+                        return Ok(());
+                    }
+                    match action.as_str() {
+                        "quarantine" => {
+                            let retiring =
+                                required_path(arguments.next(), "retiring snapshot directory")?;
+                            let replacement =
+                                required_path(arguments.next(), "replacement snapshot directory")?;
+                            let quarantine =
+                                required_path(arguments.next(), "snapshot quarantine directory")?;
+                            let remaining = arguments.collect::<Vec<_>>();
+                            validate_command_options(
+                                &remaining,
+                                &[
+                                    "--retiring-recovery-kit",
+                                    "--retiring-local-credential",
+                                    "--replacement-recovery-kit",
+                                ],
+                                &["--retiring-snapshot-passphrase-stdin"],
+                            )?;
+                            let retiring_recovery_kit =
+                                option_path(&remaining, "--retiring-recovery-kit")?;
+                            let retiring_local_credential =
+                                option_path(&remaining, "--retiring-local-credential")?;
+                            let retiring_passphrase = remaining
+                                .iter()
+                                .any(|value| value == "--retiring-snapshot-passphrase-stdin");
+                            if usize::from(retiring_recovery_kit.is_some())
+                                + usize::from(retiring_local_credential.is_some())
+                                + usize::from(retiring_passphrase)
+                                != 1
+                            {
+                                return Err(
+                                    "snapshot retention quarantine requires exactly one retiring-generation protector"
+                                        .into(),
+                                );
+                            }
+                            let replacement_recovery_kit = option_path(
+                                &remaining,
+                                "--replacement-recovery-kit",
+                            )?
+                            .ok_or(
+                                "snapshot retention quarantine requires portable recovery verification of the replacement",
+                            )?;
+                            let retiring_key = if let Some(path) = retiring_recovery_kit {
+                                let words = SnapshotRecoveryWords::read_private_file(&path)?;
+                                unlock_recoverable_snapshot_with_recovery_words(
+                                    &retiring,
+                                    &words,
+                                )?
+                            } else if let Some(path) = retiring_local_credential.as_ref() {
+                                let credential =
+                                    SnapshotLocalCredential::read_private_file(path)?;
+                                unlock_recoverable_snapshot_with_local_credential(
+                                    &retiring,
+                                    &credential,
+                                )?
+                            } else {
+                                let passphrase = SnapshotPassphrase::read_stdin()?;
+                                unlock_recoverable_snapshot_with_passphrase(
+                                    &retiring,
+                                    &passphrase,
+                                )?
+                            };
+                            let replacement_words = SnapshotRecoveryWords::read_private_file(
+                                &replacement_recovery_kit,
+                            )?;
+                            let report = quarantine_recoverable_snapshot_generation(
+                                &retiring,
+                                &retiring_key,
+                                &replacement,
+                                &replacement_words,
+                                &quarantine,
+                            )?;
+                            println!("{}", serde_json::to_string_pretty(&report)?);
+                        }
+                        "restore" => {
+                            let quarantined =
+                                required_path(arguments.next(), "quarantined snapshot directory")?;
+                            let restored =
+                                required_path(arguments.next(), "restored snapshot directory")?;
+                            let remaining = arguments.collect::<Vec<_>>();
+                            validate_command_options(
+                                &remaining,
+                                &[
+                                    "--snapshot-recovery-kit",
+                                    "--snapshot-local-credential",
+                                ],
+                                &["--snapshot-passphrase-stdin"],
+                            )?;
+                            let recovery_kit =
+                                option_path(&remaining, "--snapshot-recovery-kit")?;
+                            let local_credential =
+                                option_path(&remaining, "--snapshot-local-credential")?;
+                            let passphrase = remaining
+                                .iter()
+                                .any(|value| value == "--snapshot-passphrase-stdin");
+                            if usize::from(recovery_kit.is_some())
+                                + usize::from(local_credential.is_some())
+                                + usize::from(passphrase)
+                                != 1
+                            {
+                                return Err(
+                                    "snapshot retention restore requires exactly one snapshot protector"
+                                        .into(),
+                                );
+                            }
+                            let snapshot_key = if let Some(path) = recovery_kit {
+                                let words = SnapshotRecoveryWords::read_private_file(&path)?;
+                                unlock_recoverable_snapshot_with_recovery_words(
+                                    &quarantined,
+                                    &words,
+                                )?
+                            } else if let Some(path) = local_credential.as_ref() {
+                                let credential =
+                                    SnapshotLocalCredential::read_private_file(path)?;
+                                unlock_recoverable_snapshot_with_local_credential(
+                                    &quarantined,
+                                    &credential,
+                                )?
+                            } else {
+                                let passphrase = SnapshotPassphrase::read_stdin()?;
+                                unlock_recoverable_snapshot_with_passphrase(
+                                    &quarantined,
+                                    &passphrase,
+                                )?
+                            };
+                            let report = restore_quarantined_snapshot_generation(
+                                &quarantined,
+                                &snapshot_key,
+                                &restored,
+                            )?;
+                            println!("{}", serde_json::to_string_pretty(&report)?);
+                        }
+                        _ => {
+                            return Err(format!(
+                                "unsupported snapshot retention action: {action}; expected 'quarantine' or 'restore'"
+                            )
+                            .into())
+                        }
+                    }
+                }
+                "rewrap" => {
+                    let source = required_path(arguments.next(), "source snapshot directory")?;
+                    let output = required_path(arguments.next(), "new snapshot directory")?;
+                    let remaining = arguments.collect::<Vec<_>>();
+                    if remaining
+                        .iter()
+                        .any(|value| matches!(value.as_str(), "--help" | "-h"))
+                    {
+                        println!("{}", snapshot_rewrap_help());
+                        return Ok(());
+                    }
+                    validate_command_options(
+                        &remaining,
+                        &[
+                            "--old-snapshot-recovery-kit",
+                            "--old-snapshot-local-credential",
+                            "--new-snapshot-recovery-kit",
+                            "--new-snapshot-local-credential",
+                        ],
+                        &[
+                            "--old-snapshot-passphrase-stdin",
+                            "--new-snapshot-passphrase-stdin",
+                        ],
+                    )?;
+                    let old_recovery_kit =
+                        option_path(&remaining, "--old-snapshot-recovery-kit")?;
+                    let old_local_credential =
+                        option_path(&remaining, "--old-snapshot-local-credential")?;
+                    let old_passphrase = remaining
+                        .iter()
+                        .any(|value| value == "--old-snapshot-passphrase-stdin");
+                    if usize::from(old_recovery_kit.is_some())
+                        + usize::from(old_local_credential.is_some())
+                        + usize::from(old_passphrase)
+                        != 1
+                    {
+                        return Err(
+                            "snapshot rewrap requires exactly one old recovery kit, old local credential, or old passphrase"
+                                .into(),
+                        );
+                    }
+                    let new_recovery_kit = option_path(
+                        &remaining,
+                        "--new-snapshot-recovery-kit",
+                    )?
+                    .ok_or(
+                        "snapshot rewrap requires --new-snapshot-recovery-kit so portable recovery is retained",
+                    )?;
+                    let new_local_credential =
+                        option_path(&remaining, "--new-snapshot-local-credential")?;
+                    let existing_key = if let Some(old_recovery_kit) = old_recovery_kit {
+                        let words = SnapshotRecoveryWords::read_private_file(&old_recovery_kit)?;
+                        unlock_recoverable_snapshot_with_recovery_words(&source, &words)?
+                    } else if let Some(path) = old_local_credential.as_ref() {
+                        let credential = SnapshotLocalCredential::read_private_file(path)?;
+                        unlock_recoverable_snapshot_with_local_credential(&source, &credential)?
+                    } else {
+                        let passphrase = SnapshotPassphrase::read_stdin()?;
+                        unlock_recoverable_snapshot_with_passphrase(&source, &passphrase)?
+                    };
+                    let new_words =
+                        SnapshotRecoveryWords::read_private_file(&new_recovery_kit)?;
+                    let new_local_credential = new_local_credential
+                        .as_ref()
+                        .map(|path| SnapshotLocalCredential::read_private_file(path))
+                        .transpose()?;
+                    let new_passphrase = remaining
+                        .iter()
+                        .any(|value| value == "--new-snapshot-passphrase-stdin")
+                        .then(SnapshotPassphrase::read_stdin)
+                        .transpose()?;
+                    let manifest = rewrap_recoverable_snapshot_protectors_with_optional_protectors(
+                        &source,
+                        &existing_key,
+                        &output,
+                        &new_words,
+                        new_local_credential.as_ref(),
+                        new_passphrase.as_ref(),
+                    )?;
+                    println!("{}", serde_json::to_string_pretty(&manifest)?);
+                }
+                "rekey" => {
+                    let source = required_path(arguments.next(), "source snapshot directory")?;
+                    let output = required_path(arguments.next(), "new snapshot directory")?;
+                    let remaining = arguments.collect::<Vec<_>>();
+                    if remaining
+                        .iter()
+                        .any(|value| matches!(value.as_str(), "--help" | "-h"))
+                    {
+                        println!("{}", snapshot_rekey_help());
+                        return Ok(());
+                    }
+                    validate_command_options(
+                        &remaining,
+                        &[],
+                        &["--old-snapshot-key-stdin", "--new-snapshot-key-stdin"],
+                    )?;
+                    if !remaining
+                        .iter()
+                        .any(|value| value == "--old-snapshot-key-stdin")
+                        || !remaining
+                            .iter()
+                            .any(|value| value == "--new-snapshot-key-stdin")
+                    {
+                        return Err(
+                            "snapshot rekey requires --old-snapshot-key-stdin and --new-snapshot-key-stdin"
+                                .into(),
+                        );
+                    }
+                    let old_snapshot_key = SnapshotKey::read_stdin()?;
+                    let new_snapshot_key = SnapshotKey::read_stdin()?;
+                    let manifest = rekey_recoverable_snapshot(
+                        &source,
+                        &old_snapshot_key,
+                        &output,
+                        &new_snapshot_key,
+                    )?;
+                    println!("{}", serde_json::to_string_pretty(&manifest)?);
+                }
+                _ => {
+                    return Err(format!(
+                    "unsupported snapshot subcommand: {subcommand}; expected 'recovery-kit', 'local-credential', 'create', 'create-capture', 'verify', 'rewrap', 'retention', or 'rekey'"
+                )
+                    .into())
+                }
+            }
+        }
         "synthetic-benchmark" => {
             let work_directory = required_path(arguments.next(), "private work directory")?;
             let remaining = arguments.collect::<Vec<_>>();
@@ -826,6 +1945,151 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let report = audit_ai_memory_with_progress(&memory, &reporter)?;
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
+        "connector-policy-direct" => {
+            let database_root = required_path(arguments.next(), "WeChat database root")?;
+            let policy_path = required_path(arguments.next(), "new direct connector policy")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if remaining
+                .iter()
+                .any(|value| matches!(value.as_str(), "--help" | "-h"))
+            {
+                println!("{}", connector_policy_direct_help());
+                return Ok(());
+            }
+            let option_start = remaining
+                .iter()
+                .position(|value| value.starts_with("--"))
+                .unwrap_or(remaining.len());
+            let option_arguments = &remaining[option_start..];
+            validate_command_options(
+                option_arguments,
+                &[
+                    "--capabilities",
+                    "--fields",
+                    "--not-before-unix",
+                    "--not-after-unix",
+                    "--max-results",
+                    "--max-summary-bytes",
+                    "--snapshot-recovery-kit",
+                    "--snapshot-local-credential",
+                ],
+                &[
+                    "--allow-remote-model",
+                    "--passphrase-stdin",
+                    "--snapshot-key-stdin",
+                    "--snapshot-passphrase-stdin",
+                    "--decrypted",
+                ],
+            )?;
+            let conversations = remaining[..option_start]
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            if conversations.is_empty() {
+                return Err("direct connector policy requires at least one conversation ID".into());
+            }
+            let capabilities = parse_capabilities(&required_option(&remaining, "--capabilities")?)?;
+            if capabilities.contains(&ToolCapability::CreateDraft) {
+                return Err("direct connector policy cannot authorize draft creation".into());
+            }
+            let message_fields = parse_message_fields(&required_option(&remaining, "--fields")?)?;
+            let scope = ConversationToolScope {
+                capabilities,
+                message_fields,
+                not_before_unix: option_i64(&remaining, "--not-before-unix")?,
+                not_after_unix: option_i64(&remaining, "--not-after-unix")?,
+                allow_remote_model: remaining
+                    .iter()
+                    .any(|value| value == "--allow-remote-model"),
+            };
+            let access = load_live_query_access(&database_root, &remaining)?;
+            let source = access.open_source(&database_root)?;
+            let conversation_ids = conversations.iter().cloned().collect::<Vec<_>>();
+            for batch in conversation_ids.chunks(MAX_PAGE_LIMIT) {
+                let present = find_live_conversations(&source, batch)?;
+                if let Some(conversation) = batch
+                    .iter()
+                    .find(|conversation| !present.contains_key(*conversation))
+                {
+                    return Err(format!(
+                        "conversation is not present in the selected SQLite source: {conversation}"
+                    )
+                    .into());
+                }
+            }
+            let scopes = conversations
+                .into_iter()
+                .map(|conversation| (conversation, scope.clone()))
+                .collect::<BTreeMap<_, _>>();
+            let policy = create_direct_tool_policy(
+                &policy_path,
+                source.identity(),
+                scopes,
+                option_usize(&remaining, "--max-results")?.unwrap_or(100),
+                option_usize(&remaining, "--max-summary-bytes")?.unwrap_or(4_096),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&policy)?);
+        }
+        "connector-serve-direct" => {
+            let database_root = required_path(arguments.next(), "WeChat database root")?;
+            let policy = required_path(arguments.next(), "direct connector policy")?;
+            let audit = required_path(arguments.next(), "audit log path")?;
+            let socket = required_path(arguments.next(), "Unix socket path")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if remaining
+                .iter()
+                .any(|value| matches!(value.as_str(), "--help" | "-h"))
+            {
+                println!("{}", connector_serve_direct_help());
+                return Ok(());
+            }
+            validate_command_options(
+                &remaining,
+                &["--snapshot-recovery-kit", "--snapshot-local-credential"],
+                &[
+                    "--passphrase-stdin",
+                    "--snapshot-key-stdin",
+                    "--snapshot-passphrase-stdin",
+                    "--decrypted",
+                ],
+            )?;
+            let access = load_live_query_access(&database_root, &remaining)?;
+            let source = access.open_source(&database_root)?;
+            let service = DirectConnectorService::open(source, &policy, &audit)?;
+            serve_unix(&service, &socket)?;
+        }
+        "connector-query-direct" => {
+            let database_root = required_path(arguments.next(), "WeChat database root")?;
+            let policy = required_path(arguments.next(), "direct connector policy")?;
+            let audit = required_path(arguments.next(), "audit log path")?;
+            let request_path = required_path(arguments.next(), "private request JSON")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if remaining
+                .iter()
+                .any(|value| matches!(value.as_str(), "--help" | "-h"))
+            {
+                println!("{}", connector_query_direct_help());
+                return Ok(());
+            }
+            validate_command_options(
+                &remaining,
+                &["--snapshot-recovery-kit", "--snapshot-local-credential"],
+                &[
+                    "--passphrase-stdin",
+                    "--snapshot-key-stdin",
+                    "--snapshot-passphrase-stdin",
+                    "--decrypted",
+                ],
+            )?;
+            let request = load_connector_request(&request_path)?;
+            let access = load_live_query_access(&database_root, &remaining)?;
+            let source = access.open_source(&database_root)?;
+            let service = DirectConnectorService::open(source, &policy, &audit)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&service.handle(request))?
+            );
+        }
         "connector-serve" => {
             let replica = required_path(arguments.next(), "replica path")?;
             let policy = required_path(arguments.next(), "tool policy path")?;
@@ -1003,6 +2267,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!(
                 concat!(
                     "Usage:\n",
+                    "  greenbubbles-restore source status <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
+                    "  greenbubbles-restore conversations list <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n",
+                    "  greenbubbles-restore messages list <source-root> --conversation <id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n",
+                    "  greenbubbles-restore messages search <source-root> --query-stdin (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n",
+                    "  greenbubbles-restore message get <source-root> --conversation <id> --message <opaque-id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
+                    "  greenbubbles-restore attachment inspect <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
+                    "  greenbubbles-restore attachment materialize <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document --attachment <opaque-id> --output <new-path> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
+                    "  greenbubbles-restore snapshot recovery-kit create <new-private-file>\n",
+                    "  greenbubbles-restore snapshot local-credential create <new-private-file>\n",
+                    "  greenbubbles-restore snapshot create <WeChat-database-root> <new-snapshot-directory> (--source-passphrase-stdin | --source-decrypted) (--snapshot-recovery-kit <file> [--snapshot-local-credential <file>] [--snapshot-passphrase-stdin] | --snapshot-key-stdin)\n",
+                    "  greenbubbles-restore snapshot create-capture <stable-acquisition-snapshot> <new-snapshot-directory> (--source-passphrase-stdin | --source-decrypted) (--snapshot-recovery-kit <file> [--snapshot-local-credential <file>] [--snapshot-passphrase-stdin] | --snapshot-key-stdin)\n",
+                    "  greenbubbles-restore snapshot verify <snapshot-directory> (--snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin)\n",
+                    "  greenbubbles-restore snapshot rewrap <snapshot-directory> <new-snapshot-directory> (--old-snapshot-recovery-kit <file> | --old-snapshot-local-credential <file> | --old-snapshot-passphrase-stdin) --new-snapshot-recovery-kit <file> [--new-snapshot-local-credential <file>] [--new-snapshot-passphrase-stdin]\n",
+                    "  greenbubbles-restore snapshot retention quarantine <retiring> <replacement> <quarantine-directory> (--retiring-recovery-kit <file> | --retiring-local-credential <file> | --retiring-snapshot-passphrase-stdin) --replacement-recovery-kit <file>\n",
+                    "  greenbubbles-restore snapshot retention restore <quarantined> <restored-directory> (--snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin)\n",
+                    "  greenbubbles-restore snapshot rekey <snapshot-directory> <new-snapshot-directory> --old-snapshot-key-stdin --new-snapshot-key-stdin\n",
                     "  greenbubbles-restore synthetic-benchmark <private-work-directory> [--samples <n>] [--small-messages <n>] [--large-messages <n>] [--burst-messages <n>]\n",
                     "  greenbubbles-restore preflight <snapshot> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
                     "  greenbubbles-restore probe <snapshot> [--passphrase-stdin | --database-keys-file <owner-only-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
@@ -1045,6 +2325,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles-restore audit-ai-context <AI-context-bundle-directory> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
                     "  greenbubbles-restore ai-memory-export <AI-context-bundle-directory> <new-output-directory> [--max-messages-per-chunk <n>] [--max-text-bytes-per-chunk <n>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
                     "  greenbubbles-restore audit-ai-memory <AI-memory-output-directory> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
+                    "  greenbubbles-restore connector-policy-direct <source-root> <new-policy-file> <conversation-id>... --capabilities list,read,search --fields sender,created-at,type,content (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--max-results <n>] [--max-summary-bytes <n>]\n",
+                    "  greenbubbles-restore connector-query-direct <source-root> <policy-file> <audit-log> <private-request-json> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
+                    "  greenbubbles-restore connector-serve-direct <source-root> <policy-file> <audit-log> <socket-path> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
                     "  greenbubbles-restore connector-serve <replica-path> <policy-file> <audit-log> <draft-directory> <socket-path> --replica-key-stdin\n",
                     "  greenbubbles-restore connector-call <socket-path> <private-request-json>\n",
                     "  greenbubbles-restore tool-policy <archive> <policy-file> ([<conversation-id>...] | --all-conversations) [--capabilities list,read,search,draft] [--fields sender,created-at,direction,type,content,attachments,relationships] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--enable-cached-moments --cached-fields author,created-at,type,content,title,description,url,media-count,like-count,comment-count] [--cached-not-before-unix <seconds>] [--cached-not-after-unix <seconds>] [--allow-cached-remote-model] [--max-results <n>] [--max-summary-bytes <n>] [--max-draft-bytes <n>]\n",
@@ -1059,8 +2342,450 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+const fn source_status_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore source status <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n\n",
+        "Authenticates the required core databases read-only, then returns bounded,\n",
+        "content-free storage accounting for every regular .db file and its adjacent\n",
+        "WAL, SHM, or rollback-journal sidecars. Sizes are filesystem byte counts; no\n",
+        "rows are restored, decoded, exported, indexed, or copied. Absolute paths are\n",
+        "not returned. The inventory is capped at 4,096 databases and 100,000 entries.\n\n",
+        "Access modes:\n",
+        "  --passphrase-stdin   Read the 32-byte WeChat database key from standard input\n",
+        "  --snapshot-local-credential <file>  Use the owner-only local convenience file\n",
+        "  --snapshot-recovery-kit <file>      Use the portable 24-word recovery kit\n",
+        "  --snapshot-passphrase-stdin         Read the optional Argon2id passphrase\n",
+        "  --snapshot-key-stdin Legacy: read an independent raw snapshot key\n",
+        "  --decrypted          Explicitly inspect plaintext SQLite database files\n",
+        "  -h, --help           Show this help\n",
+    )
+}
+
+const fn conversations_command_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore conversations list <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n\n",
+        "Returns one bounded, keyset-paginated JSON page directly from session.db.\n",
+        "The source is opened read-only with SQLite query_only enforcement; no archive,\n",
+        "replica, staging database, search index, or media derivative is created.\n\n",
+        "Access modes:\n",
+        "  --passphrase-stdin  Read the 32-byte WeChat database key from standard input\n",
+        "  --snapshot-local-credential <file>  Use a local snapshot convenience protector\n",
+        "  --snapshot-recovery-kit <file>      Use portable 24-word snapshot recovery\n",
+        "  --snapshot-passphrase-stdin         Read the optional Argon2id passphrase\n",
+        "  --snapshot-key-stdin Legacy raw-key snapshot compatibility\n",
+        "  --decrypted         Explicitly query plaintext SQLite database files\n\n",
+        "Options:\n",
+        "  --limit <n>         Return 1..500 conversations; default 100\n",
+        "  --cursor <token>    Continue from an opaque cursor returned by the prior page\n",
+        "  -h, --help          Show this help\n",
+    )
+}
+
+const fn messages_command_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore messages list <source-root> --conversation <id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n\n",
+        "  greenbubbles-restore messages search <source-root> --query-stdin (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n\n",
+        "Returns one bounded, typed, keyset-paginated JSON page directly from numbered\n",
+        "WeChat message shards. Each shard uses a short read-only statement; the response\n",
+        "reports cross-database consistency and partial-coverage warnings explicitly. Search\n",
+        "prefers compatible native WeChat FTS. If it is unavailable, each response scans at\n",
+        "most 500 decoded source messages and returns a continuation without writing an index.\n\n",
+        "Access modes:\n",
+        "  --passphrase-stdin  Read the 32-byte WeChat database key from standard input\n",
+        "  --snapshot-local-credential <file>  Use a local snapshot convenience protector\n",
+        "  --snapshot-recovery-kit <file>      Use portable 24-word snapshot recovery\n",
+        "  --snapshot-passphrase-stdin         Read the optional Argon2id passphrase\n",
+        "  --snapshot-key-stdin Legacy raw-key snapshot compatibility\n",
+        "  --decrypted         Explicitly query plaintext SQLite database files\n\n",
+        "Options:\n",
+        "  --conversation <id> Exact wxid or chatroom identifier\n",
+        "  --limit <n>         Return 1..500 messages; default 100\n",
+        "  --cursor <token>    Continue from an opaque cursor returned by the prior page\n",
+        "  -h, --help          Show this help\n",
+    )
+}
+
+const fn messages_search_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore messages search <source-root> --query-stdin (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n\n",
+        "Runs one literal, parameterized, keyset-paginated query against a compatible\n",
+        "read-only native WeChat message FTS database. It never builds an index or falls\n",
+        "back to a corpus-wide message scan. Index freshness is reported as unverified.\n\n",
+        "Input ordering:\n",
+        "  encrypted live source   input line 1 is the WeChat key; all remaining UTF-8\n",
+        "                          input (maximum 16 KiB) is the search query\n",
+        "  encrypted snapshot      input line 1 is the snapshot recovery key; all remaining\n",
+        "                          UTF-8 input is the search query\n",
+        "  snapshot passphrase     input line 1 is the Argon2id passphrase; all remaining\n",
+        "                          UTF-8 input is the search query\n",
+        "  snapshot protector file all standard input is the search query; protector\n",
+        "                          contents and unwrapped key never enter standard input\n",
+        "  --decrypted             all standard input is the search query\n\n",
+        "Options:\n",
+        "  --query-stdin       Required; search text is never accepted in an argument\n",
+        "  --conversation <id> Restrict hits to one exact wxid or chatroom identifier\n",
+        "  --limit <n>         Return 1..200 hits; default 50\n",
+        "  --cursor <token>    Continue the exact same search from a prior page\n",
+        "  -h, --help          Show this help\n",
+    )
+}
+
+fn messages_subcommand_help(subcommand: &str) -> Result<&'static str, String> {
+    match subcommand {
+        "list" => Ok(messages_command_help()),
+        "search" => Ok(messages_search_help()),
+        _ => Err(format!(
+            "unsupported messages subcommand: {subcommand}; expected 'list' or 'search'"
+        )),
+    }
+}
+
+const fn message_get_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore message get <source-root> --conversation <id> --message <opaque-id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n\n",
+        "Performs one bounded retrieval by the opaque identity returned from messages\n",
+        "list. The identity is bound to the source and conversation. GreenBubbles opens\n",
+        "only the named read-only shard and performs one rowid/key lookup; it does not\n",
+        "scan the conversation or create an archive, index, replica, or derivative.\n\n",
+        "Access modes:\n",
+        "  --passphrase-stdin   Read the 32-byte WeChat database key from standard input\n",
+        "  --snapshot-local-credential <file>  Use a local snapshot convenience protector\n",
+        "  --snapshot-recovery-kit <file>      Use portable 24-word snapshot recovery\n",
+        "  --snapshot-passphrase-stdin         Read the optional Argon2id passphrase\n",
+        "  --snapshot-key-stdin Legacy raw-key snapshot compatibility\n",
+        "  --decrypted          Explicitly query plaintext SQLite database files\n\n",
+        "Options:\n",
+        "  --conversation <id>  Exact wxid or chatroom identifier used for listing\n",
+        "  --message <id>       Opaque message identity returned by messages list\n",
+        "  -h, --help           Show this help\n",
+    )
+}
+
+const fn attachment_command_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore attachment inspect <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document <access-mode>\n",
+        "  greenbubbles-restore attachment materialize <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document --attachment <opaque-id> --output <new-path> <access-mode>\n",
+        "  greenbubbles-restore attachment inspect <account-root> --conversation <id> --md5 <hex>\n",
+        "  greenbubbles-restore attachment materialize <account-root> --conversation <id> --md5 <hex> --attachment <opaque-id> --output <new-path>\n\n",
+        "Inspects or materializes one exact image, voice, video, or document on demand.\n",
+        "The preferred message-bound form hydrates one opaque message identity read-only,\n",
+        "then performs bounded media-DB, hardlink-metadata, or conversation filesystem\n",
+        "lookup. The legacy MD5 form remains available for images and reads no database.\n",
+        "Inspection writes nothing. Materialization revalidates the opaque candidate and\n",
+        "atomically creates one owner-only output outside the protected source. Source and\n",
+        "output paths are never returned in JSON.\n",
+    )
+}
+
+const fn attachment_inspect_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore attachment inspect <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document <access-mode>\n",
+        "  greenbubbles-restore attachment inspect <account-root> --conversation <id> --md5 <hex>\n\n",
+        "Returns a small versioned JSON description without decoding or writing media.\n",
+        "The preferred form binds the source, conversation, exact opaque message, kind,\n",
+        "candidate location or row, and current content/version evidence. Legacy --md5 is\n",
+        "image-only, accepts no database access mode, and remains compatibility syntax.\n\n",
+        "Access modes for --message:\n",
+        "  --passphrase-stdin                   Encrypted live WeChat databases\n",
+        "  --snapshot-recovery-kit <file>       Portable 24-word snapshot recovery\n",
+        "  --snapshot-local-credential <file>   Local snapshot convenience protector\n",
+        "  --snapshot-passphrase-stdin          Optional Argon2id snapshot passphrase\n",
+        "  --snapshot-key-stdin                 Legacy raw snapshot key\n",
+        "  --decrypted                          Explicit plaintext SQLite source\n\n",
+        "Options:\n",
+        "  --conversation <id>  Exact wxid or chatroom identifier\n",
+        "  --message <id>       Opaque identity returned by messages list/search\n",
+        "  --kind <kind>        image, voice, video, or document; default image\n",
+        "  --md5 <hex>          Legacy image locator; exactly 32 hexadecimal characters\n",
+        "  -h, --help           Show this help\n",
+    )
+}
+
+const fn attachment_materialize_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore attachment materialize <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document --attachment <opaque-id> --output <new-path> <access-mode>\n",
+        "  greenbubbles-restore attachment materialize <account-root> --conversation <id> --md5 <hex> --attachment <opaque-id> --output <new-path>\n\n",
+        "Materializes exactly one previously inspected candidate. Images are decoded; a\n",
+        "voice payload is converted from SILK to Ogg Opus when supported and otherwise\n",
+        "retained as SILK; video and documents are streamed without whole-file buffering.\n",
+        "The output parent\n",
+        "must already be a current-user-owned directory with no group/other access.\n",
+        "Existing outputs are never overwritten, and output inside the protected source is\n",
+        "rejected. The response reports format, byte count, and SHA-256, but no paths.\n\n",
+        "Access modes for --message are the same as attachment inspect.\n\n",
+        "Options:\n",
+        "  --conversation <id>  Exact wxid or chatroom identifier\n",
+        "  --message <id>       Opaque identity returned by messages list/search\n",
+        "  --kind <kind>        image, voice, video, or document; default image\n",
+        "  --md5 <hex>          Legacy image locator; exactly 32 hexadecimal characters\n",
+        "  --attachment <id>    Opaque candidate identity returned by inspect\n",
+        "  --output <path>      New decoded file path; overwrite is not supported\n",
+        "  -h, --help           Show this help\n",
+    )
+}
+
+fn attachment_subcommand_help(subcommand: &str) -> Result<&'static str, String> {
+    match subcommand {
+        "inspect" => Ok(attachment_inspect_help()),
+        "materialize" => Ok(attachment_materialize_help()),
+        _ => Err(format!(
+            "unsupported attachment subcommand: {subcommand}; expected 'inspect' or 'materialize'"
+        )),
+    }
+}
+
+const fn snapshot_command_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore snapshot recovery-kit (create | validate) <private-file>\n",
+        "  greenbubbles-restore snapshot local-credential (create | validate) <private-file>\n",
+        "  greenbubbles-restore snapshot create <WeChat-database-root> <new-snapshot-directory> (--source-passphrase-stdin | --source-decrypted) (--snapshot-recovery-kit <private-file> [--snapshot-local-credential <private-file>] [--snapshot-passphrase-stdin] | --snapshot-key-stdin)\n",
+        "  greenbubbles-restore snapshot create-capture <stable-acquisition-snapshot> <new-snapshot-directory> (--source-passphrase-stdin | --source-decrypted) (--snapshot-recovery-kit <private-file> [--snapshot-local-credential <private-file>] [--snapshot-passphrase-stdin] | --snapshot-key-stdin)\n",
+        "  greenbubbles-restore snapshot verify <snapshot-directory> (--snapshot-recovery-kit <private-file> | --snapshot-local-credential <private-file> | --snapshot-passphrase-stdin | --snapshot-key-stdin)\n\n",
+        "  greenbubbles-restore snapshot rewrap <snapshot-directory> <new-snapshot-directory> (--old-snapshot-recovery-kit <private-file> | --old-snapshot-local-credential <private-file> | --old-snapshot-passphrase-stdin) --new-snapshot-recovery-kit <private-file> [--new-snapshot-local-credential <private-file>] [--new-snapshot-passphrase-stdin]\n",
+        "  greenbubbles-restore snapshot retention quarantine <retiring> <replacement> <quarantine-directory> (--retiring-recovery-kit <private-file> | --retiring-local-credential <private-file> | --retiring-snapshot-passphrase-stdin) --replacement-recovery-kit <private-file>\n",
+        "  greenbubbles-restore snapshot retention restore <quarantined> <restored-directory> (--snapshot-recovery-kit <private-file> | --snapshot-local-credential <private-file> | --snapshot-passphrase-stdin)\n",
+        "  greenbubbles-restore snapshot rekey <snapshot-directory> <new-snapshot-directory> --old-snapshot-key-stdin --new-snapshot-key-stdin\n\n",
+        "Creates and verifies durable logical SQLite backups whose encryption key is\n",
+        "independent of WeChat. Use 'snapshot create --help' or 'snapshot verify --help'\n",
+        "for secret-input ordering and recovery details.\n",
+    )
+}
+
+const fn snapshot_local_credential_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore snapshot local-credential create <new-private-file>\n",
+        "  greenbubbles-restore snapshot local-credential validate <private-file>\n\n",
+        "Creates or validates a random local convenience credential. The file is\n",
+        "exclusively created mode 0600 beneath an owner-only directory and is never\n",
+        "printed. It wraps the snapshot database key independently; it contains neither\n",
+        "the SQLCipher key nor the 24 recovery words. This file is not a backup: keep the\n",
+        "portable recovery words separately so deletion or loss of this device is safe.\n",
+    )
+}
+
+const fn snapshot_recovery_kit_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore snapshot recovery-kit create <new-private-file>\n",
+        "  greenbubbles-restore snapshot recovery-kit validate <private-file>\n\n",
+        "Creates or validates a standard 24-word English BIP-39 recovery kit. Creation\n",
+        "uses 256 random bits, validates the checksum, exclusively creates a mode-0600\n",
+        "single-link file beneath an owner-only directory, and syncs it before success.\n",
+        "The JSON report contains no words, raw key, base64 key, or path. Read and copy\n",
+        "the private file to an independent recovery location before snapshot creation.\n",
+    )
+}
+
+const fn snapshot_create_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore snapshot create <WeChat-database-root> <new-snapshot-directory> (--source-passphrase-stdin | --source-decrypted) (--snapshot-recovery-kit <private-file> [--snapshot-local-credential <private-file>] [--snapshot-passphrase-stdin] | --snapshot-key-stdin)\n\n",
+        "Copies every regular .db file through SQLite's logical backup API into a new\n",
+        "SQLCipher database protected by a random key independent from WeChat. Prefer a\n",
+        "24-word recovery kit, which wraps that key without becoming the database key.\n",
+        "No plaintext database staging file is created. Every destination is reopened,\n",
+        "integrity-checked without the WeChat key, hashed, and atomically published.\n\n",
+        "Source modes:\n",
+        "  --source-passphrase-stdin  Read the 32-byte WeChat key from input line 1\n",
+        "  --source-decrypted         Explicitly read plaintext SQLite source databases\n\n",
+        "Recovery protection:\n",
+        "  --snapshot-recovery-kit <file>      Preferred portable 24-word protector\n",
+        "  --snapshot-local-credential <file>  Optional local convenience protector; this\n",
+        "                                      is accepted only alongside the recovery kit\n",
+        "  --snapshot-passphrase-stdin         Optional Argon2id protector; read after the\n",
+        "                                      source key, or as line 1 for plaintext source\n",
+        "  --snapshot-key-stdin       Legacy raw-key format. Read line 2 for an encrypted\n",
+        "                             source, or line 1 for a decrypted source\n",
+        "  -h, --help                 Show this help\n",
+    )
+}
+
+const fn snapshot_create_capture_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore snapshot create-capture <stable-acquisition-snapshot> <new-snapshot-directory> (--source-passphrase-stdin | --source-decrypted) (--snapshot-recovery-kit <private-file> [--snapshot-local-credential <private-file>] [--snapshot-passphrase-stdin] | --snapshot-key-stdin)\n\n",
+        "Converts a complete owner-only filesystem capture produced by GreenBubbles'\n",
+        "database/WAL/SHM snapshotter. It verifies every capture hash before use, opens\n",
+        "captured databases read-only, writes logical pages directly into separately\n",
+        "keyed SQLCipher databases, and verifies the capture again before publication.\n",
+        "Incremental fragments are rejected because they are not complete generations.\n",
+        "No plaintext database staging file is created.\n\n",
+        "Source modes:\n",
+        "  --source-passphrase-stdin  Read the 32-byte WeChat key from input line 1\n",
+        "  --source-decrypted         Explicitly read a plaintext SQLite capture\n\n",
+        "Recovery protection:\n",
+        "  --snapshot-recovery-kit <file>      Preferred portable 24-word protector\n",
+        "  --snapshot-local-credential <file>  Optional local convenience protector; this\n",
+        "                                      is accepted only alongside the recovery kit\n",
+        "  --snapshot-passphrase-stdin         Optional Argon2id protector; read after the\n",
+        "                                      source key, or as line 1 for plaintext capture\n",
+        "  --snapshot-key-stdin       Legacy raw-key format; read line 2 for encrypted\n",
+        "                             captures, or line 1 for plaintext\n",
+        "  -h, --help                 Show this help\n",
+    )
+}
+
+const fn snapshot_verify_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore snapshot verify <snapshot-directory> (--snapshot-recovery-kit <private-file> | --snapshot-local-credential <private-file> | --snapshot-passphrase-stdin | --snapshot-key-stdin)\n\n",
+        "Verifies owner-only permissions, exact inventory, manifest hashes, encrypted\n",
+        "headers, absence of required WAL/SHM/journal files, and SQLite integrity using\n",
+        "only an independent snapshot protector. No WeChat key is accepted. A local\n",
+        "credential is valid only when the manifest still contains portable recovery.\n\n",
+        "Options:\n",
+        "  --snapshot-recovery-kit <file>      Use the portable 24-word recovery kit\n",
+        "  --snapshot-local-credential <file>  Use the owner-only local convenience file\n",
+        "  --snapshot-passphrase-stdin         Read the Argon2id passphrase as one line\n",
+        "  --snapshot-key-stdin Legacy: read the raw recovery key from standard input\n",
+        "  -h, --help            Show this help\n",
+    )
+}
+
+const fn snapshot_rekey_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore snapshot rekey <snapshot-directory> <new-snapshot-directory> --old-snapshot-key-stdin --new-snapshot-key-stdin\n\n",
+        "Verifies an immutable source generation using only its old recovery key, then\n",
+        "logically copies each database directly from old-key SQLCipher into new-key\n",
+        "SQLCipher. No plaintext database is created. A separate generation is verified\n",
+        "with only the new key and atomically published; the source remains untouched.\n\n",
+        "Input ordering:\n",
+        "  line 1  Existing 32-byte snapshot recovery key\n",
+        "  line 2  Distinct new 32-byte snapshot recovery key\n\n",
+        "Options:\n",
+        "  --old-snapshot-key-stdin  Required; confirms line 1 semantics\n",
+        "  --new-snapshot-key-stdin  Required; confirms line 2 semantics\n",
+        "  -h, --help                Show this help\n",
+    )
+}
+
+const fn snapshot_rewrap_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore snapshot rewrap <snapshot-directory> <new-snapshot-directory> (--old-snapshot-recovery-kit <private-file> | --old-snapshot-local-credential <private-file> | --old-snapshot-passphrase-stdin) --new-snapshot-recovery-kit <private-file> [--new-snapshot-local-credential <private-file>] [--new-snapshot-passphrase-stdin]\n\n",
+        "Authenticates and fully verifies an immutable format-2 source generation, then\n",
+        "byte-copies its already encrypted SQLCipher databases into a new generation.\n",
+        "The database key and ciphertext bytes do not change; only the snapshot identity\n",
+        "and authenticated protector envelope change. The source remains untouched.\n\n",
+        "A new portable 24-word recovery kit is mandatory. A new local credential and\n",
+        "Argon2id passphrase are optional and never substitute for portable recovery. If\n",
+        "both passphrase flags are used, stdin line 1 is the old passphrase and line 2 is\n",
+        "the new passphrase. No key, recovery words, or database plaintext enters stdin.\n",
+    )
+}
+
+const fn snapshot_retention_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore snapshot retention quarantine <retiring> <replacement> <quarantine-directory> (--retiring-recovery-kit <private-file> | --retiring-local-credential <private-file> | --retiring-snapshot-passphrase-stdin) --replacement-recovery-kit <private-file>\n",
+        "  greenbubbles-restore snapshot retention restore <quarantined> <restored-directory> (--snapshot-recovery-kit <private-file> | --snapshot-local-credential <private-file> | --snapshot-passphrase-stdin)\n\n",
+        "Retention moves only a whole verified generation and never deletes it. Quarantine\n",
+        "requires a newer linked replacement and proves that replacement through its\n",
+        "portable 24-word recovery path. The move is same-filesystem, atomic, fsynced,\n",
+        "re-verified at the destination, and rolled back automatically on failure.\n",
+    )
+}
+
+const fn snapshot_retention_quarantine_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore snapshot retention quarantine <retiring> <replacement> <quarantine-directory> (--retiring-recovery-kit <private-file> | --retiring-local-credential <private-file> | --retiring-snapshot-passphrase-stdin) --replacement-recovery-kit <private-file>\n\n",
+        "The retiring generation must verify with either of its protectors. The replacement\n",
+        "must be newer, linked by parent identity or stable source identity, and verify\n",
+        "using its portable recovery words. A retiring passphrase is read as stdin line 1.\n",
+        "No age-only or local-only retirement is allowed.\n",
+    )
+}
+
+const fn snapshot_retention_restore_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore snapshot retention restore <quarantined> <restored-directory> (--snapshot-recovery-kit <private-file> | --snapshot-local-credential <private-file> | --snapshot-passphrase-stdin)\n\n",
+        "Authenticates the quarantined generation, atomically moves the whole directory to\n",
+        "a new non-existing path on the same filesystem, fsyncs both parents, and verifies\n",
+        "it again. A passphrase is read as stdin line 1. A failed post-move verification\n",
+        "is rolled back automatically.\n",
+    )
+}
+
+fn snapshot_retention_action_help(action: &str) -> Result<&'static str, String> {
+    match action {
+        "quarantine" => Ok(snapshot_retention_quarantine_help()),
+        "restore" => Ok(snapshot_retention_restore_help()),
+        _ => Err(format!(
+            "unsupported snapshot retention action: {action}; expected 'quarantine' or 'restore'"
+        )),
+    }
+}
+
+fn snapshot_subcommand_help(subcommand: &str) -> Result<&'static str, String> {
+    match subcommand {
+        "recovery-kit" => Ok(snapshot_recovery_kit_help()),
+        "local-credential" => Ok(snapshot_local_credential_help()),
+        "create" => Ok(snapshot_create_help()),
+        "create-capture" => Ok(snapshot_create_capture_help()),
+        "verify" => Ok(snapshot_verify_help()),
+        "rewrap" => Ok(snapshot_rewrap_help()),
+        "retention" => Ok(snapshot_retention_help()),
+        "rekey" => Ok(snapshot_rekey_help()),
+        _ => Err(format!(
+            "unsupported snapshot subcommand: {subcommand}; expected 'recovery-kit', 'local-credential', 'create', 'create-capture', 'verify', 'rewrap', 'retention', or 'rekey'"
+        )),
+    }
+}
+
+const fn connector_policy_direct_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore connector-policy-direct <source-root> <new-policy-file> <conversation-id>... --capabilities list,read,search --fields sender,created-at,type,content (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--max-results <n>] [--max-summary-bytes <n>]\n\n",
+        "Creates an owner-only policy in the direct SQLite identifier namespace. Every\n",
+        "conversation is verified against the selected source before publication. The policy\n",
+        "is bound to that source identity and cannot authorize draft or replica-only operations.\n",
+    )
+}
+
+const fn connector_serve_direct_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore connector-serve-direct <source-root> <policy-file> <audit-log> <socket-path> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n\n",
+        "Serves policy-scoped ordinary reads directly from live or snapshot SQLite. Requests\n",
+        "remain typed, bounded, keyset-paginated, read-only, destination-scoped, and recorded\n",
+        "in the same append-only privacy-safe audit format. Replica-only surfaces fail closed.\n",
+    )
+}
+
+const fn connector_query_direct_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles-restore connector-query-direct <source-root> <policy-file> <audit-log> <private-request-json> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n\n",
+        "Runs one owner-only JSON connector request directly against live or snapshot SQLite\n",
+        "and returns one bounded JSON response. No archive, replica, daemon, or corpus-sized\n",
+        "JSON conversion is required; the normal connector policy and audit boundary remains.\n",
+    )
+}
+
 fn ai_command_help(command: &str) -> Option<&'static str> {
     match command {
+        "source" => Some(source_status_help()),
+        "conversations" => Some(conversations_command_help()),
+        "messages" => Some(messages_command_help()),
+        "message" => Some(message_get_help()),
+        "attachment" => Some(attachment_command_help()),
+        "snapshot" => Some(snapshot_command_help()),
+        "connector-policy-direct" => Some(connector_policy_direct_help()),
+        "connector-query-direct" => Some(connector_query_direct_help()),
+        "connector-serve-direct" => Some(connector_serve_direct_help()),
         "audit-replica" => Some(concat!(
             "Usage:\n",
             "  greenbubbles-restore audit-replica <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n\n",
@@ -1152,6 +2877,180 @@ fn ai_command_help(command: &str) -> Option<&'static str> {
             "  -h, --help              Show this help\n",
         )),
         _ => None,
+    }
+}
+
+enum OwnedLiveQueryAccess {
+    LiveEncrypted(DatabasePassphrase),
+    SnapshotEncrypted(SnapshotKey),
+    Decrypted,
+}
+
+impl OwnedLiveQueryAccess {
+    fn open_source<'a>(
+        &'a self,
+        selected_root: &Path,
+    ) -> Result<LiveQuerySource<'a>, Box<dyn std::error::Error>> {
+        match self {
+            Self::LiveEncrypted(key) => Ok(LiveQuerySource::open(
+                selected_root,
+                QueryDatabaseAccess::LiveEncrypted(key.expose_for_database_operation()),
+            )?),
+            Self::SnapshotEncrypted(key) => {
+                let data_root = recoverable_snapshot_data_root(selected_root)?;
+                Ok(LiveQuerySource::open(
+                    &data_root,
+                    QueryDatabaseAccess::SnapshotEncrypted(key.expose_for_snapshot_operation()),
+                )?)
+            }
+            Self::Decrypted => Ok(LiveQuerySource::open(
+                selected_root,
+                QueryDatabaseAccess::Decrypted,
+            )?),
+        }
+    }
+
+    fn open_attachment_source<'a>(
+        &'a self,
+        selected_root: &Path,
+    ) -> Result<LiveQuerySource<'a>, Box<dyn std::error::Error>> {
+        match self {
+            Self::SnapshotEncrypted(_) => self.open_source(selected_root),
+            Self::LiveEncrypted(_) | Self::Decrypted => {
+                let database_root = if selected_root.join("db_storage").is_dir() {
+                    selected_root.join("db_storage")
+                } else {
+                    selected_root.to_path_buf()
+                };
+                self.open_source(&database_root)
+            }
+        }
+    }
+}
+
+fn attachment_account_root(selected_root: &Path) -> Option<PathBuf> {
+    if selected_root.join("msg").is_dir() && selected_root.join("db_storage").is_dir() {
+        return Some(selected_root.to_path_buf());
+    }
+    selected_root
+        .file_name()
+        .is_some_and(|name| name == "db_storage")
+        .then(|| selected_root.parent())
+        .flatten()
+        .filter(|parent| parent.join("msg").is_dir())
+        .map(Path::to_path_buf)
+}
+
+fn reject_database_access_options(arguments: &[String]) -> Result<(), String> {
+    const ACCESS_OPTIONS: [&str; 6] = [
+        "--passphrase-stdin",
+        "--snapshot-key-stdin",
+        "--snapshot-passphrase-stdin",
+        "--snapshot-recovery-kit",
+        "--snapshot-local-credential",
+        "--decrypted",
+    ];
+    if arguments
+        .iter()
+        .any(|argument| ACCESS_OPTIONS.contains(&argument.as_str()))
+    {
+        return Err(
+            "database access options require --message; legacy image-MD5 lookup reads no database"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn load_live_query_access(
+    selected_root: &Path,
+    arguments: &[String],
+) -> Result<OwnedLiveQueryAccess, Box<dyn std::error::Error>> {
+    let encrypted = arguments.iter().any(|value| value == "--passphrase-stdin");
+    let snapshot_key = arguments
+        .iter()
+        .any(|value| value == "--snapshot-key-stdin");
+    let snapshot_passphrase = arguments
+        .iter()
+        .any(|value| value == "--snapshot-passphrase-stdin");
+    let recovery_kit = option_path(arguments, "--snapshot-recovery-kit")?;
+    let local_credential = option_path(arguments, "--snapshot-local-credential")?;
+    let decrypted = arguments.iter().any(|value| value == "--decrypted");
+    if usize::from(encrypted)
+        + usize::from(snapshot_key)
+        + usize::from(snapshot_passphrase)
+        + usize::from(recovery_kit.is_some())
+        + usize::from(local_credential.is_some())
+        + usize::from(decrypted)
+        != 1
+    {
+        return Err(
+            "choose exactly one database access mode: --passphrase-stdin, --snapshot-key-stdin, --snapshot-passphrase-stdin, --snapshot-recovery-kit, --snapshot-local-credential, or --decrypted".into(),
+        );
+    }
+    if encrypted {
+        Ok(OwnedLiveQueryAccess::LiveEncrypted(
+            DatabasePassphrase::read_stdin()?,
+        ))
+    } else if snapshot_key {
+        Ok(OwnedLiveQueryAccess::SnapshotEncrypted(
+            SnapshotKey::read_stdin()?,
+        ))
+    } else if snapshot_passphrase {
+        let passphrase = SnapshotPassphrase::read_stdin()?;
+        Ok(OwnedLiveQueryAccess::SnapshotEncrypted(
+            unlock_recoverable_snapshot_with_passphrase(selected_root, &passphrase)?,
+        ))
+    } else if let Some(recovery_kit) = recovery_kit {
+        let recovery_words = SnapshotRecoveryWords::read_private_file(&recovery_kit)?;
+        Ok(OwnedLiveQueryAccess::SnapshotEncrypted(
+            unlock_recoverable_snapshot_with_recovery_words(selected_root, &recovery_words)?,
+        ))
+    } else if let Some(local_credential) = local_credential {
+        let local_credential = SnapshotLocalCredential::read_private_file(&local_credential)?;
+        Ok(OwnedLiveQueryAccess::SnapshotEncrypted(
+            unlock_recoverable_snapshot_with_local_credential(selected_root, &local_credential)?,
+        ))
+    } else {
+        Ok(OwnedLiveQueryAccess::Decrypted)
+    }
+}
+
+enum OwnedSnapshotCreateSourceAccess {
+    LiveEncrypted(DatabasePassphrase),
+    Decrypted,
+}
+
+impl OwnedSnapshotCreateSourceAccess {
+    fn material(&self) -> QueryDatabaseAccess<'_> {
+        match self {
+            Self::LiveEncrypted(key) => {
+                QueryDatabaseAccess::LiveEncrypted(key.expose_for_database_operation())
+            }
+            Self::Decrypted => QueryDatabaseAccess::Decrypted,
+        }
+    }
+}
+
+fn load_snapshot_create_source_access(
+    arguments: &[String],
+) -> Result<OwnedSnapshotCreateSourceAccess, Box<dyn std::error::Error>> {
+    let encrypted = arguments
+        .iter()
+        .any(|value| value == "--source-passphrase-stdin");
+    let decrypted = arguments.iter().any(|value| value == "--source-decrypted");
+    if encrypted == decrypted {
+        return Err(
+            "choose exactly one snapshot source mode: --source-passphrase-stdin or --source-decrypted"
+                .into(),
+        );
+    }
+    if encrypted {
+        Ok(OwnedSnapshotCreateSourceAccess::LiveEncrypted(
+            DatabasePassphrase::read_stdin()?,
+        ))
+    } else {
+        Ok(OwnedSnapshotCreateSourceAccess::Decrypted)
     }
 }
 
@@ -1830,6 +3729,41 @@ fn resolved_path_for_comparison(path: &Path) -> io::Result<PathBuf> {
         io::Error::new(io::ErrorKind::InvalidInput, "path has no final component")
     })?;
     Ok(std::fs::canonicalize(parent)?.join(file_name))
+}
+
+fn validate_command_options(
+    arguments: &[String],
+    value_options: &[&str],
+    flags: &[&str],
+) -> Result<(), String> {
+    let value_options = value_options.iter().copied().collect::<BTreeSet<_>>();
+    let flags = flags.iter().copied().collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    let mut index = 0usize;
+    while index < arguments.len() {
+        let option = arguments[index].as_str();
+        if !option.starts_with("--") {
+            return Err(format!("unexpected positional argument: {option}"));
+        }
+        if !seen.insert(option) {
+            return Err(format!("option may be supplied only once: {option}"));
+        }
+        if value_options.contains(option) {
+            let value = arguments
+                .get(index + 1)
+                .filter(|value| !value.starts_with("--"))
+                .ok_or_else(|| format!("missing value for {option}"))?;
+            if value.is_empty() {
+                return Err(format!("empty value for {option}"));
+            }
+            index += 2;
+        } else if flags.contains(option) {
+            index += 1;
+        } else {
+            return Err(format!("unsupported option: {option}"));
+        }
+    }
+    Ok(())
 }
 
 fn option_string(arguments: &[String], option: &str) -> Result<Option<String>, String> {

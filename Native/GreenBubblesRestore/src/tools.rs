@@ -165,6 +165,8 @@ pub struct MinimizedMessage {
     pub source_database_freshness: ToolSourceDatabaseFreshness,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sender_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at_unix: Option<i64>,
     pub conversation_ordinal: u64,
@@ -322,6 +324,34 @@ pub fn create_tool_policy(
         maximum_message_summary_bytes,
         maximum_draft_bytes,
     )
+}
+
+pub fn create_direct_tool_policy(
+    policy_path: &Path,
+    source_identity: &str,
+    conversation_scopes: BTreeMap<String, ConversationToolScope>,
+    maximum_result_count: usize,
+    maximum_message_summary_bytes: usize,
+) -> Result<ToolAuthorizationPolicy, RestoreError> {
+    if source_identity.is_empty() {
+        return Err(RestoreError::Integrity(
+            "direct-query source identity is empty".to_string(),
+        ));
+    }
+    validate_tool_scopes(&conversation_scopes, None)?;
+    let policy = ToolAuthorizationPolicy {
+        format_version: 3,
+        account_id: source_identity.to_string(),
+        created_from_source_fingerprint: source_identity.to_string(),
+        conversation_scopes,
+        cached_moments_scope: None,
+        maximum_result_count: maximum_result_count.clamp(1, MAX_TOOL_RESULTS),
+        maximum_message_summary_bytes: maximum_message_summary_bytes
+            .clamp(1, MAX_MESSAGE_SUMMARY_BYTES),
+        maximum_draft_bytes: 1,
+    };
+    write_owner_only_json(policy_path, &policy)?;
+    Ok(policy)
 }
 
 /// Creates one identical, explicit scope for every conversation in an
@@ -1119,6 +1149,7 @@ pub(crate) fn minimize_message(
             .contains(&ToolMessageField::Sender)
             .then_some(message.sender_id)
             .flatten(),
+        sender_display_name: None,
         created_at_unix: fields
             .contains(&ToolMessageField::CreatedAt)
             .then_some(message.created_at_unix)
@@ -1253,6 +1284,13 @@ fn summarize_payload(
     let TypedPayload::Decoded(value) = payload else {
         return ("unknown".to_string(), None, false);
     };
+    summarize_decoded_payload(value, maximum_bytes)
+}
+
+pub(crate) fn summarize_decoded_payload(
+    value: &serde_json::Value,
+    maximum_bytes: usize,
+) -> (String, Option<String>, bool) {
     let Some((kind, content)) = value.as_object().and_then(|object| object.iter().next()) else {
         return ("decoded".to_string(), None, false);
     };

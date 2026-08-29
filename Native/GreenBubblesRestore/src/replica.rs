@@ -6179,6 +6179,72 @@ fn ensure_partial_database_transition_is_lossless(
     Ok(())
 }
 
+#[derive(Debug)]
+struct ExistingReplicaRecord {
+    record_sha256: String,
+    record_json_matches: bool,
+}
+
+impl ExistingReplicaRecord {
+    fn matches(&self, expected_sha256: &str) -> bool {
+        self.record_sha256 == expected_sha256 && self.record_json_matches
+    }
+}
+
+fn existing_replica_record(
+    transaction: &Transaction<'_>,
+    table: &str,
+    identifier_column: &str,
+    account_id: &str,
+    identifier: &str,
+    expected_json: &[u8],
+) -> Result<Option<ExistingReplicaRecord>, RestoreError> {
+    let query = match (table, identifier_column) {
+        ("conversation", "conversation_id") => {
+            "SELECT record_sha256, record_json = ?3 FROM conversation
+             WHERE account_id = ?1 AND conversation_id = ?2"
+        }
+        ("participant", "participant_id") => {
+            "SELECT record_sha256, record_json = ?3 FROM participant
+             WHERE account_id = ?1 AND participant_id = ?2"
+        }
+        ("artifact", "artifact_id") => {
+            "SELECT record_sha256, record_json = ?3 FROM artifact
+             WHERE account_id = ?1 AND artifact_id = ?2"
+        }
+        ("message", "canonical_id") => {
+            "SELECT record_sha256, record_json = ?3 FROM message
+             WHERE account_id = ?1 AND canonical_id = ?2"
+        }
+        ("cached_moment", "canonical_id") => {
+            "SELECT record_sha256, record_json = ?3 FROM cached_moment
+             WHERE account_id = ?1 AND canonical_id = ?2"
+        }
+        ("cached_moment_interaction", "canonical_id") => {
+            "SELECT record_sha256, record_json = ?3 FROM cached_moment_interaction
+             WHERE account_id = ?1 AND canonical_id = ?2"
+        }
+        _ => {
+            return Err(RestoreError::Integrity(
+                "unsupported replica reconciliation record lookup".to_string(),
+            ));
+        }
+    };
+    transaction
+        .query_row(
+            query,
+            params![account_id, identifier, expected_json],
+            |row| {
+                Ok(ExistingReplicaRecord {
+                    record_sha256: row.get(0)?,
+                    record_json_matches: row.get::<_, i64>(1)? != 0,
+                })
+            },
+        )
+        .optional()
+        .map_err(RestoreError::from)
+}
+
 fn reconcile_archive_transactionally(
     connection: &mut Connection,
     archive_directory: &Path,
@@ -6228,15 +6294,15 @@ fn reconcile_archive_transactionally(
             require_account(&conversation.account_id, &report.account_id)?;
             mark_seen(&transaction, "conversation", &conversation.conversation_id)?;
             let digest = sha256(&bytes);
-            let existing: Option<String> = transaction
-                .query_row(
-                    "SELECT record_sha256 FROM conversation
-                 WHERE account_id = ?1 AND conversation_id = ?2",
-                    params![report.account_id, conversation.conversation_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let change_kind = match existing.as_deref() {
+            let existing = existing_replica_record(
+                &transaction,
+                "conversation",
+                "conversation_id",
+                &report.account_id,
+                &conversation.conversation_id,
+                &bytes,
+            )?;
+            let change_kind = match existing.as_ref() {
                 None => {
                     transaction.execute(
                         "INSERT INTO conversation VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -6252,7 +6318,7 @@ fn reconcile_archive_transactionally(
                     )?;
                     Some("added")
                 }
-                Some(value) if value != digest => {
+                Some(value) if !value.matches(&digest) => {
                     transaction.execute(
                         "UPDATE conversation SET
                        kind = ?3, entity_decode_state = ?4, participant_count = ?5,
@@ -6309,15 +6375,15 @@ fn reconcile_archive_transactionally(
             require_account(&participant.account_id, &report.account_id)?;
             mark_seen(&transaction, "participant", &participant.participant_id)?;
             let digest = sha256(&bytes);
-            let existing: Option<String> = transaction
-                .query_row(
-                    "SELECT record_sha256 FROM participant
-                 WHERE account_id = ?1 AND participant_id = ?2",
-                    params![report.account_id, participant.participant_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let change_kind = match existing.as_deref() {
+            let existing = existing_replica_record(
+                &transaction,
+                "participant",
+                "participant_id",
+                &report.account_id,
+                &participant.participant_id,
+                &bytes,
+            )?;
+            let change_kind = match existing.as_ref() {
                 None => {
                     transaction.execute(
                         "INSERT INTO participant VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -6331,7 +6397,7 @@ fn reconcile_archive_transactionally(
                     )?;
                     Some("added")
                 }
-                Some(value) if value != digest => {
+                Some(value) if !value.matches(&digest) => {
                     transaction.execute(
                         "UPDATE participant SET local_profile_state = ?3,
                        record_sha256 = ?4, record_json = ?5
@@ -6421,21 +6487,24 @@ fn reconcile_archive_transactionally(
         |artifact, bytes| {
             mark_seen(&transaction, "artifact", &artifact.artifact_id)?;
             let digest = sha256(&bytes);
-            let existing: Option<String> = transaction
-                .query_row(
-                    "SELECT record_sha256 FROM artifact
-                 WHERE account_id = ?1 AND artifact_id = ?2",
-                    params![report.account_id, artifact.artifact_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if existing.as_deref() != Some(digest.as_str()) {
+            let existing = existing_replica_record(
+                &transaction,
+                "artifact",
+                "artifact_id",
+                &report.account_id,
+                &artifact.artifact_id,
+                &bytes,
+            )?;
+            if !existing
+                .as_ref()
+                .is_some_and(|value| value.matches(&digest))
+            {
                 validate_canonical_artifact(&artifact, &coverage)?;
                 if report.format_version >= 3 {
                     verify_recorded_artifact_files(archive_directory, &artifact)?;
                 }
             }
-            let change_kind = match existing.as_deref() {
+            let change_kind = match existing.as_ref() {
                 None => {
                     transaction.execute(
                         "INSERT INTO artifact VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
@@ -6453,7 +6522,7 @@ fn reconcile_archive_transactionally(
                     )?;
                     Some("added")
                 }
-                Some(value) if value != digest => {
+                Some(value) if !value.matches(&digest) => {
                     transaction.execute(
                         "UPDATE artifact SET kind = ?3, role = ?4, availability = ?5,
                        source_sha256 = ?6, decoded_sha256 = ?7,
@@ -6511,20 +6580,20 @@ fn reconcile_archive_transactionally(
             require_account(&message.account_id, &report.account_id)?;
             mark_seen(&transaction, "message", &message.canonical_id)?;
             let digest = sha256(&bytes);
-            let existing: Option<String> = transaction
-                .query_row(
-                    "SELECT record_sha256 FROM message
-                 WHERE account_id = ?1 AND canonical_id = ?2",
-                    params![report.account_id, message.canonical_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let change_kind = match existing.as_deref() {
+            let existing = existing_replica_record(
+                &transaction,
+                "message",
+                "canonical_id",
+                &report.account_id,
+                &message.canonical_id,
+                &bytes,
+            )?;
+            let change_kind = match existing.as_ref() {
                 None => {
                     insert_message(&transaction, report, &message, &bytes, &digest)?;
                     Some("added")
                 }
-                Some(value) if value != digest => {
+                Some(value) if !value.matches(&digest) => {
                     update_message(&transaction, report, &message, &bytes, &digest)?;
                     Some("changed")
                 }
@@ -6961,15 +7030,15 @@ fn reconcile_cached_surfaces(
             require_account(&moment.account_id, &report.account_id)?;
             mark_seen(transaction, "cachedMoment", &moment.canonical_id)?;
             let digest = sha256(&bytes);
-            let existing: Option<String> = transaction
-                .query_row(
-                    "SELECT record_sha256 FROM cached_moment
-                     WHERE account_id = ?1 AND canonical_id = ?2",
-                    params![report.account_id, moment.canonical_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let kind = match existing.as_deref() {
+            let existing = existing_replica_record(
+                transaction,
+                "cached_moment",
+                "canonical_id",
+                &report.account_id,
+                &moment.canonical_id,
+                &bytes,
+            )?;
+            let kind = match existing.as_ref() {
                 None => {
                     transaction.execute(
                         "INSERT INTO cached_moment VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -6985,7 +7054,7 @@ fn reconcile_cached_surfaces(
                     )?;
                     Some("added")
                 }
-                Some(value) if value != digest => {
+                Some(value) if !value.matches(&digest) => {
                     transaction.execute(
                         "UPDATE cached_moment SET author_id = ?3, created_at_unix = ?4,
                            content_type = ?5, record_sha256 = ?6, record_json = ?7
@@ -7044,15 +7113,15 @@ fn reconcile_cached_surfaces(
                 &interaction.canonical_id,
             )?;
             let digest = sha256(&bytes);
-            let existing: Option<String> = transaction
-                .query_row(
-                    "SELECT record_sha256 FROM cached_moment_interaction
-                     WHERE account_id = ?1 AND canonical_id = ?2",
-                    params![report.account_id, interaction.canonical_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let kind = match existing.as_deref() {
+            let existing = existing_replica_record(
+                transaction,
+                "cached_moment_interaction",
+                "canonical_id",
+                &report.account_id,
+                &interaction.canonical_id,
+                &bytes,
+            )?;
+            let kind = match existing.as_ref() {
                 None => {
                     transaction.execute(
                         "INSERT INTO cached_moment_interaction VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -7069,7 +7138,7 @@ fn reconcile_cached_surfaces(
                     )?;
                     Some("added")
                 }
-                Some(value) if value != digest => {
+                Some(value) if !value.matches(&digest) => {
                     transaction.execute(
                         "UPDATE cached_moment_interaction SET
                            created_at_unix = ?3, interaction_kind = ?4,

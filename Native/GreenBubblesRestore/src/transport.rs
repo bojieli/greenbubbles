@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::archive::ensure_private_directory;
 use crate::connector::{
-    ConnectorRequest, ConnectorResponse, ConnectorService, CONNECTOR_API_VERSION,
+    ConnectorRequest, ConnectorRequestHandler, ConnectorResponse, CONNECTOR_API_VERSION,
 };
 use crate::RestoreError;
 
@@ -18,7 +18,10 @@ const CONNECTOR_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const CONNECTOR_CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECTOR_CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(300);
 
-pub fn serve_unix(service: &ConnectorService<'_>, socket_path: &Path) -> Result<(), RestoreError> {
+pub fn serve_unix(
+    service: &impl ConnectorRequestHandler,
+    socket_path: &Path,
+) -> Result<(), RestoreError> {
     let (listener, _lease) = bind_private_socket(socket_path)?;
     for connection in listener.incoming() {
         match connection {
@@ -36,7 +39,7 @@ pub fn serve_unix(service: &ConnectorService<'_>, socket_path: &Path) -> Result<
 }
 
 pub fn serve_unix_once(
-    service: &ConnectorService<'_>,
+    service: &impl ConnectorRequestHandler,
     socket_path: &Path,
 ) -> Result<(), RestoreError> {
     let (listener, _lease) = bind_private_socket(socket_path)?;
@@ -185,7 +188,7 @@ fn validate_socket(path: &Path) -> Result<(), RestoreError> {
 }
 
 fn handle_connection(
-    service: &ConnectorService<'_>,
+    service: &impl ConnectorRequestHandler,
     connection: &mut UnixStream,
 ) -> Result<(), RestoreError> {
     connection.set_read_timeout(Some(CONNECTOR_REQUEST_READ_TIMEOUT))?;
@@ -198,7 +201,7 @@ fn handle_connection(
         invalid_transport_response("transport", "connector request exceeds its byte limit")
     } else {
         match serde_json::from_slice::<ConnectorRequest>(&bytes) {
-            Ok(request) => service.handle(request),
+            Ok(request) => service.handle_connector_request(request),
             Err(error) => invalid_transport_response("transport", &error.to_string()),
         }
     };

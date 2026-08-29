@@ -29,6 +29,8 @@ pub enum RestoreError {
     },
     #[error("replica key must be exactly 32 bytes or 64 hexadecimal characters")]
     InvalidReplicaKey,
+    #[error("snapshot recovery key must be exactly 32 bytes or 64 hexadecimal characters")]
+    InvalidSnapshotKey,
     #[error("database decryption failed for set {set_id}: {reason}")]
     Decryption { set_id: String, reason: String },
     #[error("snapshot entry is missing: {0}")]

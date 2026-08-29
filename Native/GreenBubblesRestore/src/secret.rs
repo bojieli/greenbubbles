@@ -10,6 +10,9 @@ pub struct DatabasePassphrase([u8; 32]);
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct ReplicaKey([u8; 32]);
 
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct SnapshotKey([u8; 32]);
+
 // A hexadecimal secret followed by CRLF is the largest accepted input line.
 const MAXIMUM_SECRET_LINE_BYTES: usize = 66;
 
@@ -37,6 +40,20 @@ impl ReplicaKey {
     }
 
     pub(crate) fn expose_for_replica_operation(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl SnapshotKey {
+    pub fn from_bytes(value: [u8; 32]) -> Self {
+        Self(value)
+    }
+
+    pub fn read_stdin() -> Result<Self, RestoreError> {
+        read_32_byte_secret(invalid_snapshot_key).map(Self)
+    }
+
+    pub fn expose_for_snapshot_operation(&self) -> &[u8; 32] {
         &self.0
     }
 }
@@ -80,6 +97,10 @@ fn invalid_database_passphrase() -> RestoreError {
 
 fn invalid_replica_key() -> RestoreError {
     RestoreError::InvalidReplicaKey
+}
+
+fn invalid_snapshot_key() -> RestoreError {
+    RestoreError::InvalidSnapshotKey
 }
 
 #[cfg(test)]
