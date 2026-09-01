@@ -1,0 +1,22 @@
+{
+  "schema": "greenbubbles.personal-memory-selection-policy.v1",
+  "formatVersion": 1,
+  "timezone": "Asia/Singapore",
+  "minimumSelfMessagesPerActiveMonth": 1,
+  "recentLookbackMonths": 12,
+  "minimumSelfActiveMonthsInLookback": 0,
+  "directSessionGapMinutes": 720,
+  "groupSessionGapMinutes": 60,
+  "directContextBefore": 24,
+  "directContextAfter": 24,
+  "groupContextBefore": 12,
+  "groupContextAfter": 16,
+  "maximumMessageTextBytes": 4096,
+  "maximumUnitMessages": 160,
+  "maximumUnitTextBytes": 49152,
+  "deliveryOrder": "accountHolderRelevance",
+  "includeDirectConversations": true,
+  "includeGroupConversations": true,
+  "includeOfficialAccounts": false,
+  "includeServiceAccounts": false
+}

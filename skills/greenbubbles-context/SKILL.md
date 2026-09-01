@@ -43,7 +43,9 @@ live/snapshot adapter without an archive, replica, or daemon. Use the existing
 coverage, cached Moments, change feeds, verified artifact paths, or another
 replica-only result is actually required. Use `ai-export` only for an explicitly
 requested static interchange/audit bundle, and `ai-memory-export` only for
-deliberate memory ingestion. Do not broaden a policy or change `local` to
+deliberate memory ingestion. Use `ai-summarize-direct` only when the owner asks
+for an actual model-generated memory/wiki from live policy-authorized data;
+review its coverage and citations before treating it as memory. Do not broaden a policy or change `local` to
 `remoteModel` to bypass a denial.
 
 Do not feed a large `messages.jsonl` ledger directly to a memory framework.
@@ -51,6 +53,13 @@ Use `ai-memory-export`, keep its projection/checkpoint IDs and
 `greenbubbles:message:<id>` citations, and surface omission or truncation codes
 with derived memories. Framework-produced facts and summaries are inferences,
 not canonical GreenBubbles records.
+
+For direct messages, prefer the explicit optional `isAccountHolder` field:
+`true` is the authenticated account holder, `false` is another known sender,
+and absence means unknown or policy-withheld. Never infer self from a display
+name or conversation peer. In model-generated memory, resolve `M###` aliases
+through the private `evidence.jsonl`; canonical IDs are deliberately excluded
+from `model-input.json`.
 
 Read [references/cli.md](references/cli.md) for command syntax, input ordering,
 response semantics, policy-scoped replica requests, or export interpretation.
