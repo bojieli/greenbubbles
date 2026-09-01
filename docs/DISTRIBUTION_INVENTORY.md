@@ -61,13 +61,14 @@ it as MIT-licensed derived material.
 
 ## Rust dependency boundary
 
-The restoration engine has 18 normal direct dependencies and one development
+The restoration engine has 28 normal direct dependencies and one development
 dependency. `Cargo.lock` is committed. At this audit the important direct
 families are:
 
 | Direct dependency | Resolved version | Cargo license metadata | Distribution-relevant role |
 | --- | --- | --- | --- |
 | `base64` | 0.22.1 | MIT OR Apache-2.0 | payload encoding |
+| `chrono`, `chrono-tz` | 0.4.45, 0.10.4 | MIT OR Apache-2.0 | explicit IANA-timezone calendar-month bucketing for personal-memory selection |
 | `hex` | 0.4.3 | MIT OR Apache-2.0 | identifiers and digests |
 | `libc` | 0.2.189 | MIT OR Apache-2.0 | descriptor and permission primitives |
 | `md5` | 0.7.0 | Apache-2.0/MIT | source-compatible media identifiers |
@@ -78,14 +79,15 @@ families are:
 | `sha2` | 0.10.9 | MIT OR Apache-2.0 | integrity digests |
 | `tempfile` | 3.27.0 | MIT OR Apache-2.0 | private temporary workspaces |
 | `thiserror` | 2.0.20 | MIT OR Apache-2.0 | errors |
+| `ureq` | 2.12.1 | MIT OR Apache-2.0 | in-process TLS/HTTP transport for the explicit Gemini summary command; API keys never enter subprocess arguments |
 | `walkdir` | 2.5.0 | Unlicense/MIT | bounded media traversal |
 | `zeroize` | 1.9.0 | Apache-2.0 OR MIT | secret cleanup |
 | `zstd` | 0.13.3 | MIT | compressed private restoration-ordering spool |
-| `wx-db`, `wx-decrypt`, `wx-media` | 0.7.4 at the revision below | absent on package records | pinned decoder primitives |
+| `wx-context`, `wx-db`, `wx-decrypt`, `wx-media` | 0.7.4 at the revision below | absent on package records | pinned decoder primitives |
 | `filetime` (development only) | 0.2.29 | MIT/Apache-2.0 | timestamp tests |
 
-The locked graph contains 185 non-local package records across target and build
-configurations. Cargo metadata reports permissive expressions for 179 and no
+The locked graph contains 279 non-local package records across target and build
+configurations. Cargo metadata reports permissive expressions for 273 and no
 license value for the six pinned `wx-*` package records. License metadata is a
 useful index, not proof that every bundled source file is covered by that one
 expression; the native-source review below demonstrates why source inspection
@@ -93,7 +95,7 @@ is also necessary.
 
 ## Pinned `wx-cli` source
 
-The three direct git dependencies and their two selected transitives resolve
+The four direct git dependencies and their two selected transitives resolve
 from:
 
 ```text

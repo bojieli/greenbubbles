@@ -53,6 +53,16 @@ policy on top of the global response caps.
 This view is not a replacement for the lossless archive, and is not meant to
 be. It is what a model gets.
 
+The corpus-scale personal-memory surface adds a second deterministic boundary.
+`memory prepare` does the million-row traversal locally, using metadata first
+and hydrating only account-holder-active episode windows. `memory next` returns
+only a delivery envelope; `memory page` returns at most 49,152 bytes of compact
+actor/time/type/text fields with short evidence aliases. Canonical message and
+sender IDs remain in private sidecars. `memory commit` has no semantic merger
+or model call. It checks immutable unit/page hashes, complete sequential review,
+the prior wiki snapshot, changed-page scope, and retained/cited evidence before
+atomically advancing a crash-safe cursor.
+
 ## Prompt injection
 
 Message text is never parsed as a tool request or as policy. The caller selects
@@ -65,7 +75,15 @@ This holds structurally rather than by convention, and the structure is worth
 spelling out:
 
 - There is **no send capability, no approval operation, no private-client call
-  and no network client** in this module or in the connector.
+  and no network client** in the connector. The separate
+  `ai-summarize-direct` orchestrator can make one explicit Gemini HTTPS request
+  only after the connector has enforced remote-model policy; chat text cannot
+  select the endpoint, model, scope, or credentials.
+- The Pi personal-memory skill uses Pi's existing shell and file tools. It adds
+  no GreenBubbles network client or agent runtime. Chat text cannot select a
+  shell command: it is explicitly marked untrusted evidence and only the skill
+  workflow chooses fixed `memory next`, `page`, `acknowledge`, and `commit`
+  operations.
 - Draft creation writes a new mode-`0600` record into an owner-only directory
   and cannot mutate WeChat state.
 - Sending lives in a separate command (`greenbubbles send`) reachable only from

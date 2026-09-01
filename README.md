@@ -143,8 +143,8 @@ greenbubbles attachment materialize <account-root> \
   --attachment <id> --output ~/photo.jpg
 ```
 
-Every command prints JSON and exits. No daemon, no index to build, nothing
-uploaded. Results are paged, so a query returns one screenful rather than your
+These local query commands print JSON and exit. They need no daemon or index and
+upload nothing. Results are paged, so a query returns one screenful rather than your
 whole history, and each result carries an id you can look up again.
 
 Prefer a window? Open the app and choose **Browse Live or Snapshot…**, then
@@ -162,16 +162,40 @@ then let it query through that:
 ```console
 greenbubbles connector-policy-direct <db_storage> policy.json <chat-id>... \
   --capabilities list,read,search --fields sender,created-at,content \
-  --passphrase-stdin
+  --allow-remote-model --passphrase-stdin
 
 greenbubbles connector-query-direct <db_storage> policy.json audit.ndjson \
   request.json --passphrase-stdin
+
+GEMINI_API_KEY=... greenbubbles ai-summarize-direct \
+  <db_storage> policy.json audit.ndjson new-memory-generation \
+  --requester my-memory-agent --passphrase-stdin
 ```
 
 Anything outside that policy is refused, every request is logged, and text
-inside a message can never widen what the assistant is allowed to read. There
-is an agent skill in [`skills/`](skills/greenbubbles-context/SKILL.md) that
+inside a message can never widen what the assistant is allowed to read.
+The summary command invokes Gemini 3.7 Flash and publishes actual structured
+and readable memory, not merely a transcript export. Its model input uses
+compact `M###` evidence aliases; exact canonical message IDs remain in a
+private sidecar for citation verification.
+
+There is an agent skill in [`skills/`](skills/greenbubbles-context/SKILL.md) that
 teaches a compatible assistant to use this properly.
+
+For a whole-history personal wiki, use the dedicated Pi skill instead of
+enumerating message pages. One local process selects account-holder-active
+monthly episodes, then Pi iteratively refines cited Markdown from crash-safe,
+byte-bounded batches:
+
+```console
+greenbubbles memory prepare new-corpus \
+  --selection-policy selection-policy.json --profile live-account
+greenbubbles memory next new-corpus --state run-state.json \
+  --wiki private-wiki --max-text-bytes 524288
+```
+
+See the [personal-memory workflow](docs/PERSONAL_MEMORY.md) and
+[`greenbubbles-personal-memory`](skills/greenbubbles-personal-memory/SKILL.md).
 
 See the [AI context guide](docs/AI_CONTEXT_CLI.md) for the full surface.
 
@@ -183,6 +207,7 @@ See the [AI context guide](docs/AI_CONTEXT_CLI.md) for the full surface.
 | [FAQ](docs/FAQ.md) | What goes wrong, and why |
 | [CLI reference](docs/CLI_REFERENCE.md) | Every command |
 | [Giving an AI access](docs/AI_CONTEXT_CLI.md) | Policies, exports, memory tools |
+| [Building a personal wiki](docs/PERSONAL_MEMORY.md) | Corpus selection, Pi batches, citations |
 | [Backups](docs/RECOVERABLE_SNAPSHOTS.md) | The 24 words, rotation, recovery drills |
 | [Architecture](docs/ARCHITECTURE.md) | How it works inside, and why |
 | [Known limitations](docs/KNOWN_LIMITATIONS.md) | What is unproven or broken |

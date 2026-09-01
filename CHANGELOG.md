@@ -6,6 +6,36 @@ Notable changes to GreenBubbles are documented here. The project follows
 
 ## Unreleased
 
+### Added
+
+- Added authenticated live `isAccountHolder` message attribution with `You`
+  display normalization and policy-preserving omission for unknown/withheld
+  senders.
+- Added `ai-summarize-direct`, an explicit Gemini 3.7 Flash memory compiler
+  with compact citation aliases, validated structured and Markdown output,
+  private provenance sidecars, atomic publication, and coverage/token evidence.
+- Added source-bound `contacts list` pagination with conservative contact kinds,
+  exact account-holder marking, and optional remark/nickname/alias details.
+- Added the production corpus-scale `memory prepare/next/page/acknowledge/commit/status`
+  workflow: owner-active monthly/session selection, selected-row hydration,
+  immutable private evidence, deterministic `page`/`acknowledge` delivery below
+  Pi's tool-output ceiling, citation/wiki validation including retained-to-cited
+  completeness, weighted account-holder/active-month relevance ordering that
+  still schedules every unit, an eight-citation representative-evidence ceiling
+  on factual prose, self-authored support enforcement for every account-holder
+  fact, explicit unchanged-wiki disposition for reviewed low-value
+  batches, state-resolved `current` batch/page selectors that avoid copying
+  opaque identifiers, idempotent commits, unambiguous last-committed status,
+  cumulative committed/selected message and coverage status, and content-free
+  preparation progress.
+- Added a Pi-discoverable `greenbubbles-personal-memory` Agent Skill and
+  project `.pi/settings.json` integration; Pi remains the only ReAct runtime.
+
+### Fixed
+
+- Removed production-length canonical message IDs and verbose connector
+  metadata from model prompts while preserving exact local citation evidence.
+
 ## 0.1.1 - 2026-08-29
 
 First public source-and-binary research release.

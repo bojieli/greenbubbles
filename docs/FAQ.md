@@ -132,6 +132,23 @@ Without a policy, the CLI runs with your own filesystem authority — which is
 appropriate for you at a terminal, and is exactly why the AI surface uses a
 policy instead.
 
+The corpus-scale Pi workflow is an explicit owner-run exception to per-chat
+policy enumeration: one local `memory prepare` process may scan the live
+account, but `memory next` returns only a delivery envelope and deterministic
+`memory page` calls release only owner-active episode windows. Pi never receives
+the full transcript or database key. Use a separate private corpus/wiki
+directory and review `coverage.json`; silence and selection are not evidence
+that omitted messages said nothing important.
+
+### Can I list my WeChat contacts from the CLI?
+
+Yes. `greenbubbles contacts list` is source-bound and paginated at 1..500 rows.
+Use `--kind person|group|official|service|account-holder|unknown` and
+`--details` only when remark/nickname/alias fields are needed. `person` means
+an ordinary address-book row, not proof that the relationship is current or
+reciprocal. The account holder is marked only by authenticated account-ID
+comparison and displayed as `You`.
+
 ### What if a message in my history tells the AI to do something?
 
 Nothing happens. A caller selects a typed operation, and that operation is
@@ -142,12 +159,15 @@ would refuse a recipient you never approved.
 
 ### Does anything get uploaded?
 
-No. There is no network client in the read path, no background service, no
-telemetry, and no cloud component. The important caveat is what happens *after*
-GreenBubbles hands over a page: if your model, embedder, vector store, log
-collector or crash reporter is remote, that page is now remote too.
-GreenBubbles controls its own boundary and marks a remote destination
-explicitly; approving it is your call.
+Ordinary reads, exports and projections upload nothing: they have no network
+client, background service, telemetry or cloud component. The explicit
+`ai-summarize-direct` command is different. When—and only when—the selected
+policy scopes set `allowRemoteModel`, it uploads the compact authorized message
+projection to Gemini 3.7 Flash and records the remote reads in the connector
+audit. It does not send canonical message IDs, sender IDs, policy/audit data or
+database metadata. Any other remote model, embedder, vector store, log collector
+or crash reporter remains outside GreenBubbles' control; approving it is your
+call.
 
 ### Can WeChat tell I am doing this?
 

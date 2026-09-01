@@ -141,6 +141,16 @@ message's sender as a group label. A resolved name sets `entityDecodeState` to
 `directContactDisplayNameUnavailable` is reported. Contact failures are
 non-fatal and surface as `directQuery.*` limitation codes.
 
+For a live source whose selected directory is the account's real
+`db_storage`, direct message projection binds the account holder from that
+validated account directory. When the policy releases `sender`, a known sender
+also carries `isAccountHolder: true|false`; a self-authored message is labelled
+`You`. The field is omitted—not set to `false`—when the sender is absent or
+withheld. If `direction` is authorized, the same comparison produces outgoing
+or incoming. Contact names, chat peers, message frequency, group ownership and
+message text are never identity evidence. A source without an authenticated
+account-directory binding leaves the derived fields absent.
+
 ### Cursors
 
 Replica message cursors bind the query, account, random replica generation,

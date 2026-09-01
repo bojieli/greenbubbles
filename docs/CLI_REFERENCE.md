@@ -10,8 +10,8 @@ greenbubbles help ai-query
 greenbubbles send --help
 ```
 
-Help topics exist for `profile`, `source`, `conversations`, `messages`,
-`message`, `attachment`, `snapshot`, `send`, the three `connector-*-direct`
+Help topics exist for `profile`, `source`, `conversations`, `contacts`,
+`messages`, `message`, `memory`, `attachment`, `snapshot`, `send`, the three `connector-*-direct`
 commands, `audit-replica`, `audit-replica-backup`, `ai-query`, `ai-export`,
 `ai-memory-export`, `audit-ai-context` and `audit-ai-memory`. An unrecognized
 topic falls back to the full usage listing rather than erroring.
@@ -38,7 +38,7 @@ GB_CLI="Native/GreenBubbles/target/release/greenbubbles"
 | Family | Commands | Use |
 | --- | --- | --- |
 | Query profiles | `profile path/template/list/show/validate/set-default` | Store private source and credential references for repeated queries |
-| Direct resources | `source status`, `conversations list`, `messages list/search`, `message get` | Read one bounded live or snapshot page without creating a restoration |
+| Direct resources | `source status`, `conversations list`, `contacts list`, `messages list/search`, `message get` | Read one bounded live or snapshot page without creating a restoration |
 | Exact attachments | `attachment inspect/materialize` | Inspect one message; copy one selected artefact to a new private path |
 | Recoverable snapshots | `snapshot recovery-kit/local-credential/create/create-capture/verify/rewrap/rekey/retention` | Create, reopen, rotate, verify and retain independently encrypted snapshots |
 | Offline restoration | `preflight`, `probe`, `restore`, `restore-publish` | Validate and restore an owner-authorized immutable capture |
@@ -48,7 +48,8 @@ GB_CLI="Native/GreenBubbles/target/release/greenbubbles"
 | Replica reads | `replica-conversations/search/message/coverage/changes/cached-moments` | Query replica-only enrichment and change surfaces |
 | Direct AI connector | `connector-policy-direct`, `connector-query-direct`, `connector-serve-direct` | Apply source-bound policy and audit directly to live or snapshot queries |
 | Replica AI connector | `tool-policy/list/recent/search/draft`, `connector-serve/call` | Serve policy-scoped replica reads and non-executing drafts |
-| AI interchange | `ai-query`, `ai-export`, `audit-ai-context`, `ai-memory-export`, `audit-ai-memory` | Create and verify minimized, citation-preserving AI context |
+| AI interchange | `ai-query`, `ai-export`, `audit-ai-context`, `ai-memory-export`, `audit-ai-memory`, `ai-summarize-direct` | Create, verify, and model-summarize minimized, citation-preserving AI context |
+| Personal memory | `memory prepare/next/page/acknowledge/commit/status` | Select a large live corpus locally and feed deterministic, crash-safe evidence pages to an agent |
 | Operational evidence | `synthetic-benchmark`, `compose-latency-evidence`, `summarize-latency-evidence`, `audit-connector-log/state` | Generate or verify aggregate release and service evidence |
 | Sending | `send …` | Inspect the separate experimental adapter; public builds stay closed |
 
@@ -80,6 +81,7 @@ use.
 ## Bounds and how to read a response
 
 - Conversation and message lists default to 100 items, hard maximum 500.
+- Contact pages use the same 1..500 bound and source/filter-bound cursors.
 - Search has a hard maximum of 200 results. Fallback source scanning examines a
   bounded window and may need a continuation followed through *empty* result
   pages — an empty page is not the end of the search.
@@ -104,6 +106,28 @@ Most restoration, audit, snapshot and export commands accept
 paths — but an operational report can still reveal private aggregate facts, so
 treat one as private until you have read it.
 
+`memory prepare` emits content-free phase, conversation, row and selection
+counts on standard error. `memory next` selects a 16 KiB..2 MiB, at-most-5,000
+message batch but returns only its small delivery envelope. New corpora can use
+the deterministic `accountHolderRelevance` order to cover self-active
+relationships and months early; it still schedules every selected unit.
+`memory page`
+deterministically fragments that immutable batch into at-most-49,152-byte JSON
+responses, and `memory acknowledge` advances one delivered page at a time. An
+agent may omit opaque batch/page selectors: these commands resolve only the
+uniquely current persisted batch and delivered page. Explicit `--batch` and
+`--page-token` bindings remain available for operator audit and replay. An
+ordinary `memory commit` needs cited factual prose, rejects both unretained
+citations, retained-but-uncited evidence, and more than eight representative
+citations on one changed factual line. Changed `me.md` prose additionally
+requires at least one self-authored citation per factual line. It advances only after every page was
+delivered and acknowledged. After full review of a low-value batch,
+`--reviewed-no-durable-memory` instead requires the wiki to be byte-for-byte
+unchanged. `memory status` reports cumulative committed/selected message counts
+and source/content limitation aggregates so an agent never needs to read corpus
+sidecars. See
+[PERSONAL_MEMORY.md](PERSONAL_MEMORY.md).
+
 ## Where to go next
 
 | Task | Document |
@@ -114,5 +138,6 @@ treat one as private until you have read it.
 | The serving replica | [Replica specification](REPLICA_SPEC.md) · [operations](REPLICA_OPERATIONS.md) |
 | The local request contract | [Connector API](CONNECTOR_API.md) |
 | Giving an AI access | [AI context CLI](AI_CONTEXT_CLI.md) |
+| Building a whole-history personal wiki | [Personal memory](PERSONAL_MEMORY.md) |
 | Verifying any of the above | [Auditing](AUDITING.md) |
 | The closed send path | [Send adapter](SEND_ADAPTER.md) |

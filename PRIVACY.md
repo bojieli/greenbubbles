@@ -1,8 +1,11 @@
 # Privacy
 
 GreenBubbles collects nothing. There is no telemetry, no analytics, no crash
-reporting, no update check, no license check, and no network client anywhere in
-the read path. Nothing about your use of it reaches the author or anyone else.
+reporting, no update check, and no license check. Ordinary live/snapshot reads,
+replica queries, exports and memory projections have no network client. The
+explicit `ai-summarize-direct` command is the one exception: after policy and
+destination checks, it sends only its compact authorized model input to the
+Gemini API. Nothing about your use reaches the project author.
 
 That is the easy half. The rest of this page is the part that actually matters:
 what stays on your machine, what can leave it, and who decides.
@@ -19,11 +22,19 @@ what stays on your machine, what can leave it, and who decides.
 | Query profiles | `~/.greenbubbles/` | paths, not secrets — still revealing |
 | Audit journals | wherever you configured them | operations and counts, no bodies |
 | Progress and evidence reports | wherever you wrote them | aggregates, sometimes schema paths |
+| Generated-memory generations | wherever you wrote them | compact source text, model output, and private citation mapping |
+| Personal-memory corpus indexes | wherever you wrote them | selected chat text plus complete private citation/contact provenance |
+| Personal-memory wiki and run state | wherever you wrote them | inferred facts, relationships, citations and processing progress |
 
 GreenBubbles reads WeChat's files read-only and never writes to them. Every
 private file it creates is mode `0600` in a mode-`0700` directory, and it
 refuses to operate on files that are group- or world-accessible, symlinked, or
 owned by another account.
+
+One deliberate exception is a completed personal-memory corpus generation:
+its files are finalized read-only (`0400`) and its directories traversal-only
+(`0500`) so an agent cannot accidentally rewrite its evidence while updating
+the separate wiki. The wiki and run state remain owner-only and writable.
 
 ## What can leave, and how
 
@@ -36,9 +47,19 @@ export and choose its destination.**
   release for that specific conversation. `destination: remote` is a property
   of the request envelope, never something a model can infer or assert for
   itself.
+- **`ai-summarize-direct`** performs that remote release itself, only for
+  conversation scopes marked `allowRemoteModel`. It sends short aliases and
+  compact actor/time/type/text fields to Gemini 3.7 Flash; exact canonical
+  message IDs, sender IDs, database metadata, policy and audit records stay
+  local. `GEMINI_API_KEY` is read from the environment, not an argument.
 - **`getArtifact`** — the only operation that reveals a file path — is
   unconditionally denied to a remote destination, even when message text for
   that conversation is remotely enabled.
+- **`memory prepare/next/page/acknowledge/commit`** make no network request.
+  `memory next` prints only a delivery envelope; the Pi agent sees chat text in
+  deterministic at-most-49,152-byte `memory page` responses. Verbose
+  `evidence.jsonl`, account/contact identifiers and database metadata remain
+  local unless the operator separately discloses them.
 
 Every one of those decisions, allowed or denied, is appended to a hash-chained,
 body-free journal you can verify with `audit-connector-log`.

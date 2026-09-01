@@ -92,6 +92,31 @@ cleanly removed final suffix without an external anchor, or defeat an owner who
 rewrites the whole journal and recomputes every unkeyed hash. Real action
 accountability would need independent signing or anchoring, which is not built.
 
+**Generated memory is an inference, not a canonical record.**
+`ai-summarize-direct` validates account attribution, citation aliases,
+conversation scope, response structure and bounded coverage, but a supported
+citation does not mechanically prove that every nuance of a model-written
+sentence is faithful. Gemini output can vary across runs and still needs human
+review. Each run creates a new immutable generation; automatic semantic merge,
+conflict resolution and promotion of an older inferred wiki are not built.
+
+**A whole-history personal wiki is selectively complete, not transcript
+complete.** `memory prepare` accounts for every reversible message table it
+scans, but it intentionally omits inactive months, silent sessions and text
+outside bounded self-anchor windows. Two real hashed tables in the current
+live validation corpus could not be mapped back to an authorized conversation
+identifier and are reported as `unmatchedMessageTable`; their contents are not
+guessed. The Pi skill semantically refines Markdown, but citation validation
+cannot mechanically prove that its prose captures every nuance. Human review
+and the coverage report remain required.
+
+**Preparation is atomic but not resumable mid-scan.** An interrupted
+`memory prepare` leaves no published partial corpus and must restart. Once the
+corpus exists, `memory next/page/acknowledge/commit` is crash-safe and repeats
+an unacknowledged page exactly. A future preparation checkpoint format would
+need to bind live source mutation across restarts before it could safely
+resume.
+
 **Retention never deletes, which means it never reclaims space either.**
 Retired archives are quarantined by atomic same-filesystem rename. Permanent
 deletion is a separate manual decision, and once taken that generation cannot

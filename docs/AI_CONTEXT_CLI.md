@@ -13,6 +13,8 @@ Three levels, in increasing order of deliberateness:
 | Direct bounded read | `messages list/search`, `message get` | You are at a terminal, with your own authority |
 | Policy-scoped query | `connector-query-direct`, `ai-query` | An AI caller needs a boundary you control |
 | Static export | `ai-export`, then `ai-memory-export` | You want a durable, auditable bundle to ingest |
+| Generated memory | `ai-summarize-direct` | You want a real model to compile a small cited wiki from live authorized messages |
+| Corpus-scale agent memory | `memory prepare/next/page/acknowledge/commit/status` | One Pi agent should iteratively refine a cited wiki without traversing a million messages itself |
 
 For ordinary conversation and message reads, `connector-query-direct` is the
 preferred policy-scoped path: one typed request against live or snapshot
@@ -153,7 +155,7 @@ counts and SHA-256 digests.
 | --- | --- |
 | `conversations.jsonl` | Stable ID, human label, kind, participant names and roles, explicit `groupOwnerParticipantId` evidence, decode state, source freshness, capabilities, allowed fields, time range. **Group ownership is never read as account ownership.** |
 | `contacts.jsonl` | Stable participant ID, preferred normalized display name, local-profile availability, source freshness, enabled conversations, per-conversation names and roles. Every representation of the bound account holder is labelled `You`. |
-| `messages.jsonl` | Stable message and conversation IDs, conversation label, sender ID and name, creation time, ordinal, direction, logical type and subtype, normalized payload kind and summary, per-message freshness, sanitized relationships and attachment references, plus `omittedRelationshipReferenceCount` and `omittedArtifactReferenceCount`. |
+| `messages.jsonl` | Stable message and conversation IDs, conversation label, sender ID and name, optional `isAccountHolder`, creation time, ordinal, direction, logical type and subtype, normalized payload kind and summary, per-message freshness, sanitized relationships and attachment references, plus `omittedRelationshipReferenceCount` and `omittedArtifactReferenceCount`. |
 | `artifacts.jsonl` | Stable artifact ID, referencing conversations, availability and decode state, format, byte count, digest, safe account-relative path, and an explicit resolution error when verification fails. |
 
 Static files deliberately omit source logical paths, database/table/row
@@ -187,6 +189,13 @@ disagrees.
 **No contact name, direct-chat peer, message frequency or group-owner field is
 ever used to guess who you are.** Sender-less records may retain an explicit
 source direction; otherwise they stay unknown.
+
+The live direct connector applies the same source-level rule before replica
+restoration. It derives the raw account identifier only from the validated
+account directory containing the selected `db_storage`. When `sender` is
+authorized, each known sender receives `isAccountHolder: true|false`, and self
+is displayed as `You`; absent or policy-withheld senders omit the marker. The
+raw bound account identifier stays inside the connector boundary.
 
 ### Attachments
 
@@ -254,6 +263,78 @@ greenbubbles audit-ai-memory <AI-memory-output-directory> \
 
 Tested framework workflows and update semantics are in
 [AI_MEMORY_INTEGRATION.md](AI_MEMORY_INTEGRATION.md).
+
+## Model-generated live memory
+
+`ai-memory-export` above is intentionally deterministic: it prepares Mem0/QMD
+inputs but does not ask a model to infer a wiki. Use the explicit live summary
+command when model inference is desired:
+
+```sh
+export GEMINI_API_KEY='<provided outside process arguments>'
+greenbubbles ai-summarize-direct \
+  <live-db_storage> <direct-policy.json> <audit.ndjson> \
+  <new-memory-output-directory> --requester <stable-id> \
+  --max-messages-per-conversation 200 --passphrase-stdin
+```
+
+The policy must grant `list`, `read`, `sender`, and `content`, and each selected
+scope must explicitly set `allowRemoteModel`. The passphrase remains stdin-only;
+the Gemini key is read only from `GEMINI_API_KEY` and is sent as an in-process
+HTTPS header, never as a subprocess argument.
+
+The command invokes `gemini-3.7-flash`. Before the request, it replaces every
+potentially long canonical message ID with a short `M###` alias and sends only
+conversation label/kind/coverage plus compact message actor, speaker, time,
+kind and text fields. The model never receives canonical IDs, sender IDs,
+connector citations, freshness objects, attachment structures or policy/audit
+metadata. Chat text is explicitly delimited as untrusted evidence.
+
+| Output | Purpose |
+| --- | --- |
+| `memory.json` | Validated structured personal memory and conversation wiki with alias citations |
+| `memory.md` | Human-readable rendering for review |
+| `model-input.json` | Exact compact JSON embedded in the model prompt; no canonical message IDs |
+| `evidence.jsonl` | Private alias-to-canonical-ID, conversation, actor, timestamp and content-digest map |
+| `model-response.json` | Raw Gemini response for local diagnosis |
+| `manifest.json` | Source/policy/audit/model digests, token usage, byte reduction, author counts, coverage and file hashes |
+
+GreenBubbles rejects malformed/truncated model JSON, unknown or repeated
+aliases, cross-conversation citations, raw canonical citation output, and any
+account-holder claim without at least one self-authored source. Ambiguous
+institution names such as `科大` may not be silently expanded. Incomplete
+bounded pages remain visibly incomplete in both memory files.
+
+Every invocation publishes a new immutable owner-only generation atomically;
+it does not mutate or silently merge an earlier model-generated wiki. Run it
+again with a new output path after live data changes, then compare or promote
+the reviewed generation explicitly.
+
+## Corpus-scale Pi memory
+
+`ai-summarize-direct` is deliberately bounded per selected conversation. For a
+whole live account, use `memory prepare`: it performs the metadata traversal,
+owner-active month/session selection and selected-row hydration inside one
+local process. `memory next` returns a small batch envelope; repeated
+`memory page` calls then return deterministic at-most-49,152-byte fragments
+with short `E#########`, `P######` and `C######` aliases. Verbose canonical
+citation data stays in a local sidecar rather than consuming model tokens.
+The default personal-memory policy orders immutable units by deterministic
+account-holder relevance and active-period coverage, rather than exhausting
+the oldest conversation slice first; the schedule still traverses every
+prepared unit.
+
+One Pi ReAct agent updates `me.md`, `people/P######.md` and `index.md` directly.
+GreenBubbles does not semantically merge prose. Pi updates useful target pages
+before acknowledging each fully read evidence page. The crash-safe `commit`
+step validates immutable input hashes, complete page review, allowed page paths,
+and exact retained/cited evidence before it advances to the next batch. The
+uncommitted page and batch are returned again after a restart.
+
+The complete algorithm, policy and command contract are in
+[PERSONAL_MEMORY.md](PERSONAL_MEMORY.md). Pi discovers the project skill at
+`skills/greenbubbles-personal-memory` through `.pi/settings.json`; no custom
+agent runtime or tool extension is present.
 
 ## Progress
 
