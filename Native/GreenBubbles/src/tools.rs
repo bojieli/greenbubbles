@@ -167,6 +167,11 @@ pub struct MinimizedMessage {
     pub sender_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_display_name: Option<String>,
+    /// Whether the released sender is the authenticated account holder.
+    /// Unknown and policy-withheld sender identity are represented by absence,
+    /// never by `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_account_holder: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at_unix: Option<i64>,
     pub conversation_ordinal: u64,
@@ -1150,6 +1155,7 @@ pub(crate) fn minimize_message(
             .then_some(message.sender_id)
             .flatten(),
         sender_display_name: None,
+        is_account_holder: None,
         created_at_unix: fields
             .contains(&ToolMessageField::CreatedAt)
             .then_some(message.created_at_unix)

@@ -21,6 +21,10 @@ fn ai_commands_expose_help_without_opening_private_inputs() {
             "ai-memory-export",
             "Mem0-compatible JSON message batches and QMD-compatible Markdown",
         ),
+        (
+            "ai-summarize-direct",
+            "invokes gemini-3.7-flash through the",
+        ),
         ("audit-ai-memory", "without printing content"),
     ] {
         for help_flag in ["--help", "-h"] {
@@ -38,7 +42,7 @@ fn ai_commands_expose_help_without_opening_private_inputs() {
             let stdout = String::from_utf8(output.stdout).expect("help should be UTF-8");
             assert!(stdout.starts_with("Usage:\n"));
             assert!(stdout.contains(expected));
-            if command != "ai-query" {
+            if !matches!(command, "ai-query" | "ai-summarize-direct") {
                 assert!(stdout.contains("--progress-file"));
                 assert!(stdout.contains("--progress-json"));
                 assert!(stdout.contains("--quiet-progress"));
@@ -59,4 +63,23 @@ fn help_topic_exposes_ai_command_help() {
     assert!(String::from_utf8(output.stdout)
         .expect("help should be UTF-8")
         .contains("greenbubbles ai-query"));
+}
+
+#[test]
+fn personal_memory_help_exposes_the_agent_batch_contract_without_private_inputs() {
+    for arguments in [vec!["memory", "--help"], vec!["help", "memory"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
+            .args(arguments)
+            .output()
+            .expect("memory help should run");
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("greenbubbles memory prepare"));
+        assert!(stdout.contains("greenbubbles memory next"));
+        assert!(stdout.contains("durably repeats"));
+        assert!(stdout.contains("uniquely current persisted batch"));
+        assert!(stdout.contains("commit never summarizes"));
+        assert!(stdout.contains("--reviewed-no-durable-memory"));
+    }
 }

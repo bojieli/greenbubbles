@@ -19,7 +19,7 @@ const RAW_KEY: [u8; 32] = [0xAB; 32];
 
 #[test]
 fn resource_commands_expose_help_without_opening_a_database() {
-    for command in ["source", "conversations", "messages", "message"] {
+    for command in ["source", "conversations", "contacts", "messages", "message"] {
         for arguments in [vec![command, "--help"], vec!["help", command]] {
             let output = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
                 .args(arguments)
@@ -34,6 +34,92 @@ fn resource_commands_expose_help_without_opening_a_database() {
             assert!(stdout.contains("--decrypted"));
         }
     }
+}
+
+#[test]
+fn contacts_are_conservatively_typed_detailed_and_cursor_bound() {
+    let fixture = Fixture::new(false);
+    let first = run(
+        &[
+            "contacts",
+            "list",
+            fixture.root.to_str().unwrap(),
+            "--decrypted",
+            "--kind",
+            "person",
+            "--details",
+            "--limit",
+            "2",
+        ],
+        None,
+    );
+    assert_success(&first);
+    let first: Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(first["operation"], "contacts.list");
+    assert_eq!(first["page"]["returned"], 2);
+    assert_eq!(first["items"][0]["id"], "wxid_a");
+    assert_eq!(first["items"][0]["displayName"], "Remark A");
+    assert_eq!(first["items"][0]["kind"], "person");
+    assert_eq!(first["items"][0]["isAccountHolder"], false);
+    assert_eq!(first["items"][0]["remark"], "Remark A");
+    let cursor = first["page"]["nextCursor"].as_str().unwrap();
+
+    let second = run(
+        &[
+            "contacts",
+            "list",
+            fixture.root.to_str().unwrap(),
+            "--decrypted",
+            "--kind",
+            "person",
+            "--details",
+            "--limit",
+            "2",
+            "--cursor",
+            cursor,
+        ],
+        None,
+    );
+    assert_success(&second);
+    let second: Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_eq!(second["items"][0]["id"], "wxid_c");
+    assert_eq!(second["items"][1]["id"], "wxid_d");
+
+    let wrong_projection = run(
+        &[
+            "contacts",
+            "list",
+            fixture.root.to_str().unwrap(),
+            "--decrypted",
+            "--kind",
+            "person",
+            "--limit",
+            "2",
+            "--cursor",
+            cursor,
+        ],
+        None,
+    );
+    assert!(!wrong_projection.status.success());
+    let error: Value = serde_json::from_slice(&wrong_projection.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "invalidCursor");
+
+    let account_holder = run(
+        &[
+            "contacts",
+            "list",
+            fixture.root.to_str().unwrap(),
+            "--decrypted",
+            "--kind",
+            "account-holder",
+        ],
+        None,
+    );
+    assert_success(&account_holder);
+    let account_holder: Value = serde_json::from_slice(&account_holder.stdout).unwrap();
+    assert_eq!(account_holder["page"]["returned"], 1);
+    assert_eq!(account_holder["items"][0]["displayName"], "You");
+    assert_eq!(account_holder["items"][0]["isAccountHolder"], true);
 }
 
 #[test]

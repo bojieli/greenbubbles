@@ -1445,11 +1445,22 @@ pub fn audit_ai_context_with_progress(
                         )
                     })?;
                 if let Some(sender_id) = message.message.sender_id.as_deref() {
-                    let expected = if sender_id == self_participant_id {
+                    let expected_is_account_holder = sender_id == self_participant_id;
+                    let expected = if expected_is_account_holder {
                         crate::MessageDirection::Outgoing
                     } else {
                         crate::MessageDirection::Incoming
                     };
+                    if message
+                        .message
+                        .is_account_holder
+                        .is_some_and(|actual| actual != expected_is_account_holder)
+                    {
+                        return Err(RestoreError::Integrity(
+                            "AI context message account-holder marker disagrees with the bound account holder"
+                                .to_string(),
+                        ));
+                    }
                     if message
                         .message
                         .direction
@@ -1790,6 +1801,7 @@ fn audit_ai_messages_with_progress(
                 "conversationId",
                 "sourceDatabaseFreshness",
                 "senderId",
+                "isAccountHolder",
                 "createdAtUnix",
                 "conversationOrdinal",
                 "direction",
@@ -2423,18 +2435,22 @@ fn normalize_message_identity(
     message: &mut crate::tools::MinimizedMessage,
     health: &AiContextHealth,
 ) {
-    let (Some(sender_id), Some(direction), Some(self_participant_id)) = (
+    let (Some(sender_id), Some(self_participant_id)) = (
         message.sender_id.as_deref(),
-        message.direction.as_mut(),
         health.self_participant_id.as_deref(),
     ) else {
         return;
     };
-    *direction = if sender_id == self_participant_id {
+    let is_account_holder = sender_id == self_participant_id;
+    message.is_account_holder = Some(is_account_holder);
+    let normalized_direction = if is_account_holder {
         crate::MessageDirection::Outgoing
     } else {
         crate::MessageDirection::Incoming
     };
+    if let Some(direction) = message.direction.as_mut() {
+        *direction = normalized_direction;
+    }
 }
 
 struct NdjsonWriter {

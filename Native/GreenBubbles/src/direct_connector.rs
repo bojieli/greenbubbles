@@ -421,7 +421,11 @@ impl<'a> DirectConnectorService<'a> {
         )
         .map_err(query_error)?;
         let mut limitation_codes = warning_codes(&page.warnings);
-        extend_direct_projection_limitations(scope, &mut limitation_codes);
+        extend_direct_projection_limitations(
+            scope,
+            self.source.account_holder_source_id().is_some(),
+            &mut limitation_codes,
+        );
         let messages = page
             .items
             .into_iter()
@@ -499,7 +503,11 @@ impl<'a> DirectConnectorService<'a> {
             )
             .map_err(query_error)?;
             let mut limitation_codes = warning_codes(&page.warnings);
-            extend_direct_projection_limitations(scope, &mut limitation_codes);
+            extend_direct_projection_limitations(
+                scope,
+                self.source.account_holder_source_id().is_some(),
+                &mut limitation_codes,
+            );
             let messages = page
                 .items
                 .into_iter()
@@ -594,7 +602,11 @@ impl<'a> DirectConnectorService<'a> {
             )
             .map_err(query_error)?;
             limitation_codes.extend(warning_codes(&page.warnings));
-            extend_direct_projection_limitations(scope, &mut limitation_codes);
+            extend_direct_projection_limitations(
+                scope,
+                self.source.account_holder_source_id().is_some(),
+                &mut limitation_codes,
+            );
             omitted_message_count =
                 omitted_message_count.saturating_add(omitted_warning_count(&page.warnings));
             messages.extend(
@@ -761,27 +773,52 @@ impl<'a> DirectConnectorService<'a> {
             } else {
                 (None, None, None)
             };
+        let sender_released = scope.message_fields.contains(&ToolMessageField::Sender);
+        let raw_sender = (!message.sender.is_empty()).then_some(message.sender);
+        let bound_account_holder = raw_sender.as_deref().and_then(|sender| {
+            self.source
+                .account_holder_source_id()
+                .map(|account_holder| sender == account_holder)
+        });
+        let sender = sender_released.then(|| raw_sender.clone()).flatten();
+        let is_account_holder = sender_released.then_some(bound_account_holder).flatten();
+        let direction = scope
+            .message_fields
+            .contains(&ToolMessageField::Direction)
+            .then(|| {
+                bound_account_holder.map(|is_self| {
+                    if is_self {
+                        crate::MessageDirection::Outgoing
+                    } else {
+                        crate::MessageDirection::Incoming
+                    }
+                })
+            })
+            .flatten();
+        let sender_display_name = if sender_released {
+            if is_account_holder == Some(true) {
+                Some("You".to_string())
+            } else {
+                message
+                    .sender_display_name
+                    .filter(|value| !value.is_empty())
+            }
+        } else {
+            None
+        };
         MinimizedMessage {
             canonical_id: message.id,
             conversation_id: message.conversation_id,
             source_database_freshness: ToolSourceDatabaseFreshness::Fresh,
-            sender_id: scope
-                .message_fields
-                .contains(&ToolMessageField::Sender)
-                .then_some(message.sender)
-                .filter(|value| !value.is_empty()),
-            sender_display_name: scope
-                .message_fields
-                .contains(&ToolMessageField::Sender)
-                .then_some(message.sender_display_name)
-                .flatten()
-                .filter(|value| !value.is_empty()),
+            sender_id: sender,
+            sender_display_name,
+            is_account_holder,
             created_at_unix: scope
                 .message_fields
                 .contains(&ToolMessageField::CreatedAt)
                 .then_some(message.created_at_unix),
             conversation_ordinal: message.sort_sequence.max(0) as u64,
-            direction: None,
+            direction,
             logical_type: scope
                 .message_fields
                 .contains(&ToolMessageField::MessageType)
@@ -808,27 +845,50 @@ impl<'a> DirectConnectorService<'a> {
         let content_enabled = scope.message_fields.contains(&ToolMessageField::Content);
         let (snippet, snippet_truncated) =
             truncate_utf8(hit.snippet, self.policy.maximum_message_summary_bytes);
+        let sender_released = scope.message_fields.contains(&ToolMessageField::Sender);
+        let raw_sender = (!hit.sender.is_empty()).then_some(hit.sender);
+        let bound_account_holder = raw_sender.as_deref().and_then(|sender| {
+            self.source
+                .account_holder_source_id()
+                .map(|account_holder| sender == account_holder)
+        });
+        let sender = sender_released.then(|| raw_sender.clone()).flatten();
+        let is_account_holder = sender_released.then_some(bound_account_holder).flatten();
+        let direction = scope
+            .message_fields
+            .contains(&ToolMessageField::Direction)
+            .then(|| {
+                bound_account_holder.map(|is_self| {
+                    if is_self {
+                        crate::MessageDirection::Outgoing
+                    } else {
+                        crate::MessageDirection::Incoming
+                    }
+                })
+            })
+            .flatten();
+        let sender_display_name = if sender_released {
+            if is_account_holder == Some(true) {
+                Some("You".to_string())
+            } else {
+                hit.sender_display_name.filter(|value| !value.is_empty())
+            }
+        } else {
+            None
+        };
         MinimizedMessage {
             canonical_id: hit.id,
             conversation_id: hit.conversation_id,
             source_database_freshness: ToolSourceDatabaseFreshness::Fresh,
-            sender_id: scope
-                .message_fields
-                .contains(&ToolMessageField::Sender)
-                .then_some(hit.sender)
-                .filter(|value| !value.is_empty()),
-            sender_display_name: scope
-                .message_fields
-                .contains(&ToolMessageField::Sender)
-                .then_some(hit.sender_display_name)
-                .flatten()
-                .filter(|value| !value.is_empty()),
+            sender_id: sender,
+            sender_display_name,
+            is_account_holder,
             created_at_unix: scope
                 .message_fields
                 .contains(&ToolMessageField::CreatedAt)
                 .then_some(hit.created_at_unix),
             conversation_ordinal: hit.sort_sequence.max(0) as u64,
-            direction: None,
+            direction,
             logical_type: scope
                 .message_fields
                 .contains(&ToolMessageField::MessageType)
@@ -1093,9 +1153,10 @@ fn omitted_warning_count(warnings: &[QueryWarning]) -> u64 {
 
 fn extend_direct_projection_limitations(
     scope: &ConversationToolScope,
+    account_holder_bound: bool,
     limitations: &mut BTreeSet<String>,
 ) {
-    if scope.message_fields.contains(&ToolMessageField::Direction) {
+    if scope.message_fields.contains(&ToolMessageField::Direction) && !account_holder_bound {
         limitations.insert("directDirectionUnavailable".to_string());
     }
     if scope

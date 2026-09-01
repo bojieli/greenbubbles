@@ -523,16 +523,18 @@ impl<'a> MemoryProjector<'a> {
         message: AiContextMessage,
     ) -> (AiMemoryFrameworkMessage, AiMemorySourceMessage, usize) {
         let self_id = self.source.context.self_participant_id.as_deref();
-        let actor = if message
-            .message
-            .sender_id
-            .as_deref()
-            .zip(self_id)
-            .is_some_and(|(sender, owner)| sender == owner)
+        let actor = if message.message.is_account_holder == Some(true)
+            || message
+                .message
+                .sender_id
+                .as_deref()
+                .zip(self_id)
+                .is_some_and(|(sender, owner)| sender == owner)
             || message.message.direction == Some(MessageDirection::Outgoing)
         {
             "self"
-        } else if message.message.sender_id.is_some()
+        } else if message.message.is_account_holder == Some(false)
+            || message.message.sender_id.is_some()
             || message.message.direction == Some(MessageDirection::Incoming)
         {
             "other"

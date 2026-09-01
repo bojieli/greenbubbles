@@ -120,15 +120,22 @@ fn policy_scoped_connector_reads_sqlite_directly_with_paging_search_and_audit() 
     assert_eq!(messages.messages[0].created_at_unix, Some(1_000));
     assert_eq!(
         messages.messages[0].sender_display_name.as_deref(),
-        Some("Sender Remark")
+        Some("You")
     );
-    assert_eq!(messages.messages[1].created_at_unix, Some(900));
+    assert_eq!(messages.messages[0].is_account_holder, Some(true));
+    assert_eq!(
+        messages.messages[0].direction,
+        Some(greenbubbles::MessageDirection::Outgoing)
+    );
+    assert_eq!(messages.messages[1].created_at_unix, Some(950));
+    assert_eq!(messages.messages[1].is_account_holder, None);
+    assert_eq!(messages.messages[1].direction, None);
     assert_eq!(
         messages.messages[0].payload_summary.as_deref(),
         Some("new mes")
     );
     assert_eq!(messages.messages[0].payload_summary_truncated, Some(true));
-    assert!(messages
+    assert!(!messages
         .limitation_codes
         .contains(&"directDirectionUnavailable".to_string()));
 
@@ -151,6 +158,11 @@ fn policy_scoped_connector_reads_sqlite_directly_with_paging_search_and_audit() 
         search.messages[0].sender_display_name.as_deref(),
         Some("Sender Remark")
     );
+    assert_eq!(search.messages[0].is_account_holder, Some(false));
+    assert_eq!(
+        search.messages[0].direction,
+        Some(greenbubbles::MessageDirection::Incoming)
+    );
     assert_eq!(
         search.messages[0].payload_summary.as_deref(),
         Some("needle ")
@@ -170,6 +182,7 @@ fn policy_scoped_connector_reads_sqlite_directly_with_paging_search_and_audit() 
     };
     assert_eq!(exact.canonical_id, search_identity);
     assert_eq!(exact.payload_summary.as_deref(), Some("needle "));
+    assert_eq!(exact.is_account_holder, Some(false));
 
     let denied = service.handle(request(
         "remote-denied",
@@ -202,6 +215,55 @@ fn policy_scoped_connector_reads_sqlite_directly_with_paging_search_and_audit() 
     assert!(audit.fully_chained);
     assert_eq!(audit.denied_event_count, 2);
     assert_eq!(database_hashes(&fixture.source), before);
+}
+
+#[test]
+fn direct_connector_omits_account_marker_when_sender_is_withheld_by_policy() {
+    let fixture = Fixture::new();
+    let source = LiveQuerySource::open(&fixture.source, QueryDatabaseAccess::Decrypted).unwrap();
+    create_direct_tool_policy(
+        &fixture.policy,
+        source.identity(),
+        BTreeMap::from([(
+            "wxid_allowed".to_string(),
+            ConversationToolScope {
+                capabilities: BTreeSet::from([ToolCapability::ReadRecentMessages]),
+                message_fields: BTreeSet::from([
+                    ToolMessageField::CreatedAt,
+                    ToolMessageField::Direction,
+                    ToolMessageField::Content,
+                ]),
+                not_before_unix: Some(990),
+                not_after_unix: Some(1_010),
+                allow_remote_model: false,
+            },
+        )]),
+        10,
+        100,
+    )
+    .unwrap();
+    let service = DirectConnectorService::open(source, &fixture.policy, &fixture.audit).unwrap();
+    let response = service.handle(request(
+        "sender-withheld",
+        ConnectorDestination::Local,
+        ConnectorOperation::GetMessages {
+            conversation_id: "wxid_allowed".to_string(),
+            cursor: None,
+            limit: Some(10),
+        },
+    ));
+    assert!(response.ok, "{:?}", response.error);
+    let ConnectorResult::Messages(page) = response.result.unwrap() else {
+        panic!("unexpected direct connector result")
+    };
+    assert_eq!(page.messages.len(), 1);
+    assert_eq!(page.messages[0].sender_id, None);
+    assert_eq!(page.messages[0].sender_display_name, None);
+    assert_eq!(page.messages[0].is_account_holder, None);
+    assert_eq!(
+        page.messages[0].direction,
+        Some(greenbubbles::MessageDirection::Outgoing)
+    );
 }
 
 #[test]
@@ -478,7 +540,9 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("source");
+        let source = directory
+            .path()
+            .join("xwechat_files/wxid_self_ab12/db_storage");
         let private = directory.path().join("private");
         for path in [
             &source,
@@ -503,6 +567,7 @@ impl Fixture {
                     ('wxid_allowed', '', 'Allowed Conversation', ''),
                     ('wxid_second', '', 'Second Conversation', ''),
                     ('wxid_blocked', '', 'Blocked Conversation', ''),
+                    ('wxid_self', '', 'Account Holder', ''),
                     ('wxid_sender', '', 'Sender Remark', '');",
             )
             .unwrap();
@@ -530,6 +595,7 @@ impl Fixture {
             .execute_batch(&format!(
                 "CREATE TABLE Name2Id(user_name TEXT);
                  INSERT INTO Name2Id(rowid, user_name) VALUES (1, 'wxid_sender');
+                 INSERT INTO Name2Id(rowid, user_name) VALUES (2, 'wxid_self');
                  CREATE TABLE [{table}](
                     local_id INTEGER,
                     server_id INTEGER,
@@ -545,19 +611,20 @@ impl Fixture {
                  );"
             ))
             .unwrap();
-        for (local_id, sort_sequence, created_at, body) in [
-            (1, 100, 1_000, "new message"),
-            (2, 90, 900, "needle source"),
-            (3, 80, 800, "outside policy"),
+        for (local_id, sort_sequence, created_at, sender, body) in [
+            (1, 100, 1_000, Some(2_i64), "new message"),
+            (4, 95, 950, None, "senderless event"),
+            (2, 90, 900, Some(1_i64), "needle source"),
+            (3, 80, 800, Some(1_i64), "outside policy"),
         ] {
             messages
                 .execute(
                     &format!(
                         "INSERT INTO [{table}](local_id, server_id, sort_seq, local_type, \
                          real_sender_id, create_time, status, message_content, \
-                         WCDB_CT_message_content) VALUES (?1, ?1, ?2, 1, 1, ?3, 0, ?4, 0)"
+                         WCDB_CT_message_content) VALUES (?1, ?1, ?2, 1, ?3, ?4, 0, ?5, 0)"
                     ),
-                    params![local_id, sort_sequence, created_at, body.as_bytes()],
+                    params![local_id, sort_sequence, sender, created_at, body.as_bytes()],
                 )
                 .unwrap();
         }

@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{Cursor, Read};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -14,6 +15,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
+
+use crate::tools::summarize_decoded_payload;
+use crate::ConversationKind;
 
 pub const QUERY_SCHEMA: &str = "greenbubbles.query.v1";
 pub const QUERY_FORMAT_VERSION: u32 = 1;
@@ -28,6 +32,9 @@ pub const MAX_SERIALIZED_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const CURSOR_FORMAT_VERSION: u32 = 1;
 const MAXIMUM_SOURCE_DATABASE_FILES: usize = 4_096;
 const MAXIMUM_SOURCE_INVENTORY_ENTRIES: usize = 100_000;
+const MAXIMUM_CONTACT_INVENTORY_ENTRIES: usize = 250_000;
+const CORPUS_METADATA_PAGE_ROWS: usize = 10_000;
+const CORPUS_HYDRATION_ROWS: usize = 400;
 const MAX_CURSOR_BYTES: usize = 4096;
 const MAX_CONVERSATION_ID_BYTES: usize = 4096;
 const MAX_FALLBACK_SEARCH_MESSAGES_PER_PAGE: usize = 500;
@@ -74,6 +81,7 @@ pub struct LiveQuerySource<'a> {
     root: PathBuf,
     identity: String,
     access: QueryDatabaseAccess<'a>,
+    account_holder_source_id: Option<String>,
 }
 
 impl<'a> LiveQuerySource<'a> {
@@ -111,10 +119,13 @@ impl<'a> LiveQuerySource<'a> {
         let digest = hasher.finalize();
         let identity = format!("sha256:{}", hex::encode(&digest[..16]));
 
+        let account_holder_source_id = live_account_holder_source_id(&canonical)?;
+
         Ok(Self {
             root: canonical,
             identity,
             access,
+            account_holder_source_id,
         })
     }
 
@@ -128,6 +139,13 @@ impl<'a> LiveQuerySource<'a> {
             QueryDatabaseAccess::SnapshotEncrypted(_) => QuerySourceMode::SnapshotEncrypted,
             QueryDatabaseAccess::Decrypted => QuerySourceMode::Decrypted,
         }
+    }
+
+    /// The source-level account identifier bound by the selected live account
+    /// directory. This value stays inside the direct-query boundary; callers
+    /// should release only derived attribution when policy permits sender data.
+    pub(crate) fn account_holder_source_id(&self) -> Option<&str> {
+        self.account_holder_source_id.as_deref()
     }
 
     pub(crate) fn root(&self) -> &Path {
@@ -386,6 +404,74 @@ impl<'a> LiveQuerySource<'a> {
     }
 }
 
+fn live_account_holder_source_id(root: &Path) -> Result<Option<String>, LiveQueryError> {
+    if root.file_name().and_then(|value| value.to_str()) != Some("db_storage") {
+        return Ok(None);
+    }
+    let account_root = root.parent().ok_or_else(|| {
+        LiveQueryError::UnsafeSource("database root has no account directory".into())
+    })?;
+    let metadata = fs::symlink_metadata(account_root).map_err(|_| {
+        LiveQueryError::UnsafeSource("account directory could not be inspected".into())
+    })?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+    {
+        return Err(LiveQueryError::UnsafeSource(
+            "account directory must be a current-user-owned real directory".into(),
+        ));
+    }
+    let directory_name = account_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            LiveQueryError::UnsafeSource("account directory name is not valid UTF-8".into())
+        })?;
+    if directory_name.is_empty()
+        || directory_name == "."
+        || directory_name == ".."
+        || directory_name.chars().any(char::is_control)
+    {
+        return Err(LiveQueryError::UnsafeSource(
+            "account directory has no usable account identifier".into(),
+        ));
+    }
+
+    let Some((candidate, suffix)) = directory_name.rsplit_once('_') else {
+        return Ok(Some(directory_name.to_string()));
+    };
+    let removable_suffix = suffix.len() == 4
+        && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        && !candidate.is_empty();
+    if !removable_suffix {
+        return Ok(Some(directory_name.to_string()));
+    }
+    if directory_name.starts_with("wxid_") {
+        return Ok((candidate.starts_with("wxid_") && candidate.len() > 5)
+            .then(|| candidate.to_string())
+            .or_else(|| Some(directory_name.to_string())));
+    }
+
+    let Some(xwechat_root) = account_root.parent() else {
+        return Ok(Some(directory_name.to_string()));
+    };
+    let login_candidate = xwechat_root.join("all_users").join("login").join(candidate);
+    let independently_confirmed =
+        fs::symlink_metadata(&login_candidate)
+            .ok()
+            .is_some_and(|value| {
+                value.is_dir()
+                    && !value.file_type().is_symlink()
+                    && value.uid() == unsafe { libc::geteuid() }
+            });
+    Ok(Some(if independently_confirmed {
+        candidate.to_string()
+    } else {
+        directory_name.to_string()
+    }))
+}
+
 fn open_snapshot_readonly_connection(
     path: &Path,
     key: &[u8; 32],
@@ -536,6 +622,64 @@ pub struct ConversationItem {
     pub last_sender_display_name: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ContactKind {
+    AccountHolder,
+    Person,
+    Group,
+    Official,
+    Service,
+    Unknown,
+}
+
+impl ContactKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AccountHolder => "accountHolder",
+            Self::Person => "person",
+            Self::Group => "group",
+            Self::Official => "official",
+            Self::Service => "service",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl FromStr for ContactKind {
+    type Err = LiveQueryError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "account-holder" | "accountHolder" => Ok(Self::AccountHolder),
+            "person" => Ok(Self::Person),
+            "group" => Ok(Self::Group),
+            "official" => Ok(Self::Official),
+            "service" => Ok(Self::Service),
+            "unknown" => Ok(Self::Unknown),
+            _ => Err(LiveQueryError::InvalidArgument(
+                "contact kind must be account-holder, person, group, official, service, or unknown"
+                    .into(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContactItem {
+    pub id: String,
+    pub display_name: String,
+    pub kind: ContactKind,
+    pub is_account_holder: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remark: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nickname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageItem {
@@ -627,6 +771,16 @@ struct ContactDisplayNameEnrichment {
     warnings: Vec<QueryWarning>,
 }
 
+#[derive(Debug, Clone)]
+struct ContactRecord {
+    id: String,
+    remark: Option<String>,
+    nickname: Option<String>,
+    alias: Option<String>,
+    in_contact_table: bool,
+    in_chat_room_table: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ConversationCursor {
@@ -635,6 +789,17 @@ struct ConversationCursor {
     source_identity: String,
     sort_timestamp: i64,
     username: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ContactCursor {
+    version: u32,
+    kind: String,
+    source_identity: String,
+    contact_kind: Option<String>,
+    include_details: bool,
+    identifier: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -827,6 +992,86 @@ struct NativeSearchTable {
     ordinal: u32,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CorpusContact {
+    pub source_id: String,
+    pub display_name: String,
+    pub kind: ContactKind,
+    pub is_account_holder: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CorpusConversation {
+    pub source_id: String,
+    pub display_name: String,
+    pub kind: ConversationKind,
+    pub contact_kind: ContactKind,
+    table_name: String,
+    shard_ids: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CorpusInventory {
+    pub contacts: Vec<CorpusContact>,
+    pub conversations: Vec<CorpusConversation>,
+    pub unmatched_message_table_count: usize,
+    pub warnings: Vec<QueryWarning>,
+    pub coverage_complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct CorpusMessageLocation {
+    pub sort_sequence: i64,
+    pub create_time: i64,
+    pub server_id: i64,
+    pub shard_id: u32,
+    pub row_id: i64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CorpusMessageMetadata {
+    pub location: CorpusMessageLocation,
+    pub local_type: i64,
+    pub sender: Option<String>,
+    pub is_account_holder: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CorpusMetadataScan {
+    pub messages: Vec<CorpusMessageMetadata>,
+    pub warnings: Vec<QueryWarning>,
+    pub coverage_complete: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CorpusHydratedMessage {
+    pub location: CorpusMessageLocation,
+    pub canonical_id: String,
+    pub sender: Option<String>,
+    pub sender_display_name: Option<String>,
+    pub is_account_holder: Option<bool>,
+    pub message_type: u32,
+    pub message_subtype: u32,
+    pub payload_kind: String,
+    pub text: Option<String>,
+    pub text_truncated: bool,
+    pub content_decode_failed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CorpusHydration {
+    pub messages: Vec<CorpusHydratedMessage>,
+    pub warnings: Vec<QueryWarning>,
+    pub coverage_complete: bool,
+}
+
+pub(crate) struct LiveCorpusReader<'source, 'key> {
+    source: &'source LiveQuerySource<'key>,
+    open_shards: OpenMessageShards,
+    inventory: CorpusInventory,
+    contact_display_names: BTreeMap<String, String>,
+}
+
 pub fn source_status(source: &LiveQuerySource<'_>) -> Result<SourceStatus, LiveQueryError> {
     // Authenticate both required core files with the selected access material.
     // Connections are closed before the filesystem inventory begins.
@@ -967,6 +1212,1117 @@ fn sqlite_sidecar_size(database_path: &Path, suffix: &str) -> Result<(bool, u64)
 fn checked_storage_sum(left: u64, right: u64) -> Result<u64, LiveQueryError> {
     left.checked_add(right)
         .ok_or_else(|| LiveQueryError::Database("source storage byte accounting overflowed".into()))
+}
+
+struct LoadedContactRecords {
+    records: BTreeMap<String, ContactRecord>,
+    warnings: Vec<QueryWarning>,
+    coverage_complete: bool,
+}
+
+fn load_contact_records(
+    source: &LiveQuerySource<'_>,
+) -> Result<LoadedContactRecords, LiveQueryError> {
+    let connection = source.open_database(Path::new("contact/contact.db"))?;
+    let mut records = BTreeMap::<String, ContactRecord>::new();
+    let mut warnings = Vec::new();
+    let mut coverage_complete = true;
+    let mut decode_failures = 0usize;
+
+    let contact_columns = table_columns(&connection, "contact")?;
+    let identifier_column = ["username", "user_name"]
+        .into_iter()
+        .find(|column| contact_columns.contains(*column))
+        .ok_or_else(|| {
+            LiveQueryError::Database(
+                "contact schema has no compatible account identifier column".into(),
+            )
+        })?;
+    let remark_column = ["remark", "remark_name"]
+        .into_iter()
+        .find(|column| contact_columns.contains(*column));
+    let nickname_column = ["nick_name", "nickname"]
+        .into_iter()
+        .find(|column| contact_columns.contains(*column));
+    let alias_column = ["alias"]
+        .into_iter()
+        .find(|column| contact_columns.contains(*column));
+    let selected_column = |column: Option<&str>| {
+        column
+            .map(|column| format!("[{column}]"))
+            .unwrap_or_else(|| "NULL".to_string())
+    };
+    let contact_sql = format!(
+        "SELECT [{identifier_column}], {}, {}, {} FROM [contact] ORDER BY [{identifier_column}] ASC",
+        selected_column(remark_column),
+        selected_column(nickname_column),
+        selected_column(alias_column),
+    );
+    let mut statement = connection
+        .prepare(&contact_sql)
+        .map_err(|error| database_error(&error.to_string()))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| database_error(&error.to_string()))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| database_error(&error.to_string()))?
+    {
+        let id = match row
+            .get_ref(0)
+            .ok()
+            .and_then(|value| decode_sqlite_text(value).ok())
+        {
+            Some(id)
+                if !id.is_empty()
+                    && id.len() <= MAX_CONVERSATION_ID_BYTES
+                    && !id.contains('\0') =>
+            {
+                id
+            }
+            _ => {
+                decode_failures = decode_failures.saturating_add(1);
+                continue;
+            }
+        };
+        let read_optional = |index: usize| -> Option<String> {
+            row.get_ref(index)
+                .ok()
+                .and_then(|value| decode_sqlite_text(value).ok())
+                .map(|value| truncate_utf8(value, MAX_PROJECTED_TEXT_BYTES).0)
+                .filter(|value| !value.trim().is_empty())
+        };
+        records.insert(
+            id.clone(),
+            ContactRecord {
+                id,
+                remark: read_optional(1),
+                nickname: read_optional(2),
+                alias: read_optional(3),
+                in_contact_table: true,
+                in_chat_room_table: false,
+            },
+        );
+        if records.len() > MAXIMUM_CONTACT_INVENTORY_ENTRIES {
+            return Err(LiveQueryError::Database(format!(
+                "contact inventory exceeds the fixed {MAXIMUM_CONTACT_INVENTORY_ENTRIES}-row safety limit"
+            )));
+        }
+    }
+    drop(rows);
+    drop(statement);
+
+    let has_chat_room = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chat_room')",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or_default()
+        == 1;
+    if has_chat_room {
+        match table_columns(&connection, "chat_room") {
+            Ok(columns) => {
+                if let Some(identifier_column) = ["username", "user_name"]
+                    .into_iter()
+                    .find(|column| columns.contains(*column))
+                {
+                    let sql = format!(
+                        "SELECT [{identifier_column}] FROM [chat_room] ORDER BY [{identifier_column}] ASC"
+                    );
+                    match connection.prepare(&sql) {
+                        Ok(mut statement) => match statement.query([]) {
+                            Ok(mut rows) => loop {
+                                match rows.next() {
+                                    Ok(Some(row)) => {
+                                        let id = row
+                                            .get_ref(0)
+                                            .ok()
+                                            .and_then(|value| decode_sqlite_text(value).ok());
+                                        let Some(id) = id.filter(|id| {
+                                            !id.is_empty()
+                                                && id.len() <= MAX_CONVERSATION_ID_BYTES
+                                                && !id.contains('\0')
+                                        }) else {
+                                            decode_failures = decode_failures.saturating_add(1);
+                                            continue;
+                                        };
+                                        records
+                                            .entry(id.clone())
+                                            .and_modify(|record| {
+                                                record.in_chat_room_table = true;
+                                            })
+                                            .or_insert(ContactRecord {
+                                                id,
+                                                remark: None,
+                                                nickname: None,
+                                                alias: None,
+                                                in_contact_table: false,
+                                                in_chat_room_table: true,
+                                            });
+                                        if records.len() > MAXIMUM_CONTACT_INVENTORY_ENTRIES {
+                                            return Err(LiveQueryError::Database(format!(
+                                                "contact inventory exceeds the fixed {MAXIMUM_CONTACT_INVENTORY_ENTRIES}-row safety limit"
+                                            )));
+                                        }
+                                    }
+                                    Ok(None) => break,
+                                    Err(_) => {
+                                        coverage_complete = false;
+                                        warnings.push(QueryWarning {
+                                            code: "chatRoomInventoryIncomplete",
+                                            message: "the chat-room inventory became unreadable during the bounded contact read".into(),
+                                            shard_id: None,
+                                            count: None,
+                                        });
+                                        break;
+                                    }
+                                }
+                            },
+                            Err(_) => {
+                                coverage_complete = false;
+                                warnings.push(QueryWarning {
+                                    code: "chatRoomInventoryUnavailable",
+                                    message: "the chat-room inventory could not be queried with this source schema".into(),
+                                    shard_id: None,
+                                    count: None,
+                                });
+                            }
+                        },
+                        Err(_) => {
+                            coverage_complete = false;
+                            warnings.push(QueryWarning {
+                                code: "chatRoomInventoryUnavailable",
+                                message: "the chat-room inventory could not be prepared with this source schema".into(),
+                                shard_id: None,
+                                count: None,
+                            });
+                        }
+                    }
+                } else {
+                    coverage_complete = false;
+                    warnings.push(QueryWarning {
+                        code: "chatRoomInventoryUnavailable",
+                        message: "the chat-room table has no compatible account identifier column"
+                            .into(),
+                        shard_id: None,
+                        count: None,
+                    });
+                }
+            }
+            Err(_) => {
+                coverage_complete = false;
+                warnings.push(QueryWarning {
+                    code: "chatRoomInventoryUnavailable",
+                    message: "the chat-room schema could not be inspected".into(),
+                    shard_id: None,
+                    count: None,
+                });
+            }
+        }
+    }
+    if decode_failures > 0 {
+        coverage_complete = false;
+        warnings.push(QueryWarning {
+            code: "contactDecodeFailed",
+            message: "one or more contact identifiers could not be decoded safely".into(),
+            shard_id: None,
+            count: Some(decode_failures),
+        });
+    }
+    coalesce_warnings(&mut warnings);
+    Ok(LoadedContactRecords {
+        records,
+        warnings,
+        coverage_complete,
+    })
+}
+
+pub(crate) fn classify_contact_id(
+    identifier: &str,
+    account_holder: Option<&str>,
+    in_contact_table: bool,
+    in_chat_room_table: bool,
+) -> ContactKind {
+    if account_holder == Some(identifier) {
+        return ContactKind::AccountHolder;
+    }
+    if in_chat_room_table || wx_db::is_group_chat(identifier) {
+        return ContactKind::Group;
+    }
+    if identifier.starts_with("gh_") {
+        return ContactKind::Official;
+    }
+    const SERVICE_IDENTIFIERS: &[&str] = &[
+        "blogapp",
+        "brandsessionholder",
+        "facebookapp",
+        "feedsapp",
+        "filehelper",
+        "floatbottle",
+        "fmessage",
+        "lbsapp",
+        "masssendapp",
+        "medianote",
+        "newsapp",
+        "notification_messages",
+        "qmessage",
+        "qqfriend",
+        "qqmail",
+        "readerapp",
+        "recommendhelper",
+        "shakeapp",
+        "tmessage",
+        "voiceinputapp",
+        "weixin",
+    ];
+    if SERVICE_IDENTIFIERS.contains(&identifier) {
+        ContactKind::Service
+    } else if in_contact_table {
+        ContactKind::Person
+    } else {
+        ContactKind::Unknown
+    }
+}
+
+fn contact_display_name(record: &ContactRecord, kind: ContactKind) -> String {
+    if kind == ContactKind::AccountHolder {
+        return "You".to_string();
+    }
+    record
+        .remark
+        .as_ref()
+        .or(record.nickname.as_ref())
+        .or(record.alias.as_ref())
+        .cloned()
+        .unwrap_or_else(|| record.id.clone())
+}
+
+pub fn list_contacts(
+    source: &LiveQuerySource<'_>,
+    kind: Option<ContactKind>,
+    include_details: bool,
+    limit: usize,
+    cursor: Option<&str>,
+) -> Result<QueryEnvelope<ContactItem>, LiveQueryError> {
+    validate_limit(limit)?;
+    let cursor = cursor
+        .map(decode_cursor::<ContactCursor>)
+        .transpose()?
+        .map(|cursor| validate_contact_cursor(source, kind, include_details, cursor))
+        .transpose()?;
+    let mut loaded = load_contact_records(source)?;
+    if let Some(account_holder) = source.account_holder_source_id() {
+        loaded
+            .records
+            .entry(account_holder.to_string())
+            .or_insert(ContactRecord {
+                id: account_holder.to_string(),
+                remark: None,
+                nickname: None,
+                alias: None,
+                in_contact_table: false,
+                in_chat_room_table: false,
+            });
+    }
+    let account_holder = source.account_holder_source_id();
+    let mut items = loaded
+        .records
+        .values()
+        .filter_map(|record| {
+            let item_kind = classify_contact_id(
+                &record.id,
+                account_holder,
+                record.in_contact_table,
+                record.in_chat_room_table,
+            );
+            if kind.is_some_and(|kind| kind != item_kind)
+                || cursor
+                    .as_ref()
+                    .is_some_and(|cursor| record.id <= cursor.identifier)
+            {
+                return None;
+            }
+            Some(ContactItem {
+                id: record.id.clone(),
+                display_name: contact_display_name(record, item_kind),
+                kind: item_kind,
+                is_account_holder: item_kind == ContactKind::AccountHolder,
+                remark: include_details.then(|| record.remark.clone()).flatten(),
+                nickname: include_details.then(|| record.nickname.clone()).flatten(),
+                alias: include_details.then(|| record.alias.clone()).flatten(),
+            })
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| left.id.cmp(&right.id));
+    let has_more = items.len() > limit;
+    items.truncate(limit);
+    let next_cursor = if has_more {
+        items
+            .last()
+            .map(|item| {
+                encode_cursor(&ContactCursor {
+                    version: CURSOR_FORMAT_VERSION,
+                    kind: "contacts.list".into(),
+                    source_identity: source.identity.clone(),
+                    contact_kind: kind.map(|kind| kind.as_str().to_string()),
+                    include_details,
+                    identifier: item.id.clone(),
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    Ok(QueryEnvelope {
+        schema: QUERY_SCHEMA,
+        format_version: QUERY_FORMAT_VERSION,
+        operation: "contacts.list",
+        ok: true,
+        source: source_description(source),
+        consistency: QueryConsistency {
+            guarantee: "singleDatabaseReadStatementSeries",
+            database_count: 1,
+            cross_database_atomic: true,
+            coverage_complete: loaded.coverage_complete,
+            observed_at_unix_milliseconds: now_unix_milliseconds(),
+        },
+        page: QueryPage {
+            limit,
+            returned: items.len(),
+            has_more,
+            next_cursor,
+        },
+        warnings: loaded.warnings,
+        items,
+    })
+}
+
+fn validate_contact_cursor(
+    source: &LiveQuerySource<'_>,
+    kind: Option<ContactKind>,
+    include_details: bool,
+    cursor: ContactCursor,
+) -> Result<ContactCursor, LiveQueryError> {
+    if cursor.version != CURSOR_FORMAT_VERSION
+        || cursor.kind != "contacts.list"
+        || cursor.source_identity != source.identity
+        || cursor.contact_kind.as_deref() != kind.map(ContactKind::as_str)
+        || cursor.include_details != include_details
+        || cursor.identifier.is_empty()
+        || cursor.identifier.len() > MAX_CONVERSATION_ID_BYTES
+    {
+        return Err(LiveQueryError::InvalidCursor(
+            "cursor does not belong to this contact filter and source".into(),
+        ));
+    }
+    Ok(cursor)
+}
+
+impl<'source, 'key> LiveCorpusReader<'source, 'key> {
+    pub(crate) fn open(source: &'source LiveQuerySource<'key>) -> Result<Self, LiveQueryError> {
+        let mut loaded_contacts = load_contact_records(source)?;
+        if let Some(account_holder) = source.account_holder_source_id() {
+            loaded_contacts
+                .records
+                .entry(account_holder.to_string())
+                .or_insert(ContactRecord {
+                    id: account_holder.to_string(),
+                    remark: None,
+                    nickname: None,
+                    alias: None,
+                    in_contact_table: false,
+                    in_chat_room_table: false,
+                });
+        }
+        let account_holder = source.account_holder_source_id();
+        let mut contacts = loaded_contacts
+            .records
+            .values()
+            .map(|record| {
+                let kind = classify_contact_id(
+                    &record.id,
+                    account_holder,
+                    record.in_contact_table,
+                    record.in_chat_room_table,
+                );
+                CorpusContact {
+                    source_id: record.id.clone(),
+                    display_name: contact_display_name(record, kind),
+                    kind,
+                    is_account_holder: kind == ContactKind::AccountHolder,
+                }
+            })
+            .collect::<Vec<_>>();
+        contacts.sort_by(|left, right| left.source_id.cmp(&right.source_id));
+        let contact_display_names = contacts
+            .iter()
+            .map(|contact| (contact.source_id.clone(), contact.display_name.clone()))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut candidate_records = loaded_contacts.records;
+        let session = source.open_database(Path::new("session/session.db"))?;
+        reset_query_deadline(&session)?;
+        let session_columns = table_columns(&session, "SessionTable")?;
+        if !session_columns.contains("username") {
+            return Err(LiveQueryError::Database(
+                "session schema is missing required column username".into(),
+            ));
+        }
+        let mut statement = session
+            .prepare("SELECT username FROM SessionTable ORDER BY username ASC")
+            .map_err(|error| database_error(&error.to_string()))?;
+        let mut rows = statement
+            .query([])
+            .map_err(|error| database_error(&error.to_string()))?;
+        let mut session_decode_failures = 0usize;
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| database_error(&error.to_string()))?
+        {
+            let id = row
+                .get_ref(0)
+                .ok()
+                .and_then(|value| decode_sqlite_text(value).ok());
+            let Some(id) = id.filter(|id| {
+                !id.is_empty() && id.len() <= MAX_CONVERSATION_ID_BYTES && !id.contains('\0')
+            }) else {
+                session_decode_failures = session_decode_failures.saturating_add(1);
+                continue;
+            };
+            candidate_records
+                .entry(id.clone())
+                .or_insert(ContactRecord {
+                    id,
+                    remark: None,
+                    nickname: None,
+                    alias: None,
+                    in_contact_table: false,
+                    in_chat_room_table: false,
+                });
+            if candidate_records.len() > MAXIMUM_CONTACT_INVENTORY_ENTRIES {
+                return Err(LiveQueryError::Database(format!(
+                    "conversation candidate inventory exceeds the fixed {MAXIMUM_CONTACT_INVENTORY_ENTRIES}-row safety limit"
+                )));
+            }
+        }
+        drop(rows);
+        drop(statement);
+        drop(session);
+
+        let open_shards = open_message_shards(source)?;
+        let mut warnings = loaded_contacts.warnings;
+        warnings.extend(open_shards.warnings.clone());
+        if session_decode_failures > 0 {
+            warnings.push(QueryWarning {
+                code: "sessionIdentifierDecodeFailed",
+                message: "one or more session identifiers could not be decoded safely".into(),
+                shard_id: None,
+                count: Some(session_decode_failures),
+            });
+        }
+
+        let mut actual_tables = BTreeMap::<String, (String, BTreeSet<u32>)>::new();
+        let mut table_inventory_complete = true;
+        for shard in &open_shards.shards {
+            reset_query_deadline(&shard.connection)?;
+            let mut statement = match shard.connection.prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'Msg_%' ORDER BY name ASC",
+            ) {
+                Ok(statement) => statement,
+                Err(_) => {
+                    table_inventory_complete = false;
+                    warnings.push(QueryWarning {
+                        code: "messageTableInventoryUnavailable",
+                        message: "a message shard table inventory could not be prepared".into(),
+                        shard_id: Some(shard.shard_id),
+                        count: None,
+                    });
+                    continue;
+                }
+            };
+            let mut rows = match statement.query([]) {
+                Ok(rows) => rows,
+                Err(_) => {
+                    table_inventory_complete = false;
+                    warnings.push(QueryWarning {
+                        code: "messageTableInventoryUnavailable",
+                        message: "a message shard table inventory could not be queried".into(),
+                        shard_id: Some(shard.shard_id),
+                        count: None,
+                    });
+                    continue;
+                }
+            };
+            loop {
+                let name = match rows.next() {
+                    Ok(Some(row)) => row.get::<_, String>(0).ok(),
+                    Ok(None) => break,
+                    Err(_) => {
+                        table_inventory_complete = false;
+                        warnings.push(QueryWarning {
+                            code: "messageTableInventoryIncomplete",
+                            message: "a message shard table inventory became unreadable".into(),
+                            shard_id: Some(shard.shard_id),
+                            count: None,
+                        });
+                        break;
+                    }
+                };
+                let Some(name) = name else {
+                    continue;
+                };
+                let Some(digest) = name.strip_prefix("Msg_") else {
+                    continue;
+                };
+                if digest.len() != 32 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    continue;
+                }
+                actual_tables
+                    .entry(digest.to_ascii_lowercase())
+                    .and_modify(|(_, shard_ids)| {
+                        shard_ids.insert(shard.shard_id);
+                    })
+                    .or_insert_with(|| (name, BTreeSet::from([shard.shard_id])));
+            }
+        }
+
+        let mut digest_candidates = BTreeMap::<String, String>::new();
+        for identifier in candidate_records.keys() {
+            let digest = format!("{:x}", md5::compute(identifier.as_bytes()));
+            if digest_candidates
+                .insert(digest, identifier.clone())
+                .is_some()
+            {
+                return Err(LiveQueryError::Database(
+                    "conversation candidate inventory contains an MD5 table-name collision".into(),
+                ));
+            }
+        }
+        let unmatched_message_table_count = actual_tables
+            .keys()
+            .filter(|digest| !digest_candidates.contains_key(*digest))
+            .count();
+        if unmatched_message_table_count > 0 {
+            warnings.push(QueryWarning {
+                code: "unmatchedMessageTable",
+                message: "one or more hashed message tables could not be mapped back to an authorized session, contact, or chat-room identifier".into(),
+                shard_id: None,
+                count: Some(unmatched_message_table_count),
+            });
+        }
+
+        let mut conversations = Vec::new();
+        for (digest, identifier) in digest_candidates {
+            let Some((table_name, shard_ids)) = actual_tables.get(&digest) else {
+                continue;
+            };
+            let record = candidate_records.get(&identifier).ok_or_else(|| {
+                LiveQueryError::Database("conversation candidate inventory changed".into())
+            })?;
+            let contact_kind = classify_contact_id(
+                &record.id,
+                account_holder,
+                record.in_contact_table,
+                record.in_chat_room_table,
+            );
+            let kind = match contact_kind {
+                ContactKind::Group => ConversationKind::Group,
+                ContactKind::Official => ConversationKind::Business,
+                ContactKind::Service | ContactKind::AccountHolder => ConversationKind::System,
+                ContactKind::Person | ContactKind::Unknown => ConversationKind::Direct,
+            };
+            conversations.push(CorpusConversation {
+                source_id: identifier,
+                display_name: contact_display_name(record, contact_kind),
+                kind,
+                contact_kind,
+                table_name: table_name.clone(),
+                shard_ids: shard_ids.iter().copied().collect(),
+            });
+        }
+        conversations.sort_by(|left, right| left.source_id.cmp(&right.source_id));
+        coalesce_warnings(&mut warnings);
+        let coverage_complete = loaded_contacts.coverage_complete
+            && table_inventory_complete
+            && unmatched_message_table_count == 0
+            && open_shards.warnings.is_empty()
+            && session_decode_failures == 0;
+        let inventory = CorpusInventory {
+            contacts,
+            conversations,
+            unmatched_message_table_count,
+            warnings,
+            coverage_complete,
+        };
+        Ok(Self {
+            source,
+            open_shards,
+            inventory,
+            contact_display_names,
+        })
+    }
+
+    pub(crate) fn inventory(&self) -> &CorpusInventory {
+        &self.inventory
+    }
+
+    pub(crate) fn scan_metadata(
+        &self,
+        conversation: &CorpusConversation,
+    ) -> Result<CorpusMetadataScan, LiveQueryError> {
+        let mut messages = Vec::new();
+        let mut warnings = Vec::new();
+        let mut coverage_complete = true;
+        for shard in self
+            .open_shards
+            .shards
+            .iter()
+            .filter(|shard| conversation.shard_ids.contains(&shard.shard_id))
+        {
+            reset_query_deadline(&shard.connection)?;
+            if !message_table_exists(&shard.connection, &conversation.table_name)? {
+                continue;
+            }
+            let Some(shape) = corpus_message_query_shape(
+                &shard.connection,
+                &conversation.table_name,
+                shard.shard_id,
+                &mut warnings,
+            )?
+            else {
+                coverage_complete = false;
+                continue;
+            };
+            let mut after_row_id = i64::MIN;
+            loop {
+                reset_query_deadline(&shard.connection)?;
+                let sql = format!(
+                    "SELECT m.rowid, m.sort_seq, m.server_id, m.local_type, {}, m.create_time \
+                     FROM [{}] m {} WHERE m.rowid > ?1 ORDER BY m.rowid ASC LIMIT ?2",
+                    shape.sender_expression, conversation.table_name, shape.sender_join,
+                );
+                let mut statement = match shard.connection.prepare(&sql) {
+                    Ok(statement) => statement,
+                    Err(_) => {
+                        coverage_complete = false;
+                        warnings.push(QueryWarning {
+                            code: "corpusMetadataQueryFailed",
+                            message: "a bounded metadata page could not be prepared".into(),
+                            shard_id: Some(shard.shard_id),
+                            count: None,
+                        });
+                        break;
+                    }
+                };
+                let mut rows = match statement
+                    .query(params![after_row_id, CORPUS_METADATA_PAGE_ROWS as i64])
+                {
+                    Ok(rows) => rows,
+                    Err(_) => {
+                        coverage_complete = false;
+                        warnings.push(QueryWarning {
+                            code: "corpusMetadataQueryFailed",
+                            message: "a bounded metadata page could not be read".into(),
+                            shard_id: Some(shard.shard_id),
+                            count: None,
+                        });
+                        break;
+                    }
+                };
+                let mut page_count = 0usize;
+                let mut page_last_row_id = after_row_id;
+                loop {
+                    let row = match rows.next() {
+                        Ok(Some(row)) => row,
+                        Ok(None) => break,
+                        Err(_) => {
+                            coverage_complete = false;
+                            warnings.push(QueryWarning {
+                                code: "corpusMetadataRowFailed",
+                                message: "a metadata row became unreadable during a bounded page"
+                                    .into(),
+                                shard_id: Some(shard.shard_id),
+                                count: Some(1),
+                            });
+                            break;
+                        }
+                    };
+                    let decoded = (|| -> Result<CorpusMessageMetadata, rusqlite::Error> {
+                        let row_id = row.get::<_, i64>(0)?;
+                        let sort_sequence = row.get::<_, i64>(1)?;
+                        let server_id = row.get::<_, i64>(2)?;
+                        let local_type = row.get::<_, i64>(3)?;
+                        let sender = row
+                            .get::<_, Option<String>>(4)?
+                            .filter(|value| !value.is_empty());
+                        let create_time = row.get::<_, i64>(5)?;
+                        let is_account_holder = sender.as_deref().and_then(|sender| {
+                            self.source
+                                .account_holder_source_id()
+                                .map(|account_holder| sender == account_holder)
+                        });
+                        Ok(CorpusMessageMetadata {
+                            location: CorpusMessageLocation {
+                                sort_sequence,
+                                create_time,
+                                server_id,
+                                shard_id: shard.shard_id,
+                                row_id,
+                            },
+                            local_type,
+                            sender,
+                            is_account_holder,
+                        })
+                    })();
+                    match decoded {
+                        Ok(message) => {
+                            page_last_row_id = message.location.row_id;
+                            messages.push(message);
+                            page_count = page_count.saturating_add(1);
+                        }
+                        Err(_) => {
+                            coverage_complete = false;
+                            warnings.push(QueryWarning {
+                                code: "corpusMetadataRowFailed",
+                                message: "a metadata row had incompatible SQLite value types"
+                                    .into(),
+                                shard_id: Some(shard.shard_id),
+                                count: Some(1),
+                            });
+                        }
+                    }
+                }
+                if page_count == 0 || page_last_row_id <= after_row_id {
+                    break;
+                }
+                after_row_id = page_last_row_id;
+                if page_count < CORPUS_METADATA_PAGE_ROWS {
+                    break;
+                }
+            }
+        }
+        messages.sort_by(|left, right| left.location.cmp(&right.location));
+        coalesce_warnings(&mut warnings);
+        Ok(CorpusMetadataScan {
+            messages,
+            warnings,
+            coverage_complete,
+        })
+    }
+
+    pub(crate) fn hydrate(
+        &self,
+        conversation: &CorpusConversation,
+        selected: &[CorpusMessageLocation],
+        maximum_text_bytes: usize,
+    ) -> Result<CorpusHydration, LiveQueryError> {
+        if maximum_text_bytes == 0 || maximum_text_bytes > MAX_PROJECTED_TEXT_BYTES {
+            return Err(LiveQueryError::InvalidArgument(format!(
+                "corpus message text bound must be between 1 and {MAX_PROJECTED_TEXT_BYTES} bytes"
+            )));
+        }
+        let selected = selected.iter().cloned().collect::<BTreeSet<_>>();
+        let mut projected = Vec::<(CorpusMessageLocation, MessageItem, bool)>::new();
+        let mut warnings = Vec::new();
+        let mut coverage_complete = true;
+        for shard in self
+            .open_shards
+            .shards
+            .iter()
+            .filter(|shard| conversation.shard_ids.contains(&shard.shard_id))
+        {
+            let locations = selected
+                .iter()
+                .filter(|location| location.shard_id == shard.shard_id)
+                .collect::<Vec<_>>();
+            if locations.is_empty() {
+                continue;
+            }
+            reset_query_deadline(&shard.connection)?;
+            if !message_table_exists(&shard.connection, &conversation.table_name)? {
+                coverage_complete = false;
+                warnings.push(QueryWarning {
+                    code: "corpusHydrationRowMissing",
+                    message: "a selected message table was no longer present during hydration"
+                        .into(),
+                    shard_id: Some(shard.shard_id),
+                    count: Some(locations.len()),
+                });
+                continue;
+            }
+            let Some(shape) = corpus_message_query_shape(
+                &shard.connection,
+                &conversation.table_name,
+                shard.shard_id,
+                &mut warnings,
+            )?
+            else {
+                coverage_complete = false;
+                continue;
+            };
+            for chunk in locations.chunks(CORPUS_HYDRATION_ROWS) {
+                reset_query_deadline(&shard.connection)?;
+                let placeholders = (1..=chunk.len())
+                    .map(|index| format!("?{index}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let sql = format!(
+                    "SELECT m.rowid, m.sort_seq, m.server_id, m.local_type, {}, m.create_time, \
+                            m.message_content, {}, {}, {}, {} \
+                     FROM [{}] m {} WHERE m.rowid IN ({placeholders})",
+                    shape.sender_expression,
+                    shape.packed_info,
+                    shape.status,
+                    shape.compression_type,
+                    shape.compressed_content,
+                    conversation.table_name,
+                    shape.sender_join,
+                );
+                let row_ids = chunk.iter().map(|location| location.row_id);
+                let mut statement = match shard.connection.prepare(&sql) {
+                    Ok(statement) => statement,
+                    Err(_) => {
+                        coverage_complete = false;
+                        warnings.push(QueryWarning {
+                            code: "corpusHydrationQueryFailed",
+                            message:
+                                "a bounded selected-message hydration query could not be prepared"
+                                    .into(),
+                            shard_id: Some(shard.shard_id),
+                            count: Some(chunk.len()),
+                        });
+                        continue;
+                    }
+                };
+                let mut rows = match statement.query(rusqlite::params_from_iter(row_ids)) {
+                    Ok(rows) => rows,
+                    Err(_) => {
+                        coverage_complete = false;
+                        warnings.push(QueryWarning {
+                            code: "corpusHydrationQueryFailed",
+                            message: "a bounded selected-message hydration query could not be read"
+                                .into(),
+                            shard_id: Some(shard.shard_id),
+                            count: Some(chunk.len()),
+                        });
+                        continue;
+                    }
+                };
+                loop {
+                    let row = match rows.next() {
+                        Ok(Some(row)) => row,
+                        Ok(None) => break,
+                        Err(_) => {
+                            coverage_complete = false;
+                            warnings.push(QueryWarning {
+                                code: "corpusHydrationRowFailed",
+                                message: "a selected message became unreadable during hydration"
+                                    .into(),
+                                shard_id: Some(shard.shard_id),
+                                count: Some(1),
+                            });
+                            break;
+                        }
+                    };
+                    let raw = match raw_message_from_row(row, shard.shard_id) {
+                        Ok(raw) => raw,
+                        Err(_) => {
+                            coverage_complete = false;
+                            warnings.push(QueryWarning {
+                                code: "corpusHydrationRowFailed",
+                                message: "a selected message had incompatible SQLite value types"
+                                    .into(),
+                                shard_id: Some(shard.shard_id),
+                                count: Some(1),
+                            });
+                            continue;
+                        }
+                    };
+                    let location = CorpusMessageLocation {
+                        sort_sequence: raw.key.sort_sequence,
+                        create_time: raw.key.create_time,
+                        server_id: raw.key.server_id,
+                        shard_id: raw.key.shard_id,
+                        row_id: raw.key.row_id,
+                    };
+                    if !selected.contains(&location) {
+                        coverage_complete = false;
+                        warnings.push(QueryWarning {
+                            code: "corpusHydrationIdentityChanged",
+                            message: "a selected row no longer matched its metadata identity and was rejected".into(),
+                            shard_id: Some(shard.shard_id),
+                            count: Some(1),
+                        });
+                        continue;
+                    }
+                    let digest =
+                        digest_text("greenbubbles-conversation-v1", &conversation.source_id);
+                    match project_message(self.source, &conversation.source_id, &digest, raw) {
+                        Ok((message, decode_failed)) => {
+                            projected.push((location, message, decode_failed));
+                        }
+                        Err(_) => {
+                            coverage_complete = false;
+                            warnings.push(QueryWarning {
+                                code: "corpusHydrationProjectionFailed",
+                                message: "a selected message could not be projected safely".into(),
+                                shard_id: Some(shard.shard_id),
+                                count: Some(1),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        let hydrated_locations = projected
+            .iter()
+            .map(|(location, _, _)| location.clone())
+            .collect::<BTreeSet<_>>();
+        let missing = selected.len().saturating_sub(hydrated_locations.len());
+        if missing > 0 {
+            coverage_complete = false;
+            warnings.push(QueryWarning {
+                code: "corpusHydrationRowMissing",
+                message: "one or more selected metadata identities were absent during hydration"
+                    .into(),
+                shard_id: None,
+                count: Some(missing),
+            });
+        }
+
+        let account_holder = self.source.account_holder_source_id();
+        let mut messages = projected
+            .into_iter()
+            .map(|(location, message, decode_failed)| {
+                let sender = (!message.sender.is_empty()).then_some(message.sender);
+                let is_account_holder = sender.as_deref().and_then(|sender| {
+                    account_holder.map(|account_holder| sender == account_holder)
+                });
+                let sender_display_name = if is_account_holder == Some(true) {
+                    Some("You".to_string())
+                } else {
+                    sender
+                        .as_ref()
+                        .and_then(|sender| self.contact_display_names.get(sender).cloned())
+                };
+                let (payload_kind, text, summarized_truncated) =
+                    summarize_decoded_payload(&message.content, maximum_text_bytes);
+                CorpusHydratedMessage {
+                    location,
+                    canonical_id: message.id,
+                    sender,
+                    sender_display_name,
+                    is_account_holder,
+                    message_type: message.message_type,
+                    message_subtype: message.message_subtype,
+                    payload_kind,
+                    text,
+                    text_truncated: message.content_truncated || summarized_truncated,
+                    content_decode_failed: decode_failed,
+                }
+            })
+            .collect::<Vec<_>>();
+        messages.sort_by(|left, right| left.location.cmp(&right.location));
+        coalesce_warnings(&mut warnings);
+        Ok(CorpusHydration {
+            messages,
+            warnings,
+            coverage_complete,
+        })
+    }
+}
+
+struct CorpusMessageQueryShape {
+    sender_expression: String,
+    sender_join: &'static str,
+    packed_info: String,
+    status: String,
+    compression_type: String,
+    compressed_content: String,
+}
+
+fn message_table_exists(connection: &Connection, table_name: &str) -> Result<bool, LiveQueryError> {
+    reset_query_deadline(connection)?;
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            [table_name],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|value| value == 1)
+        .map_err(|error| database_error(&error.to_string()))
+}
+
+fn corpus_message_query_shape(
+    connection: &Connection,
+    table_name: &str,
+    shard_id: u32,
+    warnings: &mut Vec<QueryWarning>,
+) -> Result<Option<CorpusMessageQueryShape>, LiveQueryError> {
+    reset_query_deadline(connection)?;
+    let columns = match table_columns(connection, table_name) {
+        Ok(columns) => columns,
+        Err(_) => {
+            warnings.push(QueryWarning {
+                code: "unsupportedCorpusMessageSchema",
+                message: "a message table schema could not be inspected for corpus selection"
+                    .into(),
+                shard_id: Some(shard_id),
+                count: None,
+            });
+            return Ok(None);
+        }
+    };
+    let required = [
+        "sort_seq",
+        "server_id",
+        "local_type",
+        "create_time",
+        "message_content",
+    ];
+    if required.iter().any(|column| !columns.contains(*column)) {
+        warnings.push(QueryWarning {
+            code: "unsupportedCorpusMessageSchema",
+            message: "a message table is missing required corpus-selection columns".into(),
+            shard_id: Some(shard_id),
+            count: None,
+        });
+        return Ok(None);
+    }
+    let has_name_table = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'Name2Id')",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or_default()
+        == 1;
+    let has_sender = columns.contains("real_sender_id") && has_name_table;
+    Ok(Some(CorpusMessageQueryShape {
+        sender_expression: if has_sender {
+            "COALESCE(n.user_name, '')".into()
+        } else {
+            "''".into()
+        },
+        sender_join: if has_sender {
+            "LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid"
+        } else {
+            ""
+        },
+        packed_info: optional_message_column(&columns, "packed_info_data"),
+        status: optional_message_column(&columns, "status"),
+        compression_type: optional_message_column(&columns, "WCDB_CT_message_content"),
+        compressed_content: optional_message_column(&columns, "compress_content"),
+    }))
+}
+
+fn reset_query_deadline(connection: &Connection) -> Result<(), LiveQueryError> {
+    let deadline = Instant::now() + MAXIMUM_SQL_STATEMENT_DURATION;
+    connection
+        .progress_handler(10_000, Some(move || Instant::now() >= deadline))
+        .map_err(|error| database_error(&error.to_string()))
 }
 
 pub fn list_conversations(

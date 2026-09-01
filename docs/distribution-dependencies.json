@@ -69,6 +69,33 @@
       },
       {
         "features" : [
+          "clock",
+          "std"
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "MIT OR Apache-2.0",
+        "name" : "chrono",
+        "optional" : false,
+        "requirement" : "^0.4",
+        "resolvedVersion" : "0.4.45",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : false
+      },
+      {
+        "features" : [
+
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "MIT OR Apache-2.0",
+        "name" : "chrono-tz",
+        "optional" : false,
+        "requirement" : "^0.10",
+        "resolvedVersion" : "0.10.4",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
           "std",
           "zeroize"
         ],
@@ -249,6 +276,19 @@
         "optional" : false,
         "requirement" : "^2",
         "resolvedVersion" : "2.0.20",
+        "source" : "registry+https://github.com/rust-lang/crates.io-index",
+        "usesDefaultFeatures" : true
+      },
+      {
+        "features" : [
+          "json"
+        ],
+        "kind" : "normal",
+        "licenseMetadata" : "MIT OR Apache-2.0",
+        "name" : "ureq",
+        "optional" : false,
+        "requirement" : "^2.12",
+        "resolvedVersion" : "2.12.1",
         "source" : "registry+https://github.com/rust-lang/crates.io-index",
         "usesDefaultFeatures" : true
       },

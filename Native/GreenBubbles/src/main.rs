@@ -30,6 +30,7 @@ use greenbubbles::{
     },
     diagnostic::{profile_archive_payloads_with_progress, profile_archive_schema_with_progress},
     direct_connector::DirectConnectorService,
+    direct_memory::{summarize_direct_memory_with_gemini, DirectMemorySummaryOptions},
     follow::{
         follow_replica_once, publish_replica_handoff, quarantine_retired_replica_archives,
         replica_follower_status, restore_quarantined_replica_archive,
@@ -43,14 +44,21 @@ use greenbubbles::{
     live_query::{
         find_conversations as find_live_conversations, get_message as get_live_message,
         get_search_result_message as get_live_search_result_message,
-        list_conversations as list_live_conversations, list_messages as list_live_messages,
-        search_messages as search_live_messages, serialize_query_error, serialize_query_response,
-        source_status as live_source_status, LiveQueryError, LiveQuerySource, QueryDatabaseAccess,
-        DEFAULT_PAGE_LIMIT, DEFAULT_SEARCH_LIMIT, MAX_PAGE_LIMIT, MAX_SEARCH_QUERY_BYTES,
+        list_contacts as list_live_contacts, list_conversations as list_live_conversations,
+        list_messages as list_live_messages, search_messages as search_live_messages,
+        serialize_query_error, serialize_query_response, source_status as live_source_status,
+        ContactKind, LiveQueryError, LiveQuerySource, QueryDatabaseAccess, DEFAULT_PAGE_LIMIT,
+        DEFAULT_SEARCH_LIMIT, MAX_PAGE_LIMIT, MAX_SEARCH_QUERY_BYTES,
     },
     merge::merge_incremental_archive,
     model::{ArtifactKind, ArtifactRole},
     operator::{restore_snapshot_and_publish_with_progress, OfflineRestorePublishOptions},
+    personal_memory::{
+        acknowledge_personal_memory_page, commit_personal_memory_batch,
+        commit_personal_memory_batch_reviewed_no_durable_memory, next_personal_memory_batch,
+        next_personal_memory_page, personal_memory_status,
+        prepare_personal_memory_corpus_with_progress, PERSONAL_MEMORY_CURRENT_SELECTOR,
+    },
     preflight_snapshot_with_progress, prepare_available_catalog_with_progress,
     prepare_catalog_batch_with_progress, prepare_catalog_with_progress,
     query_profile::{
@@ -150,6 +158,9 @@ fn process_query_operation() -> Option<&'static str> {
     match arguments.as_slice() {
         [command, subcommand] if command == "conversations" && subcommand == "list" => {
             Some("conversations.list")
+        }
+        [command, subcommand] if command == "contacts" && subcommand == "list" => {
+            Some("contacts.list")
         }
         [command, subcommand] if command == "source" && subcommand == "status" => {
             Some("source.status")
@@ -563,6 +574,262 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let cursor = option_string(&remaining, "--cursor")?;
             let response = list_live_conversations(&source, limit, cursor.as_deref())?;
             println!("{}", serialize_query_response(&response)?);
+        }
+        "contacts" => {
+            let subcommand = arguments
+                .next()
+                .ok_or("missing contacts subcommand; expected 'list'")?;
+            if subcommand != "list" {
+                return Err(format!(
+                    "unsupported contacts subcommand: {subcommand}; expected 'list'"
+                )
+                .into());
+            }
+            if matches!(arguments.peek().map(String::as_str), Some("--help" | "-h")) {
+                println!("{}", contacts_command_help());
+                return Ok(());
+            }
+            let (database_root, remaining) =
+                split_optional_query_source(arguments.collect::<Vec<_>>());
+            if remaining
+                .iter()
+                .any(|value| matches!(value.as_str(), "--help" | "-h"))
+            {
+                println!("{}", contacts_command_help());
+                return Ok(());
+            }
+            validate_command_options(
+                &remaining,
+                &[
+                    "--profile",
+                    "--kind",
+                    "--limit",
+                    "--cursor",
+                    "--snapshot-recovery-kit",
+                    "--snapshot-local-credential",
+                ],
+                &[
+                    "--details",
+                    "--passphrase-stdin",
+                    "--snapshot-key-stdin",
+                    "--snapshot-passphrase-stdin",
+                    "--decrypted",
+                ],
+            )?;
+            let invocation = resolve_query_invocation(database_root, &remaining)?;
+            let source = invocation.access.open_source(&invocation.source_root)?;
+            let kind = option_string(&remaining, "--kind")?
+                .map(|value| value.parse::<ContactKind>())
+                .transpose()?;
+            let include_details = remaining.iter().any(|value| value == "--details");
+            let limit = option_usize(&remaining, "--limit")?.unwrap_or(DEFAULT_PAGE_LIMIT);
+            let cursor = option_string(&remaining, "--cursor")?;
+            let response =
+                list_live_contacts(&source, kind, include_details, limit, cursor.as_deref())?;
+            println!("{}", serialize_query_response(&response)?);
+        }
+        "memory" => {
+            let subcommand = arguments.next().ok_or(
+                "missing memory subcommand; expected 'prepare', 'next', 'page', 'acknowledge', 'commit', or 'status'",
+            )?;
+            if matches!(arguments.peek().map(String::as_str), Some("--help" | "-h")) {
+                println!("{}", memory_subcommand_help(&subcommand)?);
+                return Ok(());
+            }
+            let remaining = arguments.collect::<Vec<_>>();
+            if remaining
+                .iter()
+                .any(|value| matches!(value.as_str(), "--help" | "-h"))
+            {
+                println!("{}", memory_subcommand_help(&subcommand)?);
+                return Ok(());
+            }
+            match subcommand.as_str() {
+                "prepare" => {
+                    let option_start = remaining
+                        .iter()
+                        .position(|value| value.starts_with("--"))
+                        .unwrap_or(remaining.len());
+                    let positional = &remaining[..option_start];
+                    let options = &remaining[option_start..];
+                    validate_command_options(
+                        options,
+                        &[
+                            "--profile",
+                            "--selection-policy",
+                            "--snapshot-recovery-kit",
+                            "--snapshot-local-credential",
+                        ],
+                        &[
+                            "--passphrase-stdin",
+                            "--snapshot-key-stdin",
+                            "--snapshot-passphrase-stdin",
+                            "--decrypted",
+                        ],
+                    )?;
+                    let (source_root, output) = match positional {
+                        [output] => (None, PathBuf::from(output)),
+                        [source, output] => (Some(PathBuf::from(source)), PathBuf::from(output)),
+                        _ => {
+                            return Err(
+                                "memory prepare requires <new-corpus-index> with a profile, or <source-root> <new-corpus-index> with an explicit access mode"
+                                    .into(),
+                            )
+                        }
+                    };
+                    let selection_policy =
+                        PathBuf::from(required_option(options, "--selection-policy")?);
+                    let invocation = resolve_query_invocation(source_root, options)?;
+                    let source = invocation.access.open_source(&invocation.source_root)?;
+                    let mut report_progress = |progress: &greenbubbles::personal_memory::PersonalMemoryProgress| {
+                        eprintln!(
+                            "memory prepare: {} {}/{} | {} scanned | {} selected | {} hydrated",
+                            progress.phase,
+                            progress.completed_items,
+                            progress.total_items,
+                            progress.scanned_message_count,
+                            progress.selected_message_count,
+                            progress.hydrated_message_count,
+                        );
+                    };
+                    let manifest = prepare_personal_memory_corpus_with_progress(
+                        &source,
+                        &selection_policy,
+                        &output,
+                        &mut report_progress,
+                    )?;
+                    println!("{}", serde_json::to_string_pretty(&manifest)?);
+                }
+                "next" => {
+                    let corpus = required_path(remaining.first().cloned(), "corpus index")?;
+                    if remaining.first().is_some_and(|value| value.starts_with("--")) {
+                        return Err("memory next requires the corpus index as its first argument".into());
+                    }
+                    let options = &remaining[1..];
+                    validate_command_options(
+                        options,
+                        &["--state", "--wiki", "--max-text-bytes"],
+                        &[],
+                    )?;
+                    let state = PathBuf::from(required_option(options, "--state")?);
+                    let wiki = PathBuf::from(required_option(options, "--wiki")?);
+                    let maximum = required_u64_option(options, "--max-text-bytes")?
+                        .try_into()
+                        .map_err(|_| "--max-text-bytes does not fit this platform")?;
+                    let batch = next_personal_memory_batch(
+                        &corpus,
+                        &state,
+                        Some(&wiki),
+                        maximum,
+                    )?;
+                    println!("{}", serde_json::to_string(&batch)?);
+                }
+                "page" => {
+                    let corpus = required_path(remaining.first().cloned(), "corpus index")?;
+                    if remaining.first().is_some_and(|value| value.starts_with("--")) {
+                        return Err(
+                            "memory page requires the corpus index as its first argument".into(),
+                        );
+                    }
+                    let options = &remaining[1..];
+                    validate_command_options(options, &["--state", "--batch"], &[])?;
+                    let state = PathBuf::from(required_option(options, "--state")?);
+                    let batch = option_string(options, "--batch")?
+                        .unwrap_or_else(|| PERSONAL_MEMORY_CURRENT_SELECTOR.to_string());
+                    let page = next_personal_memory_page(&corpus, &state, &batch)?;
+                    // The paging layer measures this exact compact representation
+                    // against Pi's 50-KiB built-in tool boundary.
+                    println!("{}", serde_json::to_string(&page)?);
+                }
+                "acknowledge" => {
+                    let corpus = required_path(remaining.first().cloned(), "corpus index")?;
+                    if remaining.first().is_some_and(|value| value.starts_with("--")) {
+                        return Err(
+                            "memory acknowledge requires the corpus index as its first argument"
+                                .into(),
+                        );
+                    }
+                    let options = &remaining[1..];
+                    validate_command_options(
+                        options,
+                        &["--state", "--batch", "--page-token", "--retain-evidence"],
+                        &["--reviewed-no-durable-memory"],
+                    )?;
+                    let state = PathBuf::from(required_option(options, "--state")?);
+                    let batch = option_string(options, "--batch")?
+                        .unwrap_or_else(|| PERSONAL_MEMORY_CURRENT_SELECTOR.to_string());
+                    let page_token = option_string(options, "--page-token")?
+                        .unwrap_or_else(|| PERSONAL_MEMORY_CURRENT_SELECTOR.to_string());
+                    let reviewed_no_durable_memory = options
+                        .iter()
+                        .any(|value| value == "--reviewed-no-durable-memory");
+                    let retained = option_string(options, "--retain-evidence")?
+                        .map(|value| {
+                            value
+                                .split(',')
+                                .map(str::trim)
+                                .map(str::to_string)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    if retained.iter().any(String::is_empty) {
+                        return Err("--retain-evidence must be a comma-separated list of exact evidence aliases".into());
+                    }
+                    let result = acknowledge_personal_memory_page(
+                        &corpus,
+                        &state,
+                        &batch,
+                        &page_token,
+                        &retained,
+                        reviewed_no_durable_memory,
+                    )?;
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
+                "commit" => {
+                    let corpus = required_path(remaining.first().cloned(), "corpus index")?;
+                    if remaining.first().is_some_and(|value| value.starts_with("--")) {
+                        return Err("memory commit requires the corpus index as its first argument".into());
+                    }
+                    let options = &remaining[1..];
+                    validate_command_options(
+                        options,
+                        &["--state", "--batch", "--wiki"],
+                        &["--reviewed-no-durable-memory"],
+                    )?;
+                    let state = PathBuf::from(required_option(options, "--state")?);
+                    let batch = option_string(options, "--batch")?
+                        .unwrap_or_else(|| PERSONAL_MEMORY_CURRENT_SELECTOR.to_string());
+                    let wiki = PathBuf::from(required_option(options, "--wiki")?);
+                    let result = if options
+                        .iter()
+                        .any(|value| value == "--reviewed-no-durable-memory")
+                    {
+                        commit_personal_memory_batch_reviewed_no_durable_memory(
+                            &corpus, &state, &batch, &wiki,
+                        )?
+                    } else {
+                        commit_personal_memory_batch(&corpus, &state, &batch, &wiki)?
+                    };
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
+                "status" => {
+                    let corpus = required_path(remaining.first().cloned(), "corpus index")?;
+                    if remaining.first().is_some_and(|value| value.starts_with("--")) {
+                        return Err("memory status requires the corpus index as its first argument".into());
+                    }
+                    let options = &remaining[1..];
+                    validate_command_options(options, &["--state"], &[])?;
+                    let state = option_path(options, "--state")?;
+                    let result = personal_memory_status(&corpus, state.as_deref())?;
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                }
+                _ => {
+                    return Err(format!(
+                        "unsupported memory subcommand: {subcommand}; expected 'prepare', 'next', 'page', 'acknowledge', 'commit', or 'status'"
+                    )
+                    .into())
+                }
+            }
         }
         "messages" => {
             let subcommand = arguments
@@ -2294,6 +2561,45 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 serde_json::to_string_pretty(&service.handle(request))?
             );
         }
+        "ai-summarize-direct" => {
+            let database_root = required_path(arguments.next(), "WeChat database root")?;
+            let policy = required_path(arguments.next(), "direct connector policy")?;
+            let audit = required_path(arguments.next(), "direct connector audit log")?;
+            let output = required_path(arguments.next(), "new direct memory output directory")?;
+            let remaining = arguments.collect::<Vec<_>>();
+            if remaining
+                .iter()
+                .any(|value| matches!(value.as_str(), "--help" | "-h"))
+            {
+                println!("{}", ai_summarize_direct_help());
+                return Ok(());
+            }
+            validate_command_options(
+                &remaining,
+                &[
+                    "--requester",
+                    "--max-messages-per-conversation",
+                    "--snapshot-recovery-kit",
+                    "--snapshot-local-credential",
+                ],
+                &[
+                    "--passphrase-stdin",
+                    "--snapshot-key-stdin",
+                    "--snapshot-passphrase-stdin",
+                    "--decrypted",
+                ],
+            )?;
+            let requester = required_option(&remaining, "--requester")?;
+            let mut options = DirectMemorySummaryOptions::new(requester);
+            if let Some(maximum) = option_usize(&remaining, "--max-messages-per-conversation")? {
+                options.maximum_messages_per_conversation = maximum;
+            }
+            let access = load_live_query_access(&database_root, &remaining)?;
+            let source = access.open_source(&database_root)?;
+            let manifest =
+                summarize_direct_memory_with_gemini(source, &policy, &audit, &output, options)?;
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
+        }
         "connector-serve" => {
             let replica = required_path(arguments.next(), "replica path")?;
             let policy = required_path(arguments.next(), "tool policy path")?;
@@ -2479,6 +2785,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles source status <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
                     "  greenbubbles conversations list [--profile <name>] [--limit <1..500>] [--cursor <opaque-cursor>]\n",
                     "  greenbubbles conversations list <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n",
+                    "  greenbubbles contacts list [--profile <name>] [--kind <kind>] [--limit <1..500>] [--cursor <opaque-cursor>] [--details]\n",
+                    "  greenbubbles memory prepare [<source-root>] <new-corpus-index> --selection-policy <policy.json> [access mode]\n",
+                    "  greenbubbles memory next <corpus-index> --state <run-state.json> --wiki <wiki-dir> --max-text-bytes <n>\n",
+                    "  greenbubbles memory page <corpus-index> --state <run-state.json> [--batch <id|current>]\n",
+                    "  greenbubbles memory acknowledge <corpus-index> --state <run-state.json> [--batch <id|current>] [--page-token <token|current>] (--retain-evidence <aliases> | --reviewed-no-durable-memory)\n",
+                    "  greenbubbles memory commit <corpus-index> --state <run-state.json> [--batch <id|current>] --wiki <wiki-dir> [--reviewed-no-durable-memory]\n",
+                    "  greenbubbles memory status <corpus-index> [--state <run-state.json>]\n",
                     "  greenbubbles messages list --conversation <id> [--profile <name>] [--limit <1..500>] [--cursor <opaque-cursor>]\n",
                     "  greenbubbles messages list <source-root> --conversation <id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n",
                     "  greenbubbles messages search --query-stdin [--profile <name>] [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n",
@@ -2541,6 +2854,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles connector-policy-direct <source-root> <new-policy-file> <conversation-id>... --capabilities list,read,search --fields sender,created-at,type,content (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--max-results <n>] [--max-summary-bytes <n>]\n",
                     "  greenbubbles connector-query-direct <source-root> <policy-file> <audit-log> <private-request-json> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
                     "  greenbubbles connector-serve-direct <source-root> <policy-file> <audit-log> <socket-path> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
+                    "  greenbubbles ai-summarize-direct <source-root> <policy-file> <audit-log> <new-output-directory> --requester <id> (--passphrase-stdin | --decrypted) [--max-messages-per-conversation <n>]\n",
                     "  greenbubbles connector-serve <replica-path> <policy-file> <audit-log> <draft-directory> <socket-path> --replica-key-stdin\n",
                     "  greenbubbles connector-call <socket-path> <private-request-json>\n",
                     "  greenbubbles tool-policy <archive> <policy-file> ([<conversation-id>...] | --all-conversations) [--capabilities list,read,search,draft] [--fields sender,created-at,direction,type,content,attachments,relationships] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--enable-cached-moments --cached-fields author,created-at,type,content,title,description,url,media-count,like-count,comment-count] [--cached-not-before-unix <seconds>] [--cached-not-after-unix <seconds>] [--allow-cached-remote-model] [--max-results <n>] [--max-summary-bytes <n>] [--max-draft-bytes <n>]\n",
@@ -2628,6 +2942,74 @@ const fn conversations_command_help() -> &'static str {
         "  --cursor <token>    Continue from an opaque cursor returned by the prior page\n",
         "  -h, --help          Show this help\n",
     )
+}
+
+const fn contacts_command_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles contacts list [--profile <name>] [--kind <kind>] [--limit <1..500>] [--cursor <opaque-cursor>] [--details]\n",
+        "  greenbubbles contacts list <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--kind <kind>] [--limit <1..500>] [--cursor <opaque-cursor>] [--details]\n\n",
+        "Returns one bounded, source-bound, keyset-paginated JSON contact page directly\n",
+        "from contact.db. The account holder is identified only by the authenticated\n",
+        "account-directory ID. A person is an ordinary address-book row; it is not proof\n",
+        "of a current reciprocal friendship. No archive or derived index is created.\n\n",
+        "Kinds: account-holder, person, group, official, service, unknown\n\n",
+        "Options:\n",
+        "  --kind <kind>       Restrict the page to one conservative contact kind\n",
+        "  --details           Include remark, nickname, and alias fields\n",
+        "  --limit <n>         Return 1..500 contacts; default 100\n",
+        "  --cursor <token>    Continue the exact same source/filter page\n",
+        "  --profile <name>    Use a named private query profile\n",
+        "  --passphrase-stdin  Read the live WeChat key from standard input\n",
+        "  --decrypted         Explicitly query plaintext SQLite database files\n",
+        "  -h, --help          Show this help\n",
+    )
+}
+
+const fn memory_command_help() -> &'static str {
+    concat!(
+        "Usage:\n",
+        "  greenbubbles memory prepare <new-corpus-index> --selection-policy <policy.json> [--profile <name>]\n",
+        "  greenbubbles memory prepare <source-root> <new-corpus-index> --selection-policy <policy.json> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
+        "  greenbubbles memory next <corpus-index> --state <run-state.json> --wiki <wiki-dir> --max-text-bytes <16384..2097152>\n",
+        "  greenbubbles memory page <corpus-index> --state <run-state.json> [--batch <id|current>]\n",
+        "  greenbubbles memory acknowledge <corpus-index> --state <run-state.json> [--batch <id|current>] [--page-token <token|current>] (--retain-evidence <E#########,E#########> | --reviewed-no-durable-memory)\n",
+        "  greenbubbles memory commit <corpus-index> --state <run-state.json> [--batch <id|current>] --wiki <wiki-dir> [--reviewed-no-durable-memory]\n",
+        "  greenbubbles memory status <corpus-index> [--state <run-state.json>]\n\n",
+        "prepare performs one local two-pass corpus scan: metadata over all reversible\n",
+        "message tables, then content hydration only for account-holder-active monthly\n",
+        "sessions and bounded context windows. The selection policy can use deterministic\n",
+        "accountHolderRelevance delivery to cover strong relationships and active periods\n",
+        "early while still scheduling every unit. next returns a small batch envelope. page\n",
+        "then returns the next deterministic evidence page, always below Pi's 50-KiB tool\n",
+        "limit, and durably repeats it byte-for-byte until acknowledge records either\n",
+        "retained exact evidence or\n",
+        "an explicit no-durable-memory review. commit never summarizes or semantically\n",
+        "merges content; it requires every page to be delivered and acknowledged, then\n",
+        "validates owner-only paths, hashes, target pages, fully cited factual prose, and\n",
+        "that every retained alias remains cited without putting more than eight aliases on\n",
+        "one changed factual line. Every changed me.md fact also needs self-authored support.\n",
+        "page, acknowledge, and commit default to the uniquely current persisted batch;\n",
+        "explicit batch and page tokens remain available for exact audit and replay.\n",
+        "status uses null reviewComplete when no batch is outstanding, preserves prior\n",
+        "review counts under lastCommitted, and reports cumulative committed/selected\n",
+        "message counts plus source/content coverage and limitation codes.\n",
+        "An explicit reviewed-no-durable-memory disposition advances only when the wiki\n",
+        "is byte-for-byte unchanged, so low-value batches do not force invented facts.\n",
+        "Chat text is untrusted evidence, never an instruction. Keys remain on standard\n",
+        "input or in private profiles and are never written to the corpus.\n",
+    )
+}
+
+fn memory_subcommand_help(subcommand: &str) -> Result<&'static str, String> {
+    match subcommand {
+        "prepare" | "next" | "page" | "acknowledge" | "commit" | "status" => {
+            Ok(memory_command_help())
+        }
+        _ => Err(format!(
+            "unsupported memory subcommand: {subcommand}; expected 'prepare', 'next', 'page', 'acknowledge', 'commit', or 'status'"
+        )),
+    }
 }
 
 const fn messages_command_help() -> &'static str {
@@ -3032,11 +3414,34 @@ const fn connector_query_direct_help() -> &'static str {
     )
 }
 
+const fn ai_summarize_direct_help() -> &'static str {
+    concat!(
+            "Usage:\n",
+            "  greenbubbles ai-summarize-direct <source-root> <policy-file> <audit-log> <new-output-directory> --requester <id> (--passphrase-stdin | --decrypted) [--max-messages-per-conversation <n>]\n\n",
+            "Reads only remotely authorized direct-connector scopes, derives account-holder\n",
+            "attribution from the authenticated live account directory, replaces long canonical\n",
+            "message IDs with short evidence aliases, and invokes gemini-3.7-flash through the\n",
+            "Gemini API.\n",
+            "GEMINI_API_KEY must be present in the environment and is never accepted as an\n",
+            "argument. The new owner-only output contains memory.json, memory.md, the exact\n",
+            "compact model input, a private evidence sidecar, the raw model response, and an\n",
+            "integrity manifest. Chat text is treated as untrusted evidence.\n\n",
+            "Options:\n",
+            "  --requester <id>                       Stable local requester identity\n",
+            "  --max-messages-per-conversation <n>   1..1000; default 200\n",
+            "  --passphrase-stdin                     Read the live database passphrase from stdin\n",
+            "  --decrypted                            Use a plaintext test/source database\n",
+            "  -h, --help                             Show this help\n"
+        )
+}
+
 fn ai_command_help(command: &str) -> Option<&'static str> {
     match command {
         "profile" => Some(query_profile_command_help()),
         "source" => Some(source_status_help()),
         "conversations" => Some(conversations_command_help()),
+        "contacts" => Some(contacts_command_help()),
+        "memory" => Some(memory_command_help()),
         "messages" => Some(messages_command_help()),
         "message" => Some(message_get_help()),
         "attachment" => Some(attachment_command_help()),
@@ -3044,6 +3449,7 @@ fn ai_command_help(command: &str) -> Option<&'static str> {
         "connector-policy-direct" => Some(connector_policy_direct_help()),
         "connector-query-direct" => Some(connector_query_direct_help()),
         "connector-serve-direct" => Some(connector_serve_direct_help()),
+        "ai-summarize-direct" => Some(ai_summarize_direct_help()),
         "send" => Some(send_command_help()),
         "audit-replica" => Some(concat!(
             "Usage:\n",

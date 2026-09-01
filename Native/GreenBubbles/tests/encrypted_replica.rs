@@ -1780,6 +1780,7 @@ fn exports_policy_scoped_ai_context_and_queries_without_a_daemon() {
     assert!(messages.contains(PRIVATE_TEXT));
     assert!(messages.contains("\"sourceDatabaseFreshness\":\"fresh\""));
     assert!(messages.contains("\"senderDisplayName\":\"You\""));
+    assert!(messages.contains("\"isAccountHolder\":true"));
     assert!(messages.contains("\"direction\":\"outgoing\""));
     assert!(!messages.contains("rawColumns"));
     assert!(!messages.contains("sourceLogicalPath"));
