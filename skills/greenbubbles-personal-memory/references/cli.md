@@ -21,7 +21,7 @@ greenbubbles contacts list [SOURCE] [--profile NAME] \
 
 Follow `page.nextCursor` until `page.hasMore` is false only when the task actually needs the full contact list. Preserve the filter and `--details` setting across pages; cursors are bound to them.
 
-## Prepare the corpus once
+## Prepare one canonical corpus
 
 Create the output parent with mode `0700`. The output itself must not exist.
 
@@ -33,25 +33,59 @@ greenbubbles memory prepare SOURCE NEW_CORPUS \
   --selection-policy POLICY.json --passphrase-stdin < PRIVATE_KEY_FILE
 ```
 
-`prepare` scans reversible message-table metadata in bounded SQL pages, identifies self-authored messages by authenticated account-ID equality, selects account-holder-active calendar-month sessions, and hydrates only merged context windows. It atomically creates:
+Use the v2 `allMessages` policy. `prepare` scans every inventoried message table in bounded SQL pages, identifies self-authored messages only by authenticated account-ID equality, and hydrates every eligible row. A hashed table that cannot be mapped to a source conversation is retained under a stable unresolved conversation alias; `unmatchedMessageTable` remains a coverage limitation because its identity is unavailable. Preparation atomically creates:
 
-`deliveryOrder` accepts `accountHolderRelevance` or `chronological`. The former
-is recommended for a new whole-corpus wiki. It changes only the immutable unit
-schedule; selection counts, source evidence and eventual full traversal are
-unchanged.
+`deliveryOrder` accepts `accountHolderRelevance` or `chronological`. The former is recommended for a new wiki. It changes only immutable unit scheduling; the canonical evidence set and eventual full traversal are unchanged. Legacy v1 policies still produce account-holder-active episode corpora and remain readable, but cannot prove whole-database review.
 
 ```text
 NEW_CORPUS/
   manifest.json
   coverage.json
   contacts.jsonl
+  conversations.jsonl
   activity.jsonl
   evidence.jsonl
   batches/index.json
   batches/U######.json
 ```
 
+New corpora use a compact v2 `batches/index.json`: evidence runs are represented
+by their first ordinal, repeated target paths are represented by person/sender
+keys, and verbose identity records stay deduplicated in sidecars. An all-message
+state does not repeat every canonical unit selection. Model pages then expose
+the real identity record once per used person or conversation rather than on
+every message, while stable `E#########` citations remain compact. Existing v1
+indexes remain readable when their identity sidecars are complete.
+
 Do not feed these sidecars wholesale to the model. `memory next` is the token-bounded interface.
+
+## Choose evidence scope and summary subject
+
+Put the scope directly on every `memory next` invocation. There is no scope JSON file:
+
+```sh
+greenbubbles memory next CORPUS \
+  --state RUN_STATE.json --wiki WIKI --max-text-bytes 524288 \
+  --conversation C000449 --conversation C000731 \
+  --conversation-kind group \
+  --from 2023-12-01T00:00:00+08:00 \
+  --through 2023-12-31T23:59:59+08:00 \
+  --sender self --sender P000123 \
+  --subject account-holder
+```
+
+The evidence filters are:
+
+- repeatable `--conversation`: an exact source conversation ID or stable `C######` key;
+- repeatable `--conversation-kind`: `direct`, `group`, `official`, or `service`;
+- `--from` and `--through`: inclusive RFC 3339 bounds with an explicit numeric offset or `Z`;
+- repeatable `--sender`: a source person ID or `P######` key. `self` and `accountHolder` select the authenticated account holder; `unknown` explicitly selects unresolved senders.
+
+Values within one repeatable category are ORed. The conversation, kind, time, and sender categories intersect. Omitting all four categories means every hydrated message in the canonical corpus; omitting `--sender` means every sender, never self-only.
+
+`--subject` controls wiki focus without changing evidence selection. It defaults to `account-holder`; use `person:<source-id-or-P######>` for another person or `none` for conversation-centric memory. Unknown, duplicate, oversized, ambiguous, inverted, offset-free, or malformed values fail before state creation.
+
+RFC 3339 fractional bounds are applied exactly to the source's whole-second timestamps: a fractional `--from` advances to the next whole second, while a fractional `--through` retains its containing whole second. Returned scope times are the effective bounds normalized to the corpus timezone.
 
 ## Process one durable batch
 
@@ -62,12 +96,20 @@ so increasing the batch bound does not make a page unreadable by Pi.
 
 ```sh
 greenbubbles memory next NEW_CORPUS \
-  --state RUN_STATE.json --wiki WIKI --max-text-bytes 524288
+  --state RUN_STATE.json --wiki WIKI --max-text-bytes 524288 \
+  [SCOPE ARGUMENTS]
 ```
 
-Keep `RUN_STATE.json` and `WIKI` outside the project and source control. `next`
+Keep `RUN_STATE.json` and `WIKI` outside the project and source control. Repeat the exact scope arguments on every `memory next`; supplying no evidence filters explicitly requests the whole corpus. A state cannot change scope while a batch is outstanding or the current scope is incomplete. After completion, a different set of arguments serially rebinds the state, preserves the committed wiki snapshot, and records the completed scope.
+
+For an unfiltered canonical scope, state records the all-message binding and
+count without serializing one redundant all-selected record for every unit.
+Sender-filter planning first uses compact sender-presence metadata as a safe
+negative filter, then verifies exact matches inside candidate units.
+
+`next`
 returns only a small envelope. Inspect `delivery` for the page count, progress,
-fixed output ceiling, and `deliveryOrder`. The persisted state already
+fixed output ceiling, `deliveryOrder`, and the resolved scope summary. The persisted state already
 identifies this uniquely current batch, so ordinary agent calls do not need to
 copy its opaque `batchId`. The envelope contains no chat messages.
 `accountHolderRelevance` is a deterministic weighted schedule:
@@ -92,13 +134,16 @@ The page contains:
   delivered page from state.
 - `page.number`, `page.pageCount`, `messageCount`, and `textByteCount`.
 - `targetPages`: the only Markdown paths this page can inform.
-- `people`: stable `P######` aliases to display names for this page.
+- `accountHolder`: the authenticated owner's real source ID and best available display name, plus distinct remark, nickname, and WeChat alias fields when the source contains them.
+- `people`: stable `P######` join keys to real source IDs, display names, remarks, nicknames, and WeChat aliases for this page.
+- `conversations`: stable `C######` join keys to real source IDs, titles, and kinds for this page.
+- `scope`: filter counts, whether the evidence scope is all messages, and the resolved summary subject.
 - `episodes`: chronological prepared-unit fragments. `u` is the unit alias,
   `o` is the fragment's zero-based message offset, and `n` is the unit's total
   message count; the same unit may continue on the next page.
 - In each episode, `c` is the stable conversation alias and `m` is its message array.
 - In each message, `e` is the evidence alias, `a` is `self`, `other`, or
-  `unknown`, `p` is an optional person alias, `t` is Unix time, `k` is payload
+  `unknown`, `p` is an optional person join key, `t` is RFC 3339 in the corpus timezone, `k` is payload
   kind, `x` is concise text, and `tr=true` means only that this message's text
   reached the configured per-message bound. It is not a page/tool truncation
   signal; only an explicit shell-tool truncation notice makes the page unsafe
@@ -111,7 +156,12 @@ WIKI/
   index.md
   me.md
   people/P######.md
+  conversations/C######.md
 ```
+
+Treat conversation pages as chronological leaf memory, person and `me.md` pages as durable rollups, and `index.md` as navigation plus a compact global overview. A page for an account-holder subject can target `me.md`, relevant people, and relevant conversations. A person subject targets that person's page and relevant conversations. A `none` subject targets conversation pages, not `me.md`. Do not promote every line upward: retain durable facts, relationship changes, dated events, conflicts, and patterns while leaving transient chatter represented only by explicit review accounting.
+
+Use real names and titles in every heading, link label, and prose reference. Keep `P######` and `C######` only in collision-safe paths and machine joins. When the source has no display label, use its real source ID; never invent `Person P######`, `Group C######`, or another anonymous substitute. Preserve distinct remark, nickname, and alias values in page metadata when they differ.
 
 Use stable headings and comprehensive but concise factual bullets. Put exact
 citations on every factual prose line, for example:
@@ -205,8 +255,9 @@ greenbubbles memory status NEW_CORPUS --state RUN_STATE.json
 
 - After interruption, call `next` with the same state and wiki.
 - Status reports `scannedMessageCount`, `selectedMessageCount`, cumulative
-  `committedMessageCount`, source/content coverage flags, unmatched-table count,
-  and aggregate `limitationCodes`. Use these fields for the final handoff; do
+  `committedMessageCount`, `eligibleMessageCount`, `corpusMessageCount`, resolved
+  `scope`, `completedScopeCount`, source/content coverage flags, unmatched-table count,
+  and aggregate `limitationCodes`. `corpusMessageCount` is the hydrated canonical evidence count; `selectedMessageCount` is the current scope's matched count. Use these fields for the final handoff; do
   not open private corpus sidecars from Pi.
 - `reviewComplete` and the outstanding review counters are `null`/zero when no
   batch is outstanding. After commit, use the `lastCommitted` object for the
@@ -222,4 +273,4 @@ greenbubbles memory status NEW_CORPUS --state RUN_STATE.json
   limitations into the handoff and never infer what missing messages said.
 - Batch commit requires `acknowledgedPageCount == outstandingPageCount` and
   `reviewComplete=true`. Corpus completion additionally requires no outstanding
-  batch and `nextUnitIndex == unitCount`.
+  batch and `nextUnitIndex == unitCount`. This proves whole-corpus review only when `scope.allMessages` is true on a canonical v2 corpus. Otherwise it proves completion of that exact scoped view.

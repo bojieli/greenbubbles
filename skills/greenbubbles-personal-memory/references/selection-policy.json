@@ -1,6 +1,7 @@
 {
-  "schema": "greenbubbles.personal-memory-selection-policy.v1",
-  "formatVersion": 1,
+  "schema": "greenbubbles.personal-memory-selection-policy.v2",
+  "formatVersion": 2,
+  "corpusMode": "allMessages",
   "timezone": "Asia/Singapore",
   "minimumSelfMessagesPerActiveMonth": 1,
   "recentLookbackMonths": 12,
@@ -17,6 +18,6 @@
   "deliveryOrder": "accountHolderRelevance",
   "includeDirectConversations": true,
   "includeGroupConversations": true,
-  "includeOfficialAccounts": false,
-  "includeServiceAccounts": false
+  "includeOfficialAccounts": true,
+  "includeServiceAccounts": true
 }
