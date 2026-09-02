@@ -1836,6 +1836,7 @@ impl<'source, 'key> LiveCorpusReader<'source, 'key> {
             });
         }
 
+        let matched_digests = digest_candidates.keys().cloned().collect::<BTreeSet<_>>();
         let mut conversations = Vec::new();
         for (digest, identifier) in digest_candidates {
             let Some((table_name, shard_ids)) = actual_tables.get(&digest) else {
@@ -1861,6 +1862,26 @@ impl<'source, 'key> LiveCorpusReader<'source, 'key> {
                 display_name: contact_display_name(record, contact_kind),
                 kind,
                 contact_kind,
+                table_name: table_name.clone(),
+                shard_ids: shard_ids.iter().copied().collect(),
+            });
+        }
+        // Preserve row coverage even when the source no longer exposes a reversible
+        // session/contact identifier for a hashed message table. The synthetic source
+        // identity records the actual hashed table digest because no reversible source
+        // conversation ID exists. Personal-memory pages preserve that unresolved source
+        // identity alongside their stable C###### join key. Coverage still reports the
+        // mapping limitation, so callers never confuse complete row traversal with
+        // recovered conversation identity.
+        for (digest, (table_name, shard_ids)) in &actual_tables {
+            if matched_digests.contains(digest) {
+                continue;
+            }
+            conversations.push(CorpusConversation {
+                source_id: format!("unresolved-table:{digest}"),
+                display_name: "Unresolved conversation".into(),
+                kind: ConversationKind::Unresolved,
+                contact_kind: ContactKind::Unknown,
                 table_name: table_name.clone(),
                 shard_ids: shard_ids.iter().copied().collect(),
             });
