@@ -1,18 +1,22 @@
-# Personal-memory corpus and Pi workflow
+# Personal-memory corpus and agent workflow
 
 GreenBubbles can turn a large live WeChat history into a sequence of concise,
 evidence-grounded batches for one ReAct agent. One canonical `memory prepare`
 process indexes every eligible message. A run scope can then select one or more
 conversations, an inclusive time range, one or more message senders, or any
 combination without rescanning the encrypted database. Empty evidence filters
-mean the entire canonical corpus. Pi receives only deterministic `memory page`
-responses; it never needs thousands of `messages list` calls, and GreenBubbles
-never writes the semantic wiki itself.
+mean the entire canonical corpus. The agent receives only deterministic
+`memory page` responses; it never needs thousands of `messages list` calls, and
+GreenBubbles never writes the semantic wiki itself.
 
 The project skill is
 [`skills/greenbubbles-personal-memory`](../skills/greenbubbles-personal-memory/SKILL.md).
-Project-local Pi sessions discover it through [`.pi/settings.json`](../.pi/settings.json).
-No Pi extension, custom shell tool, daemon or multi-agent runtime is required.
+Project-local Pi sessions discover it through [`.pi/settings.json`](../.pi/settings.json),
+and the parallel driver below carries the same skill in the prompt for harnesses
+that do not read it from disk. Pi is the default and the runtime every example
+here uses, but nothing in the protocol is specific to it: any coding agent that
+can run a command and edit a file will do. No extension, custom shell tool,
+daemon or multi-agent runtime is required.
 
 ## Canonical corpus and scoped views
 
@@ -370,6 +374,18 @@ least N messages and drops the rest of that group's history. `--group-kind`
 chooses which kinds the gate applies to; `--group-min-self-per-month 0` disables
 it and keeps every conversation whole.
 
+The default of 5 comes from measuring this corpus rather than from taste. At 5
+the run keeps 446,435 messages in 50 scopes; at 10 it keeps 436,345, which saves
+about 2% of the bill while dropping 138 groups, so the stricter gate buys almost
+nothing and loses real history. Raising it further only sharpens that trade:
+234 groups have at least one month above 10, but only 32 have three such months,
+so a high gate keeps the same handful of groups you would have named anyway. The
+tempting alternative — keep only the days you spoke in — reads the fewest
+messages of all, 426,507, and still costs two to three times more, because it
+scatters them across 2,732 scopes and the run pays per invocation. Lower the
+gate to widen coverage, raise it to trim, but check the printed scope count
+along with the message count.
+
 Scopes are then built per window rather than per conversation. Every whole
 conversation in a shard is read under one binding, and every gated group sharing
 a month is read under one month binding, so the number of agent invocations
@@ -391,6 +407,69 @@ only after the current one is complete, which is what a run state permits;
 skips them. Everything is resumable: re-running continues from each shard's
 committed state. Cost is per message and does not change with parallelism; wall
 clock falls to roughly the heaviest shard.
+
+### Any coding agent, and any provider behind it
+
+`run` shells out to a coding agent, and which one is mostly a cost decision.
+The measured API price of a full run is in the hundreds of dollars, while the
+coding-agent subscriptions many people already pay for include the same class of
+model at a flat monthly rate. `--agent pi` (the default), `--agent claude`,
+`--agent codex` and `--agent gemini` each drive that harness the way it expects:
+non-interactive, approvals off, and with the shard directory made writable,
+since the state file and the wiki live outside the repository on purpose.
+`--agent command --agent-command '<template>'` runs anything else — `{prompt}`,
+`{model}`, `{cwd}` and `{directory}` are substituted, and a template with no
+`{prompt}` receives the prompt on standard input.
+
+```sh
+# A subscription instead of a metered key.
+python3 scripts/personal-memory-parallel.py run \
+  --run /private/path/run --agent claude
+
+# A third-party router instead of the first-party API.
+export OPENROUTER_API_KEY=...
+python3 scripts/personal-memory-parallel.py run \
+  --run /private/path/run \
+  --base-url https://openrouter.ai/api/v1 \
+  --model google/gemini-3.7-flash
+```
+
+A subscription only pays for the run if the harness actually uses it. Several
+harnesses prefer an API key over the login when both are present — Claude Code
+says so on stderr and then bills the key — so a bare `--env NAME` removes that
+variable for the agent process alone (`--env ANTHROPIC_API_KEY`), leaving your
+own shell untouched. It is worth checking the first batch's stderr in the shard
+log before starting a run that will make thousands of calls.
+
+Only Pi is configured to discover the project skill from disk, so every other
+harness is given the same skill text inside its prompt. That is `--skill inline`,
+the default everywhere except Pi; `--skill discover` leaves it to the harness.
+An agent that carries the skill has no reason to sit in the source tree, so it
+runs from its own shard directory and cannot leave stray files in the checkout.
+
+A third-party router is the other way to pay less: OpenRouter, Krill AI and
+similar gateways serve the same models well below first-party prices.
+`--base-url` points the run at one. Claude Code, Codex and Gemini CLI each read
+an endpoint from their own environment variable, so the driver sets that
+variable; Pi has no such variable, so the driver writes a private `models.json`
+into a run-local agent directory and points `PI_CODING_AGENT_DIR` at it, which
+leaves `~/.pi/agent` untouched. `--api-key-env` names the environment variable
+holding the key — only the name is ever written to disk, never the key —
+`--api-type`, `--context-window` and `--max-output-tokens` describe the endpoint,
+`--env NAME=VALUE` passes anything else to the agent process alone (and a bare
+`--env NAME` removes a variable), and
+`--agent-arg` passes a flag straight through to the harness.
+
+Because the printed estimate is only true of a metered key,
+`plan --usd-per-1k-messages` re-prices it: pass what your provider charges, or
+`0` for a subscription harness, and the estimate says so instead of quoting a
+number that does not apply.
+
+One caveat is worth knowing. `memory page` releases up to 49,152 bytes at a
+time, and some harnesses truncate long tool output below that; a truncated page
+must not be acknowledged, so the shard stalls rather than recording something it
+did not read. The driver raises Claude Code's `BASH_MAX_OUTPUT_LENGTH` for this
+reason, and `--env` or `--agent-arg` can raise the equivalent limit elsewhere.
 
 `merge` combines the shard wikis into a derived wiki: people pages and `me.md`
 are merged with duplicate lines dropped, and `index.md` is regenerated. A gated

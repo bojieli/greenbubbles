@@ -182,10 +182,11 @@ private sidecar for citation verification.
 There is an agent skill in [`skills/`](skills/greenbubbles-context/SKILL.md) that
 teaches a compatible assistant to use this properly.
 
-For a whole-history personal wiki, use the dedicated Pi skill instead of
-enumerating message pages. One local process prepares a canonical corpus from
-every eligible message, then reusable run scopes select any combination of
-conversations, inclusive time bounds, and senders. Pi iteratively refines one
+For a whole-history personal wiki, use the dedicated personal-memory skill
+instead of enumerating message pages. One local process prepares a canonical
+corpus from every eligible message, then reusable run scopes select any
+combination of conversations, inclusive time bounds, and senders. A coding agent
+— Pi, Claude Code, Codex, Gemini CLI, or your own — iteratively refines one
 cited Markdown wiki from crash-safe, byte-bounded batches; if those evidence
 filters are all empty, the run covers the entire hydrated corpus:
 

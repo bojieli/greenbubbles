@@ -92,7 +92,7 @@ RFC 3339 fractional bounds are applied exactly to the source's whole-second time
 Create the wiki and state parent as owner-only directories. A practical Gemini
 3.7 Flash starting bound is 524288 text bytes; it must be at least
 `manifest.json.largestUnitTextBytes`. Page output remains independently capped,
-so increasing the batch bound does not make a page unreadable by Pi.
+so increasing the batch bound does not make a page unreadable.
 
 ```sh
 greenbubbles memory next NEW_CORPUS \
@@ -125,8 +125,10 @@ greenbubbles memory page NEW_CORPUS \
 ```
 
 Each compact page, including its JSON envelope and newline, is at most 49152
-bytes, below Pi's 51200-byte built-in tool-output limit. A retry before
-acknowledgement is byte-identical. Never acknowledge output marked as truncated.
+bytes, below Pi's 51200-byte built-in tool-output limit. A harness with a lower
+tool-output ceiling must have it raised, or it will truncate a complete page. A
+retry before acknowledgement is byte-identical. Never acknowledge output marked
+as truncated.
 The page contains:
 
 - `pageToken` and `pageSHA256`: deterministic bindings retained for audit and
@@ -258,7 +260,7 @@ greenbubbles memory status NEW_CORPUS --state RUN_STATE.json
   `committedMessageCount`, `eligibleMessageCount`, `corpusMessageCount`, resolved
   `scope`, `completedScopeCount`, source/content coverage flags, unmatched-table count,
   and aggregate `limitationCodes`. `corpusMessageCount` is the hydrated canonical evidence count; `selectedMessageCount` is the current scope's matched count. Use these fields for the final handoff; do
-  not open private corpus sidecars from Pi.
+  not open private corpus sidecars from the agent.
 - `reviewComplete` and the outstanding review counters are `null`/zero when no
   batch is outstanding. After commit, use the `lastCommitted` object for the
   preceding batch's reviewed page, message and retained-evidence counts.

@@ -86,11 +86,13 @@ spelling out:
   `ai-summarize-direct` orchestrator can make one explicit Gemini HTTPS request
   only after the connector has enforced remote-model policy; chat text cannot
   select the endpoint, model, scope, or credentials.
-- The Pi personal-memory skill uses Pi's existing shell and file tools. It adds
-  no GreenBubbles network client or agent runtime. Chat text cannot select a
-  shell command: it is explicitly marked untrusted evidence and only the skill
-  workflow chooses fixed `memory next`, `page`, `acknowledge`, and `commit`
-  operations.
+- The personal-memory skill uses the coding agent's existing shell and file
+  tools, whichever agent runs it. It adds no GreenBubbles network client or
+  agent runtime. Chat text cannot select a shell command: it is explicitly
+  marked untrusted evidence and only the skill workflow chooses fixed
+  `memory next`, `page`, `acknowledge`, and `commit` operations. Pointing a run
+  at a different model provider changes who serves the model, not what leaves
+  this boundary: the released bytes are the same deterministic pages.
 - Draft creation writes a new mode-`0600` record into an owner-only directory
   and cannot mutate WeChat state.
 - Sending lives in a separate command (`greenbubbles send`) reachable only from

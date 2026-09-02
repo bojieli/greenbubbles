@@ -332,18 +332,19 @@ account-holder relevance and active-period coverage, rather than exhausting
 the oldest conversation slice first; the schedule still traverses every
 prepared unit.
 
-One Pi ReAct agent updates `conversations/C######.md`, `me.md`,
+One ReAct agent updates `conversations/C######.md`, `me.md`,
 `people/P######.md` and `index.md` directly according to the resolved subject.
-GreenBubbles does not semantically merge prose. Pi updates useful target pages
-before acknowledging each fully read evidence page. The crash-safe `commit`
+GreenBubbles does not semantically merge prose. The agent updates useful target
+pages before acknowledging each fully read evidence page. The crash-safe `commit`
 step validates immutable input hashes, complete page review, allowed page paths,
 and exact retained/cited evidence before it advances to the next batch. The
 uncommitted page and batch are returned again after a restart.
 
 The complete algorithm, policy and command contract are in
 [PERSONAL_MEMORY.md](PERSONAL_MEMORY.md). Pi discovers the project skill at
-`skills/greenbubbles-personal-memory` through `.pi/settings.json`; no custom
-agent runtime or tool extension is present.
+`skills/greenbubbles-personal-memory` through `.pi/settings.json`, and other
+harnesses receive the same skill text in their prompt; no custom agent runtime
+or tool extension is present.
 
 ## Progress
 

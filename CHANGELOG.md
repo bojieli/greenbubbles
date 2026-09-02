@@ -47,9 +47,25 @@ Notable changes to GreenBubbles are documented here. The project follows
   the cost of a large WeChat history sits. Shards bind their scopes one at a
   time in order, and scopes are grouped by time window rather than by
   conversation, so invocation overhead follows the windows, not the thousands
-  of conversations.
+  of conversations. The run summary now counts what an unfinished scope has
+  already committed, so stopping at the batch budget no longer reports zero.
+- Added harness and provider choice to `scripts/personal-memory-parallel.py`,
+  because the model bill, not the corpus, is what makes a full run expensive.
+  `--agent` runs the batches under Pi, Claude Code, Codex, or Gemini CLI, and
+  `--agent command` under any other harness, so a coding-agent subscription can
+  do work that would otherwise be charged per message to an API key. `--base-url`
+  points a run at a third-party router such as OpenRouter or Krill AI instead of
+  the first-party API; for Pi, which has no endpoint variable, the driver writes
+  a run-local `models.json` and leaves the user's own configuration alone. Keys
+  are passed by variable name and never written to the plan, the log, or the
+  prompt. Harnesses that do not discover the project skill receive its text in
+  the prompt and run from their own shard directory, and
+  `plan --usd-per-1k-messages` re-prices the estimate for the provider actually
+  in use.
 - Added a Pi-discoverable `greenbubbles-personal-memory` Agent Skill and
-  project `.pi/settings.json` integration; Pi remains the only ReAct runtime.
+  project `.pi/settings.json` integration. Pi remains the default ReAct runtime
+  and the one the examples use, but the skill is the whole contract: no
+  extension, custom tool, or daemon is required of any agent that runs it.
 
 ### Fixed
 
