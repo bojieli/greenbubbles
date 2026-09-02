@@ -115,7 +115,14 @@ independently defaults to `account-holder`, accepts `person:<selector>`, or may
 be `none` for conversation-centric memory. Every agent-visible memory timestamp
 is RFC 3339 in the corpus timezone. `memory next` selects a
 16 KiB..2 MiB, at-most-5,000-message batch but returns only its small delivery
-envelope. New corpora can use the deterministic `accountHolderRelevance` order
+envelope. `--max-text-bytes` bounds stored chat text; optional `--max-messages`
+additionally bounds the per-message delivery envelope that text bytes do not
+predict, which is what a caller sizing a batch against a fixed agent context
+window needs. It is a soft bound: it stops a batch taking another unit, and
+never splits or refuses the one unit a batch must deliver whole. Sticker,
+location and system payloads reach the agent as the human text inside their
+WeChat markup envelope rather than as verbatim XML, and the account holder is
+labelled `Me` beside their source id. New corpora can use the deterministic `accountHolderRelevance` order
 to cover self-active relationships and months early; it still schedules every
 canonical unit.
 `memory page`
@@ -126,7 +133,9 @@ uniquely current persisted batch and delivered page. Explicit `--batch` and
 `--page-token` bindings remain available for operator audit and replay. An
 ordinary `memory commit` needs cited factual prose, rejects both unretained
 citations, retained-but-uncited evidence, and more than eight representative
-citations on one changed factual line. Changed `me.md` prose additionally
+citations on one changed factual line. A rejection reports every problem it
+found at once, with one-based line numbers and the offending aliases and paths,
+so one more invocation can fix all of them. Changed `me.md` prose additionally
 requires at least one self-authored citation per factual line. It advances only after every page was
 delivered and acknowledged. After full review of a low-value batch,
 `--reviewed-no-durable-memory` instead requires the wiki to be byte-for-byte

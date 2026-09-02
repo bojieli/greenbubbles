@@ -105,7 +105,8 @@ JSON file:
 greenbubbles memory next /private/path/corpus \
   --state /private/path/run-state.json \
   --wiki /private/path/wiki \
-  --max-text-bytes 524288 \
+  --max-text-bytes 327680 \
+  --max-messages 2520 \
   --conversation conversation-id-1 \
   --conversation C000123 \
   --conversation-kind group \
@@ -150,11 +151,21 @@ mkdir -m 700 /private/path/wiki
 greenbubbles memory next /private/path/corpus \
   --state /private/path/run-state.json \
   --wiki /private/path/wiki \
-  --max-text-bytes 524288 \
+  --max-text-bytes 327680 \
+  --max-messages 2520 \
   --conversation-kind group \
   --from 2023-01-01T00:00:00+08:00 \
   --through 2023-12-31T23:59:59+08:00
 ```
+
+Two bounds decide how much one batch delivers. `--max-text-bytes` bounds the
+chat text a batch may carry; `--max-messages` bounds how many messages it may
+carry. Both are needed because every delivered message costs roughly 130 bytes
+of envelope — alias, actor, timestamp, kind — whatever its text weighs, so a
+thread of one-word replies fills far more delivery pages than its text bytes
+predict. `--max-messages` is a soft bound: it stops a batch taking another unit
+and never splits or refuses the unit a batch must deliver whole. Size both to
+the agent's context window, since a batch is what one agent has to hold.
 
 `next` writes the outstanding batch to state before returning a small envelope.
 The command-line scope and its deterministic unit/message plan are bound to the
@@ -187,7 +198,14 @@ Pi's built-in 50-KiB read/shell limit. Calling `page` again before acknowledgeme
 returns byte-identical JSON. Each message has an evidence alias (`e`), actor
 (`a`), optional person join key (`p`), RFC 3339 time in the corpus timezone
 (`t`), payload kind (`k`), text
-(`x`) and optional truncation marker (`tr`). Unit fragments also report their
+(`x`) and optional truncation marker (`tr`). WeChat wraps many payloads in an
+XML envelope; `x` carries the human text inside it rather than the envelope. A
+sticker becomes `[Emoji]` instead of a CDN URL, an MD5 sum and a buffer length,
+while a location keeps its place name and a system message keeps its template.
+Stickers are 2.7% of a 1.7M-message corpus and were 48% of its delivered text
+bytes, so this roughly halves what an agent reads for the same history. The
+prepared corpus is not rewritten; existing corpora get this without
+re-preparation. Unit fragments also report their
 stable unit (`u`), zero-based offset (`o`) and total unit message count (`n`).
 The page-level `accountHolder`, `people`, and `conversations` dictionaries
 preserve real source IDs, names, remarks, nicknames, aliases, group titles, and
@@ -223,7 +241,11 @@ name, source ID, and group title supplied in those identity dictionaries.
 `P######` and `C######` exist only as collision-safe join and filename keys.
 When a source label is unavailable, the real source ID is used; GreenBubbles
 does not replace it with `Person P######`, `Group C######`, or another anonymous
-label. Distinct remark, nickname, and WeChat alias values belong in page
+label. The one exception is the account holder, who is delivered as
+`Me`: the corpus normalises them to the second person, which reads as a stray
+pronoun in a third-person wiki, and the raw `wxid_…` underneath it is what three
+different harnesses used as the title of `me.md`. The source ID still travels
+beside the label. Distinct remark, nickname, and WeChat alias values belong in page
 metadata when they add identity detail.
 
 Every factual prose line needs an exact evidence alias such as
@@ -303,7 +325,12 @@ immutable unit and page hashes, complete delivery/review accounting, prior wiki
 hashes, safe paths, changed-page scope, retained citation aliases, citations on
 factual prose and either the cited-prose boundary or the explicit unchanged-wiki
 disposition, then atomically advances the cursor. A rejected commit leaves the
-batch outstanding. Repeating a successful commit is idempotent.
+batch outstanding and reports every problem at once, with one-based line numbers
+for uncited and citation-dumping prose lines and the actual aliases that were
+unknown, unexpected, or retained but never cited; ownership and shape errors
+name the offending path, its mode and its link count. Reporting one problem per
+rejection made an agent pay a full batch invocation per fix. Repeating a
+successful commit is idempotent.
 
 While a batch is outstanding, `memory status` reports its counters and a Boolean
 `reviewComplete`. With no outstanding batch that field is `null`, rather than a
@@ -329,7 +356,8 @@ greenbubbles memory status /private/path/corpus \
 greenbubbles memory next /private/path/corpus \
   --state /private/path/run-state.json \
   --wiki /private/path/wiki \
-  --max-text-bytes 524288
+  --max-text-bytes 327680 \
+  --max-messages 2520
 ```
 
 ## Run shards in parallel
@@ -360,7 +388,8 @@ python3 scripts/personal-memory-parallel.py merge --run /private/path/run
 database is not worth distilling. `--kind` keeps only the conversation kinds
 worth reading, `--min-self-messages` drops conversations the account holder
 never took part in, `--from-month`/`--through-month` bound the window, and
-`--max-messages` caps the budget outright. The plan is built from the corpus
+`plan --max-messages` caps the whole run's budget outright (unrelated to the
+per-batch `--max-messages` above). The plan is built from the corpus
 activity sidecar, which holds per-conversation and per-month counts and no
 message text. It prints how many messages survived and what they will cost
 before anything is spent.
@@ -407,6 +436,15 @@ only after the current one is complete, which is what a run state permits;
 skips them. Everything is resumable: re-running continues from each shard's
 committed state. Cost is per message and does not change with parallelism; wall
 clock falls to roughly the heaviest shard.
+
+The driver sizes each batch from `--context-window` rather than a fixed number,
+because a batch has to fit in one agent's context: it derives both
+`--max-text-bytes` and `--max-messages` from that window and passes them to
+`memory next`. `--max-text-bytes` and `--max-batch-messages` override the derived
+values when a harness needs something else. `--language` fixes the language every
+shard writes in; without it one shard writes English and the next writes Chinese,
+and `merge`, which drops duplicate lines rather than translating them, would then
+state each fact twice in two languages.
 
 ### Any coding agent, and any provider behind it
 

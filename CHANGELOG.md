@@ -62,13 +62,54 @@ Notable changes to GreenBubbles are documented here. The project follows
   the prompt and run from their own shard directory, and
   `plan --usd-per-1k-messages` re-prices the estimate for the provider actually
   in use.
+- Added `memory next --max-messages`, because `--max-text-bytes` bounds stored
+  chat text and says nothing about the roughly 130-byte envelope every delivered
+  message carries. A thread of one-word replies therefore filled far more
+  delivery pages than its text bytes predicted, and a batch has to fit in one
+  agent's context window. The bound is soft: it stops a batch taking another
+  unit and never splits or refuses the unit a batch must deliver whole.
+  `scripts/personal-memory-parallel.py` now derives both bounds from
+  `--context-window` rather than a fixed 512 KiB, so a 200K-context harness gets
+  a batch it can actually hold, and `--language` keeps every shard writing one
+  language so a line-by-line merge does not state each fact twice in two.
 - Added a Pi-discoverable `greenbubbles-personal-memory` Agent Skill and
   project `.pi/settings.json` integration. Pi remains the default ReAct runtime
   and the one the examples use, but the skill is the whole contract: no
   extension, custom tool, or daemon is required of any agent that runs it.
 
+### Changed
+
+- Delivery pages now render WeChat markup envelopes as the human text inside
+  them instead of verbatim XML. Stickers are 2.7% of a real 1.7M-message corpus
+  but 48% of its delivered text bytes, all of it CDN URLs, MD5 sums and buffer
+  lengths; location and system envelopes do carry meaning, so their place names
+  and templates survive while the plumbing does not. Measured on one real
+  2,664-message scope: 18 delivery pages became 10, page one went from 130 to
+  257 messages, and `memory next` fell from 16.4s to 6.1s. The prepared corpus
+  is not rewritten, so existing corpora get this without re-preparation.
+- The account holder now reaches the agent as `Me` rather than a raw `wxid_…`
+  source id, which three different harnesses had faithfully used as the title of
+  `me.md`. The source id still travels beside the label.
+- A rejected `memory commit` now reports every problem at once, with one-based
+  line numbers for uncited and citation-dumping prose lines and the actual
+  aliases that were unknown, unexpected, or retained but never cited. Reporting
+  one problem per rejection made an agent pay a full batch invocation per fix.
+- Wiki ownership and shape errors now name the offending path, its mode and its
+  link count, so an agent that created a subdirectory under the process umask
+  can see which one to `chmod` instead of guessing.
+- `memory commit` no longer decodes the whole evidence sidecar to resolve the
+  actors behind `me.md`'s citations. The sidecar is 1.5 GB at corpus scale and a
+  commit cites a handful of aliases, so only the cited lines are parsed; every
+  byte is still hashed, which is what binds the file to its manifest. Measured on
+  the real 1,724,948-message corpus, a commit that changes `me.md` fell from
+  7.3s to 5.6s, against 1.0s for a commit that does not.
+
 ### Fixed
 
+- `scripts/personal-memory-parallel.py` now creates `wiki/conversations` and
+  `wiki/people` itself at mode 700. An agent creating them mid-batch got the
+  process umask, and the not-owner-only directory then failed the commit that
+  batch had already been paid for.
 - Made the source database's explicit `Name2Id` sender relation authoritative
   over legacy group-content prefix parsing, and reject malformed/XML-like
   content-derived sender identifiers before attribution or corpus publication.

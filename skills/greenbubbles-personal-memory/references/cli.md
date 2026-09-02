@@ -65,7 +65,8 @@ Put the scope directly on every `memory next` invocation. There is no scope JSON
 
 ```sh
 greenbubbles memory next CORPUS \
-  --state RUN_STATE.json --wiki WIKI --max-text-bytes 524288 \
+  --state RUN_STATE.json --wiki WIKI \
+  --max-text-bytes 327680 --max-messages 2520 \
   --conversation C000449 --conversation C000731 \
   --conversation-kind group \
   --from 2023-12-01T00:00:00+08:00 \
@@ -89,14 +90,23 @@ RFC 3339 fractional bounds are applied exactly to the source's whole-second time
 
 ## Process one durable batch
 
-Create the wiki and state parent as owner-only directories. A practical Gemini
-3.7 Flash starting bound is 524288 text bytes; it must be at least
-`manifest.json.largestUnitTextBytes`. Page output remains independently capped,
-so increasing the batch bound does not make a page unreadable.
+Create the wiki and state parent as owner-only directories, including any
+`conversations/` and `people/` subdirectories, at mode 700: a directory created
+under a looser umask fails the commit at the end of the batch.
+
+Size the batch against your own context window, because you read the whole batch
+in one session. `--max-text-bytes` bounds stored chat text and must be at least
+`manifest.json.largestUnitTextBytes`; a practical Gemini 3.7 Flash starting
+bound is 327680. Text bytes alone under-predict delivery, though, because every
+message also carries about 130 bytes of envelope, so bound the message count as
+well. `--max-messages` is soft: it stops a batch taking another unit and never
+splits or refuses the one unit a batch must deliver whole. Page output remains
+independently capped, so a larger batch never makes a page unreadable.
 
 ```sh
 greenbubbles memory next NEW_CORPUS \
-  --state RUN_STATE.json --wiki WIKI --max-text-bytes 524288 \
+  --state RUN_STATE.json --wiki WIKI \
+  --max-text-bytes 327680 --max-messages 2520 \
   [SCOPE ARGUMENTS]
 ```
 
@@ -136,7 +146,7 @@ The page contains:
   delivered page from state.
 - `page.number`, `page.pageCount`, `messageCount`, and `textByteCount`.
 - `targetPages`: the only Markdown paths this page can inform.
-- `accountHolder`: the authenticated owner's real source ID and best available display name, plus distinct remark, nickname, and WeChat alias fields when the source contains them.
+- `accountHolder`: the authenticated owner's real source ID and best available display name, plus distinct remark, nickname, and WeChat alias fields when the source contains them. When the source has no name of its own the display name is `Me`, which is what `me.md` should be titled; never title a page with a `wxid_…` source ID.
 - `people`: stable `P######` join keys to real source IDs, display names, remarks, nicknames, and WeChat aliases for this page.
 - `conversations`: stable `C######` join keys to real source IDs, titles, and kinds for this page.
 - `scope`: filter counts, whether the evidence scope is all messages, and the resolved summary subject.
@@ -147,9 +157,11 @@ The page contains:
 - In each message, `e` is the evidence alias, `a` is `self`, `other`, or
   `unknown`, `p` is an optional person join key, `t` is RFC 3339 in the corpus timezone, `k` is payload
   kind, `x` is concise text, and `tr=true` means only that this message's text
-  reached the configured per-message bound. It is not a page/tool truncation
-  signal; only an explicit shell-tool truncation notice makes the page unsafe
-  to acknowledge.
+  reached the configured per-message bound. Sticker, location and system
+  payloads arrive as the human text inside their WeChat markup envelope, or as
+  an `[Emoji]`-style placeholder when the envelope holds nothing readable. `tr`
+  is not a page or tool truncation signal; only an explicit shell-tool
+  truncation notice makes the page unsafe to acknowledge.
 
 Keep the wiki private:
 
@@ -246,8 +258,11 @@ Commit checks immutable unit and deterministic page hashes, complete delivery an
 review accounting, safe owner-only wiki paths, changed-page scope, retained
 evidence aliases, citations on every factual prose line, and the explicit
 unchanged-wiki disposition above. It does not merge Markdown. A rejected commit
-leaves the same batch outstanding; correct the wiki and retry. Repeating a
-successful commit is idempotent.
+leaves the same batch outstanding; correct the wiki and retry. The rejection
+lists every problem it found in one message, with one-based line numbers for
+offending prose lines and the exact aliases and paths at fault, so fix all of
+them before retrying rather than one per attempt. Repeating a successful commit
+is idempotent.
 
 ## Status and recovery
 

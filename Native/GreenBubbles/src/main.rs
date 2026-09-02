@@ -56,7 +56,7 @@ use greenbubbles::{
     personal_memory::{
         acknowledge_personal_memory_page, commit_personal_memory_batch,
         commit_personal_memory_batch_reviewed_no_durable_memory,
-        next_personal_memory_batch_with_scope, next_personal_memory_page,
+        next_personal_memory_batch_with_bounds, next_personal_memory_page,
         personal_memory_manifest_output, personal_memory_status,
         prepare_personal_memory_corpus_with_progress, PersonalMemoryConversationKindSelector,
         PersonalMemoryScopeOptions, PersonalMemorySummarySubjectSelector,
@@ -718,6 +718,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             "--state",
                             "--wiki",
                             "--max-text-bytes",
+                            "--max-messages",
                             "--from",
                             "--through",
                             "--subject",
@@ -730,6 +731,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let maximum = required_u64_option(options, "--max-text-bytes")?
                         .try_into()
                         .map_err(|_| "--max-text-bytes does not fit this platform")?;
+                    let maximum_messages = option_usize(options, "--max-messages")?;
                     let conversations = option_strings(options, "--conversation")?;
                     let conversation_kinds = option_strings(options, "--conversation-kind")?
                         .iter()
@@ -747,11 +749,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         sender_selectors: senders,
                         summary_subject: subject,
                     };
-                    let batch = next_personal_memory_batch_with_scope(
+                    let batch = next_personal_memory_batch_with_bounds(
                         &corpus,
                         &state,
                         Some(&wiki),
                         maximum,
+                        maximum_messages,
                         Some(&scope),
                     )?;
                     println!("{}", serde_json::to_string(&batch)?);
@@ -2819,7 +2822,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles conversations list <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n",
                     "  greenbubbles contacts list [--profile <name>] [--kind <kind>] [--limit <1..500>] [--cursor <opaque-cursor>] [--details]\n",
                     "  greenbubbles memory prepare [<source-root>] <new-corpus-index> --selection-policy <policy.json> [access mode]\n",
-                    "  greenbubbles memory next <corpus-index> --state <run-state.json> --wiki <wiki-dir> --max-text-bytes <n> [scope filters]\n",
+                    "  greenbubbles memory next <corpus-index> --state <run-state.json> --wiki <wiki-dir> --max-text-bytes <n> [--max-messages <n>] [scope filters]\n",
                     "  greenbubbles memory page <corpus-index> --state <run-state.json> [--batch <id|current>]\n",
                     "  greenbubbles memory acknowledge <corpus-index> --state <run-state.json> [--batch <id|current>] [--page-token <token|current>] (--retain-evidence <aliases> | --reviewed-no-durable-memory)\n",
                     "  greenbubbles memory commit <corpus-index> --state <run-state.json> [--batch <id|current>] --wiki <wiki-dir> [--reviewed-no-durable-memory]\n",
@@ -3003,7 +3006,7 @@ const fn memory_command_help() -> &'static str {
         "Usage:\n",
         "  greenbubbles memory prepare <new-corpus-index> --selection-policy <policy.json> [--profile <name>]\n",
         "  greenbubbles memory prepare <source-root> <new-corpus-index> --selection-policy <policy.json> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
-        "  greenbubbles memory next <corpus-index> --state <run-state.json> --wiki <wiki-dir> --max-text-bytes <16384..2097152> [--conversation <id>]... [--conversation-kind <kind>]... [--from <RFC3339>] [--through <RFC3339>] [--sender <id>]... [--subject <subject>]\n",
+        "  greenbubbles memory next <corpus-index> --state <run-state.json> --wiki <wiki-dir> --max-text-bytes <16384..2097152> [--max-messages <1..5000>] [--conversation <id>]... [--conversation-kind <kind>]... [--from <RFC3339>] [--through <RFC3339>] [--sender <id>]... [--subject <subject>]\n",
         "  greenbubbles memory page <corpus-index> --state <run-state.json> [--batch <id|current>]\n",
         "  greenbubbles memory acknowledge <corpus-index> --state <run-state.json> [--batch <id|current>] [--page-token <token|current>] (--retain-evidence <E#########,E#########> | --reviewed-no-durable-memory)\n",
         "  greenbubbles memory commit <corpus-index> --state <run-state.json> [--batch <id|current>] --wiki <wiki-dir> [--reviewed-no-durable-memory]\n",

@@ -55,6 +55,9 @@ it read-only.
   recovery words, so a backup still opens if you lose the app or the account.
 - **Feed a memory tool.** Export to QMD, Mem0 and friends, with a link back to
   the exact message behind every line.
+- **Turn a million messages into a wiki.** Coding agents you already pay for
+  read your history in parallel and write cited Markdown, one message at a
+  time, never a summary of a summary.
 - **Never writes.** WeChat's own files are opened read-only, always.
 
 ## Install
@@ -182,28 +185,56 @@ private sidecar for citation verification.
 There is an agent skill in [`skills/`](skills/greenbubbles-context/SKILL.md) that
 teaches a compatible assistant to use this properly.
 
-For a whole-history personal wiki, use the dedicated personal-memory skill
-instead of enumerating message pages. One local process prepares a canonical
-corpus from every eligible message, then reusable run scopes select any
-combination of conversations, inclusive time bounds, and senders. A coding agent
-— Pi, Claude Code, Codex, Gemini CLI, or your own — iteratively refines one
-cited Markdown wiki from crash-safe, byte-bounded batches; if those evidence
-filters are all empty, the run covers the entire hydrated corpus:
+See the [AI context guide](docs/AI_CONTEXT_CLI.md) for the full surface.
+
+### Turning your history into a wiki
+
+Reading a million messages one page at a time is the wrong shape for a whole
+history. The personal-memory workflow instead prepares a canonical corpus once,
+locally, from every eligible message; reusable run scopes then select any
+combination of conversations, inclusive time bounds and senders. A coding agent
+— Pi, Claude Code, Codex, Gemini CLI, or your own — refines one cited Markdown
+wiki from crash-safe, byte-bounded batches. Leave the evidence filters empty and
+the run covers the entire hydrated corpus:
 
 ```console
 greenbubbles memory prepare new-corpus \
   --selection-policy selection-policy.json --profile live-account
 greenbubbles memory next new-corpus --state run-state.json \
-  --wiki private-wiki --max-text-bytes 524288 \
+  --wiki private-wiki --max-text-bytes 327680 --max-messages 2520 \
   --conversation-kind group \
   --from 2023-12-01T00:00:00+08:00 \
   --through 2023-12-31T23:59:59+08:00
 ```
 
+Every factual line on every page cites the exact messages behind it. A commit
+that adds an uncited line, quietly drops evidence it said it would keep, or
+edits a page it did not declare is rejected, so the wiki cannot drift away from
+what was actually said.
+
+One agent reading serially would take days, so
+[`scripts/personal-memory-parallel.py`](scripts/personal-memory-parallel.py)
+shards the corpus by conversation, runs eight agents at once against the same
+read-only corpus, and merges the results. It also decides what is worth
+reading: direct chats whole, and a group month only when you said something
+there yourself. On this Mac that selects 446,435 messages out of 1.72 million,
+measured at USD 1.15 per 1,000 messages — roughly USD 510 and 7 hours:
+
+```console
+python3 scripts/personal-memory-parallel.py plan \
+  --corpus corpus-v2 --run /private/path/run --shards 8
+python3 scripts/personal-memory-parallel.py run \
+  --run /private/path/run --agent claude --env ANTHROPIC_API_KEY
+python3 scripts/personal-memory-parallel.py merge --run /private/path/run
+```
+
+`--agent` runs whichever harness you already pay for, so a flat-rate
+subscription does the reading instead of a metered key, and `--base-url` points
+a run at a cheaper third-party router such as OpenRouter or Krill AI instead of
+the first-party API.
+
 See the [personal-memory workflow](docs/PERSONAL_MEMORY.md) and
 [`greenbubbles-personal-memory`](skills/greenbubbles-personal-memory/SKILL.md).
-
-See the [AI context guide](docs/AI_CONTEXT_CLI.md) for the full surface.
 
 ## Documentation
 
@@ -213,7 +244,7 @@ See the [AI context guide](docs/AI_CONTEXT_CLI.md) for the full surface.
 | [FAQ](docs/FAQ.md) | What goes wrong, and why |
 | [CLI reference](docs/CLI_REFERENCE.md) | Every command |
 | [Giving an AI access](docs/AI_CONTEXT_CLI.md) | Policies, exports, memory tools |
-| [Building a personal wiki](docs/PERSONAL_MEMORY.md) | Corpus selection, Pi batches, citations |
+| [Building a personal wiki](docs/PERSONAL_MEMORY.md) | Corpus selection, parallel agents, citations |
 | [Backups](docs/RECOVERABLE_SNAPSHOTS.md) | The 24 words, rotation, recovery drills |
 | [Architecture](docs/ARCHITECTURE.md) | How it works inside, and why |
 | [Known limitations](docs/KNOWN_LIMITATIONS.md) | What is unproven or broken |

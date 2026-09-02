@@ -42,9 +42,20 @@ const MAXIMUM_UNIT_INDEX_BYTES: u64 = 512 * 1024 * 1024;
 const MAXIMUM_WIKI_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAXIMUM_WIKI_ENTRIES: usize = 100_000;
 const MAXIMUM_WIKI_CITATIONS_PER_PROSE_LINE: usize = 8;
+const MAXIMUM_REPORTED_WIKI_PROBLEMS: usize = 20;
+const MAXIMUM_REPORTED_WIKI_LOCATIONS: usize = 12;
 const MINIMUM_NEXT_TEXT_BYTES: usize = 16 * 1024;
 const MAXIMUM_NEXT_TEXT_BYTES: usize = 2 * 1024 * 1024;
 const MAXIMUM_BATCH_MESSAGES: usize = 5_000;
+/// No non-sticker payload in a million-message corpus comes close to this, so
+/// it only bounds the pathological case rather than trimming ordinary chat.
+const MAXIMUM_DELIVERED_MESSAGE_TEXT_BYTES: usize = 4096;
+const DELIVERED_MARKUP_TEXT_ATTRIBUTES: [&str; 5] =
+    ["label", "poiname", "title", "desc", "content"];
+/// The corpus stores the account holder as "You"; a third-person wiki needs a
+/// stable noun instead, and the raw source id made every agent title the
+/// account-holder page with a wxid.
+const ACCOUNT_HOLDER_DELIVERY_LABEL: &str = "Me";
 /// Pi's built-in read and shell tools truncate at 50 KiB. Every serialized page,
 /// including its envelope and trailing newline, stays below that boundary.
 pub const MAXIMUM_MEMORY_PAGE_OUTPUT_BYTES: usize = 48 * 1024;
@@ -1955,6 +1966,109 @@ fn merged_context_windows(
     merged
 }
 
+/// Sticker, location, and system payloads reach the corpus as WeChat markup
+/// envelopes whose CDN and geometry attributes mean nothing to a reader while
+/// consuming most of a delivery page. Rendering only their human-readable text
+/// keeps pages dense without rewriting the immutable prepared corpus.
+fn delivery_message_text(kind: &str, text: &str) -> String {
+    let rendered = if looks_like_markup_envelope(text) {
+        let readable = markup_envelope_text(text);
+        if readable.is_empty() {
+            format!("[{kind}]")
+        } else {
+            readable
+        }
+    } else {
+        text.to_string()
+    };
+    truncate_on_character_boundary(rendered, MAXIMUM_DELIVERED_MESSAGE_TEXT_BYTES)
+}
+
+fn looks_like_markup_envelope(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    (trimmed.starts_with("<?xml") || trimmed.starts_with("<msg") || trimmed.starts_with("<sysmsg"))
+        && text.trim_end().ends_with('>')
+}
+
+/// Deliberately minimal: this reads text nodes, CDATA sections, and a small
+/// allow list of human-readable attributes. Anything else in the envelope is
+/// machine plumbing, and every extracted string stays untrusted evidence.
+fn markup_envelope_text(text: &str) -> String {
+    let mut pieces = Vec::<String>::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('<') {
+        push_markup_text(&mut pieces, &rest[..open]);
+        rest = &rest[open..];
+        if let Some(body) = rest.strip_prefix("<![CDATA[") {
+            let Some(end) = body.find("]]>") else {
+                return pieces.join(" ");
+            };
+            push_markup_text(&mut pieces, &body[..end]);
+            rest = &body[end.saturating_add(3)..];
+            continue;
+        }
+        let Some(close) = rest.find('>') else {
+            return pieces.join(" ");
+        };
+        push_markup_attribute_text(&mut pieces, &rest[1..close]);
+        rest = &rest[close.saturating_add(1)..];
+    }
+    push_markup_text(&mut pieces, rest);
+    pieces.join(" ")
+}
+
+fn push_markup_attribute_text(pieces: &mut Vec<String>, tag: &str) {
+    let mut rest = tag;
+    while let Some(equals) = rest.find('=') {
+        let name = rest[..equals]
+            .trim_end()
+            .rsplit(|character: char| character.is_whitespace())
+            .next()
+            .unwrap_or_default();
+        let readable = DELIVERED_MARKUP_TEXT_ATTRIBUTES
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(name));
+        let after = rest[equals.saturating_add(1)..].trim_start();
+        let Some(quote) = after
+            .chars()
+            .next()
+            .filter(|character| *character == '"' || *character == '\'')
+        else {
+            rest = &rest[equals.saturating_add(1)..];
+            continue;
+        };
+        let body = &after[quote.len_utf8()..];
+        let Some(end) = body.find(quote) else {
+            return;
+        };
+        if readable {
+            push_markup_text(pieces, &body[..end]);
+        }
+        rest = &body[end.saturating_add(quote.len_utf8())..];
+    }
+}
+
+fn push_markup_text(pieces: &mut Vec<String>, candidate: &str) {
+    let candidate = candidate.trim();
+    if candidate.is_empty() || pieces.iter().any(|existing| existing == candidate) {
+        return;
+    }
+    pieces.push(candidate.to_string());
+}
+
+fn truncate_on_character_boundary(mut text: String, maximum_bytes: usize) -> String {
+    if text.len() <= maximum_bytes {
+        return text;
+    }
+    let mut end = maximum_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    text.truncate(end);
+    text.push('\u{2026}');
+    text
+}
+
 fn compact_message_text(message: &CorpusHydratedMessage) -> String {
     message.text.clone().unwrap_or_else(|| {
         if message.content_decode_failed {
@@ -2255,7 +2369,15 @@ struct WikiFileSnapshot {
     /// Needed only while validating the current in-memory scan. Omitting this
     /// duplicate derived data keeps persisted run state compact.
     #[serde(skip)]
-    prose_line_citations: Vec<BTreeSet<String>>,
+    prose_lines: Vec<ProseLine>,
+}
+
+/// One-based source line numbers travel with each prose line so a rejected
+/// commit can tell the agent exactly where to look instead of a bare count.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ProseLine {
+    number: usize,
+    citations: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2624,7 +2746,7 @@ fn append_delivery_message(
         p: compact.p.clone(),
         t: format_unix_seconds_rfc3339(timezone, compact.t)?,
         k: compact.k.clone(),
-        x: compact.x.clone(),
+        x: delivery_message_text(&compact.k, &compact.x),
         tr: compact.tr,
     };
     if let Some(current) = episodes.last_mut().filter(|episode| {
@@ -3037,11 +3159,43 @@ pub fn next_personal_memory_batch_with_scope(
     maximum_text_bytes: usize,
     scope_options: Option<&PersonalMemoryScopeOptions>,
 ) -> Result<Value, RestoreError> {
+    next_personal_memory_batch_with_bounds(
+        corpus_directory,
+        state_path,
+        wiki_directory,
+        maximum_text_bytes,
+        None,
+        scope_options,
+    )
+}
+
+/// `maximum_text_bytes` bounds stored message text, which says nothing about the
+/// per-message envelope. A conversation of one-word replies therefore fills far
+/// more delivery pages than its text bytes suggest, so a caller sizing a batch
+/// against a fixed agent context window can also bound the message count.
+pub fn next_personal_memory_batch_with_bounds(
+    corpus_directory: &Path,
+    state_path: &Path,
+    wiki_directory: Option<&Path>,
+    maximum_text_bytes: usize,
+    maximum_messages: Option<usize>,
+    scope_options: Option<&PersonalMemoryScopeOptions>,
+) -> Result<Value, RestoreError> {
     if !(MINIMUM_NEXT_TEXT_BYTES..=MAXIMUM_NEXT_TEXT_BYTES).contains(&maximum_text_bytes) {
         return Err(RestoreError::Integrity(format!(
             "memory next --max-text-bytes must be between {MINIMUM_NEXT_TEXT_BYTES} and {MAXIMUM_NEXT_TEXT_BYTES}"
         )));
     }
+    if maximum_messages.is_some_and(|maximum| !(1..=MAXIMUM_BATCH_MESSAGES).contains(&maximum)) {
+        return Err(RestoreError::Integrity(format!(
+            "memory next --max-messages must be between 1 and {MAXIMUM_BATCH_MESSAGES}"
+        )));
+    }
+    // A soft bound: it stops a batch from taking another unit, and never splits
+    // or refuses the one unit a batch must always deliver whole.
+    let maximum_packed_messages = maximum_messages
+        .unwrap_or(MAXIMUM_BATCH_MESSAGES)
+        .min(MAXIMUM_BATCH_MESSAGES);
     let corpus = load_corpus(corpus_directory)?;
     let _lock = acquire_state_lock(state_path)?;
     let mut state = load_or_initialize_state(state_path, &corpus, scope_options)?;
@@ -3118,7 +3272,7 @@ pub fn next_personal_memory_batch_with_scope(
             let next_text = text_byte_count.saturating_add(selection.text_byte_count);
             let next_messages = message_count.saturating_add(selection.message_count);
             if end > start
-                && (next_text > maximum_text_bytes || next_messages > MAXIMUM_BATCH_MESSAGES)
+                && (next_text > maximum_text_bytes || next_messages > maximum_packed_messages)
             {
                 break;
             }
@@ -4080,8 +4234,11 @@ fn load_unit(
 }
 
 fn delivery_person_identity(record: &ContactSidecarRecord, alias: &str) -> DeliveryPersonIdentity {
+    // The corpus normalises the account holder to the second person, which reads
+    // as a stray pronoun in a third-person wiki and previously fell through to
+    // the raw source id. The source id still travels beside this label.
     let display_name = if record.is_account_holder && record.display_name.trim() == "You" {
-        record.source_id.clone()
+        ACCOUNT_HOLDER_DELIVERY_LABEL.to_string()
     } else {
         model_safe_person_label(record, alias)
     };
@@ -4595,6 +4752,28 @@ fn load_scoped_unit(
     Ok(unit)
 }
 
+/// The alias is the first field the sidecar writer emits, so a commit can decide
+/// whether a line is worth decoding without paying `serde_json` for it. Anything
+/// that is not exactly that shape returns `None` and is parsed in full rather
+/// than skipped, so an unexpected sidecar still fails loudly.
+fn evidence_line_alias(line: &[u8]) -> Option<&str> {
+    let rest = line.strip_prefix(b"{\"alias\":\"")?;
+    let end = rest.iter().position(|byte| *byte == b'"')?;
+    if rest.get(end.saturating_add(1)) != Some(&b',') {
+        return None;
+    }
+    let alias = std::str::from_utf8(&rest[..end]).ok()?;
+    let mut characters = alias.chars();
+    if characters.next() != Some('E') {
+        return None;
+    }
+    let digits = characters.as_str();
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(alias)
+}
+
 fn load_self_evidence_aliases(
     corpus: &LoadedCorpus,
     requested: &BTreeSet<String>,
@@ -4615,7 +4794,9 @@ fn load_self_evidence_aliases(
             "corpus evidence sidecar has an unexpected byte count".into(),
         ));
     }
-    let mut reader = BufReader::new(File::open(path)?);
+    // The default 8-KiB buffer costs a read syscall every nine records across a
+    // gigabyte-scale sidecar.
+    let mut reader = BufReader::with_capacity(1 << 20, File::open(path)?);
     let mut line = Vec::new();
     let mut hasher = Sha256::new();
     let mut byte_count = 0_u64;
@@ -4629,6 +4810,12 @@ fn load_self_evidence_aliases(
         }
         byte_count = byte_count.saturating_add(read as u64);
         hasher.update(&line);
+        // The sidecar is over a gigabyte at corpus scale and a commit cites a
+        // handful of aliases, so only the cited lines are decoded. Every byte is
+        // still hashed, which is what actually binds the file to its manifest.
+        if evidence_line_alias(&line).is_some_and(|alias| !requested.contains(alias)) {
+            continue;
+        }
         let evidence: EvidenceRecord = serde_json::from_slice(&line)?;
         if requested.contains(&evidence.alias) {
             if !found.insert(evidence.alias.clone()) {
@@ -5145,27 +5332,32 @@ fn scan_wiki(wiki_directory: &Path) -> Result<BTreeMap<String, WikiFileSnapshot>
         if entry.path() == root {
             continue;
         }
+        let relative_display = entry
+            .path()
+            .strip_prefix(&root)
+            .map(|relative| relative.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| entry.path().to_string_lossy().into_owned());
         let metadata = fs::symlink_metadata(entry.path())?;
         if metadata.file_type().is_symlink() || metadata.uid() != unsafe { libc::geteuid() } {
-            return Err(RestoreError::Integrity(
-                "wiki entries must be current-user-owned and may not be symbolic links".into(),
-            ));
+            return Err(RestoreError::Integrity(format!(
+                "wiki entry {relative_display} must be current-user-owned and may not be a symbolic link"
+            )));
         }
         if metadata.is_dir() {
-            if metadata.permissions().mode() & 0o077 != 0 {
-                return Err(RestoreError::Integrity(
-                    "wiki directories must be owner-only".into(),
-                ));
+            let mode = metadata.permissions().mode() & 0o7777;
+            if mode & 0o077 != 0 {
+                return Err(RestoreError::Integrity(format!(
+                    "wiki directory {relative_display} is mode {mode:04o}; wiki directories must be owner-only (chmod 700)"
+                )));
             }
             continue;
         }
-        if !metadata.is_file()
-            || metadata.permissions().mode() & 0o077 != 0
-            || metadata.nlink() != 1
-        {
-            return Err(RestoreError::Integrity(
-                "wiki files must be owner-only, singly linked regular files".into(),
-            ));
+        let mode = metadata.permissions().mode() & 0o7777;
+        if !metadata.is_file() || mode & 0o077 != 0 || metadata.nlink() != 1 {
+            return Err(RestoreError::Integrity(format!(
+                "wiki file {relative_display} is mode {mode:04o} with {} link(s); wiki files must be owner-only (chmod 600), singly linked regular files",
+                metadata.nlink()
+            )));
         }
         let relative = entry
             .path()
@@ -5176,29 +5368,31 @@ fn scan_wiki(wiki_directory: &Path) -> Result<BTreeMap<String, WikiFileSnapshot>
             .replace(std::path::MAIN_SEPARATOR, "/");
         validate_wiki_relative_path(&relative)?;
         if entry.path().extension().and_then(|value| value.to_str()) != Some("md") {
-            return Err(RestoreError::Integrity(
-                "wiki may contain only owner-only Markdown files and directories".into(),
-            ));
+            return Err(RestoreError::Integrity(format!(
+                "wiki entry {relative} is not Markdown; a wiki may contain only owner-only .md files and directories"
+            )));
         }
         if metadata.len() > MAXIMUM_WIKI_FILE_BYTES {
             return Err(RestoreError::Integrity(format!(
-                "wiki Markdown file exceeds the fixed {MAXIMUM_WIKI_FILE_BYTES}-byte safety limit"
+                "wiki Markdown file {relative} is {} bytes and exceeds the fixed {MAXIMUM_WIKI_FILE_BYTES}-byte safety limit; split it into smaller pages",
+                metadata.len()
             )));
         }
         let bytes = read_owner_file_limited(entry.path(), MAXIMUM_WIKI_FILE_BYTES)?;
-        let text = std::str::from_utf8(&bytes)
-            .map_err(|_| RestoreError::Integrity("wiki Markdown must be valid UTF-8".into()))?;
+        let text = std::str::from_utf8(&bytes).map_err(|_| {
+            RestoreError::Integrity(format!("wiki Markdown file {relative} must be valid UTF-8"))
+        })?;
+        let prose_lines = markdown_prose_lines(text);
         snapshot.insert(
             relative,
             WikiFileSnapshot {
                 sha256: sha256_bytes(&bytes),
                 citations: extract_evidence_aliases(text),
-                has_prose: markdown_has_prose(text),
-                uncited_prose_line_count: markdown_uncited_prose_line_count(text),
-                excessive_citation_prose_line_count: markdown_excessive_citation_prose_line_count(
-                    text,
-                ),
-                prose_line_citations: markdown_prose_line_citations(text),
+                has_prose: !prose_lines.is_empty(),
+                uncited_prose_line_count: uncited_prose_lines(&prose_lines).len(),
+                excessive_citation_prose_line_count: excessive_citation_prose_lines(&prose_lines)
+                    .len(),
+                prose_lines,
             },
         );
     }
@@ -5217,87 +5411,113 @@ fn validate_wiki_commit(
     let mut changed = Vec::new();
     let mut changed_factual_page_count = 0usize;
     let mut current_batch_cited = false;
+    let mut problems = Vec::<String>::new();
     if let Some(before) = before {
-        for path in before.keys() {
-            if !current.contains_key(path) {
-                return Err(RestoreError::Integrity(format!(
-                    "memory commit may not delete wiki page {path}"
-                )));
-            }
+        let deleted = before
+            .keys()
+            .filter(|path| !current.contains_key(*path))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !deleted.is_empty() {
+            problems.push(format!(
+                "memory commit may not delete wiki page(s) {}",
+                format_bounded_list(deleted)
+            ));
         }
     }
     for (path, record) in current {
         let previous_record = before.and_then(|before| before.get(path));
-        let changed_file = before
-            .and_then(|before| before.get(path))
-            .is_none_or(|previous| previous.sha256 != record.sha256);
+        let changed_file = previous_record.is_none_or(|previous| previous.sha256 != record.sha256);
         if changed_file {
             if !target_pages.contains(path) {
-                return Err(RestoreError::Integrity(format!(
-                    "memory commit changed non-target wiki page {path}"
-                )));
+                problems.push(format!(
+                    "memory commit changed non-target wiki page {path}; declare it in targetPages or restore it"
+                ));
             }
             changed.push(path.clone());
             if path != "index.md" {
+                changed_factual_page_count = changed_factual_page_count.saturating_add(1);
                 if !record.has_prose {
-                    return Err(RestoreError::Integrity(format!(
+                    problems.push(format!(
                         "changed factual wiki page {path} has no prose; empty or heading-only placeholders cannot advance memory"
-                    )));
+                    ));
                 }
                 if record.citations.is_empty() {
-                    return Err(RestoreError::Integrity(format!(
+                    problems.push(format!(
                         "changed factual wiki page {path} has no evidence alias"
-                    )));
+                    ));
                 }
-                if record.uncited_prose_line_count > 0 {
-                    return Err(RestoreError::Integrity(format!(
-                        "changed factual wiki page {path} contains {} uncited prose line(s)",
-                        record.uncited_prose_line_count
-                    )));
+                let uncited = uncited_prose_lines(&record.prose_lines);
+                if !uncited.is_empty() {
+                    problems.push(format!(
+                        "changed factual wiki page {path} has {} uncited prose line(s) at line {}",
+                        uncited.len(),
+                        format_line_numbers(&uncited)
+                    ));
                 }
-                if record.excessive_citation_prose_line_count > 0 {
-                    return Err(RestoreError::Integrity(format!(
-                        "changed factual wiki page {path} contains {} prose line(s) with more than {MAXIMUM_WIKI_CITATIONS_PER_PROSE_LINE} citations; retain a representative evidence set instead of citation dumping",
-                        record.excessive_citation_prose_line_count
-                    )));
+                let excessive = excessive_citation_prose_lines(&record.prose_lines);
+                if !excessive.is_empty() {
+                    problems.push(format!(
+                        "changed factual wiki page {path} has {} prose line(s) with more than {MAXIMUM_WIKI_CITATIONS_PER_PROSE_LINE} citations at line {}; retain a representative evidence set instead of citation dumping",
+                        excessive.len(),
+                        format_line_numbers(&excessive)
+                    ));
                 }
-                changed_factual_page_count = changed_factual_page_count.saturating_add(1);
             }
         }
+        let mut unknown = Vec::new();
+        let mut introduced = Vec::new();
         for alias in &record.citations {
             if !valid_evidence_alias(alias, evidence_count) {
-                return Err(RestoreError::Integrity(format!(
-                    "wiki page {path} cites an unknown evidence alias"
-                )));
+                unknown.push(alias.clone());
+                continue;
             }
             if changed_file
                 && !batch_aliases.contains(alias)
                 && previous_record.is_none_or(|previous| !previous.citations.contains(alias))
             {
-                return Err(RestoreError::Integrity(format!(
-                    "wiki page {path} introduced evidence not present in this batch or that same prior page"
-                )));
+                introduced.push(alias.clone());
             }
             if changed_file && path != "index.md" && batch_aliases.contains(alias) {
                 current_batch_cited = true;
             }
+        }
+        if !unknown.is_empty() {
+            problems.push(format!(
+                "wiki page {path} cites unknown evidence alias(es) {}",
+                format_bounded_list(unknown)
+            ));
+        }
+        if !introduced.is_empty() {
+            problems.push(format!(
+                "wiki page {path} introduced evidence alias(es) {} that are absent from this batch and from that same prior page",
+                format_bounded_list(introduced)
+            ));
         }
     }
     let cited_aliases = current
         .values()
         .flat_map(|record| record.citations.iter().cloned())
         .collect::<BTreeSet<_>>();
-    let retained_but_uncited_count = batch_aliases.difference(&cited_aliases).count();
-    if retained_but_uncited_count > 0 {
-        return Err(RestoreError::Integrity(format!(
-            "memory commit has {retained_but_uncited_count} retained evidence alias(es) that are not cited in the durable wiki"
-        )));
+    let retained_but_uncited = batch_aliases
+        .difference(&cited_aliases)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !retained_but_uncited.is_empty() {
+        problems.push(format!(
+            "memory commit retained {} evidence alias(es) that no durable wiki page cites: {}",
+            retained_but_uncited.len(),
+            format_bounded_list(retained_but_uncited)
+        ));
     }
     if changed_factual_page_count == 0 || !current_batch_cited {
-        return Err(RestoreError::Integrity(
+        problems.push(
             "memory commit requires at least one changed non-index page with prose and an evidence alias from the outstanding batch"
-                .into(),
-        ));
+                .to_string(),
+        );
+    }
+    if !problems.is_empty() {
+        return Err(wiki_validation_error(problems));
     }
     changed.sort();
     Ok(changed)
@@ -5307,14 +5527,17 @@ fn validate_me_self_attribution(
     me: &WikiFileSnapshot,
     self_evidence_aliases: &BTreeSet<String>,
 ) -> Result<(), RestoreError> {
-    let incoming_only_line_count = me
-        .prose_line_citations
+    let incoming_only = me
+        .prose_lines
         .iter()
-        .filter(|citations| citations.is_disjoint(self_evidence_aliases))
-        .count();
-    if incoming_only_line_count > 0 {
+        .filter(|prose| prose.citations.is_disjoint(self_evidence_aliases))
+        .map(|prose| prose.number)
+        .collect::<Vec<_>>();
+    if !incoming_only.is_empty() {
         return Err(RestoreError::Integrity(format!(
-            "changed account-holder wiki page contains {incoming_only_line_count} factual prose line(s) without a self-authored citation; incoming-only facts belong on a person page or must be explicitly supported by account-holder evidence"
+            "changed account-holder wiki page has {} factual prose line(s) without a self-authored citation at line {}; incoming-only facts belong on a person page or must be explicitly supported by account-holder evidence",
+            incoming_only.len(),
+            format_line_numbers(&incoming_only)
         )));
     }
     Ok(())
@@ -5385,29 +5608,67 @@ fn extract_evidence_aliases(text: &str) -> BTreeSet<String> {
     aliases
 }
 
-fn markdown_has_prose(text: &str) -> bool {
-    text.lines().any(markdown_line_is_prose)
-}
-
-fn markdown_uncited_prose_line_count(text: &str) -> usize {
+fn markdown_prose_lines(text: &str) -> Vec<ProseLine> {
     text.lines()
-        .filter(|line| markdown_line_is_prose(line))
-        .filter(|line| extract_evidence_aliases(line).is_empty())
-        .count()
-}
-
-fn markdown_excessive_citation_prose_line_count(text: &str) -> usize {
-    text.lines()
-        .filter(|line| markdown_line_is_prose(line))
-        .filter(|line| extract_evidence_aliases(line).len() > MAXIMUM_WIKI_CITATIONS_PER_PROSE_LINE)
-        .count()
-}
-
-fn markdown_prose_line_citations(text: &str) -> Vec<BTreeSet<String>> {
-    text.lines()
-        .filter(|line| markdown_line_is_prose(line))
-        .map(extract_evidence_aliases)
+        .enumerate()
+        .filter(|(_, line)| markdown_line_is_prose(line))
+        .map(|(index, line)| ProseLine {
+            number: index.saturating_add(1),
+            citations: extract_evidence_aliases(line),
+        })
         .collect()
+}
+
+fn uncited_prose_lines(prose_lines: &[ProseLine]) -> Vec<usize> {
+    prose_lines
+        .iter()
+        .filter(|prose| prose.citations.is_empty())
+        .map(|prose| prose.number)
+        .collect()
+}
+
+fn excessive_citation_prose_lines(prose_lines: &[ProseLine]) -> Vec<usize> {
+    prose_lines
+        .iter()
+        .filter(|prose| prose.citations.len() > MAXIMUM_WIKI_CITATIONS_PER_PROSE_LINE)
+        .map(|prose| prose.number)
+        .collect()
+}
+
+/// A rejected commit costs a full agent turn, so every reason the wiki is
+/// invalid is reported at once instead of one per retry.
+fn wiki_validation_error(problems: Vec<String>) -> RestoreError {
+    let total = problems.len();
+    let mut shown = problems;
+    let hidden = total.saturating_sub(MAXIMUM_REPORTED_WIKI_PROBLEMS);
+    shown.truncate(MAXIMUM_REPORTED_WIKI_PROBLEMS);
+    let mut message = format!(
+        "memory commit rejected with {total} problem(s); fix every one before committing again: {}",
+        shown.join("; ")
+    );
+    if hidden > 0 {
+        message.push_str(&format!("; and {hidden} more"));
+    }
+    RestoreError::Integrity(message)
+}
+
+fn format_line_numbers(lines: &[usize]) -> String {
+    format_bounded_list(lines.iter().map(|line| line.to_string()))
+}
+
+fn format_bounded_list(values: impl IntoIterator<Item = String>) -> String {
+    let values = values.into_iter().collect::<Vec<_>>();
+    let hidden = values.len().saturating_sub(MAXIMUM_REPORTED_WIKI_LOCATIONS);
+    let shown = values
+        .into_iter()
+        .take(MAXIMUM_REPORTED_WIKI_LOCATIONS)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if hidden > 0 {
+        format!("{shown}, and {hidden} more")
+    } else {
+        shown
+    }
 }
 
 fn markdown_line_is_prose(line: &str) -> bool {
@@ -5454,9 +5715,10 @@ fn validate_wiki_relative_path(value: &str) -> Result<(), RestoreError> {
 #[cfg(test)]
 mod personal_memory_tests {
     use super::{
-        extract_evidence_aliases, order_unit_drafts, validate_me_self_attribution,
+        delivery_message_text, evidence_line_alias, extract_evidence_aliases, markdown_prose_lines,
+        order_unit_drafts, validate_me_self_attribution,
         validate_reviewed_no_durable_memory_commit, validate_wiki_commit, MemoryDeliveryOrder,
-        UnitDraft, WikiFileSnapshot,
+        ProseLine, UnitDraft, WikiFileSnapshot,
     };
     use crate::live_query::{CorpusHydratedMessage, CorpusMessageLocation};
     use crate::ConversationKind;
@@ -5469,7 +5731,14 @@ mod personal_memory_tests {
             has_prose,
             uncited_prose_line_count: 0,
             excessive_citation_prose_line_count: 0,
-            prose_line_citations: Vec::new(),
+            prose_lines: Vec::new(),
+        }
+    }
+
+    fn prose_line(number: usize, aliases: &[&str]) -> ProseLine {
+        ProseLine {
+            number,
+            citations: aliases.iter().map(|alias| (*alias).to_string()).collect(),
         }
     }
 
@@ -5663,7 +5932,10 @@ mod personal_memory_tests {
                 has_prose: true,
                 uncited_prose_line_count: 0,
                 excessive_citation_prose_line_count: 1,
-                prose_line_citations: vec![aliases.iter().cloned().collect()],
+                prose_lines: vec![ProseLine {
+                    number: 3,
+                    citations: aliases.iter().cloned().collect(),
+                }],
             },
         )]);
         assert!(
@@ -5674,19 +5946,107 @@ mod personal_memory_tests {
     #[test]
     fn account_holder_prose_requires_self_authored_support() {
         let mut me = snapshot("me-after", &["E000000001"], true);
-        me.prose_line_citations = vec![BTreeSet::from(["E000000001".to_string()])];
+        me.prose_lines = vec![prose_line(4, &["E000000001"])];
         assert!(validate_me_self_attribution(&me, &BTreeSet::new()).is_err());
         assert!(
             validate_me_self_attribution(&me, &BTreeSet::from(["E000000001".to_string()]),).is_ok()
         );
 
-        me.prose_line_citations = vec![BTreeSet::from([
-            "E000000001".to_string(),
-            "E000000002".to_string(),
-        ])];
+        me.prose_lines = vec![prose_line(4, &["E000000001", "E000000002"])];
         assert!(
             validate_me_self_attribution(&me, &BTreeSet::from(["E000000002".to_string()]),).is_ok()
         );
+    }
+
+    #[test]
+    fn sticker_envelopes_collapse_while_location_and_system_text_survive() {
+        let sticker = "<msg><emoji fromusername = \"someone\" tousername = \"wxid_example\" type=\"2\" md5=\"82a3c0358c131b7f4b8d5987a3ca4e0e\" len = \"10967\" cdnurl = \"http://vweixinf.tc.qq.com/very/long/path\" aeskey=\"0123456789abcdef\" /></msg>";
+        assert_eq!(delivery_message_text("Emoji", sticker), "[Emoji]");
+
+        let location = "<?xml version=\"1.0\"?>\n<msg>\n\t<location x=\"31.19\" y=\"121.31\" scale=\"16\" label=\"Hongqiao Tiandi F6\" maptype=\"roadmap\" poiname=\"New Discovery\" poiid=\"qqmap_1055\" />\n</msg>";
+        assert_eq!(
+            delivery_message_text("Location", location),
+            "Hongqiao Tiandi F6 New Discovery"
+        );
+
+        let system = "<?xml version=\"1.0\"?>\n<sysmsg type=\"sysmsgtemplate\">\n<template><![CDATA[\"$username$\" invited you to this group chat]]></template>\n<nickname><![CDATA[Zheng]]></nickname>\n</sysmsg>";
+        assert_eq!(
+            delivery_message_text("System", system),
+            "\"$username$\" invited you to this group chat Zheng"
+        );
+
+        assert_eq!(
+            delivery_message_text("Text", "<3 not markup"),
+            "<3 not markup"
+        );
+        let long = "\u{4e2d}".repeat(4000);
+        let bounded = delivery_message_text("Text", &long);
+        assert!(bounded.len() <= 4096 + '\u{2026}'.len_utf8());
+        assert!(bounded.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn prose_lines_carry_one_based_source_line_numbers() {
+        let lines = markdown_prose_lines("# Title\n\nfact one [E000000001]\nuncited fact\n");
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].number, 3);
+        assert_eq!(lines[1].number, 4);
+        assert!(lines[1].citations.is_empty());
+    }
+
+    #[test]
+    fn only_cited_evidence_lines_are_worth_decoding() {
+        assert_eq!(
+            evidence_line_alias(br#"{"alias":"E000236493","canonicalId":"eyJ2Ijox"}"#),
+            Some("E000236493")
+        );
+        assert_eq!(
+            evidence_line_alias(b"{\"alias\":\"E000000001\",\"actor\":\"self\"}\n"),
+            Some("E000000001")
+        );
+        // Anything the writer would not have produced falls through to a full
+        // parse rather than being silently skipped.
+        assert_eq!(evidence_line_alias(br#"{"alias":"E00023649"#), None);
+        assert_eq!(evidence_line_alias(br#"{"alias":"","actor":"self"}"#), None);
+        assert_eq!(
+            evidence_line_alias(br#"{"alias":"X000236493","a":1}"#),
+            None
+        );
+        assert_eq!(
+            evidence_line_alias(br#"{"alias":"E00023649x","a":1}"#),
+            None
+        );
+        assert_eq!(evidence_line_alias(br#"{"alias":"E000236493"}"#), None);
+        assert_eq!(
+            evidence_line_alias(br#"{"actor":"self","alias":"E000236493"}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn a_rejected_commit_reports_every_problem_at_once() {
+        let mut page = snapshot("after", &["E000000001"], true);
+        page.prose_lines = vec![prose_line(3, &["E000000001"]), prose_line(7, &[])];
+        let current = BTreeMap::from([("people/P000001.md".to_string(), page)]);
+        let error = validate_wiki_commit(
+            &current,
+            None,
+            &[],
+            &["E000000001".to_string(), "E000000002".to_string()],
+            9,
+        )
+        .expect_err("an untargeted page with an uncited line and a stray alias is invalid");
+        let message = error.to_string();
+        assert!(message.contains("3 problem(s)"), "{message}");
+        assert!(
+            message.contains("non-target wiki page people/P000001.md"),
+            "{message}"
+        );
+        assert!(
+            message.contains("uncited prose line(s) at line 7"),
+            "{message}"
+        );
+        assert!(message.contains("E000000002"), "{message}");
     }
 
     #[test]
