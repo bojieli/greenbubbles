@@ -43,6 +43,7 @@ jobs:
         run: |
           bash -n scripts/package-send-helper.sh
           bash -n scripts/check-public-release.sh
+          python3 -m py_compile scripts/personal-memory-parallel.py
           bash scripts/check-public-release.sh
           plutil -lint Packaging/GreenBubbles/Info.plist
           plutil -lint Packaging/GreenBubblesInputHelper/Info.plist

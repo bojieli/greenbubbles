@@ -32,3 +32,6 @@ decrypted/
 # builds; the seed stays on the release machine and never enters the repository.
 *signing-key*.json
 *signing-seed*.json
+
+# Python bytecode from the packaging checks.
+__pycache__/
