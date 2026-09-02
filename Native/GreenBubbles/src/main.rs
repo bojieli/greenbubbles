@@ -55,9 +55,12 @@ use greenbubbles::{
     operator::{restore_snapshot_and_publish_with_progress, OfflineRestorePublishOptions},
     personal_memory::{
         acknowledge_personal_memory_page, commit_personal_memory_batch,
-        commit_personal_memory_batch_reviewed_no_durable_memory, next_personal_memory_batch,
-        next_personal_memory_page, personal_memory_status,
-        prepare_personal_memory_corpus_with_progress, PERSONAL_MEMORY_CURRENT_SELECTOR,
+        commit_personal_memory_batch_reviewed_no_durable_memory,
+        next_personal_memory_batch_with_scope, next_personal_memory_page,
+        personal_memory_manifest_output, personal_memory_status,
+        prepare_personal_memory_corpus_with_progress, PersonalMemoryConversationKindSelector,
+        PersonalMemoryScopeOptions, PersonalMemorySummarySubjectSelector,
+        PERSONAL_MEMORY_CURRENT_SELECTOR,
     },
     preflight_snapshot_with_progress, prepare_available_catalog_with_progress,
     prepare_catalog_batch_with_progress, prepare_catalog_with_progress,
@@ -698,7 +701,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         &output,
                         &mut report_progress,
                     )?;
-                    println!("{}", serde_json::to_string_pretty(&manifest)?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&personal_memory_manifest_output(&manifest)?)?
+                    );
                 }
                 "next" => {
                     let corpus = required_path(remaining.first().cloned(), "corpus index")?;
@@ -706,9 +712,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         return Err("memory next requires the corpus index as its first argument".into());
                     }
                     let options = &remaining[1..];
-                    validate_command_options(
+                    validate_command_options_repeated(
                         options,
-                        &["--state", "--wiki", "--max-text-bytes"],
+                        &[
+                            "--state",
+                            "--wiki",
+                            "--max-text-bytes",
+                            "--from",
+                            "--through",
+                            "--subject",
+                        ],
+                        &["--conversation", "--conversation-kind", "--sender"],
                         &[],
                     )?;
                     let state = PathBuf::from(required_option(options, "--state")?);
@@ -716,11 +730,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let maximum = required_u64_option(options, "--max-text-bytes")?
                         .try_into()
                         .map_err(|_| "--max-text-bytes does not fit this platform")?;
-                    let batch = next_personal_memory_batch(
+                    let conversations = option_strings(options, "--conversation")?;
+                    let conversation_kinds = option_strings(options, "--conversation-kind")?
+                        .iter()
+                        .map(|value| PersonalMemoryConversationKindSelector::parse_cli(value))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let senders = option_strings(options, "--sender")?;
+                    let subject = parse_personal_memory_subject(
+                        option_string(options, "--subject")?.as_deref(),
+                    )?;
+                    let scope = PersonalMemoryScopeOptions {
+                        conversation_selectors: conversations,
+                        conversation_kinds,
+                        from: option_string(options, "--from")?,
+                        through: option_string(options, "--through")?,
+                        sender_selectors: senders,
+                        summary_subject: subject,
+                    };
+                    let batch = next_personal_memory_batch_with_scope(
                         &corpus,
                         &state,
                         Some(&wiki),
                         maximum,
+                        Some(&scope),
                     )?;
                     println!("{}", serde_json::to_string(&batch)?);
                 }
@@ -2787,7 +2819,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "  greenbubbles conversations list <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n",
                     "  greenbubbles contacts list [--profile <name>] [--kind <kind>] [--limit <1..500>] [--cursor <opaque-cursor>] [--details]\n",
                     "  greenbubbles memory prepare [<source-root>] <new-corpus-index> --selection-policy <policy.json> [access mode]\n",
-                    "  greenbubbles memory next <corpus-index> --state <run-state.json> --wiki <wiki-dir> --max-text-bytes <n>\n",
+                    "  greenbubbles memory next <corpus-index> --state <run-state.json> --wiki <wiki-dir> --max-text-bytes <n> [scope filters]\n",
                     "  greenbubbles memory page <corpus-index> --state <run-state.json> [--batch <id|current>]\n",
                     "  greenbubbles memory acknowledge <corpus-index> --state <run-state.json> [--batch <id|current>] [--page-token <token|current>] (--retain-evidence <aliases> | --reviewed-no-durable-memory)\n",
                     "  greenbubbles memory commit <corpus-index> --state <run-state.json> [--batch <id|current>] --wiki <wiki-dir> [--reviewed-no-durable-memory]\n",
@@ -2971,14 +3003,22 @@ const fn memory_command_help() -> &'static str {
         "Usage:\n",
         "  greenbubbles memory prepare <new-corpus-index> --selection-policy <policy.json> [--profile <name>]\n",
         "  greenbubbles memory prepare <source-root> <new-corpus-index> --selection-policy <policy.json> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
-        "  greenbubbles memory next <corpus-index> --state <run-state.json> --wiki <wiki-dir> --max-text-bytes <16384..2097152>\n",
+        "  greenbubbles memory next <corpus-index> --state <run-state.json> --wiki <wiki-dir> --max-text-bytes <16384..2097152> [--conversation <id>]... [--conversation-kind <kind>]... [--from <RFC3339>] [--through <RFC3339>] [--sender <id>]... [--subject <subject>]\n",
         "  greenbubbles memory page <corpus-index> --state <run-state.json> [--batch <id|current>]\n",
         "  greenbubbles memory acknowledge <corpus-index> --state <run-state.json> [--batch <id|current>] [--page-token <token|current>] (--retain-evidence <E#########,E#########> | --reviewed-no-durable-memory)\n",
         "  greenbubbles memory commit <corpus-index> --state <run-state.json> [--batch <id|current>] --wiki <wiki-dir> [--reviewed-no-durable-memory]\n",
         "  greenbubbles memory status <corpus-index> [--state <run-state.json>]\n\n",
-        "prepare performs one local two-pass corpus scan: metadata over all reversible\n",
-        "message tables, then content hydration only for account-holder-active monthly\n",
-        "sessions and bounded context windows. The selection policy can use deterministic\n",
+        "A v2 allMessages prepare performs one local two-pass canonical scan: metadata over every\n",
+        "inventoried message table, then content hydration for every eligible row, including unresolved\n",
+        "hashed tables whose conversation identity is unavailable. Repeated conversation IDs,\n",
+        "conversation kinds and sender IDs are ORed within their category; categories and the\n",
+        "inclusive RFC 3339 time bounds intersect. Every timestamp shown to the agent uses RFC\n",
+        "3339 in the corpus timezone. Empty evidence filters mean the entire canonical corpus.\n",
+        "--subject defaults to account-holder, accepts person:<selector>, or none for\n",
+        "conversation-centric memory; it changes wiki focus without filtering evidence.\n",
+        "Conversation kinds: direct, group, official, service.\n",
+        "Stable corpus evidence aliases let sequential scopes safely refine one wiki. Legacy v1\n",
+        "account-holder-active corpora remain readable. The selection policy can use deterministic\n",
         "accountHolderRelevance delivery to cover strong relationships and active periods\n",
         "early while still scheduling every unit. next returns a small batch envelope. page\n",
         "then returns the next deterministic evidence page, always below Pi's 50-KiB tool\n",
@@ -4541,7 +4581,20 @@ fn validate_command_options(
     value_options: &[&str],
     flags: &[&str],
 ) -> Result<(), String> {
+    validate_command_options_repeated(arguments, value_options, &[], flags)
+}
+
+fn validate_command_options_repeated(
+    arguments: &[String],
+    value_options: &[&str],
+    repeatable_value_options: &[&str],
+    flags: &[&str],
+) -> Result<(), String> {
     let value_options = value_options.iter().copied().collect::<BTreeSet<_>>();
+    let repeatable_value_options = repeatable_value_options
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
     let flags = flags.iter().copied().collect::<BTreeSet<_>>();
     let mut seen = BTreeSet::new();
     let mut index = 0usize;
@@ -4550,10 +4603,10 @@ fn validate_command_options(
         if !option.starts_with("--") {
             return Err(format!("unexpected positional argument: {option}"));
         }
-        if !seen.insert(option) {
+        if !repeatable_value_options.contains(option) && !seen.insert(option) {
             return Err(format!("option may be supplied only once: {option}"));
         }
-        if value_options.contains(option) {
+        if value_options.contains(option) || repeatable_value_options.contains(option) {
             let value = arguments
                 .get(index + 1)
                 .filter(|value| !value.starts_with("--"))
@@ -4569,6 +4622,45 @@ fn validate_command_options(
         }
     }
     Ok(())
+}
+
+fn option_strings(arguments: &[String], option: &str) -> Result<Vec<String>, String> {
+    let mut values = Vec::new();
+    let mut index = 0usize;
+    while index < arguments.len() {
+        if arguments[index] == option {
+            let value = arguments
+                .get(index + 1)
+                .filter(|value| !value.starts_with("--"))
+                .ok_or_else(|| format!("missing value for {option}"))?;
+            values.push(value.clone());
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    Ok(values)
+}
+
+fn parse_personal_memory_subject(
+    value: Option<&str>,
+) -> Result<PersonalMemorySummarySubjectSelector, String> {
+    match value.unwrap_or("account-holder") {
+        "account-holder" | "accountHolder" | "self" => {
+            Ok(PersonalMemorySummarySubjectSelector::AccountHolder)
+        }
+        "none" => Ok(PersonalMemorySummarySubjectSelector::None),
+        value => value
+            .strip_prefix("person:")
+            .filter(|selector| !selector.is_empty())
+            .map(|selector| PersonalMemorySummarySubjectSelector::Person {
+                selector: selector.to_string(),
+            })
+            .ok_or_else(|| {
+                "--subject must be account-holder, none, or person:<source-id-or-P######>"
+                    .to_string()
+            }),
+    }
 }
 
 fn option_string(arguments: &[String], option: &str) -> Result<Option<String>, String> {

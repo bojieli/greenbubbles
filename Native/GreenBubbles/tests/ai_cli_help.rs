@@ -67,7 +67,11 @@ fn help_topic_exposes_ai_command_help() {
 
 #[test]
 fn personal_memory_help_exposes_the_agent_batch_contract_without_private_inputs() {
-    for arguments in [vec!["memory", "--help"], vec!["help", "memory"]] {
+    for arguments in [
+        vec!["memory", "--help"],
+        vec!["memory", "next", "--help"],
+        vec!["help", "memory"],
+    ] {
         let output = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
             .args(arguments)
             .output()
@@ -77,6 +81,15 @@ fn personal_memory_help_exposes_the_agent_batch_contract_without_private_inputs(
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert!(stdout.contains("greenbubbles memory prepare"));
         assert!(stdout.contains("greenbubbles memory next"));
+        assert!(stdout.contains("--conversation <id>"));
+        assert!(stdout.contains("--conversation-kind <kind>"));
+        assert!(stdout.contains("--from <RFC3339>"));
+        assert!(stdout.contains("--through <RFC3339>"));
+        assert!(stdout.contains("--sender <id>"));
+        assert!(stdout.contains("--subject <subject>"));
+        assert!(stdout.contains("allMessages"));
+        assert!(stdout.contains("Empty evidence filters"));
+        assert!(stdout.contains("person:<selector>"));
         assert!(stdout.contains("durably repeats"));
         assert!(stdout.contains("uniquely current persisted batch"));
         assert!(stdout.contains("commit never summarizes"));

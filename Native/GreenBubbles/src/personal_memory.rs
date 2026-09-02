@@ -6,7 +6,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use chrono::{Datelike, TimeZone};
+use chrono::{DateTime, Datelike, SecondsFormat, TimeZone};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -19,7 +19,10 @@ use crate::live_query::{
 };
 use crate::{ConversationKind, RestoreError};
 
-pub const PERSONAL_MEMORY_POLICY_SCHEMA: &str = "greenbubbles.personal-memory-selection-policy.v1";
+pub const PERSONAL_MEMORY_POLICY_SCHEMA: &str = "greenbubbles.personal-memory-selection-policy.v2";
+pub const LEGACY_PERSONAL_MEMORY_POLICY_SCHEMA: &str =
+    "greenbubbles.personal-memory-selection-policy.v1";
+pub const PERSONAL_MEMORY_POLICY_FORMAT_VERSION: u32 = 2;
 pub const PERSONAL_MEMORY_CORPUS_SCHEMA: &str = "greenbubbles.personal-memory-corpus.v1";
 pub const PERSONAL_MEMORY_BATCH_SCHEMA: &str = "greenbubbles.personal-memory-batch.v1";
 pub const PERSONAL_MEMORY_PAGE_SCHEMA: &str = "greenbubbles.personal-memory-page.v1";
@@ -28,7 +31,14 @@ pub const PERSONAL_MEMORY_FORMAT_VERSION: u32 = 1;
 pub const PERSONAL_MEMORY_CURRENT_SELECTOR: &str = "current";
 
 const MAXIMUM_POLICY_BYTES: u64 = 1024 * 1024;
+const MAXIMUM_SCOPE_SELECTORS: usize = 10_000;
+const MAXIMUM_SCOPE_SELECTOR_BYTES: usize = 512;
 const MAXIMUM_CONTROL_FILE_BYTES: u64 = 64 * 1024 * 1024;
+/// A canonical million-message corpus can legitimately have well over 100,000
+/// immutable units. Keep its verified index separate from the much smaller run
+/// state/control-file bound. New v2 indexes omit per-message aliases and repeated
+/// target paths, but this larger ceiling also keeps existing v1 corpora readable.
+const MAXIMUM_UNIT_INDEX_BYTES: u64 = 512 * 1024 * 1024;
 const MAXIMUM_WIKI_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAXIMUM_WIKI_ENTRIES: usize = 100_000;
 const MAXIMUM_WIKI_CITATIONS_PER_PROSE_LINE: usize = 8;
@@ -105,11 +115,142 @@ pub enum MemoryDeliveryOrder {
     AccountHolderRelevance,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PersonalMemoryCorpusMode {
+    /// Legacy v1 behavior: retain account-holder-active episodes and bounded context.
+    #[default]
+    AccountHolderActiveEpisodes,
+    /// Canonical v2 behavior: retain every decodable row from every inventoried message table.
+    AllMessages,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PersonalMemorySummarySubjectSelector {
+    /// Build the account holder's personal wiki. This is intentionally not a sender filter.
+    #[default]
+    AccountHolder,
+    /// Build memory about one other person selected by source ID or stable corpus alias.
+    Person { selector: String },
+    /// Build conversation-centric memory without choosing a person as the subject.
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PersonalMemoryConversationKindSelector {
+    Direct,
+    Group,
+    Official,
+    Service,
+}
+
+impl PersonalMemoryConversationKindSelector {
+    pub fn parse_cli(value: &str) -> Result<Self, RestoreError> {
+        match value {
+            "direct" => Ok(Self::Direct),
+            "group" => Ok(Self::Group),
+            "official" => Ok(Self::Official),
+            "service" => Ok(Self::Service),
+            _ => Err(RestoreError::Integrity(
+                "memory --conversation-kind must be direct, group, official, or service".into(),
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PersonalMemoryScopeOptions {
+    /// Empty means every conversation in the canonical corpus.
+    pub conversation_selectors: Vec<String>,
+    /// Empty means every conversation kind. Values are ORed, then intersected
+    /// with explicit conversation selectors and every other evidence filter.
+    pub conversation_kinds: Vec<PersonalMemoryConversationKindSelector>,
+    /// Inclusive RFC 3339 lower bound with an explicit offset or `Z`.
+    pub from: Option<String>,
+    /// Inclusive RFC 3339 upper bound with an explicit offset or `Z`.
+    pub through: Option<String>,
+    /// Empty means messages from every sender. `self` and `accountHolder` are accepted aliases.
+    pub sender_selectors: Vec<String>,
+    /// Defaults to the authenticated account holder and does not narrow evidence coverage.
+    pub summary_subject: PersonalMemorySummarySubjectSelector,
+}
+
+impl PersonalMemoryScopeOptions {
+    fn validate_shape(&self) -> Result<(Option<i64>, Option<i64>), RestoreError> {
+        for (label, selectors) in [
+            ("--conversation", &self.conversation_selectors),
+            ("--sender", &self.sender_selectors),
+        ] {
+            if selectors.len() > MAXIMUM_SCOPE_SELECTORS {
+                return Err(RestoreError::Integrity(format!(
+                    "memory {label} exceeds the fixed {MAXIMUM_SCOPE_SELECTORS}-selector limit"
+                )));
+            }
+            let mut unique = BTreeSet::new();
+            if selectors.iter().any(|selector| {
+                let trimmed = selector.trim();
+                trimmed.is_empty()
+                    || trimmed.len() > MAXIMUM_SCOPE_SELECTOR_BYTES
+                    || !unique.insert(trimmed)
+            }) {
+                return Err(RestoreError::Integrity(format!(
+                    "memory {label} contains an empty, duplicate, or oversized selector"
+                )));
+            }
+        }
+        if self.conversation_kinds.len() > MAXIMUM_SCOPE_SELECTORS
+            || self
+                .conversation_kinds
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .len()
+                != self.conversation_kinds.len()
+        {
+            return Err(RestoreError::Integrity(
+                "memory --conversation-kind contains a duplicate or exceeds the fixed selector limit"
+                    .into(),
+            ));
+        }
+        if let PersonalMemorySummarySubjectSelector::Person { selector } = &self.summary_subject {
+            let selector = selector.trim();
+            if selector.is_empty() || selector.len() > MAXIMUM_SCOPE_SELECTOR_BYTES {
+                return Err(RestoreError::Integrity(
+                    "memory --subject person selector is empty or oversized".into(),
+                ));
+            }
+        }
+        let not_before_unix = self
+            .from
+            .as_deref()
+            .map(|value| parse_rfc3339_scope_bound(value, "--from", true))
+            .transpose()?;
+        let not_after_unix = self
+            .through
+            .as_deref()
+            .map(|value| parse_rfc3339_scope_bound(value, "--through", false))
+            .transpose()?;
+        if not_before_unix
+            .zip(not_after_unix)
+            .is_some_and(|(start, end)| start > end)
+        {
+            return Err(RestoreError::Integrity(
+                "memory RFC 3339 time range is inverted or contains no whole source second".into(),
+            ));
+        }
+        Ok((not_before_unix, not_after_unix))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct PersonalMemorySelectionPolicy {
     pub schema: String,
     pub format_version: u32,
+    /// Required to be `allMessages` for v2 canonical corpora. Legacy v1 policies omit it.
+    #[serde(default)]
+    pub corpus_mode: PersonalMemoryCorpusMode,
     #[serde(default = "default_timezone")]
     pub timezone: String,
     #[serde(default)]
@@ -155,14 +296,30 @@ pub struct PersonalMemorySelectionPolicy {
 }
 
 impl PersonalMemorySelectionPolicy {
-    fn validate(&self) -> Result<Tz, RestoreError> {
-        if self.schema != PERSONAL_MEMORY_POLICY_SCHEMA
-            || self.format_version != PERSONAL_MEMORY_FORMAT_VERSION
+    fn validate(&self) -> Result<(Tz, PersonalMemoryCorpusMode), RestoreError> {
+        let corpus_mode = if self.schema == LEGACY_PERSONAL_MEMORY_POLICY_SCHEMA
+            && self.format_version == PERSONAL_MEMORY_FORMAT_VERSION
         {
+            if self.corpus_mode != PersonalMemoryCorpusMode::AccountHolderActiveEpisodes {
+                return Err(RestoreError::Integrity(
+                    "legacy personal-memory policies cannot request a v2 corpus mode".into(),
+                ));
+            }
+            PersonalMemoryCorpusMode::AccountHolderActiveEpisodes
+        } else if self.schema == PERSONAL_MEMORY_POLICY_SCHEMA
+            && self.format_version == PERSONAL_MEMORY_POLICY_FORMAT_VERSION
+        {
+            if self.corpus_mode != PersonalMemoryCorpusMode::AllMessages {
+                return Err(RestoreError::Integrity(
+                    "v2 personal-memory policies must use corpusMode=allMessages".into(),
+                ));
+            }
+            PersonalMemoryCorpusMode::AllMessages
+        } else {
             return Err(RestoreError::Integrity(
                 "personal-memory selection policy schema or format version is unsupported".into(),
             ));
-        }
+        };
         let timezone = self.timezone.parse::<Tz>().map_err(|_| {
             RestoreError::Integrity(
                 "selection policy timezone must be a valid IANA timezone name".into(),
@@ -222,7 +379,20 @@ impl PersonalMemorySelectionPolicy {
                     .into(),
             ));
         }
-        Ok(timezone)
+        if corpus_mode == PersonalMemoryCorpusMode::AllMessages
+            && (self.not_before_unix.is_some()
+                || self.not_after_unix.is_some()
+                || !self.include_direct_conversations
+                || !self.include_group_conversations
+                || !self.include_official_accounts
+                || !self.include_service_accounts)
+        {
+            return Err(RestoreError::Integrity(
+                "v2 canonical corpus preparation may not pre-filter time or conversation kinds; apply evidence filters through a run scope"
+                    .into(),
+            ));
+        }
+        Ok((timezone, corpus_mode))
     }
 }
 
@@ -245,6 +415,9 @@ pub struct PersonalMemoryCorpusManifest {
     pub source_identity: String,
     #[serde(rename = "selectionPolicySHA256")]
     pub selection_policy_sha256: String,
+    /// Missing in legacy corpora, which retained only account-holder-active episodes.
+    #[serde(default)]
+    pub corpus_mode: PersonalMemoryCorpusMode,
     pub timezone: String,
     /// Missing in legacy format-1 corpora, which were always chronological.
     #[serde(default)]
@@ -254,6 +427,10 @@ pub struct PersonalMemoryCorpusManifest {
     pub content_trust: String,
     pub immutable_index: bool,
     pub source_coverage_complete: bool,
+    /// True when every inventoried hashed message table was scanned, including
+    /// tables whose conversation identity could not be reversed.
+    #[serde(default)]
+    pub row_coverage_complete: bool,
     pub content_complete: bool,
     pub contact_count: usize,
     pub conversation_count: usize,
@@ -287,6 +464,9 @@ pub struct PersonalMemoryCoverage {
     pub episode_count: u64,
     pub unit_count: u64,
     pub source_coverage_complete: bool,
+    /// True when every inventoried hashed message table contributed metadata rows.
+    #[serde(default)]
+    pub row_coverage_complete: bool,
     pub content_complete: bool,
     pub limitation_codes: Vec<String>,
 }
@@ -297,8 +477,24 @@ struct ContactSidecarRecord {
     alias: Option<String>,
     source_id: String,
     display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remark: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nickname: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    wechat_alias: Option<String>,
     kind: ContactKind,
     is_account_holder: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConversationSidecarRecord {
+    alias: String,
+    source_id: String,
+    display_name: String,
+    kind: ConversationKind,
+    contact_kind: ContactKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -364,20 +560,33 @@ struct PreparedUnitFile {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct DeliveryMessage {
+    e: String,
+    a: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    p: Option<String>,
+    /// RFC 3339 in the corpus timezone. Integer seconds remain private to the
+    /// immutable corpus and state so the model never has to decode Unix time.
+    t: String,
+    k: String,
+    x: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    tr: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct DeliveryEpisode {
     /// Stable prepared-unit alias. A unit may continue on the next delivery page.
     u: String,
     c: String,
-    label: String,
-    kind: ConversationKind,
     month: String,
-    from: i64,
-    to: i64,
+    from: String,
+    to: String,
     /// Zero-based message offset within the immutable prepared unit.
     o: usize,
     /// Total message count in the immutable prepared unit.
     n: usize,
-    m: Vec<CompactMessage>,
+    m: Vec<DeliveryMessage>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -391,14 +600,51 @@ struct DeliveryPagePosition {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct DeliveryPersonIdentity {
+    source_id: String,
+    display_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remark: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nickname: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wechat_alias: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeliveryConversationIdentity {
+    source_id: String,
+    title: String,
+    kind: ConversationKind,
+}
+
+struct DeliveryIdentityIndex {
+    account_holder: DeliveryPersonIdentity,
+    people: BTreeMap<String, DeliveryPersonIdentity>,
+    conversations: BTreeMap<String, DeliveryConversationIdentity>,
+}
+
+struct DeliveryPageContext<'a> {
+    scope: &'a ResolvedPersonalMemoryScope,
+    timezone: Tz,
+    direct_people_by_unit: &'a BTreeMap<String, BTreeSet<String>>,
+    identities: &'a DeliveryIdentityIndex,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct DeliveryPagePayload {
     schema: &'static str,
     format_version: u32,
     batch_id: String,
     content_trust: &'static str,
     page: DeliveryPagePosition,
+    scope: MemoryScopeOutput,
     target_pages: Vec<String>,
-    people: BTreeMap<String, String>,
+    account_holder: DeliveryPersonIdentity,
+    people: BTreeMap<String, DeliveryPersonIdentity>,
+    conversations: BTreeMap<String, DeliveryConversationIdentity>,
     episodes: Vec<DeliveryEpisode>,
 }
 
@@ -429,8 +675,32 @@ struct UnitIndexEntry {
     byte_count: u64,
     text_byte_count: usize,
     message_count: usize,
+    /// Legacy v1 fields. V2 derives evidence aliases from one ordinal and stores
+    /// only person aliases rather than repeating full Markdown paths per unit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     target_pages: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     evidence_aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    person_aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    sender_aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    has_account_holder_sender: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    has_unknown_sender: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    first_evidence_ordinal: Option<u64>,
+    /// Added for canonical corpora so scopes can be planned without model-facing IDs.
+    #[serde(default)]
+    conversation: String,
+    /// Private source ID used only to resolve an operator's scope selector.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    conversation_id: String,
+    #[serde(default)]
+    from: i64,
+    #[serde(default)]
+    to: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -439,6 +709,44 @@ struct UnitIndex {
     schema: String,
     format_version: u32,
     units: Vec<UnitIndexEntry>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum ResolvedMemorySummarySubject {
+    #[default]
+    AccountHolder,
+    Person {
+        alias: String,
+    },
+    None,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResolvedPersonalMemoryScope {
+    conversation_aliases: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    conversation_kinds: BTreeSet<PersonalMemoryConversationKindSelector>,
+    not_before_unix: Option<i64>,
+    not_after_unix: Option<i64>,
+    sender_aliases: BTreeSet<String>,
+    include_account_holder_sender: bool,
+    include_unknown_sender: bool,
+    summary_subject: ResolvedMemorySummarySubject,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ScopedUnitSelection {
+    corpus_unit_index: usize,
+    /// True means every message in the immutable unit is selected and the bitmap stays absent.
+    all_messages: bool,
+    /// Hex-encoded least-significant-bit-first selection bitmap for a partial unit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message_bitmap: Option<String>,
+    message_count: usize,
+    text_byte_count: usize,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -514,7 +822,7 @@ pub fn prepare_personal_memory_corpus_with_progress(
     validate_new_corpus_output(output_directory, source.root())?;
     let policy_bytes = read_regular_file_limited(selection_policy_path, MAXIMUM_POLICY_BYTES)?;
     let policy: PersonalMemorySelectionPolicy = serde_json::from_slice(&policy_bytes)?;
-    let timezone = policy.validate()?;
+    let (timezone, corpus_mode) = policy.validate()?;
     let policy_sha256 = sha256_bytes(&policy_bytes);
     let reference_unix = policy.reference_unix.unwrap_or_else(now_unix_seconds);
     let reference_month = month_key(timezone, reference_unix).ok_or_else(|| {
@@ -575,7 +883,7 @@ pub fn prepare_personal_memory_corpus_with_progress(
             }
         }
 
-        if !conversation_enabled(conversation, &policy) {
+        if !conversation_enabled(conversation, &policy, corpus_mode) {
             coverage.omitted_filtered_conversation = coverage
                 .omitted_filtered_conversation
                 .saturating_add(scan.messages.len() as u64);
@@ -643,17 +951,21 @@ pub fn prepare_personal_memory_corpus_with_progress(
             month_indices.entry(month).or_default().push(index);
         }
 
-        let active_months = month_indices
-            .iter()
-            .filter_map(|(month, indices)| {
-                let self_count = indices
-                    .iter()
-                    .filter(|index| messages[**index].is_account_holder == Some(true))
-                    .count();
-                (self_count >= policy.minimum_self_messages_per_active_month)
-                    .then_some(month.clone())
-            })
-            .collect::<BTreeSet<_>>();
+        let active_months = if corpus_mode == PersonalMemoryCorpusMode::AllMessages {
+            month_indices.keys().cloned().collect::<BTreeSet<_>>()
+        } else {
+            month_indices
+                .iter()
+                .filter_map(|(month, indices)| {
+                    let self_count = indices
+                        .iter()
+                        .filter(|index| messages[**index].is_account_holder == Some(true))
+                        .count();
+                    (self_count >= policy.minimum_self_messages_per_active_month)
+                        .then_some(month.clone())
+                })
+                .collect::<BTreeSet<_>>()
+        };
         let recent_active_count = active_months
             .iter()
             .filter(|month| {
@@ -662,7 +974,8 @@ pub fn prepare_personal_memory_corpus_with_progress(
                 })
             })
             .count();
-        let recent_conversation_eligible = policy.minimum_self_active_months_in_lookback == 0
+        let recent_conversation_eligible = corpus_mode == PersonalMemoryCorpusMode::AllMessages
+            || policy.minimum_self_active_months_in_lookback == 0
             || recent_active_count >= policy.minimum_self_active_months_in_lookback;
 
         for (month, indices) in &month_indices {
@@ -714,6 +1027,23 @@ pub fn prepare_personal_memory_corpus_with_progress(
             let sessions = split_sessions(indices, &messages, gap_seconds);
             let mut selected_in_month = BTreeSet::<usize>::new();
             for session in sessions {
+                if corpus_mode == PersonalMemoryCorpusMode::AllMessages {
+                    let locations = session
+                        .iter()
+                        .map(|index| {
+                            selected_in_month.insert(*index);
+                            messages[*index].location.clone()
+                        })
+                        .collect::<Vec<_>>();
+                    if !locations.is_empty() {
+                        episode_drafts.push(EpisodeDraft {
+                            conversation: conversation.clone(),
+                            month: month.label.clone(),
+                            locations,
+                        });
+                    }
+                    continue;
+                }
                 let anchors = session
                     .iter()
                     .enumerate()
@@ -998,6 +1328,9 @@ pub fn prepare_personal_memory_corpus_with_progress(
             alias: person_aliases.get(&contact.source_id).cloned(),
             source_id: contact.source_id.clone(),
             display_name: contact.display_name.clone(),
+            remark: contact.remark.clone(),
+            nickname: contact.nickname.clone(),
+            wechat_alias: contact.alias.clone(),
             kind: contact.kind,
             is_account_holder: contact.is_account_holder,
         })
@@ -1014,6 +1347,9 @@ pub fn prepare_personal_memory_corpus_with_progress(
                     .get(source_id)
                     .cloned()
                     .unwrap_or_else(|| source_id.clone()),
+                remark: None,
+                nickname: None,
+                wechat_alias: None,
                 kind: ContactKind::Unknown,
                 is_account_holder: false,
             });
@@ -1024,6 +1360,35 @@ pub fn prepare_personal_memory_corpus_with_progress(
         &contacts_path,
         "contacts.jsonl",
         contact_records.iter(),
+    )?);
+
+    let conversations_path = staging.path().join("conversations.jsonl");
+    let conversation_records = inventory
+        .conversations
+        .iter()
+        .map(|conversation| {
+            let alias = conversation_aliases
+                .get(&conversation.source_id)
+                .cloned()
+                .ok_or_else(|| {
+                    RestoreError::Integrity(
+                        "canonical corpus conversation alias is unavailable".into(),
+                    )
+                })?;
+            let display_name = model_safe_conversation_label(conversation, &alias);
+            Ok(ConversationSidecarRecord {
+                alias,
+                source_id: conversation.source_id.clone(),
+                display_name,
+                kind: conversation.kind,
+                contact_kind: conversation.contact_kind,
+            })
+        })
+        .collect::<Result<Vec<_>, RestoreError>>()?;
+    files.push(write_json_lines(
+        &conversations_path,
+        "conversations.jsonl",
+        conversation_records.iter(),
     )?);
 
     let activity_path = staging.path().join("activity.jsonl");
@@ -1045,19 +1410,28 @@ pub fn prepare_personal_memory_corpus_with_progress(
     for (unit_index, unit) in units.into_iter().enumerate() {
         let unit_id = format!("U{:06}", unit_index.saturating_add(1));
         let mut compact_messages = Vec::with_capacity(unit.messages.len());
-        let mut evidence_aliases = Vec::with_capacity(unit.messages.len());
-        let mut target_pages = BTreeSet::from(["index.md".to_string(), "me.md".to_string()]);
+        let first_evidence_ordinal = evidence_count.saturating_add(1);
+        let mut unit_person_aliases = BTreeSet::new();
+        let mut unit_sender_aliases = BTreeSet::new();
+        let mut has_account_holder_sender = false;
+        let mut has_unknown_sender = false;
         if let Some(person_alias) = person_aliases.get(&unit.conversation_source_id) {
-            target_pages.insert(format!("people/{person_alias}.md"));
+            unit_person_aliases.insert(person_alias.clone());
         }
         let mut text_byte_count = 0usize;
         for message in unit.messages {
             evidence_count = evidence_count.saturating_add(1);
             let evidence_alias = format!("E{evidence_count:09}");
             let actor = match message.is_account_holder {
-                Some(true) => "self",
+                Some(true) => {
+                    has_account_holder_sender = true;
+                    "self"
+                }
                 Some(false) => "other",
-                None => "unknown",
+                None => {
+                    has_unknown_sender = true;
+                    "unknown"
+                }
             }
             .to_string();
             let person_alias = message
@@ -1065,7 +1439,8 @@ pub fn prepare_personal_memory_corpus_with_progress(
                 .as_ref()
                 .and_then(|sender| person_aliases.get(sender).cloned());
             if let Some(person_alias) = &person_alias {
-                target_pages.insert(format!("people/{person_alias}.md"));
+                unit_person_aliases.insert(person_alias.clone());
+                unit_sender_aliases.insert(person_alias.clone());
             }
             let text = compact_message_text(&message);
             text_byte_count = text_byte_count.saturating_add(text.len());
@@ -1101,7 +1476,6 @@ pub fn prepare_personal_memory_corpus_with_progress(
                 x: text,
                 tr: message.text_truncated,
             });
-            evidence_aliases.push(evidence_alias);
         }
         let from = compact_messages
             .first()
@@ -1111,10 +1485,11 @@ pub fn prepare_personal_memory_corpus_with_progress(
             .last()
             .map(|message| message.t)
             .unwrap_or_default();
+        let conversation_alias = unit.conversation_alias;
         let prepared = PreparedUnitFile {
             schema: PERSONAL_MEMORY_BATCH_SCHEMA.to_string(),
             id: unit_id.clone(),
-            c: unit.conversation_alias,
+            c: conversation_alias.clone(),
             label: unit.conversation_label,
             kind: unit.conversation_kind,
             month: unit.month,
@@ -1135,9 +1510,18 @@ pub fn prepare_personal_memory_corpus_with_progress(
             sha256: record.sha256.clone(),
             byte_count: record.byte_count,
             text_byte_count,
-            message_count: evidence_aliases.len(),
-            target_pages: target_pages.into_iter().collect(),
-            evidence_aliases,
+            message_count: prepared.m.len(),
+            target_pages: Vec::new(),
+            evidence_aliases: Vec::new(),
+            person_aliases: unit_person_aliases.into_iter().collect(),
+            sender_aliases: unit_sender_aliases.into_iter().collect(),
+            has_account_holder_sender,
+            has_unknown_sender,
+            first_evidence_ordinal: Some(first_evidence_ordinal),
+            conversation: conversation_alias,
+            conversation_id: String::new(),
+            from,
+            to,
         });
         if unit_index.saturating_add(1) == publication_unit_count
             || last_progress.elapsed() >= Duration::from_secs(2)
@@ -1162,17 +1546,36 @@ pub fn prepare_personal_memory_corpus_with_progress(
     });
 
     let unit_index = UnitIndex {
-        schema: "greenbubbles.personal-memory-unit-index.v1".into(),
-        format_version: PERSONAL_MEMORY_FORMAT_VERSION,
+        schema: "greenbubbles.personal-memory-unit-index.v2".into(),
+        format_version: 2,
         units: unit_index_entries,
     };
-    files.push(write_json_pretty(
+    let unit_index_record = write_json_compact(
         &batches_directory.join("index.json"),
         "batches/index.json",
         &unit_index,
-    )?);
+    )?;
+    if unit_index_record.byte_count > MAXIMUM_UNIT_INDEX_BYTES {
+        return Err(RestoreError::Integrity(format!(
+            "prepared unit index exceeds the fixed {MAXIMUM_UNIT_INDEX_BYTES}-byte safety limit"
+        )));
+    }
+    files.push(unit_index_record);
     coverage.unit_count = unit_index.units.len() as u64;
     coverage.limitation_codes = limitation_codes.into_iter().collect();
+    coverage.row_coverage_complete = coverage.metadata_decode_failure_count == 0
+        && !coverage.limitation_codes.iter().any(|code| {
+            matches!(
+                code.as_str(),
+                "messageTableInventoryUnavailable"
+                    | "messageTableInventoryIncomplete"
+                    | "corpusMetadataQueryFailed"
+                    | "corpusMetadataRowFailed"
+                    | "unsupportedCorpusMessageSchema"
+                    | "shardUnavailable"
+                    | "shardSchemaUnavailable"
+            )
+        });
     let coverage_record = write_json_pretty(
         &staging.path().join("coverage.json"),
         "coverage.json",
@@ -1187,6 +1590,7 @@ pub fn prepare_personal_memory_corpus_with_progress(
         source_mode: source.mode(),
         source_identity: source.identity().to_string(),
         selection_policy_sha256: policy_sha256,
+        corpus_mode,
         timezone: policy.timezone,
         delivery_order: policy.delivery_order,
         reference_unix,
@@ -1194,6 +1598,7 @@ pub fn prepare_personal_memory_corpus_with_progress(
         content_trust: "untrustedChatEvidence".into(),
         immutable_index: true,
         source_coverage_complete: coverage.source_coverage_complete,
+        row_coverage_complete: coverage.row_coverage_complete,
         content_complete: coverage.content_complete,
         contact_count: contact_records.len(),
         conversation_count: inventory.conversations.len(),
@@ -1229,7 +1634,11 @@ pub fn prepare_personal_memory_corpus_with_progress(
 fn conversation_enabled(
     conversation: &CorpusConversation,
     policy: &PersonalMemorySelectionPolicy,
+    corpus_mode: PersonalMemoryCorpusMode,
 ) -> bool {
+    if corpus_mode == PersonalMemoryCorpusMode::AllMessages {
+        return true;
+    }
     match conversation.contact_kind {
         ContactKind::Group => policy.include_group_conversations,
         ContactKind::Official => policy.include_official_accounts,
@@ -1240,26 +1649,26 @@ fn conversation_enabled(
 
 fn model_safe_conversation_label(conversation: &CorpusConversation, alias: &str) -> String {
     let display_name = conversation.display_name.trim();
-    if !display_name.is_empty() && display_name != conversation.source_id.trim() {
+    if !display_name.is_empty() {
         return display_name.to_string();
     }
-
-    match conversation.kind {
-        ConversationKind::Group => format!("Group {alias}"),
-        ConversationKind::Direct => format!("Direct conversation {alias}"),
-        ConversationKind::Business => format!("Official account {alias}"),
-        ConversationKind::Chatbot => format!("Chatbot {alias}"),
-        ConversationKind::System => format!("System conversation {alias}"),
-        ConversationKind::Unresolved => format!("Conversation {alias}"),
+    let source_id = conversation.source_id.trim();
+    if !source_id.is_empty() {
+        return source_id.to_string();
     }
+    alias.to_string()
 }
 
 fn model_safe_person_label(record: &ContactSidecarRecord, alias: &str) -> String {
     let display_name = record.display_name.trim();
-    if !display_name.is_empty() && display_name != record.source_id.trim() {
+    if !display_name.is_empty() {
         return display_name.to_string();
     }
-    format!("Person {alias}")
+    let source_id = record.source_id.trim();
+    if !source_id.is_empty() {
+        return source_id.to_string();
+    }
+    alias.to_string()
 }
 
 fn chronological_metadata_key(message: &CorpusMessageMetadata) -> (i64, i64, i64, u32, i64) {
@@ -1638,6 +2047,24 @@ fn write_json_pretty<T: Serialize>(
     })
 }
 
+fn write_json_compact<T: Serialize>(
+    path: &Path,
+    relative_path: &str,
+    value: &T,
+) -> Result<CorpusFileRecord, RestoreError> {
+    let mut bytes = serde_json::to_vec(value)?;
+    bytes.push(b'\n');
+    let mut writer = owner_only_writer(path)?;
+    writer.write_all(&bytes)?;
+    writer.flush()?;
+    writer.get_ref().sync_all()?;
+    Ok(CorpusFileRecord {
+        relative_path: relative_path.to_string(),
+        byte_count: bytes.len() as u64,
+        sha256: sha256_bytes(&bytes),
+    })
+}
+
 fn write_json_lines<'record, T: Serialize + 'record>(
     path: &Path,
     relative_path: &str,
@@ -1697,6 +2124,104 @@ fn now_unix_seconds() -> i64 {
         .unwrap_or_default()
         .as_secs()
         .min(i64::MAX as u64) as i64
+}
+
+fn parse_rfc3339_scope_bound(
+    value: &str,
+    option: &str,
+    round_fraction_up: bool,
+) -> Result<i64, RestoreError> {
+    if value.trim() != value || value.is_empty() {
+        return Err(RestoreError::Integrity(format!(
+            "memory {option} must be a non-empty RFC 3339 timestamp without surrounding whitespace"
+        )));
+    }
+    let parsed = DateTime::parse_from_rfc3339(value).map_err(|_| {
+        RestoreError::Integrity(format!(
+            "memory {option} must be an RFC 3339 timestamp with an explicit offset, for example 2023-12-02T11:18:36+08:00"
+        ))
+    })?;
+    let nanos = parsed.timestamp_subsec_nanos();
+    if nanos >= 1_000_000_000 {
+        return Err(RestoreError::Integrity(format!(
+            "memory {option} does not accept an RFC 3339 leap-second value"
+        )));
+    }
+    if round_fraction_up && nanos != 0 {
+        parsed.timestamp().checked_add(1).ok_or_else(|| {
+            RestoreError::Integrity(format!(
+                "memory {option} is outside the supported time range"
+            ))
+        })
+    } else {
+        Ok(parsed.timestamp())
+    }
+}
+
+fn format_unix_seconds_rfc3339(timezone: Tz, timestamp: i64) -> Result<String, RestoreError> {
+    timezone
+        .timestamp_opt(timestamp, 0)
+        .single()
+        .map(|value| value.to_rfc3339_opts(SecondsFormat::Secs, false))
+        .ok_or_else(|| {
+            RestoreError::Integrity(
+                "personal-memory timestamp is outside the RFC 3339 presentation range".into(),
+            )
+        })
+}
+
+fn format_unix_milliseconds_rfc3339(timezone: Tz, timestamp: u64) -> Result<String, RestoreError> {
+    let timestamp = i64::try_from(timestamp).map_err(|_| {
+        RestoreError::Integrity(
+            "personal-memory millisecond timestamp is outside the RFC 3339 presentation range"
+                .into(),
+        )
+    })?;
+    timezone
+        .timestamp_millis_opt(timestamp)
+        .single()
+        .map(|value| value.to_rfc3339_opts(SecondsFormat::Millis, false))
+        .ok_or_else(|| {
+            RestoreError::Integrity(
+                "personal-memory millisecond timestamp is outside the RFC 3339 presentation range"
+                    .into(),
+            )
+        })
+}
+
+fn manifest_timezone(manifest: &PersonalMemoryCorpusManifest) -> Result<Tz, RestoreError> {
+    manifest.timezone.parse::<Tz>().map_err(|_| {
+        RestoreError::Integrity(
+            "personal-memory corpus manifest contains an unsupported IANA timezone".into(),
+        )
+    })
+}
+
+pub fn personal_memory_manifest_output(
+    manifest: &PersonalMemoryCorpusManifest,
+) -> Result<Value, RestoreError> {
+    let timezone = manifest_timezone(manifest)?;
+    let mut output = serde_json::to_value(manifest)?;
+    let object = output.as_object_mut().ok_or_else(|| {
+        RestoreError::Integrity("personal-memory manifest did not serialize as an object".into())
+    })?;
+    object.remove("generatedAtUnixMilliseconds");
+    object.remove("referenceUnix");
+    object.insert(
+        "generatedAt".into(),
+        Value::String(format_unix_milliseconds_rfc3339(
+            timezone,
+            manifest.generated_at_unix_milliseconds,
+        )?),
+    );
+    object.insert(
+        "referenceTime".into(),
+        Value::String(format_unix_seconds_rfc3339(
+            timezone,
+            manifest.reference_unix,
+        )?),
+    );
+    Ok(output)
 }
 
 fn now_unix_milliseconds() -> Result<u64, RestoreError> {
@@ -1800,6 +2325,16 @@ struct CommittedBatch {
     retained_evidence_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompletedMemoryScope {
+    #[serde(rename = "scopeSHA256")]
+    scope_sha256: String,
+    unit_count: usize,
+    message_count: u64,
+    completed_at_unix_milliseconds: u64,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum MemoryCommitDisposition {
@@ -1815,6 +2350,17 @@ struct MemoryRunState {
     format_version: u32,
     #[serde(rename = "corpusManifestSHA256")]
     corpus_manifest_sha256: String,
+    /// Present on new scoped states. Missing means a legacy state over every prepared unit.
+    #[serde(default)]
+    scope: Option<ResolvedPersonalMemoryScope>,
+    #[serde(default, rename = "scopeSHA256")]
+    scope_sha256: Option<String>,
+    #[serde(default)]
+    scoped_units: Vec<ScopedUnitSelection>,
+    #[serde(default)]
+    scoped_message_count: Option<u64>,
+    #[serde(default)]
+    completed_scopes: Vec<CompletedMemoryScope>,
     next_unit_index: usize,
     outstanding: Option<OutstandingBatch>,
     last_committed: Option<CommittedBatch>,
@@ -1842,8 +2388,21 @@ struct MemoryBatchOutput {
     batch_id: String,
     complete: bool,
     content_trust: &'static str,
+    scope: MemoryScopeOutput,
     position: BatchPosition,
     delivery: MemoryBatchDelivery,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryScopeOutput {
+    conversation_filter_count: usize,
+    conversation_kinds: Vec<PersonalMemoryConversationKindSelector>,
+    from: Option<String>,
+    through: Option<String>,
+    sender_filter_count: usize,
+    all_messages: bool,
+    summary_subject: ResolvedMemorySummarySubject,
 }
 
 #[derive(Debug, Serialize)]
@@ -1915,12 +2474,18 @@ pub struct MemoryStatus {
     pub unit_count: usize,
     pub evidence_count: u64,
     pub scanned_message_count: u64,
+    pub eligible_message_count: u64,
+    /// Hydrated messages physically present before run-time scope filtering.
+    pub corpus_message_count: u64,
     pub selected_message_count: u64,
     pub source_coverage_complete: bool,
+    pub row_coverage_complete: bool,
     pub content_complete: bool,
     pub unmatched_message_table_count: usize,
     pub limitation_codes: Vec<String>,
     pub delivery_order: MemoryDeliveryOrder,
+    pub scope: MemoryScopeStatus,
+    pub completed_scope_count: usize,
     pub next_unit_index: usize,
     pub committed_unit_count: usize,
     pub committed_message_count: u64,
@@ -1937,6 +2502,21 @@ pub struct MemoryStatus {
     pub last_committed: Option<MemoryLastCommittedStatus>,
     pub complete: bool,
     pub progress_percent: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryScopeStatus {
+    pub conversation_filter_count: usize,
+    pub conversation_kinds: Vec<PersonalMemoryConversationKindSelector>,
+    pub from: Option<String>,
+    pub through: Option<String>,
+    pub sender_filter_count: usize,
+    pub includes_account_holder_sender: bool,
+    pub includes_unknown_sender: bool,
+    pub all_messages: bool,
+    pub summary_subject: String,
+    pub summary_subject_alias: Option<String>,
 }
 
 struct LoadedCorpus {
@@ -1963,31 +2543,108 @@ fn person_alias_from_target_page(path: &str) -> Option<&str> {
     path.strip_prefix("people/")?.strip_suffix(".md")
 }
 
+fn unit_person_aliases(entry: &UnitIndexEntry) -> BTreeSet<String> {
+    entry
+        .person_aliases
+        .iter()
+        .cloned()
+        .chain(
+            entry
+                .target_pages
+                .iter()
+                .filter_map(|path| person_alias_from_target_page(path).map(str::to_string)),
+        )
+        .collect()
+}
+
+fn memory_scope_output(
+    scope: &ResolvedPersonalMemoryScope,
+    timezone: Tz,
+) -> Result<MemoryScopeOutput, RestoreError> {
+    Ok(MemoryScopeOutput {
+        conversation_filter_count: scope.conversation_aliases.len(),
+        conversation_kinds: scope.conversation_kinds.iter().copied().collect(),
+        from: scope
+            .not_before_unix
+            .map(|value| format_unix_seconds_rfc3339(timezone, value))
+            .transpose()?,
+        through: scope
+            .not_after_unix
+            .map(|value| format_unix_seconds_rfc3339(timezone, value))
+            .transpose()?,
+        sender_filter_count: scope.sender_aliases.len()
+            + usize::from(scope.include_account_holder_sender)
+            + usize::from(scope.include_unknown_sender),
+        all_messages: scope_selects_all_evidence(scope),
+        summary_subject: scope.summary_subject.clone(),
+    })
+}
+
+fn memory_scope_status(
+    scope: &ResolvedPersonalMemoryScope,
+    timezone: Tz,
+) -> Result<MemoryScopeStatus, RestoreError> {
+    let (summary_subject, summary_subject_alias) = match &scope.summary_subject {
+        ResolvedMemorySummarySubject::AccountHolder => ("accountHolder".into(), None),
+        ResolvedMemorySummarySubject::Person { alias } => ("person".into(), Some(alias.clone())),
+        ResolvedMemorySummarySubject::None => ("none".into(), None),
+    };
+    Ok(MemoryScopeStatus {
+        conversation_filter_count: scope.conversation_aliases.len(),
+        conversation_kinds: scope.conversation_kinds.iter().copied().collect(),
+        from: scope
+            .not_before_unix
+            .map(|value| format_unix_seconds_rfc3339(timezone, value))
+            .transpose()?,
+        through: scope
+            .not_after_unix
+            .map(|value| format_unix_seconds_rfc3339(timezone, value))
+            .transpose()?,
+        sender_filter_count: scope.sender_aliases.len()
+            + usize::from(scope.include_account_holder_sender)
+            + usize::from(scope.include_unknown_sender),
+        includes_account_holder_sender: scope.include_account_holder_sender,
+        includes_unknown_sender: scope.include_unknown_sender,
+        all_messages: scope_selects_all_evidence(scope),
+        summary_subject,
+        summary_subject_alias,
+    })
+}
+
 fn append_delivery_message(
     episodes: &mut Vec<DeliveryEpisode>,
     unit: &PreparedUnitFile,
     message_offset: usize,
-) {
-    let message = unit.m[message_offset].clone();
+    timezone: Tz,
+) -> Result<(), RestoreError> {
+    let compact = &unit.m[message_offset];
+    let message = DeliveryMessage {
+        e: compact.e.clone(),
+        a: compact.a.clone(),
+        p: compact.p.clone(),
+        t: format_unix_seconds_rfc3339(timezone, compact.t)?,
+        k: compact.k.clone(),
+        x: compact.x.clone(),
+        tr: compact.tr,
+    };
     if let Some(current) = episodes.last_mut().filter(|episode| {
         episode.u == unit.id && episode.o.saturating_add(episode.m.len()) == message_offset
     }) {
-        current.to = message.t;
+        current.to = message.t.clone();
         current.m.push(message);
-        return;
+        return Ok(());
     }
     episodes.push(DeliveryEpisode {
         u: unit.id.clone(),
         c: unit.c.clone(),
-        label: unit.label.clone(),
-        kind: unit.kind,
         month: unit.month.clone(),
-        from: message.t,
-        to: message.t,
+        from: message.t.clone(),
+        to: message.t.clone(),
         o: message_offset,
         n: unit.m.len(),
         m: vec![message],
     });
+    Ok(())
 }
 
 fn remove_last_delivery_message(episodes: &mut Vec<DeliveryEpisode>) {
@@ -1996,7 +2653,7 @@ fn remove_last_delivery_message(episodes: &mut Vec<DeliveryEpisode>) {
     };
     last.m.pop();
     if let Some(message) = last.m.last() {
-        last.to = message.t;
+        last.to = message.t.clone();
     } else {
         episodes.pop();
     }
@@ -2007,14 +2664,17 @@ fn delivery_page_payload(
     number: usize,
     page_count: usize,
     episodes: Vec<DeliveryEpisode>,
-    direct_people_by_unit: &BTreeMap<String, BTreeSet<String>>,
-    all_people: &BTreeMap<String, String>,
-) -> DeliveryPagePayload {
+    context: &DeliveryPageContext<'_>,
+) -> Result<DeliveryPagePayload, RestoreError> {
     let mut aliases = BTreeSet::new();
+    if let ResolvedMemorySummarySubject::Person { alias } = &context.scope.summary_subject {
+        aliases.insert(alias.clone());
+    }
     for episode in &episodes {
-        if episode.kind == ConversationKind::Direct {
+        if context.direct_people_by_unit.contains_key(&episode.u) {
             aliases.extend(
-                direct_people_by_unit
+                context
+                    .direct_people_by_unit
                     .get(&episode.u)
                     .into_iter()
                     .flatten()
@@ -2023,25 +2683,62 @@ fn delivery_page_payload(
         }
         aliases.extend(episode.m.iter().filter_map(|message| message.p.clone()));
     }
-    let mut target_pages = BTreeSet::from(["index.md".to_string(), "me.md".to_string()]);
+    let mut target_pages = BTreeSet::from(["index.md".to_string()]);
+    match &context.scope.summary_subject {
+        ResolvedMemorySummarySubject::AccountHolder => {
+            target_pages.insert("me.md".into());
+        }
+        ResolvedMemorySummarySubject::Person { alias } => {
+            target_pages.insert(format!("people/{alias}.md"));
+        }
+        ResolvedMemorySummarySubject::None => {}
+    }
     let people = aliases
         .into_iter()
         .map(|alias| {
-            target_pages.insert(format!("people/{alias}.md"));
-            let label = all_people
+            if matches!(
+                &context.scope.summary_subject,
+                ResolvedMemorySummarySubject::AccountHolder
+            ) {
+                target_pages.insert(format!("people/{alias}.md"));
+            }
+            let identity = context
+                .identities
+                .people
                 .get(&alias)
                 .cloned()
-                .unwrap_or_else(|| alias.clone());
-            (alias, label)
+                .ok_or_else(|| {
+                    RestoreError::Integrity(
+                        "memory page cannot resolve a participant's source identity".into(),
+                    )
+                })?;
+            Ok((alias, identity))
         })
-        .collect();
+        .collect::<Result<BTreeMap<_, _>, RestoreError>>()?;
+    let conversations = episodes
+        .iter()
+        .map(|episode| {
+            target_pages.insert(format!("conversations/{}.md", episode.c));
+            let identity = context
+                .identities
+                .conversations
+                .get(&episode.c)
+                .cloned()
+                .ok_or_else(|| {
+                    RestoreError::Integrity(
+                        "memory page cannot resolve a conversation's source identity".into(),
+                    )
+                })?;
+            Ok((episode.c.clone(), identity))
+        })
+        .collect::<Result<BTreeMap<_, _>, RestoreError>>()?;
     let message_count = episodes.iter().map(|episode| episode.m.len()).sum();
     let text_byte_count = episodes
         .iter()
         .flat_map(|episode| &episode.m)
         .map(|message| message.x.len())
         .sum();
-    DeliveryPagePayload {
+    Ok(DeliveryPagePayload {
         schema: PERSONAL_MEMORY_PAGE_SCHEMA,
         format_version: PERSONAL_MEMORY_FORMAT_VERSION,
         batch_id: batch_id.to_string(),
@@ -2052,10 +2749,13 @@ fn delivery_page_payload(
             message_count,
             text_byte_count,
         },
+        scope: memory_scope_output(context.scope, context.timezone)?,
         target_pages: target_pages.into_iter().collect(),
+        account_holder: context.identities.account_holder.clone(),
         people,
+        conversations,
         episodes,
-    }
+    })
 }
 
 fn render_delivery_page(
@@ -2086,42 +2786,53 @@ fn render_delivery_page(
 
 fn build_delivery_pages(
     corpus: &LoadedCorpus,
+    scope: &ResolvedPersonalMemoryScope,
+    scoped_units: &[ScopedUnitSelection],
     batch_id: &str,
     start_unit_index: usize,
     end_unit_index_exclusive: usize,
 ) -> Result<Vec<RenderedDeliveryPage>, RestoreError> {
-    if start_unit_index >= end_unit_index_exclusive
-        || end_unit_index_exclusive > corpus.unit_index.units.len()
+    if start_unit_index >= end_unit_index_exclusive || end_unit_index_exclusive > scoped_units.len()
     {
         return Err(RestoreError::Integrity(
             "outstanding batch contains an invalid delivery range".into(),
         ));
     }
-    let entries = &corpus.unit_index.units[start_unit_index..end_unit_index_exclusive];
-    let units = entries
+    let selections = &scoped_units[start_unit_index..end_unit_index_exclusive];
+    let units = selections
         .iter()
-        .map(|entry| load_unit(corpus, entry))
+        .map(|selection| load_scoped_unit(corpus, selection))
         .collect::<Result<Vec<_>, _>>()?;
     let mut all_person_aliases = BTreeSet::new();
+    if let ResolvedMemorySummarySubject::Person { alias } = &scope.summary_subject {
+        all_person_aliases.insert(alias.clone());
+    }
     let mut direct_people_by_unit = BTreeMap::<String, BTreeSet<String>>::new();
-    for (entry, unit) in entries.iter().zip(&units) {
-        let aliases = entry
-            .target_pages
-            .iter()
-            .filter_map(|path| person_alias_from_target_page(path).map(str::to_string))
-            .collect::<BTreeSet<_>>();
+    let mut all_conversation_aliases = BTreeSet::new();
+    for (selection, unit) in selections.iter().zip(&units) {
+        let entry = &corpus.unit_index.units[selection.corpus_unit_index];
+        let aliases = unit_person_aliases(entry);
         all_person_aliases.extend(aliases.iter().cloned());
         if unit.kind == ConversationKind::Direct {
             direct_people_by_unit.insert(unit.id.clone(), aliases);
         }
+        all_conversation_aliases.insert(unit.c.clone());
     }
-    let all_people = load_people_labels(corpus, &all_person_aliases)?;
+    let timezone = manifest_timezone(&corpus.manifest)?;
+    let identities =
+        load_delivery_identities(corpus, &all_person_aliases, &all_conversation_aliases)?;
+    let context = DeliveryPageContext {
+        scope,
+        timezone,
+        direct_people_by_unit: &direct_people_by_unit,
+        identities: &identities,
+    };
 
     let mut drafts = Vec::<Vec<DeliveryEpisode>>::new();
     let mut current = Vec::<DeliveryEpisode>::new();
     for unit in &units {
         for message_offset in 0..unit.m.len() {
-            append_delivery_message(&mut current, unit, message_offset);
+            append_delivery_message(&mut current, unit, message_offset, timezone)?;
             // Use maximum-width counters while packing. The actual page number and
             // count can only make the final compact JSON smaller.
             let candidate = render_delivery_page(delivery_page_payload(
@@ -2129,9 +2840,8 @@ fn build_delivery_pages(
                 usize::MAX,
                 usize::MAX,
                 current.clone(),
-                &direct_people_by_unit,
-                &all_people,
-            ))?;
+                &context,
+            )?)?;
             if candidate.serialized.len() <= MAXIMUM_MEMORY_PAGE_OUTPUT_BYTES {
                 continue;
             }
@@ -2143,15 +2853,14 @@ fn build_delivery_pages(
                 )));
             }
             drafts.push(std::mem::take(&mut current));
-            append_delivery_message(&mut current, unit, message_offset);
+            append_delivery_message(&mut current, unit, message_offset, timezone)?;
             let single = render_delivery_page(delivery_page_payload(
                 batch_id,
                 usize::MAX,
                 usize::MAX,
                 current.clone(),
-                &direct_people_by_unit,
-                &all_people,
-            ))?;
+                &context,
+            )?)?;
             if single.serialized.len() > MAXIMUM_MEMORY_PAGE_OUTPUT_BYTES {
                 return Err(RestoreError::Integrity(format!(
                     "prepared message {} cannot fit the fixed {}-byte Pi delivery boundary; prepare with a smaller maximumMessageTextBytes",
@@ -2171,9 +2880,8 @@ fn build_delivery_pages(
             index.saturating_add(1),
             page_count,
             episodes,
-            &direct_people_by_unit,
-            &all_people,
-        ))?;
+            &context,
+        )?)?;
         if page.serialized.len() > MAXIMUM_MEMORY_PAGE_OUTPUT_BYTES {
             return Err(RestoreError::Integrity(
                 "deterministic memory page exceeded the fixed Pi delivery boundary".into(),
@@ -2186,10 +2894,14 @@ fn build_delivery_pages(
 
 fn ensure_outstanding_delivery(
     corpus: &LoadedCorpus,
+    scope: &ResolvedPersonalMemoryScope,
+    scoped_units: &[ScopedUnitSelection],
     outstanding: &mut OutstandingBatch,
 ) -> Result<Vec<RenderedDeliveryPage>, RestoreError> {
     let rendered = build_delivery_pages(
         corpus,
+        scope,
+        scoped_units,
         &outstanding.batch_id,
         outstanding.start_unit_index,
         outstanding.end_unit_index_exclusive,
@@ -2309,6 +3021,22 @@ pub fn next_personal_memory_batch(
     wiki_directory: Option<&Path>,
     maximum_text_bytes: usize,
 ) -> Result<Value, RestoreError> {
+    next_personal_memory_batch_with_scope(
+        corpus_directory,
+        state_path,
+        wiki_directory,
+        maximum_text_bytes,
+        None,
+    )
+}
+
+pub fn next_personal_memory_batch_with_scope(
+    corpus_directory: &Path,
+    state_path: &Path,
+    wiki_directory: Option<&Path>,
+    maximum_text_bytes: usize,
+    scope_options: Option<&PersonalMemoryScopeOptions>,
+) -> Result<Value, RestoreError> {
     if !(MINIMUM_NEXT_TEXT_BYTES..=MAXIMUM_NEXT_TEXT_BYTES).contains(&maximum_text_bytes) {
         return Err(RestoreError::Integrity(format!(
             "memory next --max-text-bytes must be between {MINIMUM_NEXT_TEXT_BYTES} and {MAXIMUM_NEXT_TEXT_BYTES}"
@@ -2316,10 +3044,11 @@ pub fn next_personal_memory_batch(
     }
     let corpus = load_corpus(corpus_directory)?;
     let _lock = acquire_state_lock(state_path)?;
-    let mut state = load_or_initialize_state(state_path, &corpus)?;
-    if state.next_unit_index > corpus.unit_index.units.len() {
+    let mut state = load_or_initialize_state(state_path, &corpus, scope_options)?;
+    let (scope, scoped_units) = effective_scope_and_units(&state, &corpus);
+    if state.next_unit_index > scoped_units.len() {
         return Err(RestoreError::Integrity(
-            "memory state cursor exceeds the immutable corpus unit count".into(),
+            "memory state cursor exceeds the immutable scoped unit count".into(),
         ));
     }
     let verified_wiki_before = if state.outstanding.is_none() {
@@ -2335,16 +3064,22 @@ pub fn next_personal_memory_batch(
     } else {
         None
     };
-    if state.outstanding.is_none() && state.next_unit_index == corpus.unit_index.units.len() {
+    if state.outstanding.is_none() && state.next_unit_index == scoped_units.len() {
+        if state.committed_wiki.is_none() && verified_wiki_before.is_some() {
+            state.committed_wiki = verified_wiki_before;
+            state.updated_at_unix_milliseconds = now_unix_milliseconds()?;
+            write_state_atomic(state_path, &state)?;
+        }
         return Ok(json!({
             "schema": PERSONAL_MEMORY_BATCH_SCHEMA,
             "formatVersion": PERSONAL_MEMORY_FORMAT_VERSION,
             "deliveryOrder": corpus.manifest.delivery_order,
+            "scope": memory_scope_output(&scope, manifest_timezone(&corpus.manifest)?)?,
             "complete": true,
             "position": {
                 "firstUnit": state.next_unit_index.saturating_add(1),
                 "unitCount": 0,
-                "totalUnits": corpus.unit_index.units.len(),
+                "totalUnits": scoped_units.len(),
                 "messageCount": 0,
                 "textByteCount": 0
             },
@@ -2363,8 +3098,8 @@ pub fn next_personal_memory_batch(
 
     if state.outstanding.is_none() {
         let start = state.next_unit_index;
-        let first = corpus.unit_index.units.get(start).ok_or_else(|| {
-            RestoreError::Integrity("memory state points to a missing corpus unit".into())
+        let first = scoped_units.get(start).ok_or_else(|| {
+            RestoreError::Integrity("memory state points to a missing scoped unit".into())
         })?;
         if first.text_byte_count > maximum_text_bytes {
             return Err(RestoreError::Integrity(format!(
@@ -2378,9 +3113,10 @@ pub fn next_personal_memory_batch(
         let mut target_pages = BTreeSet::new();
         let mut evidence_aliases = Vec::new();
         let mut unit_hashes = Vec::new();
-        while let Some(entry) = corpus.unit_index.units.get(end) {
-            let next_text = text_byte_count.saturating_add(entry.text_byte_count);
-            let next_messages = message_count.saturating_add(entry.message_count);
+        while let Some(selection) = scoped_units.get(end) {
+            let entry = &corpus.unit_index.units[selection.corpus_unit_index];
+            let next_text = text_byte_count.saturating_add(selection.text_byte_count);
+            let next_messages = message_count.saturating_add(selection.message_count);
             if end > start
                 && (next_text > maximum_text_bytes || next_messages > MAXIMUM_BATCH_MESSAGES)
             {
@@ -2393,9 +3129,10 @@ pub fn next_personal_memory_batch(
             }
             text_byte_count = next_text;
             message_count = next_messages;
-            target_pages.extend(entry.target_pages.iter().cloned());
-            evidence_aliases.extend(entry.evidence_aliases.iter().cloned());
-            unit_hashes.push(entry.sha256.clone());
+            let unit = load_scoped_unit(&corpus, selection)?;
+            extend_memory_target_pages(&mut target_pages, &scope, &unit, entry);
+            evidence_aliases.extend(unit.m.iter().map(|message| message.e.clone()));
+            unit_hashes.push(scope_unit_binding_hash(entry, selection));
             end = end.saturating_add(1);
         }
         let batch_id = batch_id(&corpus.manifest_sha256, start, end, &unit_hashes);
@@ -2416,7 +3153,7 @@ pub fn next_personal_memory_batch(
         .outstanding
         .as_mut()
         .ok_or_else(|| RestoreError::Integrity("outstanding batch was not persisted".into()))?;
-    ensure_outstanding_delivery(&corpus, outstanding)?;
+    ensure_outstanding_delivery(&corpus, &scope, &scoped_units, outstanding)?;
     state.updated_at_unix_milliseconds = now_unix_milliseconds()?;
     write_state_atomic(state_path, &state)?;
     render_outstanding_batch(
@@ -2424,8 +3161,10 @@ pub fn next_personal_memory_batch(
             .outstanding
             .as_ref()
             .ok_or_else(|| RestoreError::Integrity("outstanding batch was not persisted".into()))?,
-        corpus.unit_index.units.len(),
+        scoped_units.len(),
         corpus.manifest.delivery_order,
+        &scope,
+        manifest_timezone(&corpus.manifest)?,
     )
 }
 
@@ -2438,6 +3177,7 @@ pub fn next_personal_memory_page(
     let corpus = load_corpus(corpus_directory)?;
     let _lock = acquire_state_lock(state_path)?;
     let mut state = load_existing_state(state_path, &corpus)?;
+    let (scope, scoped_units) = effective_scope_and_units(&state, &corpus);
     let outstanding = state
         .outstanding
         .as_mut()
@@ -2448,7 +3188,7 @@ pub fn next_personal_memory_page(
         ));
     }
     let resolved_batch_id = outstanding.batch_id.clone();
-    let rendered = ensure_outstanding_delivery(&corpus, outstanding)?;
+    let rendered = ensure_outstanding_delivery(&corpus, &scope, &scoped_units, outstanding)?;
     let Some(index) = outstanding
         .delivery_pages
         .iter()
@@ -2461,6 +3201,7 @@ pub fn next_personal_memory_page(
             "schema": PERSONAL_MEMORY_PAGE_SCHEMA,
             "formatVersion": PERSONAL_MEMORY_FORMAT_VERSION,
             "batchId": resolved_batch_id,
+            "scope": memory_scope_output(&scope, manifest_timezone(&corpus.manifest)?)?,
             "reviewComplete": true,
             "pageCount": summary.page_count,
             "acknowledgedPageCount": summary.acknowledged_page_count,
@@ -2505,6 +3246,7 @@ pub fn acknowledge_personal_memory_page(
     let corpus = load_corpus(corpus_directory)?;
     let _lock = acquire_state_lock(state_path)?;
     let mut state = load_existing_state(state_path, &corpus)?;
+    let (scope, scoped_units) = effective_scope_and_units(&state, &corpus);
     let outstanding = state.outstanding.as_mut().ok_or_else(|| {
         RestoreError::Integrity("memory acknowledge has no outstanding batch".into())
     })?;
@@ -2514,7 +3256,7 @@ pub fn acknowledge_personal_memory_page(
         ));
     }
     let resolved_batch_id = outstanding.batch_id.clone();
-    ensure_outstanding_delivery(&corpus, outstanding)?;
+    ensure_outstanding_delivery(&corpus, &scope, &scoped_units, outstanding)?;
     let index = if page_token == PERSONAL_MEMORY_CURRENT_SELECTOR {
         outstanding
             .delivery_pages
@@ -2677,6 +3419,7 @@ fn commit_personal_memory_batch_with_disposition(
     let corpus = load_corpus(corpus_directory)?;
     let _lock = acquire_state_lock(state_path)?;
     let mut state = load_existing_state(state_path, &corpus)?;
+    let (scope, scoped_units) = effective_scope_and_units(&state, &corpus);
     let resolved_batch_id = if batch_id == PERSONAL_MEMORY_CURRENT_SELECTOR {
         state
             .outstanding
@@ -2709,8 +3452,8 @@ fn commit_personal_memory_batch_with_disposition(
             already_committed: true,
             disposition: committed.disposition,
             next_unit_index: state.next_unit_index,
-            total_units: corpus.unit_index.units.len(),
-            complete: state.next_unit_index == corpus.unit_index.units.len(),
+            total_units: scoped_units.len(),
+            complete: state.next_unit_index == scoped_units.len(),
             changed_pages: Vec::new(),
             reviewed_page_count: committed.reviewed_page_count,
             reviewed_message_count: committed.reviewed_message_count,
@@ -2726,7 +3469,7 @@ fn commit_personal_memory_batch_with_disposition(
             "memory commit batch identifier does not match the outstanding batch".into(),
         ));
     }
-    ensure_outstanding_delivery(&corpus, &mut outstanding)?;
+    ensure_outstanding_delivery(&corpus, &scope, &scoped_units, &mut outstanding)?;
     if outstanding.delivery_pages.is_empty()
         || outstanding
             .delivery_pages
@@ -2808,8 +3551,8 @@ fn commit_personal_memory_batch_with_disposition(
         already_committed: false,
         disposition,
         next_unit_index: state.next_unit_index,
-        total_units: corpus.unit_index.units.len(),
-        complete: state.next_unit_index == corpus.unit_index.units.len(),
+        total_units: scoped_units.len(),
+        complete: state.next_unit_index == scoped_units.len(),
         changed_pages,
         reviewed_page_count: outstanding.delivery_pages.len(),
         reviewed_message_count: outstanding.message_count,
@@ -2831,6 +3574,15 @@ pub fn personal_memory_status(
     } else {
         None
     };
+    let (scope, scoped_units) = state.as_ref().map_or_else(
+        || {
+            (
+                ResolvedPersonalMemoryScope::default(),
+                all_corpus_unit_selections(&corpus),
+            )
+        },
+        |state| effective_scope_and_units(state, &corpus),
+    );
     let next_unit_index = state
         .as_ref()
         .map(|state| state.next_unit_index)
@@ -2882,8 +3634,12 @@ pub fn personal_memory_status(
             reviewed_message_count: committed.reviewed_message_count,
             retained_evidence_count: committed.retained_evidence_count,
         });
-    let total = corpus.unit_index.units.len();
-    let committed_message_count = corpus.unit_index.units[..next_unit_index]
+    let total = scoped_units.len();
+    let selected_message_count = scoped_units
+        .iter()
+        .map(|unit| unit.message_count as u64)
+        .sum();
+    let committed_message_count = scoped_units[..next_unit_index]
         .iter()
         .map(|unit| unit.message_count as u64)
         .sum();
@@ -2900,12 +3656,20 @@ pub fn personal_memory_status(
         unit_count: total,
         evidence_count: corpus.manifest.evidence_count,
         scanned_message_count: corpus.manifest.scanned_message_count,
-        selected_message_count: corpus.manifest.selected_message_count,
+        eligible_message_count: corpus.coverage.eligible_message_count,
+        corpus_message_count: corpus.manifest.evidence_count,
+        selected_message_count,
         source_coverage_complete: corpus.manifest.source_coverage_complete,
+        row_coverage_complete: corpus.coverage.row_coverage_complete,
         content_complete: corpus.manifest.content_complete,
         unmatched_message_table_count: corpus.manifest.unmatched_message_table_count,
         limitation_codes: corpus.coverage.limitation_codes.clone(),
         delivery_order: corpus.manifest.delivery_order,
+        scope: memory_scope_status(&scope, manifest_timezone(&corpus.manifest)?)?,
+        completed_scope_count: state
+            .as_ref()
+            .map(|state| state.completed_scopes.len())
+            .unwrap_or_default(),
         next_unit_index,
         committed_unit_count: next_unit_index,
         committed_message_count,
@@ -2952,6 +3716,16 @@ fn load_corpus(corpus_directory: &Path) -> Result<LoadedCorpus, RestoreError> {
             "personal-memory corpus manifest invariants are invalid".into(),
         ));
     }
+    if manifest.corpus_mode == PersonalMemoryCorpusMode::AllMessages
+        && !manifest
+            .files
+            .iter()
+            .any(|record| record.relative_path == "conversations.jsonl")
+    {
+        return Err(RestoreError::Integrity(
+            "canonical personal-memory corpus has no conversation selector sidecar".into(),
+        ));
+    }
     for record in &manifest.files {
         if !valid_sha256(&record.sha256) {
             return Err(RestoreError::Integrity(
@@ -2987,6 +3761,7 @@ fn load_corpus(corpus_directory: &Path) -> Result<LoadedCorpus, RestoreError> {
         || coverage.selected_message_count != manifest.selected_message_count
         || coverage.unit_count != manifest.unit_count as u64
         || coverage.source_coverage_complete != manifest.source_coverage_complete
+        || coverage.row_coverage_complete != manifest.row_coverage_complete
         || coverage.content_complete != manifest.content_complete
         || coverage.limitation_codes.len() > 128
         || coverage.limitation_codes.iter().any(|code| {
@@ -3001,6 +3776,38 @@ fn load_corpus(corpus_directory: &Path) -> Result<LoadedCorpus, RestoreError> {
             "coverage report does not match corpus manifest accounting".into(),
         ));
     }
+    if manifest.corpus_mode == PersonalMemoryCorpusMode::AllMessages
+        && (coverage.selected_message_count != coverage.eligible_message_count
+            || coverage.omitted_outside_time_range != 0
+            || coverage.omitted_inactive_month != 0
+            || coverage.omitted_silent_session != 0
+            || coverage.omitted_context_bound != 0
+            || coverage.omitted_filtered_conversation != 0)
+    {
+        return Err(RestoreError::Integrity(
+            "canonical personal-memory corpus was pre-filtered before run-time scoping".into(),
+        ));
+    }
+    if manifest.corpus_mode == PersonalMemoryCorpusMode::AllMessages
+        && coverage.row_coverage_complete
+            != (coverage.metadata_decode_failure_count == 0
+                && !coverage.limitation_codes.iter().any(|code| {
+                    matches!(
+                        code.as_str(),
+                        "messageTableInventoryUnavailable"
+                            | "messageTableInventoryIncomplete"
+                            | "corpusMetadataQueryFailed"
+                            | "corpusMetadataRowFailed"
+                            | "unsupportedCorpusMessageSchema"
+                            | "shardUnavailable"
+                            | "shardSchemaUnavailable"
+                    )
+                }))
+    {
+        return Err(RestoreError::Integrity(
+            "canonical personal-memory row-coverage accounting is inconsistent".into(),
+        ));
+    }
     let unit_index_record = manifest
         .files
         .iter()
@@ -3010,7 +3817,7 @@ fn load_corpus(corpus_directory: &Path) -> Result<LoadedCorpus, RestoreError> {
         })?;
     let unit_index_path = safe_corpus_path(&root, &unit_index_record.relative_path)?;
     let unit_index_bytes =
-        read_immutable_owner_file_limited(&unit_index_path, MAXIMUM_CONTROL_FILE_BYTES)?;
+        read_immutable_owner_file_limited(&unit_index_path, MAXIMUM_UNIT_INDEX_BYTES)?;
     if unit_index_bytes.len() as u64 != unit_index_record.byte_count
         || sha256_bytes(&unit_index_bytes) != unit_index_record.sha256
     {
@@ -3019,9 +3826,11 @@ fn load_corpus(corpus_directory: &Path) -> Result<LoadedCorpus, RestoreError> {
         ));
     }
     let unit_index: UnitIndex = serde_json::from_slice(&unit_index_bytes)?;
-    if unit_index.schema != "greenbubbles.personal-memory-unit-index.v1"
-        || unit_index.format_version != PERSONAL_MEMORY_FORMAT_VERSION
-        || unit_index.units.len() != manifest.unit_count
+    let legacy_unit_index = unit_index.schema == "greenbubbles.personal-memory-unit-index.v1"
+        && unit_index.format_version == PERSONAL_MEMORY_FORMAT_VERSION;
+    let compact_unit_index = unit_index.schema == "greenbubbles.personal-memory-unit-index.v2"
+        && unit_index.format_version == 2;
+    if (!legacy_unit_index && !compact_unit_index) || unit_index.units.len() != manifest.unit_count
     {
         return Err(RestoreError::Integrity(
             "prepared-unit index schema or count is invalid".into(),
@@ -3033,31 +3842,65 @@ fn load_corpus(corpus_directory: &Path) -> Result<LoadedCorpus, RestoreError> {
     let mut largest_unit_text_bytes = 0usize;
     for (index, unit) in unit_index.units.iter().enumerate() {
         let expected_id = format!("U{:06}", index.saturating_add(1));
+        let expected_first_evidence_ordinal = evidence_count.saturating_add(1);
+        let compact_metadata_valid = compact_unit_index
+            && unit.evidence_aliases.is_empty()
+            && unit.target_pages.is_empty()
+            && unit.conversation_id.is_empty()
+            && unit.first_evidence_ordinal == Some(expected_first_evidence_ordinal)
+            && unit
+                .person_aliases
+                .iter()
+                .all(|alias| valid_person_alias(alias))
+            && unit.person_aliases.windows(2).all(|pair| pair[0] < pair[1])
+            && unit
+                .sender_aliases
+                .iter()
+                .all(|alias| valid_person_alias(alias))
+            && unit.sender_aliases.windows(2).all(|pair| pair[0] < pair[1])
+            && unit
+                .sender_aliases
+                .iter()
+                .all(|alias| unit.person_aliases.binary_search(alias).is_ok());
+        let legacy_metadata_valid = legacy_unit_index
+            && unit.message_count == unit.evidence_aliases.len()
+            && unit.person_aliases.is_empty()
+            && unit.sender_aliases.is_empty()
+            && !unit.has_account_holder_sender
+            && !unit.has_unknown_sender
+            && unit.first_evidence_ordinal.is_none();
         if unit.id != expected_id
             || !ids.insert(unit.id.clone())
             || !paths.insert(unit.relative_path.clone())
             || unit.relative_path != format!("batches/{}.json", unit.id)
             || !valid_sha256(&unit.sha256)
-            || unit.message_count != unit.evidence_aliases.len()
+            || (!compact_metadata_valid && !legacy_metadata_valid)
+            || unit.message_count == 0
             || unit.message_count > 1_000
             || unit.text_byte_count > 512 * 1024
+            || manifest.corpus_mode == PersonalMemoryCorpusMode::AllMessages
+                && (unit.conversation.is_empty()
+                    || legacy_unit_index && unit.conversation_id.is_empty()
+                    || unit.from > unit.to)
         {
             return Err(RestoreError::Integrity(
                 "prepared-unit index contains an invalid or duplicate entry".into(),
             ));
         }
         safe_corpus_path(&root, &unit.relative_path)?;
-        evidence_count = evidence_count.saturating_add(unit.evidence_aliases.len() as u64);
+        evidence_count = evidence_count.saturating_add(unit.message_count as u64);
         largest_unit_text_bytes = largest_unit_text_bytes.max(unit.text_byte_count);
-        for alias in &unit.evidence_aliases {
-            if !valid_evidence_alias(alias, manifest.evidence_count) {
-                return Err(RestoreError::Integrity(
-                    "prepared-unit index contains an invalid evidence alias".into(),
-                ));
+        if legacy_unit_index {
+            for alias in &unit.evidence_aliases {
+                if !valid_evidence_alias(alias, manifest.evidence_count) {
+                    return Err(RestoreError::Integrity(
+                        "prepared-unit index contains an invalid evidence alias".into(),
+                    ));
+                }
             }
-        }
-        for page in &unit.target_pages {
-            validate_wiki_relative_path(page)?;
+            for page in &unit.target_pages {
+                validate_wiki_relative_path(page)?;
+            }
         }
     }
     if evidence_count != manifest.evidence_count
@@ -3082,6 +3925,8 @@ fn render_outstanding_batch(
     outstanding: &OutstandingBatch,
     total_units: usize,
     delivery_order: MemoryDeliveryOrder,
+    scope: &ResolvedPersonalMemoryScope,
+    timezone: Tz,
 ) -> Result<Value, RestoreError> {
     if outstanding.start_unit_index >= outstanding.end_unit_index_exclusive {
         return Err(RestoreError::Integrity(
@@ -3095,6 +3940,7 @@ fn render_outstanding_batch(
         batch_id: outstanding.batch_id.clone(),
         complete: false,
         content_trust: "untrustedChatEvidence",
+        scope: memory_scope_output(scope, timezone)?,
         position: BatchPosition {
             first_unit: outstanding.start_unit_index.saturating_add(1),
             unit_count: outstanding
@@ -3107,6 +3953,92 @@ fn render_outstanding_batch(
         delivery: batch_delivery_summary(outstanding),
     };
     Ok(serde_json::to_value(output)?)
+}
+
+fn all_corpus_unit_selections(corpus: &LoadedCorpus) -> Vec<ScopedUnitSelection> {
+    corpus
+        .unit_index
+        .units
+        .iter()
+        .enumerate()
+        .map(|(corpus_unit_index, entry)| ScopedUnitSelection {
+            corpus_unit_index,
+            all_messages: true,
+            message_bitmap: None,
+            message_count: entry.message_count,
+            text_byte_count: entry.text_byte_count,
+        })
+        .collect()
+}
+
+fn effective_scope_and_units(
+    state: &MemoryRunState,
+    corpus: &LoadedCorpus,
+) -> (ResolvedPersonalMemoryScope, Vec<ScopedUnitSelection>) {
+    let scope = state.scope.clone().unwrap_or_default();
+    let units = if state.scope.is_none()
+        || scope_selects_all_evidence(&scope) && state.scoped_units.is_empty()
+    {
+        all_corpus_unit_selections(corpus)
+    } else {
+        state.scoped_units.clone()
+    };
+    (scope, units)
+}
+
+fn state_total_units(state: &MemoryRunState, corpus: &LoadedCorpus) -> usize {
+    if state.scope.is_none()
+        || state.scope.as_ref().is_some_and(scope_selects_all_evidence)
+            && state.scoped_units.is_empty()
+    {
+        corpus.unit_index.units.len()
+    } else {
+        state.scoped_units.len()
+    }
+}
+
+fn scope_unit_binding_hash(entry: &UnitIndexEntry, selection: &ScopedUnitSelection) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"greenbubbles-scope-unit-v1\0");
+    hasher.update(entry.sha256.as_bytes());
+    hasher.update((selection.corpus_unit_index as u64).to_le_bytes());
+    hasher.update([u8::from(selection.all_messages)]);
+    if let Some(bitmap) = &selection.message_bitmap {
+        hasher.update(bitmap.as_bytes());
+    }
+    hasher.update((selection.message_count as u64).to_le_bytes());
+    hasher.update((selection.text_byte_count as u64).to_le_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn extend_memory_target_pages(
+    target_pages: &mut BTreeSet<String>,
+    scope: &ResolvedPersonalMemoryScope,
+    unit: &PreparedUnitFile,
+    entry: &UnitIndexEntry,
+) {
+    target_pages.insert("index.md".into());
+    target_pages.insert(format!("conversations/{}.md", unit.c));
+    match &scope.summary_subject {
+        ResolvedMemorySummarySubject::AccountHolder => {
+            target_pages.insert("me.md".into());
+            target_pages.extend(
+                unit_person_aliases(entry)
+                    .into_iter()
+                    .map(|alias| format!("people/{alias}.md")),
+            );
+            target_pages.extend(
+                unit.m
+                    .iter()
+                    .filter_map(|message| message.p.as_ref())
+                    .map(|alias| format!("people/{alias}.md")),
+            );
+        }
+        ResolvedMemorySummarySubject::Person { alias } => {
+            target_pages.insert(format!("people/{alias}.md"));
+        }
+        ResolvedMemorySummarySubject::None => {}
+    }
 }
 
 fn load_unit(
@@ -3122,15 +4054,22 @@ fn load_unit(
         )));
     }
     let unit: PreparedUnitFile = serde_json::from_slice(&bytes)?;
+    let evidence_aliases_match = if let Some(first) = entry.first_evidence_ordinal {
+        entry.evidence_aliases.is_empty()
+            && unit.m.iter().enumerate().all(|(offset, message)| {
+                message.e == format!("E{:09}", first.saturating_add(offset as u64))
+            })
+    } else {
+        unit.m
+            .iter()
+            .map(|message| message.e.as_str())
+            .eq(entry.evidence_aliases.iter().map(String::as_str))
+    };
     if unit.schema != PERSONAL_MEMORY_BATCH_SCHEMA
         || unit.id != entry.id
         || unit.m.len() != entry.message_count
         || unit.m.iter().map(|message| message.x.len()).sum::<usize>() != entry.text_byte_count
-        || unit
-            .m
-            .iter()
-            .map(|message| message.e.as_str())
-            .ne(entry.evidence_aliases.iter().map(String::as_str))
+        || !evidence_aliases_match
     {
         return Err(RestoreError::Integrity(format!(
             "prepared unit {} has invalid internal accounting",
@@ -3140,40 +4079,520 @@ fn load_unit(
     Ok(unit)
 }
 
-fn load_people_labels(
+fn delivery_person_identity(record: &ContactSidecarRecord, alias: &str) -> DeliveryPersonIdentity {
+    let display_name = if record.is_account_holder && record.display_name.trim() == "You" {
+        record.source_id.clone()
+    } else {
+        model_safe_person_label(record, alias)
+    };
+    DeliveryPersonIdentity {
+        source_id: record.source_id.clone(),
+        display_name,
+        remark: record.remark.clone(),
+        nickname: record.nickname.clone(),
+        wechat_alias: record.wechat_alias.clone(),
+    }
+}
+
+fn load_delivery_identities(
     corpus: &LoadedCorpus,
-    requested: &BTreeSet<String>,
-) -> Result<BTreeMap<String, String>, RestoreError> {
-    if requested.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let record = corpus
-        .manifest
-        .files
-        .iter()
-        .find(|record| record.relative_path == "contacts.jsonl")
+    requested_people: &BTreeSet<String>,
+    requested_conversations: &BTreeSet<String>,
+) -> Result<DeliveryIdentityIndex, RestoreError> {
+    let contacts_path = verified_corpus_sidecar_path(corpus, "contacts.jsonl")?
         .ok_or_else(|| RestoreError::Integrity("corpus contacts sidecar is missing".into()))?;
-    let path = safe_corpus_path(&corpus.root, &record.relative_path)?;
-    let metadata = immutable_owner_file_metadata(&path)?;
-    if metadata.len() != record.byte_count || sha256_file(&path)? != record.sha256 {
-        return Err(RestoreError::Integrity(
-            "corpus contacts sidecar no longer matches the immutable manifest".into(),
-        ));
-    }
-    let mut labels = BTreeMap::new();
-    let reader = BufReader::new(File::open(path)?);
+    let mut account_holder = None;
+    let mut people = BTreeMap::new();
+    let reader = BufReader::new(File::open(contacts_path)?);
     for line in reader.lines() {
         let record: ContactSidecarRecord = serde_json::from_str(&line?)?;
+        if record.is_account_holder
+            && account_holder
+                .replace(delivery_person_identity(&record, "self"))
+                .is_some()
+        {
+            return Err(RestoreError::Integrity(
+                "corpus contacts sidecar contains more than one account holder".into(),
+            ));
+        }
         if let Some(alias) = record.alias.as_deref() {
-            if requested.contains(alias) {
-                labels.insert(alias.to_string(), model_safe_person_label(&record, alias));
+            if requested_people.contains(alias)
+                && people
+                    .insert(alias.to_string(), delivery_person_identity(&record, alias))
+                    .is_some()
+            {
+                return Err(RestoreError::Integrity(
+                    "corpus contacts sidecar repeats a requested person alias".into(),
+                ));
             }
         }
     }
-    for alias in requested {
-        labels.entry(alias.clone()).or_insert_with(|| alias.clone());
+    let account_holder = account_holder.ok_or_else(|| {
+        RestoreError::Integrity(
+            "corpus contacts sidecar has no authenticated account-holder identity".into(),
+        )
+    })?;
+    if people.keys().collect::<BTreeSet<_>>() != requested_people.iter().collect::<BTreeSet<_>>() {
+        return Err(RestoreError::Integrity(
+            "corpus contacts sidecar cannot resolve every requested person identity".into(),
+        ));
     }
-    Ok(labels)
+
+    let conversations_path = verified_corpus_sidecar_path(corpus, "conversations.jsonl")?
+        .ok_or_else(|| RestoreError::Integrity("corpus conversations sidecar is missing".into()))?;
+    let mut conversations = BTreeMap::new();
+    for line in BufReader::new(File::open(conversations_path)?).lines() {
+        let record: ConversationSidecarRecord = serde_json::from_str(&line?)?;
+        if requested_conversations.contains(&record.alias)
+            && conversations
+                .insert(
+                    record.alias.clone(),
+                    DeliveryConversationIdentity {
+                        source_id: record.source_id,
+                        title: if record.display_name.trim().is_empty() {
+                            record.alias
+                        } else {
+                            record.display_name
+                        },
+                        kind: record.kind,
+                    },
+                )
+                .is_some()
+        {
+            return Err(RestoreError::Integrity(
+                "corpus conversations sidecar repeats a requested conversation alias".into(),
+            ));
+        }
+    }
+    if conversations.keys().collect::<BTreeSet<_>>()
+        != requested_conversations.iter().collect::<BTreeSet<_>>()
+    {
+        return Err(RestoreError::Integrity(
+            "corpus conversations sidecar cannot resolve every requested conversation identity"
+                .into(),
+        ));
+    }
+    Ok(DeliveryIdentityIndex {
+        account_holder,
+        people,
+        conversations,
+    })
+}
+
+#[derive(Debug, Default)]
+struct ScopeSelectorMaps {
+    conversations: BTreeMap<String, String>,
+    senders: BTreeMap<String, String>,
+}
+
+fn insert_scope_selector(
+    map: &mut BTreeMap<String, String>,
+    selector: &str,
+    alias: &str,
+    description: &str,
+) -> Result<(), RestoreError> {
+    if selector.is_empty() || alias.is_empty() {
+        return Ok(());
+    }
+    if let Some(existing) = map.insert(selector.to_string(), alias.to_string()) {
+        if existing != alias {
+            return Err(RestoreError::Integrity(format!(
+                "personal-memory {description} selector is ambiguous"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn verified_corpus_sidecar_path(
+    corpus: &LoadedCorpus,
+    relative_path: &str,
+) -> Result<Option<PathBuf>, RestoreError> {
+    let Some(record) = corpus
+        .manifest
+        .files
+        .iter()
+        .find(|record| record.relative_path == relative_path)
+    else {
+        return Ok(None);
+    };
+    let path = safe_corpus_path(&corpus.root, relative_path)?;
+    let metadata = immutable_owner_file_metadata(&path)?;
+    if metadata.len() != record.byte_count || sha256_file(&path)? != record.sha256 {
+        return Err(RestoreError::Integrity(format!(
+            "corpus {relative_path} sidecar no longer matches the immutable manifest"
+        )));
+    }
+    Ok(Some(path))
+}
+
+fn load_scope_selector_maps(corpus: &LoadedCorpus) -> Result<ScopeSelectorMaps, RestoreError> {
+    let mut maps = ScopeSelectorMaps::default();
+    if let Some(path) = verified_corpus_sidecar_path(corpus, "contacts.jsonl")? {
+        for line in BufReader::new(File::open(path)?).lines() {
+            let record: ContactSidecarRecord = serde_json::from_str(&line?)?;
+            let Some(alias) = record.alias.as_deref() else {
+                continue;
+            };
+            insert_scope_selector(&mut maps.senders, alias, alias, "sender")?;
+            insert_scope_selector(&mut maps.senders, &record.source_id, alias, "sender")?;
+        }
+    }
+    if let Some(path) = verified_corpus_sidecar_path(corpus, "conversations.jsonl")? {
+        for line in BufReader::new(File::open(path)?).lines() {
+            let record: ConversationSidecarRecord = serde_json::from_str(&line?)?;
+            insert_scope_selector(
+                &mut maps.conversations,
+                &record.alias,
+                &record.alias,
+                "conversation",
+            )?;
+            insert_scope_selector(
+                &mut maps.conversations,
+                &record.source_id,
+                &record.alias,
+                "conversation",
+            )?;
+        }
+    }
+    for entry in &corpus.unit_index.units {
+        if !entry.conversation.is_empty() {
+            insert_scope_selector(
+                &mut maps.conversations,
+                &entry.conversation,
+                &entry.conversation,
+                "conversation",
+            )?;
+            insert_scope_selector(
+                &mut maps.conversations,
+                &entry.conversation_id,
+                &entry.conversation,
+                "conversation",
+            )?;
+        } else {
+            let unit = load_unit(corpus, entry)?;
+            insert_scope_selector(&mut maps.conversations, &unit.c, &unit.c, "conversation")?;
+            for message in &unit.m {
+                if let Some(alias) = &message.p {
+                    insert_scope_selector(&mut maps.senders, alias, alias, "sender")?;
+                }
+            }
+        }
+    }
+    Ok(maps)
+}
+
+fn resolve_personal_memory_scope(
+    corpus: &LoadedCorpus,
+    requested: &PersonalMemoryScopeOptions,
+) -> Result<(ResolvedPersonalMemoryScope, String), RestoreError> {
+    let (not_before_unix, not_after_unix) = requested.validate_shape()?;
+    let maps = load_scope_selector_maps(corpus)?;
+    let mut conversation_aliases = BTreeSet::new();
+    for selector in &requested.conversation_selectors {
+        let alias = maps
+            .conversations
+            .get(selector.trim())
+            .cloned()
+            .ok_or_else(|| {
+                RestoreError::Integrity(
+                    "personal-memory scope names an unknown conversation selector".into(),
+                )
+            })?;
+        if !conversation_aliases.insert(alias) {
+            return Err(RestoreError::Integrity(
+                "conversationSelectors resolves the same conversation more than once".into(),
+            ));
+        }
+    }
+    let mut sender_aliases = BTreeSet::new();
+    let mut include_account_holder_sender = false;
+    let mut include_unknown_sender = false;
+    for selector in &requested.sender_selectors {
+        match selector.trim() {
+            "self" | "accountHolder" => {
+                if include_account_holder_sender {
+                    return Err(RestoreError::Integrity(
+                        "senderSelectors resolves the account holder more than once".into(),
+                    ));
+                }
+                include_account_holder_sender = true;
+            }
+            "unknown" => {
+                if include_unknown_sender {
+                    return Err(RestoreError::Integrity(
+                        "senderSelectors resolves the unknown sender more than once".into(),
+                    ));
+                }
+                include_unknown_sender = true;
+            }
+            selector => {
+                let alias = maps.senders.get(selector).cloned().ok_or_else(|| {
+                    RestoreError::Integrity(
+                        "personal-memory scope names an unknown sender selector".into(),
+                    )
+                })?;
+                if !sender_aliases.insert(alias) {
+                    return Err(RestoreError::Integrity(
+                        "senderSelectors resolves the same sender more than once".into(),
+                    ));
+                }
+            }
+        }
+    }
+    let summary_subject = match &requested.summary_subject {
+        PersonalMemorySummarySubjectSelector::AccountHolder => {
+            ResolvedMemorySummarySubject::AccountHolder
+        }
+        PersonalMemorySummarySubjectSelector::None => ResolvedMemorySummarySubject::None,
+        PersonalMemorySummarySubjectSelector::Person { selector } => {
+            let alias = maps.senders.get(selector.trim()).cloned().ok_or_else(|| {
+                RestoreError::Integrity(
+                    "summarySubject names a person unavailable in the canonical corpus".into(),
+                )
+            })?;
+            ResolvedMemorySummarySubject::Person { alias }
+        }
+    };
+    let resolved = ResolvedPersonalMemoryScope {
+        conversation_aliases,
+        conversation_kinds: requested.conversation_kinds.iter().copied().collect(),
+        not_before_unix,
+        not_after_unix,
+        sender_aliases,
+        include_account_holder_sender,
+        include_unknown_sender,
+        summary_subject,
+    };
+    let digest = sha256_bytes(&serde_json::to_vec(&resolved)?);
+    Ok((resolved, digest))
+}
+
+fn scope_has_sender_filter(scope: &ResolvedPersonalMemoryScope) -> bool {
+    scope.include_account_holder_sender
+        || scope.include_unknown_sender
+        || !scope.sender_aliases.is_empty()
+}
+
+fn scope_selects_all_evidence(scope: &ResolvedPersonalMemoryScope) -> bool {
+    scope.conversation_aliases.is_empty()
+        && scope.conversation_kinds.is_empty()
+        && scope.not_before_unix.is_none()
+        && scope.not_after_unix.is_none()
+        && !scope_has_sender_filter(scope)
+}
+
+fn scope_matches_message(
+    scope: &ResolvedPersonalMemoryScope,
+    conversation_alias: &str,
+    message: &CompactMessage,
+) -> bool {
+    if !scope.conversation_aliases.is_empty()
+        && !scope.conversation_aliases.contains(conversation_alias)
+    {
+        return false;
+    }
+    if scope
+        .not_before_unix
+        .is_some_and(|not_before| message.t < not_before)
+        || scope
+            .not_after_unix
+            .is_some_and(|not_after| message.t > not_after)
+    {
+        return false;
+    }
+    if !scope_has_sender_filter(scope) {
+        return true;
+    }
+    match message.a.as_str() {
+        "self" => scope.include_account_holder_sender,
+        "unknown" => scope.include_unknown_sender,
+        "other" => message
+            .p
+            .as_ref()
+            .is_some_and(|alias| scope.sender_aliases.contains(alias)),
+        _ => false,
+    }
+}
+
+fn load_conversation_contact_kinds(
+    corpus: &LoadedCorpus,
+) -> Result<BTreeMap<String, ContactKind>, RestoreError> {
+    let mut kinds = BTreeMap::new();
+    if let Some(path) = verified_corpus_sidecar_path(corpus, "conversations.jsonl")? {
+        for line in BufReader::new(File::open(path)?).lines() {
+            let record: ConversationSidecarRecord = serde_json::from_str(&line?)?;
+            if kinds.insert(record.alias, record.contact_kind).is_some() {
+                return Err(RestoreError::Integrity(
+                    "corpus conversation sidecar repeats a stable alias".into(),
+                ));
+            }
+        }
+    }
+    Ok(kinds)
+}
+
+fn scope_matches_conversation_kind(
+    scope: &ResolvedPersonalMemoryScope,
+    conversation_alias: &str,
+    kind: ConversationKind,
+    contact_kinds: &BTreeMap<String, ContactKind>,
+) -> bool {
+    if scope.conversation_kinds.is_empty() {
+        return true;
+    }
+    let contact_kind = contact_kinds.get(conversation_alias).copied();
+    scope
+        .conversation_kinds
+        .iter()
+        .any(|selector| match selector {
+            PersonalMemoryConversationKindSelector::Direct => kind == ConversationKind::Direct,
+            PersonalMemoryConversationKindSelector::Group => kind == ConversationKind::Group,
+            PersonalMemoryConversationKindSelector::Official => {
+                contact_kind == Some(ContactKind::Official) || kind == ConversationKind::Business
+            }
+            PersonalMemoryConversationKindSelector::Service => {
+                contact_kind == Some(ContactKind::Service)
+            }
+        })
+}
+
+fn select_scope_units(
+    corpus: &LoadedCorpus,
+    scope: &ResolvedPersonalMemoryScope,
+) -> Result<Vec<ScopedUnitSelection>, RestoreError> {
+    let mut selected = Vec::new();
+    let contact_kinds = if scope.conversation_kinds.is_empty() {
+        BTreeMap::new()
+    } else {
+        load_conversation_contact_kinds(corpus)?
+    };
+    for (corpus_unit_index, entry) in corpus.unit_index.units.iter().enumerate() {
+        if !scope.conversation_aliases.is_empty()
+            && !entry.conversation.is_empty()
+            && !scope.conversation_aliases.contains(&entry.conversation)
+        {
+            continue;
+        }
+        if scope
+            .not_before_unix
+            .is_some_and(|not_before| entry.to != 0 && entry.to < not_before)
+            || scope
+                .not_after_unix
+                .is_some_and(|not_after| entry.from != 0 && entry.from > not_after)
+        {
+            continue;
+        }
+        // Compact v2 indexes carry privacy-minimized sender-presence metadata.
+        // Use it only as a safe negative filter; v1 indexes have no such fields
+        // and therefore fall through to exact unit inspection.
+        if scope_has_sender_filter(scope)
+            && entry.first_evidence_ordinal.is_some()
+            && !(scope.include_account_holder_sender && entry.has_account_holder_sender
+                || scope.include_unknown_sender && entry.has_unknown_sender
+                || entry
+                    .sender_aliases
+                    .iter()
+                    .any(|alias| scope.sender_aliases.contains(alias)))
+        {
+            continue;
+        }
+        let unit = load_unit(corpus, entry)?;
+        if !scope_matches_conversation_kind(scope, &unit.c, unit.kind, &contact_kinds) {
+            continue;
+        }
+        let message_offsets = unit
+            .m
+            .iter()
+            .enumerate()
+            .filter_map(|(offset, message)| {
+                scope_matches_message(scope, &unit.c, message).then_some(offset)
+            })
+            .collect::<Vec<_>>();
+        if message_offsets.is_empty() {
+            continue;
+        }
+        let all_messages = message_offsets.len() == unit.m.len();
+        let text_byte_count = message_offsets
+            .iter()
+            .map(|offset| unit.m[*offset].x.len())
+            .sum();
+        selected.push(ScopedUnitSelection {
+            corpus_unit_index,
+            all_messages,
+            message_count: message_offsets.len(),
+            text_byte_count,
+            message_bitmap: (!all_messages).then(|| {
+                let mut bitmap = vec![0_u8; unit.m.len().div_ceil(8)];
+                for offset in &message_offsets {
+                    bitmap[*offset / 8] |= 1 << (*offset % 8);
+                }
+                hex::encode(bitmap)
+            }),
+        });
+    }
+    Ok(selected)
+}
+
+fn load_scoped_unit(
+    corpus: &LoadedCorpus,
+    selection: &ScopedUnitSelection,
+) -> Result<PreparedUnitFile, RestoreError> {
+    let entry = corpus
+        .unit_index
+        .units
+        .get(selection.corpus_unit_index)
+        .ok_or_else(|| RestoreError::Integrity("scope references a missing corpus unit".into()))?;
+    let mut unit = load_unit(corpus, entry)?;
+    if selection.all_messages {
+        if selection.message_bitmap.is_some()
+            || selection.message_count != unit.m.len()
+            || selection.text_byte_count
+                != unit.m.iter().map(|message| message.x.len()).sum::<usize>()
+        {
+            return Err(RestoreError::Integrity(
+                "scope all-message unit accounting is inconsistent".into(),
+            ));
+        }
+    } else {
+        let bitmap = selection
+            .message_bitmap
+            .as_ref()
+            .ok_or_else(|| RestoreError::Integrity("partial scope unit has no bitmap".into()))?;
+        let bitmap = hex::decode(bitmap).map_err(|_| {
+            RestoreError::Integrity("scope contains a malformed message bitmap".into())
+        })?;
+        if bitmap.len() != unit.m.len().div_ceil(8)
+            || unit.m.len() % 8 != 0
+                && bitmap.last().is_some_and(|byte| {
+                    let used = unit.m.len() % 8;
+                    *byte & !((1_u8 << used) - 1) != 0
+                })
+        {
+            return Err(RestoreError::Integrity(
+                "scope contains an invalid message bitmap".into(),
+            ));
+        }
+        unit.m = unit
+            .m
+            .into_iter()
+            .enumerate()
+            .filter_map(|(offset, message)| {
+                (bitmap[offset / 8] & (1 << (offset % 8)) != 0).then_some(message)
+            })
+            .collect();
+        if selection.message_count != unit.m.len()
+            || selection.text_byte_count
+                != unit.m.iter().map(|message| message.x.len()).sum::<usize>()
+        {
+            return Err(RestoreError::Integrity(
+                "scope filtered-message byte accounting is inconsistent".into(),
+            ));
+        }
+    }
+    unit.from = unit.m.first().map(|message| message.t).unwrap_or_default();
+    unit.to = unit.m.last().map(|message| message.t).unwrap_or_default();
+    Ok(unit)
 }
 
 fn load_self_evidence_aliases(
@@ -3324,15 +4743,82 @@ fn acquire_state_lock(state_path: &Path) -> Result<StateLock, RestoreError> {
 fn load_or_initialize_state(
     state_path: &Path,
     corpus: &LoadedCorpus,
+    scope_options: Option<&PersonalMemoryScopeOptions>,
 ) -> Result<MemoryRunState, RestoreError> {
     if state_path.try_exists()? {
-        return load_existing_state(state_path, corpus);
+        let mut state = load_existing_state(state_path, corpus)?;
+        if let Some(scope_options) = scope_options {
+            let (requested, requested_hash) = resolve_personal_memory_scope(corpus, scope_options)?;
+            if state.scope.as_ref() != Some(&requested)
+                || state.scope_sha256.as_deref() != Some(requested_hash.as_str())
+            {
+                let current_total = state_total_units(&state, corpus);
+                if state.outstanding.is_some() || state.next_unit_index != current_total {
+                    return Err(RestoreError::Integrity(
+                        "personal-memory state cannot change scope before the current scope is complete"
+                            .into(),
+                    ));
+                }
+                if state.completed_scopes.len() >= MAXIMUM_SCOPE_SELECTORS {
+                    return Err(RestoreError::Integrity(
+                        "personal-memory state completed-scope history exceeds its fixed limit"
+                            .into(),
+                    ));
+                }
+                if let (Some(scope_sha256), Some(message_count)) =
+                    (state.scope_sha256.clone(), state.scoped_message_count)
+                {
+                    state.completed_scopes.push(CompletedMemoryScope {
+                        scope_sha256,
+                        unit_count: current_total,
+                        message_count,
+                        completed_at_unix_milliseconds: now_unix_milliseconds()?,
+                    });
+                }
+                let (scoped_units, scoped_message_count) = if scope_selects_all_evidence(&requested)
+                {
+                    (Vec::new(), corpus.manifest.evidence_count)
+                } else {
+                    let units = select_scope_units(corpus, &requested)?;
+                    let message_count = units.iter().map(|unit| unit.message_count as u64).sum();
+                    (units, message_count)
+                };
+                state.scope = Some(requested);
+                state.scope_sha256 = Some(requested_hash);
+                state.scoped_units = scoped_units;
+                state.scoped_message_count = Some(scoped_message_count);
+                state.next_unit_index = 0;
+                state.last_committed = None;
+                state.updated_at_unix_milliseconds = now_unix_milliseconds()?;
+                write_state_atomic(state_path, &state)?;
+            }
+        }
+        return Ok(state);
     }
+    let (scope, scope_sha256) = if let Some(scope_options) = scope_options {
+        resolve_personal_memory_scope(corpus, scope_options)?
+    } else {
+        let scope = ResolvedPersonalMemoryScope::default();
+        let scope_sha256 = sha256_bytes(&serde_json::to_vec(&scope)?);
+        (scope, scope_sha256)
+    };
+    let (scoped_units, scoped_message_count) = if scope_selects_all_evidence(&scope) {
+        (Vec::new(), corpus.manifest.evidence_count)
+    } else {
+        let units = select_scope_units(corpus, &scope)?;
+        let message_count = units.iter().map(|unit| unit.message_count as u64).sum();
+        (units, message_count)
+    };
     let now = now_unix_milliseconds()?;
     let state = MemoryRunState {
         schema: PERSONAL_MEMORY_STATE_SCHEMA.into(),
         format_version: PERSONAL_MEMORY_FORMAT_VERSION,
         corpus_manifest_sha256: corpus.manifest_sha256.clone(),
+        scope: Some(scope),
+        scope_sha256: Some(scope_sha256),
+        scoped_units,
+        scoped_message_count: Some(scoped_message_count),
+        completed_scopes: Vec::new(),
         next_unit_index: 0,
         outstanding: None,
         last_committed: None,
@@ -3350,20 +4836,105 @@ fn load_existing_state(
 ) -> Result<MemoryRunState, RestoreError> {
     let bytes = read_owner_file_limited(state_path, MAXIMUM_CONTROL_FILE_BYTES)?;
     let state: MemoryRunState = serde_json::from_slice(&bytes)?;
+    let total_units = state_total_units(&state, corpus);
     if state.schema != PERSONAL_MEMORY_STATE_SCHEMA
         || state.format_version != PERSONAL_MEMORY_FORMAT_VERSION
         || state.corpus_manifest_sha256 != corpus.manifest_sha256
-        || state.next_unit_index > corpus.unit_index.units.len()
+        || state.next_unit_index > total_units
         || state.created_at_unix_milliseconds > state.updated_at_unix_milliseconds
     {
         return Err(RestoreError::Integrity(
             "memory state does not belong to this immutable corpus or is inconsistent".into(),
         ));
     }
+    if state.completed_scopes.len() > MAXIMUM_SCOPE_SELECTORS
+        || state.completed_scopes.iter().any(|completed| {
+            !valid_sha256(&completed.scope_sha256)
+                || completed.completed_at_unix_milliseconds < state.created_at_unix_milliseconds
+                || completed.completed_at_unix_milliseconds > state.updated_at_unix_milliseconds
+        })
+    {
+        return Err(RestoreError::Integrity(
+            "memory state completed-scope history is invalid".into(),
+        ));
+    }
+    if let Some(scope) = &state.scope {
+        let expected_scope_hash = sha256_bytes(&serde_json::to_vec(scope)?);
+        if state.scope_sha256.as_deref() != Some(expected_scope_hash.as_str()) {
+            return Err(RestoreError::Integrity(
+                "memory state scope hash is inconsistent".into(),
+            ));
+        }
+        let compact_all_messages =
+            scope_selects_all_evidence(scope) && state.scoped_units.is_empty();
+        let mut previous_corpus_index = None;
+        let mut scoped_message_count = if compact_all_messages {
+            corpus.manifest.evidence_count
+        } else {
+            0
+        };
+        for selection in &state.scoped_units {
+            let Some(entry) = corpus.unit_index.units.get(selection.corpus_unit_index) else {
+                return Err(RestoreError::Integrity(
+                    "memory state scope references a missing corpus unit".into(),
+                ));
+            };
+            if previous_corpus_index.is_some_and(|previous| previous >= selection.corpus_unit_index)
+            {
+                return Err(RestoreError::Integrity(
+                    "memory state scoped units are not in canonical order".into(),
+                ));
+            }
+            previous_corpus_index = Some(selection.corpus_unit_index);
+            let valid_selection = if selection.all_messages {
+                selection.message_bitmap.is_none()
+                    && selection.message_count == entry.message_count
+                    && selection.text_byte_count == entry.text_byte_count
+            } else if let Some(bitmap) = &selection.message_bitmap {
+                hex::decode(bitmap).is_ok_and(|bytes| {
+                    bytes.len() == entry.message_count.div_ceil(8)
+                        && bytes
+                            .iter()
+                            .map(|byte| byte.count_ones() as usize)
+                            .sum::<usize>()
+                            == selection.message_count
+                        && selection.message_count > 0
+                        && selection.message_count < entry.message_count
+                        && selection.text_byte_count <= entry.text_byte_count
+                        && (entry.message_count % 8 == 0
+                            || bytes.last().is_some_and(|byte| {
+                                let used = entry.message_count % 8;
+                                *byte & !((1_u8 << used) - 1) == 0
+                            }))
+                })
+            } else {
+                false
+            };
+            if !valid_selection {
+                return Err(RestoreError::Integrity(
+                    "memory state contains an invalid scoped unit selection".into(),
+                ));
+            }
+            scoped_message_count =
+                scoped_message_count.saturating_add(selection.message_count as u64);
+        }
+        if state.scoped_message_count != Some(scoped_message_count) {
+            return Err(RestoreError::Integrity(
+                "memory state scoped message accounting is inconsistent".into(),
+            ));
+        }
+    } else if state.scope_sha256.is_some()
+        || !state.scoped_units.is_empty()
+        || state.scoped_message_count.is_some()
+    {
+        return Err(RestoreError::Integrity(
+            "legacy memory state contains partial scope metadata".into(),
+        ));
+    }
     if let Some(outstanding) = &state.outstanding {
         if outstanding.start_unit_index != state.next_unit_index
             || outstanding.start_unit_index >= outstanding.end_unit_index_exclusive
-            || outstanding.end_unit_index_exclusive > corpus.unit_index.units.len()
+            || outstanding.end_unit_index_exclusive > total_units
             || outstanding.batch_id.is_empty()
             || outstanding.batch_id.len() > 128
         {
@@ -3433,7 +5004,7 @@ fn write_state_atomic(path: &Path, state: &MemoryRunState) -> Result<(), Restore
     if path.try_exists()? {
         ensure_private_regular_file(path)?;
     }
-    let mut bytes = serde_json::to_vec_pretty(state)?;
+    let mut bytes = serde_json::to_vec(state)?;
     bytes.push(b'\n');
     if bytes.len() as u64 > MAXIMUM_CONTROL_FILE_BYTES {
         return Err(RestoreError::Integrity(
@@ -3855,6 +5426,13 @@ fn valid_evidence_alias(alias: &str, evidence_count: u64) -> bool {
         && alias[1..]
             .parse::<u64>()
             .is_ok_and(|number| number > 0 && number <= evidence_count)
+}
+
+fn valid_person_alias(alias: &str) -> bool {
+    alias.len() == 7
+        && alias.starts_with('P')
+        && alias[1..].bytes().all(|byte| byte.is_ascii_digit())
+        && alias[1..].parse::<u64>().is_ok_and(|number| number > 0)
 }
 
 fn validate_wiki_relative_path(value: &str) -> Result<(), RestoreError> {

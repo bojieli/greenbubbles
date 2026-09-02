@@ -1020,6 +1020,9 @@ struct NativeSearchTable {
 pub(crate) struct CorpusContact {
     pub source_id: String,
     pub display_name: String,
+    pub remark: Option<String>,
+    pub nickname: Option<String>,
+    pub alias: Option<String>,
     pub kind: ContactKind,
     pub is_account_holder: bool,
 }
@@ -1672,7 +1675,22 @@ impl<'source, 'key> LiveCorpusReader<'source, 'key> {
                 );
                 CorpusContact {
                     source_id: record.id.clone(),
-                    display_name: contact_display_name(record, kind),
+                    // Personal memory preserves source identity instead of replacing
+                    // the authenticated owner with the presentation label `You`.
+                    display_name: if kind == ContactKind::AccountHolder {
+                        record
+                            .remark
+                            .as_ref()
+                            .or(record.nickname.as_ref())
+                            .or(record.alias.as_ref())
+                            .cloned()
+                            .unwrap_or_else(|| record.id.clone())
+                    } else {
+                        contact_display_name(record, kind)
+                    },
+                    remark: record.remark.clone(),
+                    nickname: record.nickname.clone(),
+                    alias: record.alias.clone(),
                     kind,
                     is_account_holder: kind == ContactKind::AccountHolder,
                 }
