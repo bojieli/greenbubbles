@@ -37,6 +37,7 @@ const CORPUS_METADATA_PAGE_ROWS: usize = 10_000;
 const CORPUS_HYDRATION_ROWS: usize = 400;
 const MAX_CURSOR_BYTES: usize = 4096;
 const MAX_CONVERSATION_ID_BYTES: usize = 4096;
+const MAX_SOURCE_IDENTIFIER_BYTES: usize = 512;
 const MAX_FALLBACK_SEARCH_MESSAGES_PER_PAGE: usize = 500;
 const MAX_FALLBACK_SEARCH_CONVERSATIONS_PER_PAGE: usize = 16;
 const FALLBACK_SEARCH_CURSOR_KIND: &str = "messages.search.fallback";
@@ -870,6 +871,28 @@ fn raw_message_from_row(
     })
 }
 
+fn normalized_source_identifier(value: &str) -> Option<String> {
+    (!value.is_empty()
+        && value.len() <= MAX_SOURCE_IDENTIFIER_BYTES
+        && value.trim() == value
+        && !value
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+        && !value.contains('<')
+        && !value.contains('>'))
+    .then(|| value.to_string())
+}
+
+/// `Name2Id` is the source's explicit sender relation and therefore wins over
+/// the content-prefix fallback. The upstream decoder also recognizes the
+/// historical `sender:\ncontent` group format, but an XML payload can contain
+/// the same delimiter and must never become a sender identifier.
+fn resolved_message_sender(source_sender: &str, decoded_sender: &str) -> String {
+    normalized_source_identifier(source_sender)
+        .or_else(|| normalized_source_identifier(decoded_sender))
+        .unwrap_or_default()
+}
+
 fn project_message(
     source: &LiveQuerySource<'_>,
     conversation: &str,
@@ -891,7 +914,7 @@ fn project_message(
         raw.compressed_content.as_deref(),
         wx_db::is_group_chat(conversation),
     );
-    let (sender, mut content, decode_state, content_decode_failed) = match decoded {
+    let (decoded_sender, mut content, decode_state, content_decode_failed) = match decoded {
         Ok(message) => (
             message.sender,
             serde_json::to_value(message.content)
@@ -900,7 +923,7 @@ fn project_message(
             false,
         ),
         Err(_) => (
-            raw.sender,
+            raw.sender.clone(),
             json!({"unavailable": "decodeFailed"}),
             "failed",
             true,
@@ -912,6 +935,7 @@ fn project_message(
         MAX_PROJECTED_TEXT_BYTES,
         &mut truncated_field_count,
     );
+    let sender = resolved_message_sender(&raw.sender, &decoded_sender);
     let (sender, sender_truncated) = truncate_utf8(sender, MAX_PROJECTED_TEXT_BYTES);
     let id = encode_message_cursor(source, conversation_digest, "message.identity", &raw.key)?;
     Ok((
@@ -1955,7 +1979,7 @@ impl<'source, 'key> LiveCorpusReader<'source, 'key> {
                         let local_type = row.get::<_, i64>(3)?;
                         let sender = row
                             .get::<_, Option<String>>(4)?
-                            .filter(|value| !value.is_empty());
+                            .and_then(|value| normalized_source_identifier(&value));
                         let create_time = row.get::<_, i64>(5)?;
                         let is_account_holder = sender.as_deref().and_then(|sender| {
                             self.source
@@ -4843,6 +4867,44 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn explicit_source_sender_wins_over_a_malformed_group_prefix() {
+        let malformed =
+            "<msg><appmsg><refermsg><chatusr>wxid_quoted</chatusr></refermsg></appmsg>:\nbody";
+        assert_eq!(
+            resolved_message_sender("wxid_sender", malformed),
+            "wxid_sender"
+        );
+        assert_eq!(
+            resolved_message_sender("", "wxid_fallback"),
+            "wxid_fallback"
+        );
+        assert_eq!(resolved_message_sender("", malformed), "");
+
+        let (_temp, root) = fixture();
+        let source = LiveQuerySource::open(&root, QueryDatabaseAccess::Decrypted).unwrap();
+        let raw = RawMessage {
+            key: MessageKey {
+                sort_sequence: 1,
+                create_time: 1,
+                server_id: 1,
+                shard_id: 0,
+                row_id: 1,
+            },
+            local_type: 1,
+            sender: "wxid_sender".into(),
+            raw_content: malformed.as_bytes().to_vec(),
+            packed_info: None,
+            status: 0,
+            compression_type: None,
+            compressed_content: None,
+        };
+        let (projected, decode_failed) =
+            project_message(&source, "123456@chatroom", "test-digest", raw).unwrap();
+        assert!(!decode_failed);
+        assert_eq!(projected.sender, "wxid_sender");
+    }
 
     fn fixture() -> (TempDir, PathBuf) {
         let temp = TempDir::new().unwrap();
