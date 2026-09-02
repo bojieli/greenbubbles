@@ -183,15 +183,20 @@ There is an agent skill in [`skills/`](skills/greenbubbles-context/SKILL.md) tha
 teaches a compatible assistant to use this properly.
 
 For a whole-history personal wiki, use the dedicated Pi skill instead of
-enumerating message pages. One local process selects account-holder-active
-monthly episodes, then Pi iteratively refines cited Markdown from crash-safe,
-byte-bounded batches:
+enumerating message pages. One local process prepares a canonical corpus from
+every eligible message, then reusable run scopes select any combination of
+conversations, inclusive time bounds, and senders. Pi iteratively refines one
+cited Markdown wiki from crash-safe, byte-bounded batches; if those evidence
+filters are all empty, the run covers the entire hydrated corpus:
 
 ```console
 greenbubbles memory prepare new-corpus \
   --selection-policy selection-policy.json --profile live-account
 greenbubbles memory next new-corpus --state run-state.json \
-  --wiki private-wiki --max-text-bytes 524288
+  --wiki private-wiki --max-text-bytes 524288 \
+  --conversation-kind group \
+  --from 2023-12-01T00:00:00+08:00 \
+  --through 2023-12-31T23:59:59+08:00
 ```
 
 See the [personal-memory workflow](docs/PERSONAL_MEMORY.md) and

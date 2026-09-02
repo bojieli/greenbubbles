@@ -100,15 +100,20 @@ sentence is faithful. Gemini output can vary across runs and still needs human
 review. Each run creates a new immutable generation; automatic semantic merge,
 conflict resolution and promotion of an older inferred wiki are not built.
 
-**A whole-history personal wiki is selectively complete, not transcript
-complete.** `memory prepare` accounts for every reversible message table it
-scans, but it intentionally omits inactive months, silent sessions and text
-outside bounded self-anchor windows. Two real hashed tables in the current
-live validation corpus could not be mapped back to an authorized conversation
-identifier and are reported as `unmatchedMessageTable`; their contents are not
-guessed. The Pi skill semantically refines Markdown, but citation validation
-cannot mechanically prove that its prose captures every nuance. Human review
-and the coverage report remain required.
+**A canonical personal-memory corpus can cover every eligible message, but the
+wiki is still an inference.** A v2 `allMessages` preparation no longer omits
+inactive months or silent sessions. It scans every inventoried hashed message
+table, including tables whose conversation identity cannot be reversed;
+`rowCoverageComplete` can therefore be true while `sourceCoverageComplete` is
+false and `unmatchedMessageTable` remains reported. Rows with undecodable
+metadata or content remain explicit coverage failures. Per-message text still
+obeys `maximumMessageTextBytes`, attachments and unsupported payloads are
+represented by compact summaries rather than every source byte, and `tr=true`
+marks text that reached that bound. A completed unfiltered scope proves that Pi
+reviewed every hydrated corpus message, not that its Markdown captured every
+nuance. Citation checks cannot prove semantic faithfulness, so human review and
+the coverage report remain required. Legacy v1 corpora keep the old selective
+account-holder-active behavior and cannot establish whole-database review.
 
 **Preparation is atomic but not resumable mid-scan.** An interrupted
 `memory prepare` leaves no published partial corpus and must restart. Once the
@@ -116,6 +121,13 @@ corpus exists, `memory next/page/acknowledge/commit` is crash-safe and repeats
 an unacknowledged page exactly. A future preparation checkpoint format would
 need to bind live source mutation across restarts before it could safely
 resume.
+
+**A prepared corpus is a point-in-time live generation, not a database lock.**
+GreenBubbles verifies row identity between metadata selection and hydration and
+publishes one internally bound immutable generation. Messages arriving before
+a later preparation may make that later corpus larger; counts from separate
+preparations must not be combined. Prepare a new corpus when a refreshed
+history is required, then review or promote it explicitly.
 
 **Retention never deletes, which means it never reclaims space either.**
 Retired archives are quarantined by atomic same-filesystem rename. Permanent

@@ -47,8 +47,9 @@ document next.
   for, and what it can never reach.
 - [AI memory integration](AI_MEMORY_INTEGRATION.md) — citation-preserving
   projections into local memory and retrieval systems.
-- [Personal memory and Pi](PERSONAL_MEMORY.md) — owner-active episode
-  selection, compact durable batches, and agent-refined Markdown.
+- [Personal memory and Pi](PERSONAL_MEMORY.md) — canonical preparation,
+  composable command-line conversation/kind/sender filters, RFC 3339 time
+  bounds, compact durable batches, and agent-refined Markdown.
 - [Connector API](CONNECTOR_API.md) — the versioned local request/response
   contract, the source connector requirements, and the resumable change
   consumer.

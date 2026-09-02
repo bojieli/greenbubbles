@@ -49,7 +49,7 @@ GB_CLI="Native/GreenBubbles/target/release/greenbubbles"
 | Direct AI connector | `connector-policy-direct`, `connector-query-direct`, `connector-serve-direct` | Apply source-bound policy and audit directly to live or snapshot queries |
 | Replica AI connector | `tool-policy/list/recent/search/draft`, `connector-serve/call` | Serve policy-scoped replica reads and non-executing drafts |
 | AI interchange | `ai-query`, `ai-export`, `audit-ai-context`, `ai-memory-export`, `audit-ai-memory`, `ai-summarize-direct` | Create, verify, and model-summarize minimized, citation-preserving AI context |
-| Personal memory | `memory prepare/next/page/acknowledge/commit/status` | Select a large live corpus locally and feed deterministic, crash-safe evidence pages to an agent |
+| Personal memory | `memory prepare/next/page/acknowledge/commit/status` | Prepare one canonical corpus, select composable run scopes with repeatable CLI arguments, and feed deterministic crash-safe evidence pages to an agent |
 | Operational evidence | `synthetic-benchmark`, `compose-latency-evidence`, `summarize-latency-evidence`, `audit-connector-log/state` | Generate or verify aggregate release and service evidence |
 | Sending | `send …` | Inspect the separate experimental adapter; public builds stay closed |
 
@@ -106,11 +106,18 @@ Most restoration, audit, snapshot and export commands accept
 paths — but an operational report can still reveal private aggregate facts, so
 treat one as private until you have read it.
 
-`memory prepare` emits content-free phase, conversation, row and selection
-counts on standard error. `memory next` selects a 16 KiB..2 MiB, at-most-5,000
-message batch but returns only its small delivery envelope. New corpora can use
-the deterministic `accountHolderRelevance` order to cover self-active
-relationships and months early; it still schedules every selected unit.
+`memory prepare` emits content-free phase, conversation, row and hydration
+counts on standard error while building one immutable `allMessages` corpus.
+Repeatable `--conversation`, `--conversation-kind`, and `--sender` filters plus
+inclusive RFC 3339 `--from`/`--through` bounds are applied by `memory next`;
+omitting every evidence filter means every hydrated corpus message. `--subject`
+independently defaults to `account-holder`, accepts `person:<selector>`, or may
+be `none` for conversation-centric memory. Every agent-visible memory timestamp
+is RFC 3339 in the corpus timezone. `memory next` selects a
+16 KiB..2 MiB, at-most-5,000-message batch but returns only its small delivery
+envelope. New corpora can use the deterministic `accountHolderRelevance` order
+to cover self-active relationships and months early; it still schedules every
+canonical unit.
 `memory page`
 deterministically fragments that immutable batch into at-most-49,152-byte JSON
 responses, and `memory acknowledge` advances one delivered page at a time. An
@@ -123,9 +130,12 @@ citations on one changed factual line. Changed `me.md` prose additionally
 requires at least one self-authored citation per factual line. It advances only after every page was
 delivered and acknowledged. After full review of a low-value batch,
 `--reviewed-no-durable-memory` instead requires the wiki to be byte-for-byte
-unchanged. `memory status` reports cumulative committed/selected message counts
-and source/content limitation aggregates so an agent never needs to read corpus
-sidecars. See
+unchanged. `memory status` separates canonical corpus counts from current-scope
+selected and committed counts, reports the resolved subject, and exposes
+row/source/content limitation aggregates so an agent never needs to read corpus
+sidecars. `complete: true` means the current scope is complete; it proves review
+of every hydrated message only for a canonical run whose `scope.allMessages` is
+true. See
 [PERSONAL_MEMORY.md](PERSONAL_MEMORY.md).
 
 ## Where to go next

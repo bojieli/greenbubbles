@@ -17,8 +17,12 @@ Notable changes to GreenBubbles are documented here. The project follows
 - Added source-bound `contacts list` pagination with conservative contact kinds,
   exact account-holder marking, and optional remark/nickname/alias details.
 - Added the production corpus-scale `memory prepare/next/page/acknowledge/commit/status`
-  workflow: owner-active monthly/session selection, selected-row hydration,
-  immutable private evidence, deterministic `page`/`acknowledge` delivery below
+  workflow: canonical all-message preparation, repeatable command-line
+  conversation/kind/sender filters, inclusive RFC 3339 time bounds, independent
+  account-holder/person/none summary subjects, full source identities and names
+  in model pages without repeating them on every message,
+  stable citations across scopes, unmatched-table row preservation, immutable
+  private evidence, deterministic `page`/`acknowledge` delivery below
   Pi's tool-output ceiling, citation/wiki validation including retained-to-cited
   completeness, weighted account-holder/active-month relevance ordering that
   still schedules every unit, an eight-citation representative-evidence ceiling
@@ -28,11 +32,19 @@ Notable changes to GreenBubbles are documented here. The project follows
   opaque identifiers, idempotent commits, unambiguous last-committed status,
   cumulative committed/selected message and coverage status, and content-free
   preparation progress.
+- Added a compact v2 prepared-unit index and compact all-message run state after
+  real 100,000-plus-unit validation exposed the original 64-MiB control-index
+  ceiling. Stable evidence aliases and legacy v1 index readability are
+  preserved; sender scopes use compact presence metadata as a safe planning
+  prefilter before exact unit verification.
 - Added a Pi-discoverable `greenbubbles-personal-memory` Agent Skill and
   project `.pi/settings.json` integration; Pi remains the only ReAct runtime.
 
 ### Fixed
 
+- Made the source database's explicit `Name2Id` sender relation authoritative
+  over legacy group-content prefix parsing, and reject malformed/XML-like
+  content-derived sender identifiers before attribution or corpus publication.
 - Removed production-length canonical message IDs and verbose connector
   metadata from model prompts while preserving exact local citation evidence.
 

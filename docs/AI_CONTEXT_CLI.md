@@ -14,7 +14,7 @@ Three levels, in increasing order of deliberateness:
 | Policy-scoped query | `connector-query-direct`, `ai-query` | An AI caller needs a boundary you control |
 | Static export | `ai-export`, then `ai-memory-export` | You want a durable, auditable bundle to ingest |
 | Generated memory | `ai-summarize-direct` | You want a real model to compile a small cited wiki from live authorized messages |
-| Corpus-scale agent memory | `memory prepare/next/page/acknowledge/commit/status` | One Pi agent should iteratively refine a cited wiki without traversing a million messages itself |
+| Corpus-scale agent memory | `memory prepare/next/page/acknowledge/commit/status` | One Pi agent should iteratively refine a cited wiki over all messages or a composable command-line scope without traversing a million messages itself |
 
 For ordinary conversation and message reads, `connector-query-direct` is the
 preferred policy-scoped path: one typed request against live or snapshot
@@ -313,18 +313,27 @@ the reviewed generation explicitly.
 ## Corpus-scale Pi memory
 
 `ai-summarize-direct` is deliberately bounded per selected conversation. For a
-whole live account, use `memory prepare`: it performs the metadata traversal,
-owner-active month/session selection and selected-row hydration inside one
-local process. `memory next` returns a small batch envelope; repeated
+whole live account, use a v2 `memory prepare`: one local process inventories the
+message tables and hydrates every eligible row into a canonical immutable
+corpus. Reuse that corpus with repeatable `memory next --conversation`,
+`--conversation-kind`, and `--sender` arguments plus inclusive RFC 3339
+`--from`/`--through` bounds. Categories intersect; empty evidence filters select
+the entire hydrated corpus. `--subject` is independent: it defaults to the
+authenticated account holder, accepts `person:<selector>`, or can be `none` for
+conversation-centric memory.
+`memory next` returns a small batch envelope; repeated
 `memory page` calls then return deterministic at-most-49,152-byte fragments
-with short `E#########`, `P######` and `C######` aliases. Verbose canonical
-citation data stays in a local sidecar rather than consuming model tokens.
+with short `E#########`, `P######` and `C######` join keys and RFC 3339 message
+times. Page-level identity dictionaries preserve real source IDs, contact
+names/aliases, and group titles without repeating them on every message.
+Verbose canonical-message citation data stays in a local sidecar.
 The default personal-memory policy orders immutable units by deterministic
 account-holder relevance and active-period coverage, rather than exhausting
 the oldest conversation slice first; the schedule still traverses every
 prepared unit.
 
-One Pi ReAct agent updates `me.md`, `people/P######.md` and `index.md` directly.
+One Pi ReAct agent updates `conversations/C######.md`, `me.md`,
+`people/P######.md` and `index.md` directly according to the resolved subject.
 GreenBubbles does not semantically merge prose. Pi updates useful target pages
 before acknowledging each fully read evidence page. The crash-safe `commit`
 step validates immutable input hashes, complete page review, allowed page paths,

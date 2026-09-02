@@ -23,7 +23,7 @@ what stays on your machine, what can leave it, and who decides.
 | Audit journals | wherever you configured them | operations and counts, no bodies |
 | Progress and evidence reports | wherever you wrote them | aggregates, sometimes schema paths |
 | Generated-memory generations | wherever you wrote them | compact source text, model output, and private citation mapping |
-| Personal-memory corpus indexes | wherever you wrote them | selected chat text plus complete private citation/contact provenance |
+| Personal-memory corpus indexes | wherever you wrote them | potentially every eligible chat message plus complete private citation/contact provenance |
 | Personal-memory wiki and run state | wherever you wrote them | inferred facts, relationships, citations and processing progress |
 
 GreenBubbles reads WeChat's files read-only and never writes to them. Every
@@ -56,10 +56,16 @@ export and choose its destination.**
   unconditionally denied to a remote destination, even when message text for
   that conversation is remotely enabled.
 - **`memory prepare/next/page/acknowledge/commit`** make no network request.
-  `memory next` prints only a delivery envelope; the Pi agent sees chat text in
-  deterministic at-most-49,152-byte `memory page` responses. Verbose
-  `evidence.jsonl`, account/contact identifiers and database metadata remain
-  local unless the operator separately discloses them.
+  A v2 canonical corpus can duplicate every eligible message into its private
+  read-only index, so protect it like the source database. `memory next` prints
+  only a delivery envelope; the Pi agent sees the selected chat text in
+  deterministic at-most-49,152-byte `memory page` responses. Empty scope filters
+  deliberately select the whole hydrated corpus. Personal-memory pages also
+  include the real account/contact/conversation source IDs, names, aliases, and
+  group titles needed for a faithful private wiki; only verbose canonical
+  message provenance and database metadata remain in sidecars. If Pi uses a
+  remote model, both page text and these identities leave the machine under
+  that provider's terms even though GreenBubbles itself makes no request.
 
 Every one of those decisions, allowed or denied, is appended to a hash-chained,
 body-free journal you can verify with `audit-connector-log`.

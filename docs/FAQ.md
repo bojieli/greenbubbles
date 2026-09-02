@@ -134,11 +134,17 @@ policy instead.
 
 The corpus-scale Pi workflow is an explicit owner-run exception to per-chat
 policy enumeration: one local `memory prepare` process may scan the live
-account, but `memory next` returns only a delivery envelope and deterministic
-`memory page` calls release only owner-active episode windows. Pi never receives
-the full transcript or database key. Use a separate private corpus/wiki
-directory and review `coverage.json`; silence and selection are not evidence
-that omitted messages said nothing important.
+account and a v2 corpus may retain every eligible message locally. A composable
+run scope can then intersect repeatable conversation/kind/sender arguments and
+inclusive RFC 3339 time bounds; leaving those filters empty deliberately selects
+the whole hydrated corpus.
+`memory next` returns only a delivery envelope and deterministic `memory page`
+calls release at most 49,152 bytes at a time. Pi never receives the database key
+or verbose citation sidecars, but personal-memory pages intentionally include
+real contact and conversation identities and it eventually receives every page
+in the chosen scope. Use separate private corpus/wiki/state paths, review the status
+coverage fields, and remember that a remote Pi model receives those released
+pages under that model provider's privacy terms.
 
 ### Can I list my WeChat contacts from the CLI?
 

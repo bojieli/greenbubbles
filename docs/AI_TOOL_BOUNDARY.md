@@ -54,14 +54,21 @@ This view is not a replacement for the lossless archive, and is not meant to
 be. It is what a model gets.
 
 The corpus-scale personal-memory surface adds a second deterministic boundary.
-`memory prepare` does the million-row traversal locally, using metadata first
-and hydrating only account-holder-active episode windows. `memory next` returns
-only a delivery envelope; `memory page` returns at most 49,152 bytes of compact
-actor/time/type/text fields with short evidence aliases. Canonical message and
-sender IDs remain in private sidecars. `memory commit` has no semantic merger
-or model call. It checks immutable unit/page hashes, complete sequential review,
-the prior wiki snapshot, changed-page scope, and retained/cited evidence before
-atomically advancing a crash-safe cursor.
+A v2 `memory prepare` does the million-row traversal locally, using metadata
+first and hydrating every eligible row into one immutable canonical corpus.
+`memory next` intersects repeatable conversation, conversation-kind, and sender
+arguments with inclusive RFC 3339 time bounds without rescanning the source;
+empty evidence filters mean every hydrated message. Its independent `--subject`
+chooses account-holder, another-person, or conversation-centric wiki targets.
+`memory next` returns only a delivery envelope; `memory page` returns at most
+49,152 bytes of compact actor/RFC-3339-time/type/text fields with short evidence
+keys. Page-level identity dictionaries intentionally preserve real source IDs,
+names, aliases, group titles, and kinds for personal-memory fidelity; verbose
+canonical-message provenance stays in verified sidecars.
+`memory commit` has no semantic merger or model call. It checks immutable
+unit/page hashes, complete sequential review, the prior wiki snapshot,
+changed-page scope, and retained/cited evidence before atomically advancing a
+crash-safe cursor.
 
 ## Prompt injection
 
