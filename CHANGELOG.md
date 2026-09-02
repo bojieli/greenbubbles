@@ -37,6 +37,17 @@ Notable changes to GreenBubbles are documented here. The project follows
   ceiling. Stable evidence aliases and legacy v1 index readability are
   preserved; sender scopes use compact presence metadata as a safe planning
   prefilter before exact unit verification.
+- Added `scripts/personal-memory-parallel.py`, which filters conversations by
+  kind, account-holder participation, month window and budget, packs them into
+  balanced shards (splitting an oversized conversation into month ranges so no
+  single conversation becomes the critical path), runs eight agents at a time by
+  default against the shared immutable corpus, and merges the shard wikis.
+  `--group-min-self-per-month` keeps direct chats whole but reads a group only
+  in the months the account holder actually spoke there, which is where most of
+  the cost of a large WeChat history sits. Shards bind their scopes one at a
+  time in order, and scopes are grouped by time window rather than by
+  conversation, so invocation overhead follows the windows, not the thousands
+  of conversations.
 - Added a Pi-discoverable `greenbubbles-personal-memory` Agent Skill and
   project `.pi/settings.json` integration; Pi remains the only ReAct runtime.
 

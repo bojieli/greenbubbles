@@ -328,6 +328,77 @@ greenbubbles memory next /private/path/corpus \
   --max-text-bytes 524288
 ```
 
+## Run shards in parallel
+
+One canonical corpus is immutable, so any number of agents may read it at once.
+A run is what cannot be shared: one state file drives one wiki serially. To use
+more than one agent, shard the work — each shard gets its own state file, its
+own wiki, and its own list of scopes — then merge the wikis afterwards.
+`scripts/personal-memory-parallel.py` does this:
+
+```sh
+python3 scripts/personal-memory-parallel.py plan \
+  --corpus /private/path/corpus \
+  --run /private/path/run \
+  --shards 8 \
+  --kind direct --kind group \
+  --min-self-messages 0 \
+  --group-min-self-per-month 5
+
+python3 scripts/personal-memory-parallel.py run \
+  --run /private/path/run --parallel 8
+
+python3 scripts/personal-memory-parallel.py status --run /private/path/run
+python3 scripts/personal-memory-parallel.py merge --run /private/path/run
+```
+
+`plan` is also where relevance filtering happens, because most of a WeChat
+database is not worth distilling. `--kind` keeps only the conversation kinds
+worth reading, `--min-self-messages` drops conversations the account holder
+never took part in, `--from-month`/`--through-month` bound the window, and
+`--max-messages` caps the budget outright. The plan is built from the corpus
+activity sidecar, which holds per-conversation and per-month counts and no
+message text. It prints how many messages survived and what they will cost
+before anything is spent.
+
+`--group-min-self-per-month` is the sharpest of those filters, because direct
+chats and groups deserve different treatment. A one-to-one thread is about the
+account holder by construction, so it is kept whole. A group is mostly other
+people talking past you, so a group month only earns its cost once you actually
+said something in it: the gate keeps the months where the account holder sent at
+least N messages and drops the rest of that group's history. `--group-kind`
+chooses which kinds the gate applies to; `--group-min-self-per-month 0` disables
+it and keeps every conversation whole.
+
+Scopes are then built per window rather than per conversation. Every whole
+conversation in a shard is read under one binding, and every gated group sharing
+a month is read under one month binding, so the number of agent invocations
+follows the number of windows rather than the number of conversations. That
+matters because a run pays a fixed cost per invocation: thousands of
+one-conversation scopes would spend more on that overhead than on the messages
+themselves. A conversation heavier than one shard is still split into
+consecutive month ranges with inclusive RFC 3339 `--from`/`--through` bounds in
+the corpus timezone; a single month heavier than the limit stays whole, since
+the corpus records activity per month. Without that split, one large
+conversation would be the critical path for the entire run.
+
+`run` invokes one agent per shard, one batch per invocation, and re-checks
+`memory status` between batches, so a shard that stops making progress is
+reported instead of looping. `--parallel` sets how many agents run at once and
+defaults to 8. A shard works through its scopes in order and binds the next one
+only after the current one is complete, which is what a run state permits;
+`shards/NNN/progress.json` records the scopes already banked, so a resumed run
+skips them. Everything is resumable: re-running continues from each shard's
+committed state. Cost is per message and does not change with parallelism; wall
+clock falls to roughly the heaviest shard.
+
+`merge` combines the shard wikis into a derived wiki: people pages and `me.md`
+are merged with duplicate lines dropped, and `index.md` is regenerated. A gated
+conversation's months can land in different shards, so a conversation page may
+have several contributors; they are merged in month order and reported, keeping
+the page a timeline. The merged tree is an output artifact, not a run state —
+keep refining through the shard states and merge again.
+
 ## Coverage means what the agent actually saw
 
 For a canonical corpus, `selectedMessageCount == eligibleMessageCount`: time,
