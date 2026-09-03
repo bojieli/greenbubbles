@@ -53,8 +53,10 @@ it read-only.
   it may see. Everything else never leaves your machine.
 - **Back it up so it outlives WeChat.** Encrypted with its own key and 24
   recovery words, so a backup still opens if you lose the app or the account.
-- **Feed a memory tool.** Export to QMD, Mem0 and friends, with a link back to
-  the exact message behind every line.
+- **Turn your history into a living knowledge project.** Extract into a
+  git-versioned Python or Markdown project with executable constraints that
+  proactively alert you to cross-domain conflicts — passport expiry vs. upcoming
+  trip, allergy vs. new prescription, conflicting instructions across sessions.
 - **Turn a million messages into a wiki.** Coding agents you already pay for
   read your history in parallel and write cited Markdown, one message at a
   time, never a summary of a summary.
@@ -139,8 +141,13 @@ greenbubbles messages list --conversation <id> --limit 50
 # search everything (the term goes in on stdin, so it stays out of your history)
 greenbubbles messages search --query-stdin
 
+# who is in your address book?
+greenbubbles contacts list --limit 50
+
 # one exact message, and a photo from it
 greenbubbles message get --conversation <id> --message <id>
+greenbubbles attachment inspect <account-root> \
+  --conversation <id> --message <id>    # see what attachments a message has
 greenbubbles attachment materialize <account-root> \
   --conversation <id> --message <id> --kind image \
   --attachment <id> --output ~/photo.jpg
@@ -187,54 +194,90 @@ teaches a compatible assistant to use this properly.
 
 See the [AI context guide](docs/AI_CONTEXT_CLI.md) for the full surface.
 
-### Turning your history into a wiki
+### Querying the replica
 
-Reading a million messages one page at a time is the wrong shape for a whole
-history. The personal-memory workflow instead prepares a canonical corpus once,
-locally, from every eligible message; reusable run scopes then select any
-combination of conversations, inclusive time bounds and senders. A coding agent
-— Pi, Claude Code, Codex, Gemini CLI, or your own — refines one cited Markdown
-wiki from crash-safe, byte-bounded batches. Leave the evidence filters empty and
-the run covers the entire hydrated corpus:
+GreenBubbles exposes a separate replica query family for AI tools that need
+structured, policy-scoped access without touching the live database.
 
 ```console
-greenbubbles memory prepare new-corpus \
+# Apply a scope policy to the replica, list recent messages, and search
+greenbubbles tool-policy replica.db policy.json <chat-id>...  # set scope
+greenbubbles tool-list replica.db policy.json                 # list conversations
+greenbubbles tool-recent replica.db policy.json               # recent messages
+greenbubbles tool-search replica.db policy.json               # search
+greenbubbles tool-draft replica.db policy.json                # non-executing draft
+```
+
+`ai-query getChanges` provides a change-feed for incremental consumer sync —
+useful when an AI tool needs to stay current with the replica without polling
+the full history. `ai-export` produces static interchange and audit bundles for
+offline analysis or archival. `ai-memory-export` produces QMD/Mem0 projections
+with checkpoint IDs and `greenbubbles:message:<id>` citations that link every
+inferred fact back to its source message. The replica tool policy uses
+account-scoped one-way hashes that are distinct from the source-bound direct
+connector policy, so replica access can be granted and revoked independently.
+
+See [docs/AI_CONTEXT_CLI.md](docs/AI_CONTEXT_CLI.md) for the full surface.
+
+### Turning your history into a living knowledge project
+
+GreenBubbles extracts your message history into a self-evolving software project
+— typed Python dataclasses with executable constraints, or structured Markdown
+— following the UserAsCode methodology. Memory is organized by life domain
+(identity, travel, finance, health, and more) and CRUD-patched incrementally:
+new facts are added, changed facts are corrected in place, unchanged facts are
+skipped. The project is git-versioned so every update is diffable and
+reversible.
+
+```console
+# Prepare the corpus once (local, no API cost)
+greenbubbles memory prepare corpus-v2 \
   --selection-policy selection-policy.json --profile live-account
-greenbubbles memory next new-corpus --state run-state.json \
-  --wiki private-wiki --max-text-bytes 327680 --max-messages 2520 \
-  --conversation-kind group \
-  --from 2023-12-01T00:00:00+08:00 \
-  --through 2023-12-31T23:59:59+08:00
+
+# Extend it incrementally when new messages arrive
+greenbubbles memory prepare corpus-v3 \
+  --extend corpus-v2 \
+  --selection-policy selection-policy.json --profile live-account
+
+# Run an incremental extraction pass into a Python knowledge project
+python3 scripts/personal-memory-parallel.py tick \
+  --corpus corpus-v2 \
+  --user-project ~/memory/me \
+  --format python \
+  --agent claude
 ```
 
-Every factual line on every page cites the exact messages behind it. A commit
-that adds an uncited line, quietly drops evidence it said it would keep, or
-edits a page it did not declare is rejected, so the wiki cannot drift away from
-what was actually said.
+The first `tick` creates `~/memory/me/` as a git repo and processes the full
+corpus. Subsequent ticks process only new messages since the last run. Cadence
+is user-configured — see [docs/PERSONAL_MEMORY.md](docs/PERSONAL_MEMORY.md) for
+a cost table. Gemini 3.8 Flash is the recommended model.
 
-One agent reading serially would take days, so
-[`scripts/personal-memory-parallel.py`](scripts/personal-memory-parallel.py)
-shards the corpus by conversation, runs eight agents at once against the same
-read-only corpus, and merges the results. It also decides what is worth
-reading: direct chats whole, and a group month only when you said something
-there yourself. On this Mac that selects 446,435 messages out of 1.72 million,
-measured at USD 1.15 per 1,000 messages — roughly USD 510 and 7 hours:
+The Python project looks like this after the first pass:
 
-```console
-python3 scripts/personal-memory-parallel.py plan \
-  --corpus corpus-v2 --run /private/path/run --shards 8
-python3 scripts/personal-memory-parallel.py run \
-  --run /private/path/run --agent claude --env ANTHROPIC_API_KEY
-python3 scripts/personal-memory-parallel.py merge --run /private/path/run
+```python
+# ~/memory/me/manifest.py
+DOMAINS = {
+    "identity":  "Name, DOB, passport | updated 2026-01-20",
+    "travel":    "2 upcoming trips; passport expires 2026-06-01 | updated 2026-01-20",
+    "health":    "Allergies: peanuts; Rx: cetirizine | updated 2025-12-01",
+}
+ACTIVE_ALERTS: list[str] = [
+    "[CRITICAL] travel_readiness: Passport expires 2026-06-01, "
+    "Singapore trip departs 2026-06-15 (only 14 days validity)",
+]
 ```
 
-`--agent` runs whichever harness you already pay for, so a flat-rate
-subscription does the reading instead of a metered key, and `--base-url` points
-a run at a cheaper third-party router such as OpenRouter or Krill AI instead of
-the first-party API.
+The equivalent Markdown manifest:
 
-See the [personal-memory workflow](docs/PERSONAL_MEMORY.md) and
-[`greenbubbles-personal-memory`](skills/greenbubbles-personal-memory/SKILL.md).
+```markdown
+# Personal Memory Manifest
+## Active Alerts
+- [CRITICAL] travel_readiness: Passport expires 2026-06-01, Singapore trip departs 2026-06-15
+```
+
+See [docs/PERSONAL_MEMORY.md](docs/PERSONAL_MEMORY.md),
+[format-python reference](skills/greenbubbles-personal-memory/references/format-python.md),
+and [format-markdown reference](skills/greenbubbles-personal-memory/references/format-markdown.md).
 
 ## Documentation
 
@@ -244,7 +287,9 @@ See the [personal-memory workflow](docs/PERSONAL_MEMORY.md) and
 | [FAQ](docs/FAQ.md) | What goes wrong, and why |
 | [CLI reference](docs/CLI_REFERENCE.md) | Every command |
 | [Giving an AI access](docs/AI_CONTEXT_CLI.md) | Policies, exports, memory tools |
-| [Building a personal wiki](docs/PERSONAL_MEMORY.md) | Corpus selection, parallel agents, citations |
+| [Living knowledge project](docs/PERSONAL_MEMORY.md) | UserAsCode extraction: corpus, formats, tick, revise |
+| [Replica operations](docs/REPLICA_OPERATIONS.md) | Replica lifecycle, sync, and recovery |
+| [AI memory integration](docs/AI_MEMORY_INTEGRATION.md) | QMD/Mem0 projections, citations, change-feed |
 | [Backups](docs/RECOVERABLE_SNAPSHOTS.md) | The 24 words, rotation, recovery drills |
 | [Architecture](docs/ARCHITECTURE.md) | How it works inside, and why |
 | [Known limitations](docs/KNOWN_LIMITATIONS.md) | What is unproven or broken |

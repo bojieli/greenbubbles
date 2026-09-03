@@ -120,7 +120,11 @@ account-holder-active behavior and cannot establish whole-database review.
 corpus exists, `memory next/page/acknowledge/commit` is crash-safe and repeats
 an unacknowledged page exactly. A future preparation checkpoint format would
 need to bind live source mutation across restarts before it could safely
-resume.
+resume. For incremental extraction after new messages arrive, use
+`memory prepare --extend` — it re-scans metadata fully but hydrates only new
+rows, so interrupting it is safe (re-run and it starts fresh). The UserAsCode
+knowledge project is updated incrementally per batch; no full re-extraction is
+required.
 
 **A prepared corpus is a point-in-time live generation, not a database lock.**
 GreenBubbles verifies row identity between metadata selection and hydration and

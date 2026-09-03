@@ -49,7 +49,7 @@ GB_CLI="Native/GreenBubbles/target/release/greenbubbles"
 | Direct AI connector | `connector-policy-direct`, `connector-query-direct`, `connector-serve-direct` | Apply source-bound policy and audit directly to live or snapshot queries |
 | Replica AI connector | `tool-policy/list/recent/search/draft`, `connector-serve/call` | Serve policy-scoped replica reads and non-executing drafts |
 | AI interchange | `ai-query`, `ai-export`, `audit-ai-context`, `ai-memory-export`, `audit-ai-memory`, `ai-summarize-direct` | Create, verify, and model-summarize minimized, citation-preserving AI context |
-| Personal memory | `memory prepare/next/page/acknowledge/commit/status` | Prepare one canonical corpus, select composable run scopes with repeatable CLI arguments, and feed deterministic crash-safe evidence pages to an agent |
+| Personal memory | `memory prepare [--extend]`, `memory next [--format python\|markdown]`, `memory page/acknowledge/commit/status` | Prepare one canonical corpus (or extend it incrementally with `--extend`), select composable run scopes, and feed deterministic crash-safe evidence pages to an agent; `--format` selects the UserAsCode output format |
 | Operational evidence | `synthetic-benchmark`, `compose-latency-evidence`, `summarize-latency-evidence`, `audit-connector-log/state` | Generate or verify aggregate release and service evidence |
 | Sending | `send …` | Inspect the separate experimental adapter; public builds stay closed |
 
@@ -157,6 +157,6 @@ true. See
 | The serving replica | [Replica specification](REPLICA_SPEC.md) · [operations](REPLICA_OPERATIONS.md) |
 | The local request contract | [Connector API](CONNECTOR_API.md) |
 | Giving an AI access | [AI context CLI](AI_CONTEXT_CLI.md) |
-| Building a whole-history personal wiki | [Personal memory](PERSONAL_MEMORY.md) |
+| UserAsCode knowledge extraction (Python or Markdown project) | [Personal memory](PERSONAL_MEMORY.md) |
 | Verifying any of the above | [Auditing](AUDITING.md) |
 | The closed send path | [Send adapter](SEND_ADAPTER.md) |
