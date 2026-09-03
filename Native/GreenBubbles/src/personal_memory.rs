@@ -6975,11 +6975,7 @@ fn validate_python_format_commit(output_directory: &Path) -> Result<(), RestoreE
             .strip_prefix(&root)
             .unwrap_or(entry.path())
             .components()
-            .any(|c| {
-                c.as_os_str()
-                    .to_str()
-                    .map_or(false, |s| s.starts_with('.'))
-            });
+            .any(|c| c.as_os_str().to_str().is_some_and(|s| s.starts_with('.')));
         if relative_hidden {
             continue;
         }

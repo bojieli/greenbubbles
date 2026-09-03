@@ -6,6 +6,67 @@ Notable changes to GreenBubbles are documented here. The project follows
 
 ## Unreleased
 
+## 0.2.0 - 2026-09-03
+
+### Added
+
+- Added `memory prepare --extend` for chained corpus generation: loads a base
+  corpus, re-scans metadata in full, hydrates only new rows, inherits alias
+  maps, allocates fresh counters for new conversations and senders, carries
+  existing unit files byte-for-byte, and appends new units. A new manifest
+  field `extends` records the base manifest hash, generation, and first new
+  unit index. Fail-closed: a missing or mutated base message is a hard error;
+  the extended corpus must be prepared from scratch.
+- Added format-aware `memory commit` and `--format python|markdown|wiki` on
+  `memory next`. The run state records the output format on first bind and
+  enforces it on every subsequent commit. Python format validation checks that
+  `manifest.py` exists, every `.py` file parses without syntax errors, and no
+  binary or disallowed-extension files are present; hidden VCS files (`.git/`,
+  `.gitignore`, `.greenbubbles-runs/`) are excluded from the walk.  Markdown
+  format validation checks that `manifest.md` exists and every `domains/*.md`
+  carries `## Schema`, `## State`, and `## History` sections. The legacy wiki
+  format path is unchanged and backward-compatible.
+- Added `tick`, `manifest-refresh`, and `revise` commands to
+  `scripts/personal-memory-parallel.py` for UserAsCode incremental extraction.
+  `tick` finds the `lastTickTime` watermark, computes an `--from` bound, plans
+  and runs one agent batch of new messages, and advances the watermark on a
+  successful commit. `manifest-refresh` re-executes constraints and regenerates
+  the manifest without touching domain state. `revise` runs a holistic agent
+  pass to consolidate stale facts, split or merge domains, and update the
+  manifest. `--user-project` and `--format` route domain output to the
+  UserAsCode project directory instead of a wiki.
+- Added UserAsCode two-phase extraction pipeline: Phase 1 delivers message
+  units via `memory next/page/acknowledge`; Phase 2 CRUD-patches domain files
+  (Python dataclasses or structured Markdown). Domain files are organically
+  created by the agent, deduplicated per run, and version-controlled in the
+  user project as a git repository. The agent writes executable constraints
+  (`constraints/*.py`) that produce `ACTIVE_ALERTS` in `manifest.py`, and
+  invariant tests (`tests/test_*.py`) runnable with `pytest`.
+- Added `skills/greenbubbles-personal-memory/references/format-python.md` and
+  `references/format-markdown.md` with format-specific agent guidance for the
+  UserAsCode methodology: ontology taxonomy, CRUD-patch deduplication rules,
+  schema and state structure, constraint lifecycle, and manifest regeneration.
+
+### Changed
+
+- Rewrote `skills/greenbubbles-personal-memory/SKILL.md` for the UserAsCode
+  methodology. The skill now covers both Python and Markdown output formats,
+  two-phase fact extraction, domain ontology classification, CRUD-patch
+  semantics, and constraint-driven alerting.
+- Rewrote `docs/PERSONAL_MEMORY.md` around a living knowledge project model:
+  "Prepare once" framing replaced by UserAsCode incremental extraction,
+  Python vs. Markdown format guidance, ontology taxonomy, constraint lifecycle,
+  and multi-timescale cron scheduling examples with cost tables.
+- Updated `docs/KNOWN_LIMITATIONS.md` to remove the "not resumable/incremental"
+  entry: `memory prepare --extend` (input side) and UserAsCode CRUD-patch
+  (output side) together enable minute-level incremental extraction.
+- Updated `docs/CLI_REFERENCE.md` with `--extend`, `--format`, `tick`,
+  `manifest-refresh`, and `revise` command entries.
+- Updated `README.md` with an AI feature coverage section and a
+  "Turning your history into a living knowledge project" section explaining the
+  UserAsCode paradigm, Python and Markdown format examples, `memory prepare
+  --extend` for incremental input, and cron setup.
+
 ### Added
 
 - Added authenticated live `isAccountHolder` message attribution with `You`

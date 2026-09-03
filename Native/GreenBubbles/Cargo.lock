@@ -753,7 +753,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "greenbubbles"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "base64",
