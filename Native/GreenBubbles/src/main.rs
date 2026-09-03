@@ -56,11 +56,12 @@ use greenbubbles::{
     personal_memory::{
         acknowledge_personal_memory_page, commit_personal_memory_batch,
         commit_personal_memory_batch_reviewed_no_durable_memory,
-        next_personal_memory_batch_with_bounds, next_personal_memory_page,
+        next_personal_memory_batch_with_bounds_and_format, next_personal_memory_page,
         personal_memory_manifest_output, personal_memory_status,
-        prepare_personal_memory_corpus_with_progress, PersonalMemoryConversationKindSelector,
-        PersonalMemoryScopeOptions, PersonalMemorySummarySubjectSelector,
-        PERSONAL_MEMORY_CURRENT_SELECTOR,
+        prepare_personal_memory_corpus_extend_with_progress,
+        prepare_personal_memory_corpus_with_progress, OutputFormat,
+        PersonalMemoryConversationKindSelector, PersonalMemoryScopeOptions,
+        PersonalMemorySummarySubjectSelector, PERSONAL_MEMORY_CURRENT_SELECTOR,
     },
     preflight_snapshot_with_progress, prepare_available_catalog_with_progress,
     prepare_catalog_batch_with_progress, prepare_catalog_with_progress,
@@ -662,6 +663,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             "--selection-policy",
                             "--snapshot-recovery-kit",
                             "--snapshot-local-credential",
+                            "--extend",
                         ],
                         &[
                             "--passphrase-stdin",
@@ -695,12 +697,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             progress.hydrated_message_count,
                         );
                     };
-                    let manifest = prepare_personal_memory_corpus_with_progress(
-                        &source,
-                        &selection_policy,
-                        &output,
-                        &mut report_progress,
-                    )?;
+                    let manifest = if let Some(base_corpus) = option_string(options, "--extend")? {
+                        let base_corpus_directory = PathBuf::from(base_corpus);
+                        prepare_personal_memory_corpus_extend_with_progress(
+                            &base_corpus_directory,
+                            &source,
+                            &selection_policy,
+                            &output,
+                            &mut report_progress,
+                        )?
+                    } else {
+                        prepare_personal_memory_corpus_with_progress(
+                            &source,
+                            &selection_policy,
+                            &output,
+                            &mut report_progress,
+                        )?
+                    };
                     println!(
                         "{}",
                         serde_json::to_string_pretty(&personal_memory_manifest_output(&manifest)?)?
@@ -722,6 +735,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             "--from",
                             "--through",
                             "--subject",
+                            "--format",
                         ],
                         &["--conversation", "--conversation-kind", "--sender"],
                         &[],
@@ -741,6 +755,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let subject = parse_personal_memory_subject(
                         option_string(options, "--subject")?.as_deref(),
                     )?;
+                    let output_format = match option_string(options, "--format")?.as_deref() {
+                        None => None,
+                        Some("wiki") => Some(OutputFormat::Wiki),
+                        Some("python") => Some(OutputFormat::Python),
+                        Some("markdown") => Some(OutputFormat::Markdown),
+                        Some(unknown) => {
+                            return Err(format!(
+                                "--format must be 'wiki', 'python', or 'markdown'; got: {unknown}"
+                            )
+                            .into())
+                        }
+                    };
                     let scope = PersonalMemoryScopeOptions {
                         conversation_selectors: conversations,
                         conversation_kinds,
@@ -749,13 +775,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         sender_selectors: senders,
                         summary_subject: subject,
                     };
-                    let batch = next_personal_memory_batch_with_bounds(
+                    let batch = next_personal_memory_batch_with_bounds_and_format(
                         &corpus,
                         &state,
                         Some(&wiki),
                         maximum,
                         maximum_messages,
                         Some(&scope),
+                        output_format,
                     )?;
                     println!("{}", serde_json::to_string(&batch)?);
                 }
