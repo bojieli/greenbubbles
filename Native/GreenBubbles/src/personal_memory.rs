@@ -6,6 +6,8 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+
 use chrono::{DateTime, Datelike, SecondsFormat, TimeZone};
 use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
@@ -452,6 +454,21 @@ pub struct PersonalMemoryCorpusManifest {
     pub largest_unit_text_bytes: usize,
     pub unmatched_message_table_count: usize,
     pub files: Vec<CorpusFileRecord>,
+    /// Present only on corpora produced by `memory prepare --extend`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extends: Option<CorpusGenerationLink>,
+}
+
+/// Chain-of-custody link written into the manifest of an extended corpus.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorpusGenerationLink {
+    #[serde(rename = "baseManifestSHA256")]
+    pub base_manifest_sha256: String,
+    pub generation: u32,
+    pub first_new_unit_index: usize,
+    pub carried_unit_count: usize,
+    pub carried_message_count: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1620,6 +1637,7 @@ pub fn prepare_personal_memory_corpus_with_progress(
         largest_unit_text_bytes,
         unmatched_message_table_count: inventory.unmatched_message_table_count,
         files,
+        extends: None,
     };
     write_json_pretty(
         &staging.path().join("manifest.json"),
@@ -1629,6 +1647,1174 @@ pub fn prepare_personal_memory_corpus_with_progress(
     File::open(&batches_directory)?.sync_all()?;
     File::open(staging.path())?.sync_all()?;
     protect_immutable_corpus_tree(staging.path())?;
+    fs::rename(staging.path(), output_directory)?;
+    File::open(parent)?.sync_all()?;
+    progress(&PersonalMemoryProgress {
+        phase: "complete",
+        completed_items: manifest.unit_count,
+        total_items: manifest.unit_count,
+        scanned_message_count: manifest.scanned_message_count,
+        selected_message_count: manifest.selected_message_count,
+        hydrated_message_count: manifest.evidence_count,
+    });
+    Ok(manifest)
+}
+
+/// Extend an existing corpus with new messages from the live source.
+///
+/// The base corpus must be fully hash-verified before any hydration begins.
+/// Every base message must still be present in the live source; any gap is
+/// a hard error directing the user to re-prepare from scratch.
+pub fn prepare_personal_memory_corpus_extend_with_progress(
+    base_corpus_directory: &Path,
+    source: &LiveQuerySource<'_>,
+    selection_policy_path: &Path,
+    output_directory: &Path,
+    progress: &mut dyn FnMut(&PersonalMemoryProgress),
+) -> Result<PersonalMemoryCorpusManifest, RestoreError> {
+    if source.account_holder_source_id().is_none() {
+        return Err(RestoreError::Integrity(
+            "personal-memory preparation requires an authenticated live account-holder binding"
+                .into(),
+        ));
+    }
+    validate_new_corpus_output(output_directory, source.root())?;
+    let policy_bytes = read_regular_file_limited(selection_policy_path, MAXIMUM_POLICY_BYTES)?;
+    let policy: PersonalMemorySelectionPolicy = serde_json::from_slice(&policy_bytes)?;
+    let (timezone, corpus_mode) = policy.validate()?;
+    let policy_sha256 = sha256_bytes(&policy_bytes);
+    let reference_unix = policy.reference_unix.unwrap_or_else(now_unix_seconds);
+    let reference_month = month_key(timezone, reference_unix).ok_or_else(|| {
+        RestoreError::Integrity(
+            "selection reference time is outside supported calendar bounds".into(),
+        )
+    })?;
+    let recent_start_ordinal = if policy.recent_lookback_months == 0 {
+        None
+    } else {
+        Some(
+            reference_month
+                .ordinal
+                .saturating_sub(policy.recent_lookback_months.saturating_sub(1) as i32),
+        )
+    };
+
+    // --- Step 1: Load and fully hash-verify the base corpus. ---
+    let base = load_corpus(base_corpus_directory)?;
+    let base_generation = base
+        .manifest
+        .extends
+        .as_ref()
+        .map(|link| link.generation)
+        .unwrap_or(0);
+
+    progress(&PersonalMemoryProgress {
+        phase: "baseCorpusVerification",
+        completed_items: 0,
+        total_items: base.manifest.unit_count,
+        scanned_message_count: 0,
+        selected_message_count: 0,
+        hydrated_message_count: 0,
+    });
+
+    // Hash-verify every base corpus file (byte-level, beyond manifest byte counts).
+    for record in &base.manifest.files {
+        if record.relative_path == "evidence.jsonl" {
+            // Verified below while building the canonical-id set.
+            continue;
+        }
+        let path = safe_corpus_path(&base.root, &record.relative_path)?;
+        let bytes = read_corpus_owner_file_limited(&path, MAXIMUM_UNIT_INDEX_BYTES)?;
+        if sha256_bytes(&bytes) != record.sha256 {
+            return Err(RestoreError::Integrity(format!(
+                "base corpus file {} failed hash verification; re-prepare from scratch",
+                record.relative_path
+            )));
+        }
+    }
+
+    // --- Step 2: Load base alias maps from sidecars. ---
+    let mut base_person_aliases: BTreeMap<String, String> = BTreeMap::new();
+    let mut base_person_names: BTreeMap<String, String> = BTreeMap::new();
+    let mut max_person_number: usize = 0;
+    {
+        let contacts_record = base
+            .manifest
+            .files
+            .iter()
+            .find(|r| r.relative_path == "contacts.jsonl")
+            .ok_or_else(|| RestoreError::Integrity("base corpus has no contacts sidecar".into()))?;
+        let contacts_path = safe_corpus_path(&base.root, "contacts.jsonl")?;
+        let contacts_bytes =
+            read_corpus_owner_file_limited(&contacts_path, MAXIMUM_CONTROL_FILE_BYTES)?;
+        if sha256_bytes(&contacts_bytes) != contacts_record.sha256 {
+            return Err(RestoreError::Integrity(
+                "base corpus contacts sidecar failed hash verification; re-prepare from scratch"
+                    .into(),
+            ));
+        }
+        for line in contacts_bytes.split(|&b| b == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            let record: ContactSidecarRecord = serde_json::from_slice(line)?;
+            base_person_names
+                .entry(record.source_id.clone())
+                .or_insert_with(|| record.display_name.clone());
+            if let Some(alias) = record.alias {
+                if let Some(n) = alias
+                    .strip_prefix('P')
+                    .and_then(|digits| digits.parse::<usize>().ok())
+                {
+                    max_person_number = max_person_number.max(n);
+                }
+                base_person_aliases.insert(record.source_id, alias);
+            }
+        }
+    }
+
+    let mut base_conversation_aliases: BTreeMap<String, String> = BTreeMap::new();
+    let mut max_conversation_number: usize = 0;
+    {
+        let conversations_record = base
+            .manifest
+            .files
+            .iter()
+            .find(|r| r.relative_path == "conversations.jsonl")
+            .ok_or_else(|| {
+                RestoreError::Integrity("base corpus has no conversations sidecar".into())
+            })?;
+        let conversations_path = safe_corpus_path(&base.root, "conversations.jsonl")?;
+        let conversations_bytes =
+            read_corpus_owner_file_limited(&conversations_path, MAXIMUM_CONTROL_FILE_BYTES)?;
+        if sha256_bytes(&conversations_bytes) != conversations_record.sha256 {
+            return Err(RestoreError::Integrity(
+                "base corpus conversations sidecar failed hash verification; re-prepare from scratch"
+                    .into(),
+            ));
+        }
+        for line in conversations_bytes.split(|&b| b == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+            let record: ConversationSidecarRecord = serde_json::from_slice(line)?;
+            if let Some(n) = record
+                .alias
+                .strip_prefix('C')
+                .and_then(|digits| digits.parse::<usize>().ok())
+            {
+                max_conversation_number = max_conversation_number.max(n);
+            }
+            base_conversation_aliases.insert(record.source_id, record.alias);
+        }
+    }
+
+    // --- Step 3: Build base location set from evidence.jsonl (with hash verify). ---
+    // We decode each base canonical_id to extract the 5 location fields so we can
+    // perform location-based lookup at metadata-scan time (CorpusMessageMetadata has
+    // no canonical_id field).
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BaseCursorFields {
+        sort_sequence: i64,
+        create_time: i64,
+        server_id: i64,
+        shard_id: u32,
+        row_id: i64,
+    }
+    let mut base_locations = BTreeSet::<CorpusMessageLocation>::new();
+    let carried_message_count;
+    {
+        let evidence_record = base
+            .manifest
+            .files
+            .iter()
+            .find(|r| r.relative_path == "evidence.jsonl")
+            .ok_or_else(|| RestoreError::Integrity("base corpus has no evidence sidecar".into()))?;
+        let evidence_path = safe_corpus_path(&base.root, "evidence.jsonl")?;
+        let metadata = corpus_owner_file_metadata(&evidence_path)?;
+        if metadata.len() != evidence_record.byte_count {
+            return Err(RestoreError::Integrity(
+                "base corpus evidence sidecar has an unexpected byte count; re-prepare from scratch"
+                    .into(),
+            ));
+        }
+        let mut reader_buf = BufReader::with_capacity(1 << 20, File::open(&evidence_path)?);
+        let mut line = Vec::new();
+        let mut hasher = Sha256::new();
+        let mut byte_count = 0_u64;
+        let mut count = 0_u64;
+        loop {
+            line.clear();
+            let read = reader_buf.read_until(b'\n', &mut line)?;
+            if read == 0 {
+                break;
+            }
+            byte_count = byte_count.saturating_add(read as u64);
+            hasher.update(&line);
+            let evidence: EvidenceRecord = serde_json::from_slice(&line)?;
+            let decoded = URL_SAFE_NO_PAD
+                .decode(evidence.canonical_id.as_bytes())
+                .map_err(|_| {
+                    RestoreError::Integrity(
+                        "base corpus evidence contains an invalid canonical_id encoding; \
+                         re-prepare from scratch"
+                            .into(),
+                    )
+                })?;
+            let cursor: BaseCursorFields = serde_json::from_slice(&decoded).map_err(|_| {
+                RestoreError::Integrity(
+                    "base corpus evidence canonical_id does not decode to expected fields; \
+                         re-prepare from scratch"
+                        .into(),
+                )
+            })?;
+            if !base_locations.insert(CorpusMessageLocation {
+                sort_sequence: cursor.sort_sequence,
+                create_time: cursor.create_time,
+                server_id: cursor.server_id,
+                shard_id: cursor.shard_id,
+                row_id: cursor.row_id,
+            }) {
+                return Err(RestoreError::Integrity(
+                    "base corpus evidence sidecar contains a duplicate canonical-id; re-prepare from scratch"
+                        .into(),
+                ));
+            }
+            count = count.saturating_add(1);
+        }
+        if byte_count != evidence_record.byte_count
+            || hex::encode(hasher.finalize()) != evidence_record.sha256
+        {
+            return Err(RestoreError::Integrity(
+                "base corpus evidence sidecar failed hash verification; re-prepare from scratch"
+                    .into(),
+            ));
+        }
+        if count != base.manifest.evidence_count {
+            return Err(RestoreError::Integrity(
+                "base corpus evidence count does not match its manifest; re-prepare from scratch"
+                    .into(),
+            ));
+        }
+        carried_message_count = count;
+    }
+
+    progress(&PersonalMemoryProgress {
+        phase: "baseCorpusVerification",
+        completed_items: base.manifest.unit_count,
+        total_items: base.manifest.unit_count,
+        scanned_message_count: carried_message_count,
+        selected_message_count: carried_message_count,
+        hydrated_message_count: carried_message_count,
+    });
+
+    // --- Step 4: Full metadata re-scan of the live source. ---
+    let live_reader = LiveCorpusReader::open(source).map_err(corpus_query_error)?;
+    let inventory = live_reader.inventory().clone();
+    let mut coverage = PersonalMemoryCoverage {
+        source_coverage_complete: inventory.coverage_complete,
+        content_complete: true,
+        ..Default::default()
+    };
+    let mut limitation_codes = inventory
+        .warnings
+        .iter()
+        .map(|warning| warning.code.to_string())
+        .collect::<BTreeSet<_>>();
+    let mut activity = BTreeMap::<(String, String), ActivityRecord>::new();
+    let mut live_locations = BTreeSet::<CorpusMessageLocation>::new();
+    let mut new_episode_drafts = Vec::<EpisodeDraft>::new();
+    let mut last_progress = Instant::now();
+
+    progress(&PersonalMemoryProgress {
+        phase: "metadataSelection",
+        completed_items: 0,
+        total_items: inventory.conversations.len(),
+        scanned_message_count: 0,
+        selected_message_count: 0,
+        hydrated_message_count: 0,
+    });
+
+    for (conversation_index, conversation) in inventory.conversations.iter().enumerate() {
+        let scan = live_reader
+            .scan_metadata(conversation)
+            .map_err(corpus_query_error)?;
+        coverage.scanned_message_count = coverage
+            .scanned_message_count
+            .saturating_add(scan.messages.len() as u64);
+        if !scan.coverage_complete {
+            coverage.source_coverage_complete = false;
+        }
+        for warning in &scan.warnings {
+            limitation_codes.insert(warning.code.to_string());
+            if matches!(warning.code, "corpusMetadataRowFailed") {
+                coverage.metadata_decode_failure_count = coverage
+                    .metadata_decode_failure_count
+                    .saturating_add(warning.count.unwrap_or(1) as u64);
+            }
+        }
+
+        // Collect all live locations (unfiltered) for fail-closed check.
+        for msg in &scan.messages {
+            live_locations.insert(msg.location.clone());
+        }
+
+        if !conversation_enabled(conversation, &policy, corpus_mode) {
+            coverage.omitted_filtered_conversation = coverage
+                .omitted_filtered_conversation
+                .saturating_add(scan.messages.len() as u64);
+            if conversation_index.saturating_add(1) == inventory.conversations.len()
+                || last_progress.elapsed() >= Duration::from_secs(2)
+            {
+                progress(&PersonalMemoryProgress {
+                    phase: "metadataSelection",
+                    completed_items: conversation_index.saturating_add(1),
+                    total_items: inventory.conversations.len(),
+                    scanned_message_count: coverage.scanned_message_count,
+                    selected_message_count: coverage.selected_message_count,
+                    hydrated_message_count: 0,
+                });
+                last_progress = Instant::now();
+            }
+            continue;
+        }
+
+        let mut messages = scan.messages;
+        messages.sort_by(|left, right| {
+            chronological_metadata_key(left).cmp(&chronological_metadata_key(right))
+        });
+        let mut month_indices = BTreeMap::<MonthKey, Vec<usize>>::new();
+        for (index, message) in messages.iter().enumerate() {
+            if message.sender.is_some() != message.is_account_holder.is_some() {
+                coverage.metadata_decode_failure_count =
+                    coverage.metadata_decode_failure_count.saturating_add(1);
+                coverage.source_coverage_complete = false;
+                limitation_codes.insert("accountHolderMetadataInconsistent".into());
+            }
+            let timestamp = message.location.create_time;
+            if policy
+                .not_before_unix
+                .is_some_and(|not_before| timestamp < not_before)
+                || policy
+                    .not_after_unix
+                    .is_some_and(|not_after| timestamp > not_after)
+            {
+                coverage.omitted_outside_time_range =
+                    coverage.omitted_outside_time_range.saturating_add(1);
+                continue;
+            }
+            let Some(month) = month_key(timezone, timestamp) else {
+                coverage.metadata_decode_failure_count =
+                    coverage.metadata_decode_failure_count.saturating_add(1);
+                coverage.source_coverage_complete = false;
+                limitation_codes.insert("timestampOutOfCalendarRange".into());
+                continue;
+            };
+            coverage.eligible_message_count = coverage.eligible_message_count.saturating_add(1);
+            match message.is_account_holder {
+                Some(true) => {
+                    coverage.self_message_count = coverage.self_message_count.saturating_add(1)
+                }
+                Some(false) => {
+                    coverage.other_message_count = coverage.other_message_count.saturating_add(1)
+                }
+                None => {
+                    coverage.unknown_actor_message_count =
+                        coverage.unknown_actor_message_count.saturating_add(1)
+                }
+            }
+            month_indices.entry(month).or_default().push(index);
+        }
+
+        let active_months = if corpus_mode == PersonalMemoryCorpusMode::AllMessages {
+            month_indices.keys().cloned().collect::<BTreeSet<_>>()
+        } else {
+            month_indices
+                .iter()
+                .filter_map(|(month, indices)| {
+                    let self_count = indices
+                        .iter()
+                        .filter(|index| messages[**index].is_account_holder == Some(true))
+                        .count();
+                    (self_count >= policy.minimum_self_messages_per_active_month)
+                        .then_some(month.clone())
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        let recent_active_count = active_months
+            .iter()
+            .filter(|month| {
+                recent_start_ordinal.is_some_and(|start| {
+                    month.ordinal >= start && month.ordinal <= reference_month.ordinal
+                })
+            })
+            .count();
+        let recent_conversation_eligible = corpus_mode == PersonalMemoryCorpusMode::AllMessages
+            || policy.minimum_self_active_months_in_lookback == 0
+            || recent_active_count >= policy.minimum_self_active_months_in_lookback;
+
+        for (month, indices) in &month_indices {
+            let self_count = indices
+                .iter()
+                .filter(|index| messages[**index].is_account_holder == Some(true))
+                .count();
+            let active = active_months.contains(month) && recent_conversation_eligible;
+            coverage.activity_month_count = coverage.activity_month_count.saturating_add(1);
+            if active {
+                coverage.active_month_count = coverage.active_month_count.saturating_add(1);
+            } else {
+                coverage.omitted_inactive_month = coverage
+                    .omitted_inactive_month
+                    .saturating_add(indices.len() as u64);
+            }
+            activity.insert(
+                (conversation.source_id.clone(), month.label.clone()),
+                ActivityRecord {
+                    conversation: String::new(),
+                    conversation_id: conversation.source_id.clone(),
+                    label: conversation.display_name.clone(),
+                    kind: conversation.kind,
+                    month: month.label.clone(),
+                    message_count: indices.len(),
+                    self_message_count: self_count,
+                    selected_message_count: 0,
+                    active,
+                    recent_conversation_eligible,
+                },
+            );
+            if !active {
+                continue;
+            }
+            let (gap_seconds, context_before, context_after) =
+                if conversation.kind == ConversationKind::Group {
+                    (
+                        policy.group_session_gap_minutes.saturating_mul(60),
+                        policy.group_context_before,
+                        policy.group_context_after,
+                    )
+                } else {
+                    (
+                        policy.direct_session_gap_minutes.saturating_mul(60),
+                        policy.direct_context_before,
+                        policy.direct_context_after,
+                    )
+                };
+            let sessions = split_sessions(indices, &messages, gap_seconds);
+            let mut selected_in_month = BTreeSet::<usize>::new();
+            for session in sessions {
+                if corpus_mode == PersonalMemoryCorpusMode::AllMessages {
+                    let new_locations: Vec<CorpusMessageLocation> = session
+                        .iter()
+                        .filter_map(|index| {
+                            selected_in_month.insert(*index);
+                            let msg = &messages[*index];
+                            if base_locations.contains(&msg.location) {
+                                None
+                            } else {
+                                Some(msg.location.clone())
+                            }
+                        })
+                        .collect();
+                    if !new_locations.is_empty() {
+                        new_episode_drafts.push(EpisodeDraft {
+                            conversation: conversation.clone(),
+                            month: month.label.clone(),
+                            locations: new_locations,
+                        });
+                    }
+                    continue;
+                }
+                let anchors = session
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(position, index)| {
+                        (messages[*index].is_account_holder == Some(true)).then_some(position)
+                    })
+                    .collect::<Vec<_>>();
+                if anchors.is_empty() {
+                    coverage.omitted_silent_session = coverage
+                        .omitted_silent_session
+                        .saturating_add(session.len() as u64);
+                    continue;
+                }
+                for (start, end) in
+                    merged_context_windows(&anchors, session.len(), context_before, context_after)
+                {
+                    let new_locations: Vec<CorpusMessageLocation> = session[start..=end]
+                        .iter()
+                        .filter_map(|index| {
+                            selected_in_month.insert(*index);
+                            let msg = &messages[*index];
+                            if base_locations.contains(&msg.location) {
+                                None
+                            } else {
+                                Some(msg.location.clone())
+                            }
+                        })
+                        .collect();
+                    if !new_locations.is_empty() {
+                        new_episode_drafts.push(EpisodeDraft {
+                            conversation: conversation.clone(),
+                            month: month.label.clone(),
+                            locations: new_locations,
+                        });
+                    }
+                }
+                let selected_in_session = session
+                    .iter()
+                    .filter(|index| selected_in_month.contains(index))
+                    .count();
+                coverage.omitted_context_bound = coverage
+                    .omitted_context_bound
+                    .saturating_add(session.len().saturating_sub(selected_in_session) as u64);
+            }
+            if let Some(record) =
+                activity.get_mut(&(conversation.source_id.clone(), month.label.clone()))
+            {
+                record.selected_message_count = selected_in_month.len();
+            }
+            coverage.selected_message_count = coverage
+                .selected_message_count
+                .saturating_add(selected_in_month.len() as u64);
+        }
+        if conversation_index.saturating_add(1) == inventory.conversations.len()
+            || last_progress.elapsed() >= Duration::from_secs(2)
+        {
+            progress(&PersonalMemoryProgress {
+                phase: "metadataSelection",
+                completed_items: conversation_index.saturating_add(1),
+                total_items: inventory.conversations.len(),
+                scanned_message_count: coverage.scanned_message_count,
+                selected_message_count: coverage.selected_message_count,
+                hydrated_message_count: 0,
+            });
+            last_progress = Instant::now();
+        }
+    }
+
+    if corpus_mode == PersonalMemoryCorpusMode::AllMessages {
+        coverage.selected_message_count = coverage.eligible_message_count;
+    }
+
+    // --- Step 5: Fail-closed check — every base location must be present in the live scan. ---
+    let missing_count = base_locations
+        .iter()
+        .filter(|loc| !live_locations.contains(*loc))
+        .count();
+    if missing_count > 0 {
+        return Err(RestoreError::Integrity(format!(
+            "{missing_count} base message(s) are missing or mutated in the live source; \
+             the source database may have been modified — re-prepare from scratch"
+        )));
+    }
+
+    // --- Step 6: Hydrate only the new episodes. ---
+    let mut new_episode_groups = BTreeMap::<String, Vec<EpisodeDraft>>::new();
+    for draft in new_episode_drafts {
+        new_episode_groups
+            .entry(draft.conversation.source_id.clone())
+            .or_default()
+            .push(draft);
+    }
+    let hydration_group_count = new_episode_groups.len();
+    let mut hydrated_episodes = Vec::<HydratedEpisode>::new();
+    let mut hydrated_message_count = 0_u64;
+
+    progress(&PersonalMemoryProgress {
+        phase: "selectedContentHydration",
+        completed_items: 0,
+        total_items: hydration_group_count,
+        scanned_message_count: coverage.scanned_message_count,
+        selected_message_count: coverage.selected_message_count,
+        hydrated_message_count: 0,
+    });
+
+    for (hydration_index, (_, episodes)) in new_episode_groups.into_iter().enumerate() {
+        let conversation = episodes
+            .first()
+            .map(|episode| episode.conversation.clone())
+            .ok_or_else(|| RestoreError::Integrity("empty episode group was produced".into()))?;
+        let selected = episodes
+            .iter()
+            .flat_map(|episode| episode.locations.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let hydration = live_reader
+            .hydrate(&conversation, &selected, policy.maximum_message_text_bytes)
+            .map_err(corpus_query_error)?;
+        if !hydration.coverage_complete {
+            coverage.content_complete = false;
+        }
+        for warning in &hydration.warnings {
+            limitation_codes.insert(warning.code.to_string());
+        }
+        coverage.content_decode_failure_count =
+            coverage.content_decode_failure_count.saturating_add(
+                hydration
+                    .messages
+                    .iter()
+                    .filter(|message| message.content_decode_failed)
+                    .count() as u64,
+            );
+        if hydration
+            .messages
+            .iter()
+            .any(|message| message.content_decode_failed)
+        {
+            coverage.content_complete = false;
+        }
+        let by_location = hydration
+            .messages
+            .into_iter()
+            .map(|message| (message.location.clone(), message))
+            .collect::<BTreeMap<_, _>>();
+        hydrated_message_count = hydrated_message_count.saturating_add(by_location.len() as u64);
+        for episode in episodes {
+            let messages = episode
+                .locations
+                .iter()
+                .filter_map(|location| by_location.get(location).cloned())
+                .collect::<Vec<_>>();
+            if messages.len() != episode.locations.len() {
+                coverage.content_complete = false;
+                limitation_codes.insert("selectedMessageHydrationIncomplete".into());
+            }
+            if !messages.is_empty() {
+                hydrated_episodes.push(HydratedEpisode {
+                    conversation: episode.conversation,
+                    month: episode.month,
+                    messages,
+                });
+            }
+        }
+        if hydration_index.saturating_add(1) == hydration_group_count
+            || last_progress.elapsed() >= Duration::from_secs(2)
+        {
+            progress(&PersonalMemoryProgress {
+                phase: "selectedContentHydration",
+                completed_items: hydration_index.saturating_add(1),
+                total_items: hydration_group_count,
+                scanned_message_count: coverage.scanned_message_count,
+                selected_message_count: coverage.selected_message_count,
+                hydrated_message_count,
+            });
+            last_progress = Instant::now();
+        }
+    }
+    hydrated_episodes
+        .sort_by(|left, right| hydrated_episode_key(left).cmp(&hydrated_episode_key(right)));
+
+    // --- Step 7: Build combined alias maps. ---
+    let mut conversation_aliases: BTreeMap<String, String> = base_conversation_aliases.clone();
+    let mut next_conversation_number = max_conversation_number.saturating_add(1);
+    for conversation in &inventory.conversations {
+        conversation_aliases
+            .entry(conversation.source_id.clone())
+            .or_insert_with(|| {
+                let alias = format!("C{:06}", next_conversation_number);
+                next_conversation_number = next_conversation_number.saturating_add(1);
+                alias
+            });
+    }
+    for record in activity.values_mut() {
+        if let Some(alias) = conversation_aliases.get(&record.conversation_id) {
+            record.conversation = alias.clone();
+        }
+    }
+
+    let mut person_names: BTreeMap<String, String> = base_person_names.clone();
+    for contact in &inventory.contacts {
+        if !contact.is_account_holder {
+            person_names
+                .entry(contact.source_id.clone())
+                .or_insert_with(|| contact.display_name.clone());
+        }
+    }
+    let mut person_ids = BTreeSet::<String>::new();
+    for episode in &hydrated_episodes {
+        if episode.conversation.kind == ConversationKind::Direct
+            && source.account_holder_source_id() != Some(episode.conversation.source_id.as_str())
+        {
+            person_ids.insert(episode.conversation.source_id.clone());
+        }
+        for message in &episode.messages {
+            if message.is_account_holder != Some(true) {
+                if let Some(sender) = &message.sender {
+                    person_ids.insert(sender.clone());
+                }
+            }
+        }
+    }
+    let mut person_aliases: BTreeMap<String, String> = base_person_aliases.clone();
+    let mut next_person_number = max_person_number.saturating_add(1);
+    for source_id in &person_ids {
+        person_aliases.entry(source_id.clone()).or_insert_with(|| {
+            let alias = format!("P{:06}", next_person_number);
+            next_person_number = next_person_number.saturating_add(1);
+            alias
+        });
+    }
+
+    // --- Step 8: Build new units from hydrated episodes. ---
+    let mut new_units = Vec::<UnitDraft>::new();
+    for episode in hydrated_episodes {
+        let conversation_alias = conversation_aliases
+            .get(&episode.conversation.source_id)
+            .cloned()
+            .ok_or_else(|| {
+                RestoreError::Integrity("extend episode conversation alias is unavailable".into())
+            })?;
+        let mut current = Vec::new();
+        let mut current_text_bytes = 0usize;
+        for message in episode.messages {
+            let text_bytes = compact_message_text(&message).len();
+            let would_overflow = !current.is_empty()
+                && (current.len() >= policy.maximum_unit_messages
+                    || current_text_bytes.saturating_add(text_bytes)
+                        > policy.maximum_unit_text_bytes);
+            if would_overflow {
+                new_units.push(UnitDraft {
+                    conversation_alias: conversation_alias.clone(),
+                    conversation_source_id: episode.conversation.source_id.clone(),
+                    conversation_label: model_safe_conversation_label(
+                        &episode.conversation,
+                        &conversation_alias,
+                    ),
+                    conversation_kind: episode.conversation.kind,
+                    month: episode.month.clone(),
+                    messages: std::mem::take(&mut current),
+                });
+                current_text_bytes = 0;
+            }
+            current_text_bytes = current_text_bytes.saturating_add(text_bytes);
+            current.push(message);
+        }
+        if !current.is_empty() {
+            new_units.push(UnitDraft {
+                conversation_label: model_safe_conversation_label(
+                    &episode.conversation,
+                    &conversation_alias,
+                ),
+                conversation_alias,
+                conversation_source_id: episode.conversation.source_id,
+                conversation_kind: episode.conversation.kind,
+                month: episode.month,
+                messages: current,
+            });
+        }
+    }
+    new_units = order_unit_drafts(new_units, policy.delivery_order);
+
+    // --- Step 9: Atomic publication. ---
+    let parent = output_directory.parent().unwrap_or_else(|| Path::new("."));
+    let carried_unit_count = base.manifest.unit_count;
+    let first_new_unit_index = carried_unit_count;
+    let total_unit_count = carried_unit_count.saturating_add(new_units.len());
+
+    progress(&PersonalMemoryProgress {
+        phase: "atomicPublication",
+        completed_items: 0,
+        total_items: total_unit_count,
+        scanned_message_count: coverage.scanned_message_count,
+        selected_message_count: coverage.selected_message_count,
+        hydrated_message_count,
+    });
+
+    let staging = tempfile::Builder::new()
+        .prefix(".greenbubbles-personal-memory-extend-")
+        .tempdir_in(parent)?;
+    fs::set_permissions(staging.path(), fs::Permissions::from_mode(0o700))?;
+    let batches_directory = staging.path().join("batches");
+    fs::create_dir(&batches_directory)?;
+    fs::set_permissions(&batches_directory, fs::Permissions::from_mode(0o700))?;
+
+    let mut files = Vec::<CorpusFileRecord>::new();
+
+    // Contacts sidecar.
+    let contacts_path = staging.path().join("contacts.jsonl");
+    let mut contact_records: Vec<ContactSidecarRecord> = inventory
+        .contacts
+        .iter()
+        .map(|contact| ContactSidecarRecord {
+            alias: person_aliases.get(&contact.source_id).cloned(),
+            source_id: contact.source_id.clone(),
+            display_name: contact.display_name.clone(),
+            remark: contact.remark.clone(),
+            nickname: contact.nickname.clone(),
+            wechat_alias: contact.alias.clone(),
+            kind: contact.kind,
+            is_account_holder: contact.is_account_holder,
+        })
+        .collect();
+    for (source_id, alias) in &person_aliases {
+        if !contact_records
+            .iter()
+            .any(|record| &record.source_id == source_id)
+        {
+            contact_records.push(ContactSidecarRecord {
+                alias: Some(alias.clone()),
+                source_id: source_id.clone(),
+                display_name: person_names
+                    .get(source_id)
+                    .cloned()
+                    .unwrap_or_else(|| source_id.clone()),
+                remark: None,
+                nickname: None,
+                wechat_alias: None,
+                kind: ContactKind::Unknown,
+                is_account_holder: false,
+            });
+        }
+    }
+    contact_records.sort_by(|left, right| left.source_id.cmp(&right.source_id));
+    files.push(write_json_lines(
+        &contacts_path,
+        "contacts.jsonl",
+        contact_records.iter(),
+    )?);
+
+    // Conversations sidecar.
+    let conversations_path = staging.path().join("conversations.jsonl");
+    let mut conversation_records = Vec::<ConversationSidecarRecord>::new();
+    for conversation in &inventory.conversations {
+        let alias = conversation_aliases
+            .get(&conversation.source_id)
+            .cloned()
+            .ok_or_else(|| {
+                RestoreError::Integrity("extend corpus conversation alias is unavailable".into())
+            })?;
+        let display_name = model_safe_conversation_label(conversation, &alias);
+        conversation_records.push(ConversationSidecarRecord {
+            alias,
+            source_id: conversation.source_id.clone(),
+            display_name,
+            kind: conversation.kind,
+            contact_kind: conversation.contact_kind,
+        });
+    }
+    for (source_id, alias) in &base_conversation_aliases {
+        if !conversation_records
+            .iter()
+            .any(|r| &r.source_id == source_id)
+        {
+            conversation_records.push(ConversationSidecarRecord {
+                alias: alias.clone(),
+                source_id: source_id.clone(),
+                display_name: alias.clone(),
+                kind: ConversationKind::Unresolved,
+                contact_kind: ContactKind::Unknown,
+            });
+        }
+    }
+    files.push(write_json_lines(
+        &conversations_path,
+        "conversations.jsonl",
+        conversation_records.iter(),
+    )?);
+
+    // Activity sidecar.
+    let activity_path = staging.path().join("activity.jsonl");
+    files.push(write_json_lines(
+        &activity_path,
+        "activity.jsonl",
+        activity.values(),
+    )?);
+
+    // Evidence sidecar — copy base bytes, then append new.
+    let evidence_path = staging.path().join("evidence.jsonl");
+    let base_evidence_path = safe_corpus_path(&base.root, "evidence.jsonl")?;
+    let base_evidence_record = base
+        .manifest
+        .files
+        .iter()
+        .find(|r| r.relative_path == "evidence.jsonl")
+        .ok_or_else(|| RestoreError::Integrity("base corpus has no evidence sidecar".into()))?;
+
+    let mut evidence_writer = owner_only_writer(&evidence_path)?;
+    let mut evidence_hasher = Sha256::new();
+    let mut evidence_byte_count = 0_u64;
+    let mut evidence_count = 0_u64;
+
+    {
+        let mut base_reader = BufReader::with_capacity(1 << 20, File::open(&base_evidence_path)?);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            let read = base_reader.read_until(b'\n', &mut line)?;
+            if read == 0 {
+                break;
+            }
+            evidence_hasher.update(&line);
+            evidence_writer.write_all(&line)?;
+            evidence_byte_count = evidence_byte_count.saturating_add(read as u64);
+            evidence_count = evidence_count.saturating_add(1);
+        }
+    }
+    if evidence_byte_count != base_evidence_record.byte_count {
+        return Err(RestoreError::Integrity(
+            "base evidence sidecar changed size during extend; re-prepare from scratch".into(),
+        ));
+    }
+
+    // Unit index — start with carried base entries.
+    let mut unit_index_entries = Vec::<UnitIndexEntry>::new();
+    for entry in &base.unit_index.units {
+        unit_index_entries.push(entry.clone());
+    }
+
+    // Copy base unit files byte-for-byte.
+    let mut largest_unit_text_bytes = base.manifest.largest_unit_text_bytes;
+    for entry in &base.unit_index.units {
+        let src_path = safe_corpus_path(&base.root, &entry.relative_path)?;
+        let dst_path = staging.path().join(&entry.relative_path);
+        let src_bytes = read_corpus_owner_file_limited(&src_path, MAXIMUM_UNIT_INDEX_BYTES)?;
+        if sha256_bytes(&src_bytes) != entry.sha256 {
+            return Err(RestoreError::Integrity(format!(
+                "base corpus unit file {} failed hash verification; re-prepare from scratch",
+                entry.relative_path
+            )));
+        }
+        let mut writer = owner_only_writer(&dst_path)?;
+        writer.write_all(&src_bytes)?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        files.push(CorpusFileRecord {
+            relative_path: entry.relative_path.clone(),
+            byte_count: entry.byte_count,
+            sha256: entry.sha256.clone(),
+        });
+        progress(&PersonalMemoryProgress {
+            phase: "atomicPublication",
+            completed_items: unit_index_entries.len(),
+            total_items: total_unit_count,
+            scanned_message_count: coverage.scanned_message_count,
+            selected_message_count: coverage.selected_message_count,
+            hydrated_message_count,
+        });
+    }
+
+    // Write new units.
+    for (new_unit_offset, unit) in new_units.into_iter().enumerate() {
+        let unit_number = carried_unit_count
+            .saturating_add(new_unit_offset)
+            .saturating_add(1);
+        let unit_id = format!("U{:06}", unit_number);
+        let mut compact_messages = Vec::with_capacity(unit.messages.len());
+        let first_evidence_ordinal = evidence_count.saturating_add(1);
+        let mut unit_person_aliases = BTreeSet::new();
+        let mut unit_sender_aliases = BTreeSet::new();
+        let mut has_account_holder_sender = false;
+        let mut has_unknown_sender = false;
+        if let Some(person_alias) = person_aliases.get(&unit.conversation_source_id) {
+            unit_person_aliases.insert(person_alias.clone());
+        }
+        let mut text_byte_count = 0usize;
+        for message in unit.messages {
+            evidence_count = evidence_count.saturating_add(1);
+            let evidence_alias = format!("E{evidence_count:09}");
+            let actor = match message.is_account_holder {
+                Some(true) => {
+                    has_account_holder_sender = true;
+                    "self"
+                }
+                Some(false) => "other",
+                None => {
+                    has_unknown_sender = true;
+                    "unknown"
+                }
+            }
+            .to_string();
+            let person_alias = message
+                .sender
+                .as_ref()
+                .and_then(|sender| person_aliases.get(sender).cloned());
+            if let Some(person_alias) = &person_alias {
+                unit_person_aliases.insert(person_alias.clone());
+                unit_sender_aliases.insert(person_alias.clone());
+            }
+            let text = compact_message_text(&message);
+            text_byte_count = text_byte_count.saturating_add(text.len());
+            let evidence = EvidenceRecord {
+                alias: evidence_alias.clone(),
+                canonical_id: message.canonical_id,
+                conversation: unit.conversation_alias.clone(),
+                conversation_id: unit.conversation_source_id.clone(),
+                sender: person_alias.clone(),
+                sender_id: message.sender,
+                actor: actor.clone(),
+                created_at_unix: message.location.create_time,
+                message_type: message.message_type,
+                message_subtype: message.message_subtype,
+                payload_kind: message.payload_kind.clone(),
+                text: text.clone(),
+                text_truncated: message.text_truncated,
+                content_decode_failed: message.content_decode_failed,
+                content_sha256: sha256_bytes(text.as_bytes()),
+            };
+            write_hashed_json_line(
+                &mut evidence_writer,
+                &mut evidence_hasher,
+                &mut evidence_byte_count,
+                &evidence,
+            )?;
+            compact_messages.push(CompactMessage {
+                e: evidence_alias,
+                a: actor,
+                p: person_alias,
+                t: message.location.create_time,
+                k: message.payload_kind,
+                x: text,
+                tr: message.text_truncated,
+            });
+        }
+        let from = compact_messages
+            .first()
+            .map(|message| message.t)
+            .unwrap_or_default();
+        let to = compact_messages
+            .last()
+            .map(|message| message.t)
+            .unwrap_or_default();
+        let conversation_alias = unit.conversation_alias;
+        let prepared = PreparedUnitFile {
+            schema: PERSONAL_MEMORY_BATCH_SCHEMA.to_string(),
+            id: unit_id.clone(),
+            c: conversation_alias.clone(),
+            label: unit.conversation_label,
+            kind: unit.conversation_kind,
+            month: unit.month,
+            from,
+            to,
+            m: compact_messages,
+        };
+        let relative_path = format!("batches/{unit_id}.json");
+        let record = write_json_pretty(
+            &staging.path().join(&relative_path),
+            &relative_path,
+            &prepared,
+        )?;
+        largest_unit_text_bytes = largest_unit_text_bytes.max(text_byte_count);
+        unit_index_entries.push(UnitIndexEntry {
+            id: unit_id,
+            relative_path: relative_path.clone(),
+            sha256: record.sha256.clone(),
+            byte_count: record.byte_count,
+            text_byte_count,
+            message_count: prepared.m.len(),
+            target_pages: Vec::new(),
+            evidence_aliases: Vec::new(),
+            person_aliases: unit_person_aliases.into_iter().collect(),
+            sender_aliases: unit_sender_aliases.into_iter().collect(),
+            has_account_holder_sender,
+            has_unknown_sender,
+            first_evidence_ordinal: Some(first_evidence_ordinal),
+            conversation: conversation_alias,
+            conversation_id: String::new(),
+            from,
+            to,
+        });
+        files.push(record);
+        progress(&PersonalMemoryProgress {
+            phase: "atomicPublication",
+            completed_items: unit_index_entries.len(),
+            total_items: total_unit_count,
+            scanned_message_count: coverage.scanned_message_count,
+            selected_message_count: coverage.selected_message_count,
+            hydrated_message_count,
+        });
+    }
+
+    evidence_writer.flush()?;
+    evidence_writer.get_ref().sync_all()?;
+    files.push(CorpusFileRecord {
+        relative_path: "evidence.jsonl".into(),
+        byte_count: evidence_byte_count,
+        sha256: hex::encode(evidence_hasher.finalize()),
+    });
+
+    let unit_index = UnitIndex {
+        schema: "greenbubbles.personal-memory-unit-index.v2".into(),
+        format_version: 2,
+        units: unit_index_entries,
+    };
+    let unit_index_record = write_json_compact(
+        &batches_directory.join("index.json"),
+        "batches/index.json",
+        &unit_index,
+    )?;
+    if unit_index_record.byte_count > MAXIMUM_UNIT_INDEX_BYTES {
+        return Err(RestoreError::Integrity(format!(
+            "prepared unit index exceeds the fixed {MAXIMUM_UNIT_INDEX_BYTES}-byte safety limit"
+        )));
+    }
+    files.push(unit_index_record);
+
+    coverage.unit_count = unit_index.units.len() as u64;
+    coverage.limitation_codes = limitation_codes.into_iter().collect();
+    coverage.row_coverage_complete = coverage.metadata_decode_failure_count == 0
+        && !coverage.limitation_codes.iter().any(|code| {
+            matches!(
+                code.as_str(),
+                "messageTableInventoryUnavailable"
+                    | "messageTableInventoryIncomplete"
+                    | "corpusMetadataQueryFailed"
+                    | "corpusMetadataRowFailed"
+                    | "unsupportedCorpusMessageSchema"
+                    | "shardUnavailable"
+                    | "shardSchemaUnavailable"
+            )
+        });
+    let coverage_record = write_json_pretty(
+        &staging.path().join("coverage.json"),
+        "coverage.json",
+        &coverage,
+    )?;
+    files.push(coverage_record);
+
+    let manifest = PersonalMemoryCorpusManifest {
+        schema: PERSONAL_MEMORY_CORPUS_SCHEMA.to_string(),
+        format_version: PERSONAL_MEMORY_FORMAT_VERSION,
+        generated_at_unix_milliseconds: now_unix_milliseconds()?,
+        source_mode: source.mode(),
+        source_identity: source.identity().to_string(),
+        selection_policy_sha256: policy_sha256,
+        corpus_mode,
+        timezone: policy.timezone,
+        delivery_order: policy.delivery_order,
+        reference_unix,
+        account_holder_attribution_bound: true,
+        content_trust: "untrustedChatEvidence".into(),
+        immutable_index: true,
+        source_coverage_complete: coverage.source_coverage_complete,
+        row_coverage_complete: coverage.row_coverage_complete,
+        content_complete: coverage.content_complete,
+        contact_count: contact_records.len(),
+        conversation_count: inventory.conversations.len(),
+        scanned_message_count: coverage.scanned_message_count,
+        selected_message_count: coverage.selected_message_count,
+        evidence_count,
+        unit_count: unit_index.units.len(),
+        largest_unit_text_bytes,
+        unmatched_message_table_count: inventory.unmatched_message_table_count,
+        files,
+        extends: Some(CorpusGenerationLink {
+            base_manifest_sha256: base.manifest_sha256.clone(),
+            generation: base_generation.saturating_add(1),
+            first_new_unit_index,
+            carried_unit_count,
+            carried_message_count,
+        }),
+    };
+    write_json_pretty(
+        &staging.path().join("manifest.json"),
+        "manifest.json",
+        &manifest,
+    )?;
+    File::open(&batches_directory)?.sync_all()?;
+    File::open(staging.path())?.sync_all()?;
+    protect_extendable_corpus_tree(staging.path())?;
     fs::rename(staging.path(), output_directory)?;
     File::open(parent)?.sync_all()?;
     progress(&PersonalMemoryProgress {
@@ -2465,6 +3651,20 @@ pub enum MemoryCommitDisposition {
     ReviewedNoDurableMemory,
 }
 
+/// Output format accepted by `memory commit` for a run.
+///
+/// The default is `Wiki` (Markdown files with evidence citations).
+/// Set once on the first `memory next` call via `--format`; verified
+/// on every subsequent call to the same state file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputFormat {
+    #[default]
+    Wiki,
+    Python,
+    Markdown,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct MemoryRunState {
@@ -2483,6 +3683,8 @@ struct MemoryRunState {
     scoped_message_count: Option<u64>,
     #[serde(default)]
     completed_scopes: Vec<CompletedMemoryScope>,
+    #[serde(default)]
+    output_format: OutputFormat,
     next_unit_index: usize,
     outstanding: Option<OutstandingBatch>,
     last_committed: Option<CommittedBatch>,
@@ -3181,6 +4383,29 @@ pub fn next_personal_memory_batch_with_bounds(
     maximum_messages: Option<usize>,
     scope_options: Option<&PersonalMemoryScopeOptions>,
 ) -> Result<Value, RestoreError> {
+    next_personal_memory_batch_with_bounds_and_format(
+        corpus_directory,
+        state_path,
+        wiki_directory,
+        maximum_text_bytes,
+        maximum_messages,
+        scope_options,
+        None,
+    )
+}
+
+/// Same as [`next_personal_memory_batch_with_bounds`], with an optional
+/// `output_format` selection that is written to the state on the first bind
+/// and verified on every subsequent call.
+pub fn next_personal_memory_batch_with_bounds_and_format(
+    corpus_directory: &Path,
+    state_path: &Path,
+    wiki_directory: Option<&Path>,
+    maximum_text_bytes: usize,
+    maximum_messages: Option<usize>,
+    scope_options: Option<&PersonalMemoryScopeOptions>,
+    output_format: Option<OutputFormat>,
+) -> Result<Value, RestoreError> {
     if !(MINIMUM_NEXT_TEXT_BYTES..=MAXIMUM_NEXT_TEXT_BYTES).contains(&maximum_text_bytes) {
         return Err(RestoreError::Integrity(format!(
             "memory next --max-text-bytes must be between {MINIMUM_NEXT_TEXT_BYTES} and {MAXIMUM_NEXT_TEXT_BYTES}"
@@ -3199,6 +4424,25 @@ pub fn next_personal_memory_batch_with_bounds(
     let corpus = load_corpus(corpus_directory)?;
     let _lock = acquire_state_lock(state_path)?;
     let mut state = load_or_initialize_state(state_path, &corpus, scope_options)?;
+    // Apply or verify the output format on bind.
+    if let Some(requested_format) = output_format {
+        if state.output_format == OutputFormat::Wiki
+            && state.next_unit_index == 0
+            && state.outstanding.is_none()
+            && state.last_committed.is_none()
+        {
+            // First bind — write the requested format into the state.
+            state.output_format = requested_format;
+            state.updated_at_unix_milliseconds = now_unix_milliseconds()?;
+            write_state_atomic(state_path, &state)?;
+        } else if state.output_format != requested_format {
+            return Err(RestoreError::Integrity(format!(
+                "memory next --format does not match the format already bound to this state \
+                 (bound: {:?}; requested: {:?})",
+                state.output_format, requested_format
+            )));
+        }
+    }
     let (scope, scoped_units) = effective_scope_and_units(&state, &corpus);
     if state.next_unit_index > scoped_units.len() {
         return Err(RestoreError::Integrity(
@@ -3206,7 +4450,11 @@ pub fn next_personal_memory_batch_with_bounds(
         ));
     }
     let verified_wiki_before = if state.outstanding.is_none() {
-        let current = wiki_directory.map(scan_wiki).transpose()?;
+        let current = if state.output_format == OutputFormat::Wiki {
+            wiki_directory.map(scan_wiki).transpose()?
+        } else {
+            None
+        };
         if let (Some(current), Some(committed)) = (&current, &state.committed_wiki) {
             if !wiki_snapshots_same_bytes(current, committed) {
                 return Err(RestoreError::Integrity(
@@ -3653,34 +4901,51 @@ fn commit_personal_memory_batch_with_disposition(
             "reviewed-no-durable-memory batch commit conflicts with retained page evidence".into(),
         ));
     }
-    let current_wiki = scan_wiki(wiki_directory)?;
-    let changed_pages = match disposition {
-        MemoryCommitDisposition::WikiUpdated => {
-            let changed_pages = validate_wiki_commit(
-                &current_wiki,
-                outstanding.wiki_before.as_ref(),
-                &outstanding.target_pages,
-                &retained_evidence_aliases
-                    .iter()
-                    .cloned()
-                    .collect::<Vec<_>>(),
-                corpus.manifest.evidence_count,
-            )?;
-            if changed_pages.iter().any(|path| path == "me.md") {
-                let me = current_wiki.get("me.md").ok_or_else(|| {
-                    RestoreError::Integrity("changed account-holder wiki page is missing".into())
-                })?;
-                let self_evidence_aliases = load_self_evidence_aliases(&corpus, &me.citations)?;
-                validate_me_self_attribution(me, &self_evidence_aliases)?;
-            }
-            changed_pages
+    let changed_pages = match state.output_format {
+        OutputFormat::Wiki => {
+            let current_wiki = scan_wiki(wiki_directory)?;
+            let changed = match disposition {
+                MemoryCommitDisposition::WikiUpdated => {
+                    let changed_pages = validate_wiki_commit(
+                        &current_wiki,
+                        outstanding.wiki_before.as_ref(),
+                        &outstanding.target_pages,
+                        &retained_evidence_aliases
+                            .iter()
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                        corpus.manifest.evidence_count,
+                    )?;
+                    if changed_pages.iter().any(|path| path == "me.md") {
+                        let me = current_wiki.get("me.md").ok_or_else(|| {
+                            RestoreError::Integrity(
+                                "changed account-holder wiki page is missing".into(),
+                            )
+                        })?;
+                        let self_evidence_aliases =
+                            load_self_evidence_aliases(&corpus, &me.citations)?;
+                        validate_me_self_attribution(me, &self_evidence_aliases)?;
+                    }
+                    changed_pages
+                }
+                MemoryCommitDisposition::ReviewedNoDurableMemory => {
+                    validate_reviewed_no_durable_memory_commit(
+                        &current_wiki,
+                        outstanding.wiki_before.as_ref(),
+                        corpus.manifest.evidence_count,
+                    )?;
+                    Vec::new()
+                }
+            };
+            state.committed_wiki = Some(current_wiki);
+            changed
         }
-        MemoryCommitDisposition::ReviewedNoDurableMemory => {
-            validate_reviewed_no_durable_memory_commit(
-                &current_wiki,
-                outstanding.wiki_before.as_ref(),
-                corpus.manifest.evidence_count,
-            )?;
+        OutputFormat::Python => {
+            validate_python_format_commit(wiki_directory)?;
+            Vec::new()
+        }
+        OutputFormat::Markdown => {
+            validate_markdown_format_commit(wiki_directory)?;
             Vec::new()
         }
     };
@@ -3694,7 +4959,6 @@ fn commit_personal_memory_batch_with_disposition(
         reviewed_message_count: outstanding.message_count,
         retained_evidence_count: retained_evidence_aliases.len(),
     });
-    state.committed_wiki = Some(current_wiki);
     state.updated_at_unix_milliseconds = now_unix_milliseconds()?;
     write_state_atomic(state_path, &state)?;
     Ok(MemoryCommitResult {
@@ -3857,7 +5121,7 @@ fn load_corpus(corpus_directory: &Path) -> Result<LoadedCorpus, RestoreError> {
     }
     let manifest_path = root.join("manifest.json");
     let manifest_bytes =
-        read_immutable_owner_file_limited(&manifest_path, MAXIMUM_CONTROL_FILE_BYTES)?;
+        read_corpus_owner_file_limited(&manifest_path, MAXIMUM_CONTROL_FILE_BYTES)?;
     let manifest_sha256 = sha256_bytes(&manifest_bytes);
     let manifest: PersonalMemoryCorpusManifest = serde_json::from_slice(&manifest_bytes)?;
     if manifest.schema != PERSONAL_MEMORY_CORPUS_SCHEMA
@@ -3887,10 +5151,10 @@ fn load_corpus(corpus_directory: &Path) -> Result<LoadedCorpus, RestoreError> {
             ));
         }
         let path = safe_corpus_path(&root, &record.relative_path)?;
-        let metadata = immutable_owner_file_metadata(&path)?;
+        let metadata = corpus_owner_file_metadata(&path)?;
         if metadata.len() != record.byte_count {
             return Err(RestoreError::Integrity(format!(
-                "immutable corpus file {} has an unexpected byte count",
+                "corpus file {} has an unexpected byte count",
                 record.relative_path
             )));
         }
@@ -3902,7 +5166,7 @@ fn load_corpus(corpus_directory: &Path) -> Result<LoadedCorpus, RestoreError> {
         .ok_or_else(|| RestoreError::Integrity("corpus manifest has no coverage report".into()))?;
     let coverage_path = safe_corpus_path(&root, &coverage_record.relative_path)?;
     let coverage_bytes =
-        read_immutable_owner_file_limited(&coverage_path, MAXIMUM_CONTROL_FILE_BYTES)?;
+        read_corpus_owner_file_limited(&coverage_path, MAXIMUM_CONTROL_FILE_BYTES)?;
     if coverage_bytes.len() as u64 != coverage_record.byte_count
         || sha256_bytes(&coverage_bytes) != coverage_record.sha256
     {
@@ -3971,12 +5235,12 @@ fn load_corpus(corpus_directory: &Path) -> Result<LoadedCorpus, RestoreError> {
         })?;
     let unit_index_path = safe_corpus_path(&root, &unit_index_record.relative_path)?;
     let unit_index_bytes =
-        read_immutable_owner_file_limited(&unit_index_path, MAXIMUM_UNIT_INDEX_BYTES)?;
+        read_corpus_owner_file_limited(&unit_index_path, MAXIMUM_UNIT_INDEX_BYTES)?;
     if unit_index_bytes.len() as u64 != unit_index_record.byte_count
         || sha256_bytes(&unit_index_bytes) != unit_index_record.sha256
     {
         return Err(RestoreError::Integrity(
-            "prepared-unit index does not match the immutable corpus manifest".into(),
+            "prepared-unit index does not match the corpus manifest".into(),
         ));
     }
     let unit_index: UnitIndex = serde_json::from_slice(&unit_index_bytes)?;
@@ -4065,6 +5329,34 @@ fn load_corpus(corpus_directory: &Path) -> Result<LoadedCorpus, RestoreError> {
         return Err(RestoreError::Integrity(
             "corpus evidence or unit accounting does not match its manifest".into(),
         ));
+    }
+    if let Some(link) = &manifest.extends {
+        if !valid_sha256(&link.base_manifest_sha256) {
+            return Err(RestoreError::Integrity(
+                "corpus extends link contains an invalid base manifest hash".into(),
+            ));
+        }
+        if link.carried_unit_count != link.first_new_unit_index {
+            return Err(RestoreError::Integrity(
+                "corpus extends link has inconsistent carried-unit and first-new-unit counts"
+                    .into(),
+            ));
+        }
+        if link.first_new_unit_index > manifest.unit_count {
+            return Err(RestoreError::Integrity(
+                "corpus extends link first-new-unit index exceeds total unit count".into(),
+            ));
+        }
+        if link.carried_message_count > manifest.evidence_count {
+            return Err(RestoreError::Integrity(
+                "corpus extends link carried-message count exceeds total evidence count".into(),
+            ));
+        }
+        if link.generation == 0 {
+            return Err(RestoreError::Integrity(
+                "corpus extends link generation must be at least 1".into(),
+            ));
+        }
     }
     Ok(LoadedCorpus {
         root,
@@ -4788,7 +6080,7 @@ fn load_self_evidence_aliases(
         .find(|record| record.relative_path == "evidence.jsonl")
         .ok_or_else(|| RestoreError::Integrity("corpus evidence sidecar is missing".into()))?;
     let path = safe_corpus_path(&corpus.root, &record.relative_path)?;
-    let metadata = immutable_owner_file_metadata(&path)?;
+    let metadata = corpus_owner_file_metadata(&path)?;
     if metadata.len() != record.byte_count {
         return Err(RestoreError::Integrity(
             "corpus evidence sidecar has an unexpected byte count".into(),
@@ -5006,6 +6298,7 @@ fn load_or_initialize_state(
         scoped_units,
         scoped_message_count: Some(scoped_message_count),
         completed_scopes: Vec::new(),
+        output_format: OutputFormat::Wiki,
         next_unit_index: 0,
         outstanding: None,
         last_committed: None,
@@ -5280,6 +6573,81 @@ fn immutable_owner_file_metadata(path: &Path) -> Result<fs::Metadata, RestoreErr
         ));
     }
     Ok(metadata)
+}
+
+/// Like `immutable_owner_file_metadata` but also accepts owner-writable 0600 files,
+/// which are produced by `memory prepare --extend` to allow future extend runs.
+fn corpus_owner_file_metadata(path: &Path) -> Result<fs::Metadata, RestoreError> {
+    let metadata = fs::symlink_metadata(path)?;
+    let mode = metadata.permissions().mode() & 0o777;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || (mode != 0o400 && mode != 0o600)
+        || metadata.nlink() != 1
+    {
+        return Err(RestoreError::Integrity(
+            "corpus files must be current-user-owned regular files with 0400 or 0600 permissions"
+                .into(),
+        ));
+    }
+    Ok(metadata)
+}
+
+fn read_corpus_owner_file_limited(
+    path: &Path,
+    maximum_bytes: u64,
+) -> Result<Vec<u8>, RestoreError> {
+    let metadata = corpus_owner_file_metadata(path)?;
+    if metadata.len() > maximum_bytes {
+        return Err(RestoreError::Integrity(format!(
+            "corpus file exceeds the fixed {maximum_bytes}-byte safety limit"
+        )));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    File::open(path)?
+        .take(maximum_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > maximum_bytes {
+        return Err(RestoreError::Integrity(format!(
+            "corpus file exceeds the fixed {maximum_bytes}-byte safety limit"
+        )));
+    }
+    Ok(bytes)
+}
+
+fn protect_extendable_corpus_tree(root: &Path) -> Result<(), RestoreError> {
+    for entry in walkdir::WalkDir::new(root)
+        .contents_first(true)
+        .follow_links(false)
+    {
+        let entry = entry.map_err(|_| {
+            RestoreError::Integrity(
+                "prepared extend-corpus tree could not be finalized safely".into(),
+            )
+        })?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() || metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(RestoreError::Integrity(
+                "prepared corpus tree contains an unsafe entry".into(),
+            ));
+        }
+        if metadata.is_file() {
+            if metadata.nlink() != 1 {
+                return Err(RestoreError::Integrity(
+                    "prepared corpus tree contains a multiply linked file".into(),
+                ));
+            }
+            fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o600))?;
+        } else if metadata.is_dir() {
+            fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o700))?;
+        } else {
+            return Err(RestoreError::Integrity(
+                "prepared corpus tree contains a non-file, non-directory entry".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn protect_immutable_corpus_tree(root: &Path) -> Result<(), RestoreError> {
@@ -5565,6 +6933,151 @@ fn validate_reviewed_no_durable_memory_commit(
                 return Err(RestoreError::Integrity(format!(
                     "wiki page {path} cites an unknown evidence alias"
                 )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate a Python-format output directory at `memory commit` time.
+///
+/// Checks:
+/// - `manifest.py` exists and is a regular, owner-only file.
+/// - Every `.py` file in the tree parses as valid Python (via `python3 -c "import ast;
+///   ast.parse(open('<file>').read())"`).
+/// - No file outside the allowed extensions (`.py`, `.txt`, `.json`, `.md`) is present.
+fn validate_python_format_commit(output_directory: &Path) -> Result<(), RestoreError> {
+    let root = fs::canonicalize(output_directory).map_err(|_| {
+        RestoreError::Integrity("Python output directory does not exist or cannot be read".into())
+    })?;
+    let manifest_path = root.join("manifest.py");
+    if !manifest_path.try_exists().unwrap_or(false) {
+        return Err(RestoreError::Integrity(
+            "Python format commit requires manifest.py in the output directory".into(),
+        ));
+    }
+    ensure_private_directory(&root)?;
+    const ALLOWED_EXTENSIONS: &[&str] = &["py", "txt", "json", "md"];
+    let mut py_files: Vec<PathBuf> = Vec::new();
+    for entry in walkdir::WalkDir::new(&root).follow_links(false) {
+        let entry = entry.map_err(|_| {
+            RestoreError::Integrity("Python output directory could not be traversed".into())
+        })?;
+        if entry.path() == root || entry.file_type().is_dir() {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if metadata.file_type().is_symlink() {
+            return Err(RestoreError::Integrity(
+                "Python output directory must not contain symbolic links".into(),
+            ));
+        }
+        let ext = entry
+            .path()
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        if !ALLOWED_EXTENSIONS.contains(&ext) {
+            let relative = entry
+                .path()
+                .strip_prefix(&root)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| entry.path().to_string_lossy().into_owned());
+            return Err(RestoreError::Integrity(format!(
+                "Python format output contains a file with a disallowed extension: {relative}"
+            )));
+        }
+        if ext == "py" {
+            py_files.push(entry.path().to_path_buf());
+        }
+    }
+    // Syntax-check every .py file.
+    for py_path in &py_files {
+        let status = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(format!(
+                "import ast; ast.parse(open({}).read())",
+                serde_json::to_string(&py_path.to_string_lossy().into_owned()).unwrap_or_default()
+            ))
+            .status()
+            .map_err(|_| {
+                RestoreError::Integrity(
+                    "Python format commit requires python3 to be available for syntax checking"
+                        .into(),
+                )
+            })?;
+        if !status.success() {
+            let relative = py_path
+                .strip_prefix(&root)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| py_path.to_string_lossy().into_owned());
+            return Err(RestoreError::Integrity(format!(
+                "Python format file {relative} failed syntax check"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Validate a Markdown-format output directory at `memory commit` time.
+///
+/// Checks:
+/// - `manifest.md` exists in the output directory.
+/// - Every `domains/*.md` file contains the three required section headings:
+///   `## Schema`, `## State`, and `## History`.
+fn validate_markdown_format_commit(output_directory: &Path) -> Result<(), RestoreError> {
+    let root = fs::canonicalize(output_directory).map_err(|_| {
+        RestoreError::Integrity("Markdown output directory does not exist or cannot be read".into())
+    })?;
+    let manifest_path = root.join("manifest.md");
+    if !manifest_path.try_exists().unwrap_or(false) {
+        return Err(RestoreError::Integrity(
+            "Markdown format commit requires manifest.md in the output directory".into(),
+        ));
+    }
+    let domains_path = root.join("domains");
+    if domains_path.try_exists().unwrap_or(false) {
+        for entry in walkdir::WalkDir::new(&domains_path)
+            .max_depth(1)
+            .follow_links(false)
+        {
+            let entry = entry.map_err(|_| {
+                RestoreError::Integrity("Markdown domains directory could not be traversed".into())
+            })?;
+            if entry.path() == domains_path || entry.file_type().is_dir() {
+                continue;
+            }
+            if entry
+                .path()
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                != "md"
+            {
+                continue;
+            }
+            let bytes = read_owner_file_limited(entry.path(), MAXIMUM_WIKI_FILE_BYTES)?;
+            let text = std::str::from_utf8(&bytes).map_err(|_| {
+                let relative = entry
+                    .path()
+                    .strip_prefix(&root)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| entry.path().to_string_lossy().into_owned());
+                RestoreError::Integrity(format!(
+                    "Markdown domains file {relative} must be valid UTF-8"
+                ))
+            })?;
+            let relative = entry
+                .path()
+                .strip_prefix(&root)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| entry.path().to_string_lossy().into_owned());
+            for heading in &["## Schema", "## State", "## History"] {
+                if !text.contains(heading) {
+                    return Err(RestoreError::Integrity(format!(
+                        "Markdown domains file {relative} is missing required section heading: {heading}"
+                    )));
+                }
             }
         }
     }
@@ -6053,5 +7566,234 @@ mod personal_memory_tests {
     fn reviewed_no_memory_still_rejects_unknown_existing_citations() {
         let wiki = BTreeMap::from([("me.md".to_string(), snapshot("same", &["E999999999"], true))]);
         assert!(validate_reviewed_no_durable_memory_commit(&wiki, Some(&wiki), 3).is_err());
+    }
+
+    // ── Task 2: OutputFormat serde round-trips ────────────────────────────────
+
+    #[test]
+    fn output_format_serializes_to_lowercase_strings() {
+        use super::OutputFormat;
+        assert_eq!(
+            serde_json::to_string(&OutputFormat::Wiki).unwrap(),
+            "\"wiki\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OutputFormat::Python).unwrap(),
+            "\"python\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OutputFormat::Markdown).unwrap(),
+            "\"markdown\""
+        );
+    }
+
+    #[test]
+    fn output_format_deserializes_from_lowercase_strings() {
+        use super::OutputFormat;
+        let wiki: OutputFormat = serde_json::from_str("\"wiki\"").unwrap();
+        assert_eq!(wiki, OutputFormat::Wiki);
+        let python: OutputFormat = serde_json::from_str("\"python\"").unwrap();
+        assert_eq!(python, OutputFormat::Python);
+        let markdown: OutputFormat = serde_json::from_str("\"markdown\"").unwrap();
+        assert_eq!(markdown, OutputFormat::Markdown);
+    }
+
+    #[test]
+    fn output_format_default_is_wiki() {
+        use super::OutputFormat;
+        assert_eq!(OutputFormat::default(), OutputFormat::Wiki);
+    }
+
+    // ── Task 2: Python format commit validation ───────────────────────────────
+
+    #[test]
+    fn python_commit_requires_manifest_py() {
+        use super::validate_python_format_commit;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path();
+        // Set dir permissions to 0700 (owner-only) so scan_wiki / ensure_private_directory passes
+        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
+        // No manifest.py → should fail
+        let result = validate_python_format_commit(path);
+        assert!(result.is_err(), "expected error when manifest.py is absent");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("manifest.py"), "{msg}");
+    }
+
+    #[test]
+    fn python_commit_rejects_invalid_python_syntax() {
+        use super::validate_python_format_commit;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path();
+        std::fs::set_permissions(path, PermissionsExt::from_mode(0o700)).unwrap();
+        // Write a syntactically broken manifest.py
+        let manifest = path.join("manifest.py");
+        std::fs::write(&manifest, b"def broken(\n").unwrap();
+        std::fs::set_permissions(&manifest, PermissionsExt::from_mode(0o600)).unwrap();
+        let result = validate_python_format_commit(path);
+        assert!(result.is_err(), "expected syntax error to be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("syntax") || msg.contains("manifest.py"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn python_commit_rejects_disallowed_extensions() {
+        use super::validate_python_format_commit;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path();
+        std::fs::set_permissions(path, PermissionsExt::from_mode(0o700)).unwrap();
+        // Valid manifest.py
+        let manifest = path.join("manifest.py");
+        std::fs::write(&manifest, b"x = 1\n").unwrap();
+        std::fs::set_permissions(&manifest, PermissionsExt::from_mode(0o600)).unwrap();
+        // Binary file with disallowed extension
+        let binary = path.join("data.bin");
+        std::fs::write(&binary, b"\x00\x01\x02").unwrap();
+        std::fs::set_permissions(&binary, PermissionsExt::from_mode(0o600)).unwrap();
+        let result = validate_python_format_commit(path);
+        assert!(
+            result.is_err(),
+            "expected disallowed extension to be rejected"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("disallowed") || msg.contains("extension"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn python_commit_accepts_valid_directory() {
+        use super::validate_python_format_commit;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path();
+        std::fs::set_permissions(path, PermissionsExt::from_mode(0o700)).unwrap();
+        // Valid manifest.py
+        let manifest = path.join("manifest.py");
+        std::fs::write(&manifest, b"schema = 'memory-v1'\n").unwrap();
+        std::fs::set_permissions(&manifest, PermissionsExt::from_mode(0o600)).unwrap();
+        // python3 must be available in the test environment; skip if not
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .status()
+            .is_err()
+        {
+            return;
+        }
+        let result = validate_python_format_commit(path);
+        assert!(
+            result.is_ok(),
+            "expected valid directory to pass: {result:?}"
+        );
+    }
+
+    // ── Task 2: Markdown format commit validation ─────────────────────────────
+
+    #[test]
+    fn markdown_commit_requires_manifest_md() {
+        use super::validate_markdown_format_commit;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path();
+        std::fs::set_permissions(path, PermissionsExt::from_mode(0o700)).unwrap();
+        let result = validate_markdown_format_commit(path);
+        assert!(result.is_err(), "expected error when manifest.md is absent");
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("manifest.md"), "{msg}");
+    }
+
+    #[test]
+    fn markdown_commit_rejects_domains_file_missing_required_headings() {
+        use super::validate_markdown_format_commit;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path();
+        std::fs::set_permissions(path, PermissionsExt::from_mode(0o700)).unwrap();
+        let manifest = path.join("manifest.md");
+        std::fs::write(&manifest, b"# Memory\n").unwrap();
+        std::fs::set_permissions(&manifest, PermissionsExt::from_mode(0o600)).unwrap();
+        let domains = path.join("domains");
+        std::fs::create_dir(&domains).unwrap();
+        std::fs::set_permissions(&domains, PermissionsExt::from_mode(0o700)).unwrap();
+        let domain_file = domains.join("contacts.md");
+        // Missing ## History
+        std::fs::write(&domain_file, b"## Schema\n\n## State\n").unwrap();
+        std::fs::set_permissions(&domain_file, PermissionsExt::from_mode(0o600)).unwrap();
+        let result = validate_markdown_format_commit(path);
+        assert!(result.is_err(), "expected missing heading to be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("## History") || msg.contains("missing"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn markdown_commit_accepts_valid_directory() {
+        use super::validate_markdown_format_commit;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path();
+        std::fs::set_permissions(path, PermissionsExt::from_mode(0o700)).unwrap();
+        let manifest = path.join("manifest.md");
+        std::fs::write(&manifest, b"# Memory\n").unwrap();
+        std::fs::set_permissions(&manifest, PermissionsExt::from_mode(0o600)).unwrap();
+        let domains = path.join("domains");
+        std::fs::create_dir(&domains).unwrap();
+        std::fs::set_permissions(&domains, PermissionsExt::from_mode(0o700)).unwrap();
+        let domain_file = domains.join("contacts.md");
+        std::fs::write(&domain_file, b"## Schema\n\n## State\n\n## History\n").unwrap();
+        std::fs::set_permissions(&domain_file, PermissionsExt::from_mode(0o600)).unwrap();
+        let result = validate_markdown_format_commit(path);
+        assert!(
+            result.is_ok(),
+            "expected valid directory to pass: {result:?}"
+        );
+    }
+
+    // ── Task 1: CorpusGenerationLink manifest field serde ────────────────────
+
+    #[test]
+    fn corpus_generation_link_serializes_with_camel_case() {
+        use super::CorpusGenerationLink;
+        let link = CorpusGenerationLink {
+            base_manifest_sha256: "abc123".to_string(),
+            generation: 1,
+            first_new_unit_index: 5,
+            carried_unit_count: 5,
+            carried_message_count: 100,
+        };
+        let json = serde_json::to_value(&link).unwrap();
+        assert!(json.get("baseManifestSHA256").is_some());
+        assert!(json.get("generation").is_some());
+        assert!(json.get("firstNewUnitIndex").is_some());
+        assert!(json.get("carriedUnitCount").is_some());
+        assert!(json.get("carriedMessageCount").is_some());
+    }
+
+    #[test]
+    fn corpus_generation_link_roundtrips() {
+        use super::CorpusGenerationLink;
+        let link = CorpusGenerationLink {
+            base_manifest_sha256: "deadbeef".to_string(),
+            generation: 2,
+            first_new_unit_index: 10,
+            carried_unit_count: 10,
+            carried_message_count: 42,
+        };
+        let json = serde_json::to_vec(&link).unwrap();
+        let decoded: CorpusGenerationLink = serde_json::from_slice(&json).unwrap();
+        assert_eq!(decoded.base_manifest_sha256, "deadbeef");
+        assert_eq!(decoded.generation, 2);
+        assert_eq!(decoded.first_new_unit_index, 10);
+        assert_eq!(decoded.carried_unit_count, 10);
+        assert_eq!(decoded.carried_message_count, 42);
     }
 }
