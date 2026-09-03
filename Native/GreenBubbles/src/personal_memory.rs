@@ -6966,6 +6966,23 @@ fn validate_python_format_commit(output_directory: &Path) -> Result<(), RestoreE
         if entry.path() == root || entry.file_type().is_dir() {
             continue;
         }
+        // Skip hidden files and files inside hidden directories (.git/, .gitignore,
+        // .greenbubbles-runs/).  These are tool/VCS metadata, not user output.
+        // Compare the path *relative* to root so that hidden components in the
+        // system temp dir (outside our control) are not considered.
+        let relative_hidden = entry
+            .path()
+            .strip_prefix(&root)
+            .unwrap_or(entry.path())
+            .components()
+            .any(|c| {
+                c.as_os_str()
+                    .to_str()
+                    .map_or(false, |s| s.starts_with('.'))
+            });
+        if relative_hidden {
+            continue;
+        }
         let metadata = fs::symlink_metadata(entry.path())?;
         if metadata.file_type().is_symlink() {
             return Err(RestoreError::Integrity(
@@ -7691,6 +7708,43 @@ mod personal_memory_tests {
         assert!(
             result.is_ok(),
             "expected valid directory to pass: {result:?}"
+        );
+    }
+
+    #[test]
+    fn python_commit_allows_hidden_files_and_git_dir() {
+        use super::validate_python_format_commit;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path();
+        std::fs::set_permissions(path, PermissionsExt::from_mode(0o700)).unwrap();
+        // Valid manifest.py
+        let manifest = path.join("manifest.py");
+        std::fs::write(&manifest, b"x = 1\n").unwrap();
+        std::fs::set_permissions(&manifest, PermissionsExt::from_mode(0o600)).unwrap();
+        // .gitignore — hidden file, should be skipped
+        let gitignore = path.join(".gitignore");
+        std::fs::write(&gitignore, b"__pycache__/\n").unwrap();
+        std::fs::set_permissions(&gitignore, PermissionsExt::from_mode(0o600)).unwrap();
+        // .git/config — file inside hidden directory, should be skipped
+        let git_dir = path.join(".git");
+        std::fs::create_dir(&git_dir).unwrap();
+        std::fs::set_permissions(&git_dir, PermissionsExt::from_mode(0o700)).unwrap();
+        let git_config = git_dir.join("config");
+        std::fs::write(&git_config, b"[core]\n").unwrap();
+        std::fs::set_permissions(&git_config, PermissionsExt::from_mode(0o600)).unwrap();
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .status()
+            .is_err()
+        {
+            return;
+        }
+        // Hidden files/dirs should be skipped; the directory should pass
+        let result = validate_python_format_commit(path);
+        assert!(
+            result.is_ok(),
+            "expected .gitignore and .git/ to be allowed: {result:?}"
         );
     }
 

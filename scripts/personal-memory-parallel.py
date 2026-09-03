@@ -517,15 +517,37 @@ def scope_arguments(scope: dict, plan: dict) -> list[str]:
     return arguments
 
 
+def _parse_ts(ts: str | None) -> str | None:
+    """Normalise an RFC 3339 timestamp to a UTC Z-suffix string for comparison.
+
+    ``memory status`` returns timestamps in the local timezone (e.g.
+    ``2026-08-25T08:00:00+08:00``) while the scope records them in UTC (e.g.
+    ``2026-08-25T00:00:00Z``).  String equality fails across the two forms
+    even when they represent the same instant, so we canonicalise both sides.
+    """
+    if ts is None:
+        return None
+    try:
+        from datetime import datetime, timezone
+        # fromisoformat handles both +HH:MM and Z suffixes (Python ≥ 3.11).
+        # For Python 3.9/3.10 compatibility, replace Z → +00:00 first.
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return ts  # fall back to raw string comparison
+
+
 def scope_is_bound(status: dict, scope: dict) -> bool:
     """True when the state is already bound to this scope.
 
     A state reports only the scope it currently holds, so a shard resuming
     mid-plan has to recognise its own window before trusting `complete`.
+    Timestamps are compared as UTC to handle local-timezone variants returned
+    by ``memory status``.
     """
     bound = status.get("scope") or {}
-    return (bound.get("from") == scope.get("from")
-            and bound.get("through") == scope.get("through")
+    return (_parse_ts(bound.get("from")) == _parse_ts(scope.get("from"))
+            and _parse_ts(bound.get("through")) == _parse_ts(scope.get("through"))
             and bound.get("conversationFilterCount") == len(scope["conversations"]))
 
 
@@ -1184,13 +1206,29 @@ def tick_agent_prompt(binary: str, corpus: Path, state: Path, user_project: Path
         "7. Write or update any warranted cross-domain constraints in constraints/.\n"
         "8. Run `python runner.py` and capture alert output.\n"
         "9. Regenerate manifest.py DOMAINS and ACTIVE_ALERTS.\n"
-        f"10. Call `memory commit --format {fmt}`, then `memory status`.\n"
+        "10. Run `memory commit` (exact command above), then `memory status`.\n"
         if fmt == "python"
         else
         "5. Run `git diff HEAD` in the user project to self-check.\n"
         "6. Update manifest.md Active Alerts with any new cross-domain issues.\n"
-        f"7. Call `memory commit --format {fmt}`, then `memory status`.\n"
+        "7. Run `memory commit` (exact command above), then `memory status`.\n"
     )
+    next_cmd = (
+        f"{binary} memory next {corpus}"
+        f" --state {state}"
+        f" --wiki {user_project}"
+        f" --format {fmt}"
+        f" --max-text-bytes {max_text_bytes}"
+        f" --max-messages {max_messages}"
+        f" {rendered}"
+    )
+    page_cmd = f"{binary} memory page {corpus} --state {state} --batch <batchId>"
+    commit_cmd = (
+        f"{binary} memory commit {corpus}"
+        f" --state {state}"
+        f" --wiki {user_project}"
+    )
+    status_cmd = f"{binary} memory status {corpus} --state {state}"
     return (
         preamble
         + f"GreenBubbles binary (use exactly this path, do not search for another): {binary}\n"
@@ -1198,11 +1236,15 @@ def tick_agent_prompt(binary: str, corpus: Path, state: Path, user_project: Path
         f"State: {state}\n"
         f"User project (UserAsCode output directory — write here, not a wiki): {user_project}\n"
         f"Format: {fmt}\n"
-        f"Repeat these exact scope arguments on every memory next: {rendered}\n"
-        f"Use --max-text-bytes {max_text_bytes} --max-messages {max_messages}.\n"
+        "Exact commands to use (copy-paste these, do not modify):\n"
+        f"  memory next  : {next_cmd}\n"
+        f"  memory page  : {page_cmd}  (replace <batchId> with the batchId from memory next output)\n"
+        f"  memory commit: {commit_cmd}\n"
+        f"  memory status: {status_cmd}\n"
         "This is a UserAsCode extraction run. Do NOT write a Markdown wiki. "
         "Instead, follow the two-phase pipeline:\n"
-        "1. Call memory next. Read every delivered page in order with memory page.\n"
+        "1. Run memory next (exact command above). Parse the JSON output: if batchId is null,"
+        " the scope is complete — proceed to commit. Otherwise read every page with memory page.\n"
         "2. Extract every fact from the messages as a flat list (people, events, preferences,"
         " dates, relationships, possessions, health, plans).\n"
         "3. Classify each fact into a domain (identity, travel, finance, health, vehicles,"
@@ -1361,8 +1403,11 @@ def command_tick(args: argparse.Namespace) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(run_dir, 0o700)
 
-    # Build a plan over activity since lastTickTime
+    # Build a plan over activity since lastTickTime.
+    # Derive from_month from lastTickTime so the plan only considers recent months
+    # and does not waste a scope on conversations silent since the cutoff.
     from_bound = last_tick_time or "1970-01-01T00:00:00Z"
+    from_month_auto = from_bound[:7] if from_bound >= "2000-01" else None
     plan_ns = argparse.Namespace(
         corpus=str(corpus),
         run=str(run_dir),
@@ -1371,13 +1416,13 @@ def command_tick(args: argparse.Namespace) -> int:
         min_self_messages=args.min_self_messages,
         group_min_self_per_month=args.group_min_self_per_month,
         group_kind=args.group_kind or None,
-        from_month=None,
+        from_month=from_month_auto,
         through_month=None,
-        max_conversations=None,
-        max_messages=None,
+        max_conversations=getattr(args, "max_conversations", None),
+        max_messages=getattr(args, "max_messages", None),
         max_shard_messages=None,
         scope_from=from_bound,
-        scope_through=None,
+        scope_through=getattr(args, "through", None),
         subject=getattr(args, "subject", None),
         usd_per_1k_messages=MEASURED_USD_PER_1K_MESSAGES,
     )
@@ -1423,16 +1468,21 @@ def command_tick(args: argparse.Namespace) -> int:
     log(f"tick: {elapsed / 60:.1f} min, {committed:,} messages committed,"
         f" {finished}/{planned} scopes complete")
 
-    # Update tick state
+    # Update tick state — only advance lastTickTime when messages were committed,
+    # so an empty run (no new messages in the corpus) does not skip history.
+    # Use --through when given (enables historical replay), else use now.
+    through_bound = getattr(args, "through", None)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    tick_state["lastTickTime"] = now
+    if through_bound or committed > 0:
+        tick_state["lastTickTime"] = through_bound or now
     tick_state["lastRunMessages"] = committed
     tick_state["lastRunSeconds"] = round(elapsed, 1)
     tick_state_path.write_text(
         json.dumps(tick_state, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     os.chmod(tick_state_path, 0o600)
-    log(f"tick state updated: lastTickTime={now}")
+    new_last = tick_state.get("lastTickTime", from_bound)
+    log(f"tick state updated: lastTickTime={new_last}")
     return 0
 
 
@@ -1755,6 +1805,13 @@ def main() -> int:
     tick.add_argument("--group-min-self-per-month", type=int, default=5)
     tick.add_argument("--group-kind", action="append")
     tick.add_argument("--subject")
+    tick.add_argument("--through",
+                      help="upper bound for message delivery (RFC 3339); also sets"
+                           " lastTickTime to this value, enabling historical replay")
+    tick.add_argument("--max-conversations", type=int,
+                      help="cap on number of conversations to include (for testing)")
+    tick.add_argument("--max-messages", type=int,
+                      help="cap on total messages to include (for testing)")
     add_agent_args(tick)
     tick.set_defaults(handler=command_tick)
 
