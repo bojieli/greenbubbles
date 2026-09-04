@@ -1183,6 +1183,27 @@ def command_merge(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 
 
+def acquire_project_lock(user_project: Path) -> "io.TextIOWrapper":
+    """Acquire an exclusive flock on the user project directory.
+
+    Returns the open file handle (caller must close it to release).
+    Raises SystemExit with a helpful message when already locked.
+    """
+    import fcntl
+    import io
+    lock_path = user_project / ".greenbubbles-tick.lock"
+    lock_fd: io.TextIOWrapper = lock_path.open("w", encoding="utf-8")
+    try:
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_fd.close()
+        raise SystemExit(
+            f"Another tick/revise/manifest-refresh is already running for {user_project}. "
+            f"Wait for it to complete or remove the lock: {lock_path}"
+        )
+    return lock_fd
+
+
 def check_remote_privacy(user_project: Path) -> None:
     """Warn if the user project git repo has any remote that looks public."""
     try:
@@ -1506,6 +1527,11 @@ def command_tick(args: argparse.Namespace) -> int:
     init_user_project(user_project, fmt)
     check_remote_privacy(user_project)
 
+    # Exclusive lockfile: prevents two concurrent tick/revise/manifest-refresh
+    # invocations (e.g. from cron) from racing on the same user project.
+    # Released automatically when this process exits.
+    _lock_fd = acquire_project_lock(user_project)
+
     # Read tick state
     tick_state_path = user_project / ".greenbubbles-tick-state.json"
     tick_state: dict = {}
@@ -1631,6 +1657,7 @@ def command_manifest_refresh(args: argparse.Namespace) -> int:
     user_project = Path(args.user_project).resolve()
     if not (user_project / ".git").is_dir():
         raise SystemExit(f"user project at {user_project} is not a git repo; run tick first")
+    _lock_fd = acquire_project_lock(user_project)
 
     runner = user_project / "runner.py"
     if not runner.is_file():
@@ -1737,6 +1764,7 @@ def command_revise(args: argparse.Namespace) -> int:
             f"user project at {user_project} does not exist; run tick first"
         )
     check_remote_privacy(user_project)
+    _lock_fd = acquire_project_lock(user_project)
 
     skill = skill_text(args)
     prompt = revise_agent_prompt(user_project, fmt, skill)
