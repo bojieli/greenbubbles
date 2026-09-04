@@ -1234,7 +1234,15 @@ def init_user_project(user_project: Path, fmt: str) -> bool:
     os.chmod(user_project, 0o700)
 
     gitignore = user_project / ".gitignore"
-    gitignore_content = "__pycache__/\n*.pyc\n*.pyo\n.DS_Store\n.greenbubbles-runs/\n"
+    gitignore_content = (
+        "__pycache__/\n"
+        "*.pyc\n"
+        "*.pyo\n"
+        ".DS_Store\n"
+        ".greenbubbles-runs/\n"
+        ".greenbubbles-tick.lock\n"   # process lock — not project state
+        ".greenbubbles-revise.log\n"  # internal log — not project state
+    )
     gitignore.write_text(gitignore_content, encoding="utf-8")
     os.chmod(gitignore, 0o600)
 
