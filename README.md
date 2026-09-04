@@ -287,7 +287,7 @@ and [format-markdown reference](skills/greenbubbles-personal-memory/references/f
 | [FAQ](docs/FAQ.md) | What goes wrong, and why |
 | [CLI reference](docs/CLI_REFERENCE.md) | Every command |
 | [Giving an AI access](docs/AI_CONTEXT_CLI.md) | Policies, exports, memory tools |
-| [Living knowledge project](docs/PERSONAL_MEMORY.md) | UserAsCode extraction: corpus, formats, tick, revise |
+| [Living knowledge project](docs/PERSONAL_MEMORY.md) | UserAsCode extraction: corpus, formats, tick, manifest-refresh, revise |
 | [Replica operations](docs/REPLICA_OPERATIONS.md) | Replica lifecycle, sync, and recovery |
 | [AI memory integration](docs/AI_MEMORY_INTEGRATION.md) | QMD/Mem0 projections, citations, change-feed |
 | [Backups](docs/RECOVERABLE_SNAPSHOTS.md) | The 24 words, rotation, recovery drills |

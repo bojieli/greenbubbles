@@ -35,7 +35,8 @@ greenbubbles memory prepare /private/path/corpus \
 python3 scripts/personal-memory-parallel.py tick \
   --corpus /private/path/corpus \
   --user-project ~/memory/me \
-  --format python
+  --format python \
+  --agent gemini --model gemini-3.8-flash
 ```
 
 The first `tick` creates `~/memory/me/` as a git repo, processes all messages
@@ -266,6 +267,10 @@ only messages since `lastTickTime`.
 
 If no new activity is found, prints `tick: no new activity since <timestamp>`
 and exits 0.
+
+To divide the corpus across multiple agents, add `--shards N` (N agent
+processes, run one at a time to avoid concurrent writes to shared domain
+files). See [Running shards in parallel](#running-shards-in-parallel) below.
 
 ### `manifest-refresh`
 
