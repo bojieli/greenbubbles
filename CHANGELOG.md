@@ -6,6 +6,40 @@ Notable changes to GreenBubbles are documented here. The project follows
 
 ## Unreleased
 
+### Added
+
+- `tick` command: process-level exclusive flock on `.greenbubbles-tick.lock`
+  prevents concurrent cron invocations from racing on the same user project.
+  Same guard applied to `manifest-refresh` and `revise`.
+- `tick` driver: `_is_api_error()` detects transient Gemini quota / rate-limit
+  / FAILED_PRECONDITION errors (distinct from genuine agent stalls), with
+  exponential backoff (base 120 s, doubles per retry, cap 30 min).  `--max-api-retries`
+  (default 5) and `--api-retry-seconds` (default 120) on both `run` and `tick`
+  subcommands.
+- `tick` driver: per-project `threading.Lock` in `git_commit_user_project`
+  prevents concurrent shards from interleaving `git add -A` and `git commit`.
+
+### Fixed
+
+- `tick` driver: `lastTickTime` is no longer advanced when API errors occurred
+  and 0 messages were committed.  Quota exhaustion no longer silently skips
+  processing windows; the same window is retried once quota recovers.
+- `tick` driver: cap `--parallel` at 1.  All tick shards share one user-project
+  directory; running agents concurrently caused last-writer-wins races on domain
+  files, silently dropping extracted facts.  Multi-shard runs still benefit from
+  shorter per-shard corpus batches — they simply execute one shard at a time.
+- `tick` driver: `.greenbubbles-tick.lock` and `.greenbubbles-revise.log` added
+  to `.gitignore` so internal process files are never committed to the user
+  project git history.
+- `run_shard` and `run_tick_shard`: log `[exit N: first-error-line]` on every
+  non-zero agent exit for easier post-mortem debugging.
+- Agent command: `--skip-trust` flag added for Gemini CLI ≥ 0.46.0 headless
+  mode (loop-detection upgrade required an explicit trusted-directory flag).
+- Tick agent prompt: agents now read only 2–3 domain files per batch (not all)
+  to reduce tool-call counts and avoid triggering loop-detection false positives.
+- Markdown commit step now carries the same urgency language as Python: names
+  both validation checks and warns that skipping causes duplication on retry.
+
 ## 0.2.0 - 2026-09-03
 
 ### Added
