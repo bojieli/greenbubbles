@@ -33,6 +33,14 @@ Notable changes to GreenBubbles are documented here. The project follows
   project git history.
 - `run_shard` and `run_tick_shard`: log `[exit N: first-error-line]` on every
   non-zero agent exit for easier post-mortem debugging.
+- `_first_error_line`: skip informational harness notices (Gemini CLI ripgrep
+  fallback banner, approval-mode header) so the displayed error snippet reflects
+  the actual failure cause rather than masking it.
+- `_is_api_error`: add network-level failure patterns (`fetch failed`,
+  `econnrefused`, `econnreset`, `etimedout`, `socket hang up`) so transient
+  DNS/TLS/TCP failures trigger the API-error retry path instead of the stall
+  detector.  Without this fix, a network blip caused the driver to mark a scope
+  stalled and advance `lastTickTime`, silently skipping unprocessed messages.
 - Agent command: `--skip-trust` flag added for Gemini CLI ≥ 0.46.0 headless
   mode (loop-detection upgrade required an explicit trusted-directory flag).
 - Tick agent prompt: agents now read only 2–3 domain files per batch (not all)

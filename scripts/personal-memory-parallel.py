@@ -92,6 +92,7 @@ def _git_lock(project: Path) -> threading.Lock:
 # (quota exhausted, rate limit, regional restriction, service unavailable)
 # rather than a genuine agent logic stall.  Checked case-insensitively.
 _API_ERROR_PATTERNS = (
+    # Quota / rate-limit (HTTP-level or Gemini API status codes)
     "location is not supported",
     "resource_exhausted",
     "rate limit",
@@ -103,6 +104,23 @@ _API_ERROR_PATTERNS = (
     "service unavailable",
     "too many requests",
     "ratelimiterror",
+    # Network-level failures (fetch/DNS/TLS before HTTP even replies)
+    "fetch failed",
+    "typeerror: fetch",
+    "econnrefused",
+    "econnreset",
+    "etimedout",
+    "socket hang up",
+    "network error",
+    "failed to fetch",
+)
+
+# Lines from the agent harness that are informational, not the root cause.
+_SKIP_STDERR_PATTERNS = (
+    "ripgrep is not available",
+    "falling back to greptool",
+    "yolo",
+    "approval mode",
 )
 
 
@@ -115,10 +133,15 @@ def _is_api_error(returncode: int, stderr: str) -> bool:
 
 
 def _first_error_line(stderr: str) -> str:
-    """Return the first non-empty, non-boilerplate stderr line for logging."""
+    """Return the first non-empty, non-boilerplate stderr line for logging.
+
+    Skips informational harness notices (ripgrep fallback, approval-mode
+    banners) so the displayed snippet reflects the actual failure cause.
+    """
     for line in stderr.splitlines():
         stripped = line.strip()
-        if stripped and not stripped.startswith("YOLO") and "approval mode" not in stripped.lower():
+        low = stripped.lower()
+        if stripped and not any(p in low for p in _SKIP_STDERR_PATTERNS):
             return stripped[:200]
     return "(no detail)"
 
