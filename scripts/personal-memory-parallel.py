@@ -76,6 +76,51 @@ MAXIMUM_NEXT_TEXT_BYTES = 2097152
 MAXIMUM_BATCH_MESSAGES = 5000
 
 PRINT_LOCK = threading.Lock()
+# Per-project locks so concurrent shards don't interleave git add / git commit.
+_GIT_LOCKS: dict[str, threading.Lock] = {}
+_GIT_LOCKS_GUARD = threading.Lock()
+
+
+def _git_lock(project: Path) -> threading.Lock:
+    key = str(project.resolve())
+    with _GIT_LOCKS_GUARD:
+        if key not in _GIT_LOCKS:
+            _GIT_LOCKS[key] = threading.Lock()
+        return _GIT_LOCKS[key]
+
+# Substrings in agent stderr that indicate a transient infrastructure error
+# (quota exhausted, rate limit, regional restriction, service unavailable)
+# rather than a genuine agent logic stall.  Checked case-insensitively.
+_API_ERROR_PATTERNS = (
+    "location is not supported",
+    "resource_exhausted",
+    "rate limit",
+    "quota exceeded",
+    "quotaexceeded",
+    "quota_exceeded",
+    "429",
+    "503 service",
+    "service unavailable",
+    "too many requests",
+    "ratelimiterror",
+)
+
+
+def _is_api_error(returncode: int, stderr: str) -> bool:
+    """True when the agent process failed due to a transient API error."""
+    if returncode == 0:
+        return False
+    text = stderr.lower()
+    return any(p in text for p in _API_ERROR_PATTERNS)
+
+
+def _first_error_line(stderr: str) -> str:
+    """Return the first non-empty, non-boilerplate stderr line for logging."""
+    for line in stderr.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("YOLO") and "approval mode" not in stripped.lower():
+            return stripped[:200]
+    return "(no detail)"
 
 
 def log(message: str) -> None:
@@ -838,6 +883,7 @@ def run_shard(args: argparse.Namespace, plan: dict, shard: dict, binary: str) ->
         prompt = shard_prompt(binary, corpus, state, wiki, arguments,
                               max_text_bytes, max_batch_messages, args.language, skill)
         stalls = 0
+        api_errors = 0
         while batches < args.max_batches:
             status = memory_status(binary, corpus, state)
             complete = (status.get("statePresent") and status.get("complete")
@@ -878,22 +924,40 @@ def run_shard(args: argparse.Namespace, plan: dict, shard: dict, binary: str) ->
             after = after_status.get("committedUnitCount", 0) if bound else 0
             committed = after_status.get("committedMessageCount", 0) if bound else 0
             percent = after_status.get("progressPercent", 0.0) if bound else 0.0
+            extra = (f" [exit {result.returncode}: {_first_error_line(result.stderr)}]"
+                     if result.returncode != 0 else "")
             log(f"[shard {index:>2}] scope {position + 1}/{len(scopes)} batch {batches}:"
-                f" +{after - before} units, {committed:,} messages committed, {percent:.1f}%")
+                f" +{after - before} units, {committed:,} messages committed,"
+                f" {percent:.1f}%{extra}")
             # A run normally stops at its batch budget part-way through a scope,
             # so record what this scope has committed rather than counting only
             # the scopes that finished.
             remember(position, {"complete": False, "messages": committed, "units": after})
             if after == before:
-                stalls += 1
-                if stalls >= args.max_stalls:
-                    log(f"[shard {index:>2}] no progress in {stalls} batch(es) on scope"
-                        f" {position + 1}; stopping this shard")
-                    remember(position, {"complete": False, "stalled": True})
-                    return shard_result(index, batches, started, progress, scopes, wiki)
-                time.sleep(args.stall_backoff_seconds)
+                if _is_api_error(result.returncode, result.stderr):
+                    api_errors += 1
+                    max_api = getattr(args, "max_api_retries", 5)
+                    if api_errors > max_api:
+                        log(f"[shard {index:>2}] API errors exceeded {max_api} on scope"
+                            f" {position + 1}; stopping this shard")
+                        remember(position, {"complete": False, "apiError": True})
+                        return shard_result(index, batches, started, progress, scopes, wiki)
+                    base = getattr(args, "api_retry_seconds", 120)
+                    wait = min(base * (2 ** (api_errors - 1)), 1800)
+                    log(f"[shard {index:>2}] API error (attempt {api_errors}/{max_api});"
+                        f" retrying in {wait}s")
+                    time.sleep(wait)
+                else:
+                    stalls += 1
+                    if stalls >= args.max_stalls:
+                        log(f"[shard {index:>2}] no progress in {stalls} batch(es) on scope"
+                            f" {position + 1}; stopping this shard")
+                        remember(position, {"complete": False, "stalled": True})
+                        return shard_result(index, batches, started, progress, scopes, wiki)
+                    time.sleep(args.stall_backoff_seconds)
             else:
                 stalls = 0
+                api_errors = 0
 
     return shard_result(index, batches, started, progress, scopes, wiki)
 
@@ -913,6 +977,10 @@ def shard_result(index: int, batches: int, started: float, progress: dict,
         "committedMessages": sum(record.get("messages", 0) for record in records),
         "committedUnits": sum(record.get("units", 0) for record in records),
         "wiki": str(wiki),
+        # True when at least one scope stopped because of API quota/rate-limit errors
+        # rather than a genuine agent stall.  Callers use this to suppress tick-state
+        # advancement so the same window is retried on the next run.
+        "apiErrors": any(record.get("apiError") for record in records),
     }
 
 
@@ -1170,21 +1238,28 @@ def init_user_project(user_project: Path, fmt: str) -> bool:
 
 
 def git_commit_user_project(user_project: Path, message: str) -> bool:
-    """Stage all changes and commit.  Returns True when something was committed."""
-    subprocess.run(
-        ["git", "-C", str(user_project), "add", "-A"],
-        capture_output=True, check=False,
-    )
-    result = subprocess.run(
-        ["git", "-C", str(user_project), "commit", "-m", message],
-        capture_output=True, text=True, check=False,
-    )
-    if result.returncode == 0:
-        return True
-    if "nothing to commit" in result.stdout or "nothing added to commit" in result.stdout:
+    """Stage all changes and commit.  Returns True when something was committed.
+
+    Holds a per-project lock so concurrent shards cannot interleave `git add -A`
+    and `git commit` — without the lock, shard A's staged files could be swept
+    into shard B's commit (or vice-versa), producing incorrect git history.
+    """
+    lock = _git_lock(user_project)
+    with lock:
+        subprocess.run(
+            ["git", "-C", str(user_project), "add", "-A"],
+            capture_output=True, check=False,
+        )
+        result = subprocess.run(
+            ["git", "-C", str(user_project), "commit", "-m", message],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode == 0:
+            return True
+        if "nothing to commit" in result.stdout or "nothing added to commit" in result.stdout:
+            return False
+        log(f"git commit in user project failed: {result.stderr.strip()[:400]}")
         return False
-    log(f"git commit in user project failed: {result.stderr.strip()[:400]}")
-    return False
 
 
 def tick_agent_prompt(binary: str, corpus: Path, state: Path, user_project: Path,
@@ -1324,6 +1399,7 @@ def run_tick_shard(args: argparse.Namespace, plan: dict, shard: dict, binary: st
             max_text_bytes, max_batch_messages, skill,
         )
         stalls = 0
+        api_errors = 0
         while batches < args.max_batches:
             status = memory_status(binary, corpus, state)
             complete = (
@@ -1384,20 +1460,39 @@ def run_tick_shard(args: argparse.Namespace, plan: dict, shard: dict, binary: st
             after = after_status.get("committedUnitCount", 0) if bound else 0
             committed = after_status.get("committedMessageCount", 0) if bound else 0
             percent = after_status.get("progressPercent", 0.0) if bound else 0.0
+            extra = (f" [exit {result.returncode}: {_first_error_line(result.stderr)}]"
+                     if result.returncode != 0 else "")
             log(f"[shard {index:>2}] scope {position + 1}/{len(scopes)} batch {batches}:"
-                f" +{after - before} units, {committed:,} messages committed, {percent:.1f}%")
+                f" +{after - before} units, {committed:,} messages committed,"
+                f" {percent:.1f}%{extra}")
             remember(position, {"complete": False, "messages": committed, "units": after})
             if after == before:
-                stalls += 1
-                if stalls >= args.max_stalls:
-                    log(f"[shard {index:>2}] no progress in {stalls} batch(es) on scope"
-                        f" {position + 1}; stopping this shard")
-                    remember(position, {"complete": False, "stalled": True})
-                    return shard_result(index, batches, started, progress, scopes,
-                                        user_project)
-                time.sleep(args.stall_backoff_seconds)
+                if _is_api_error(result.returncode, result.stderr):
+                    api_errors += 1
+                    max_api = getattr(args, "max_api_retries", 5)
+                    if api_errors > max_api:
+                        log(f"[shard {index:>2}] API errors exceeded {max_api} on scope"
+                            f" {position + 1}; stopping this shard")
+                        remember(position, {"complete": False, "apiError": True})
+                        return shard_result(index, batches, started, progress, scopes,
+                                            user_project)
+                    base = getattr(args, "api_retry_seconds", 120)
+                    wait = min(base * (2 ** (api_errors - 1)), 1800)
+                    log(f"[shard {index:>2}] API error (attempt {api_errors}/{max_api});"
+                        f" retrying in {wait}s")
+                    time.sleep(wait)
+                else:
+                    stalls += 1
+                    if stalls >= args.max_stalls:
+                        log(f"[shard {index:>2}] no progress in {stalls} batch(es) on scope"
+                            f" {position + 1}; stopping this shard")
+                        remember(position, {"complete": False, "stalled": True})
+                        return shard_result(index, batches, started, progress, scopes,
+                                            user_project)
+                    time.sleep(args.stall_backoff_seconds)
             else:
                 stalls = 0
+                api_errors = 0
 
     return shard_result(index, batches, started, progress, scopes, user_project)
 
@@ -1489,13 +1584,27 @@ def command_tick(args: argparse.Namespace) -> int:
     log(f"tick: {elapsed / 60:.1f} min, {committed:,} messages committed,"
         f" {finished}/{planned} scopes complete")
 
-    # Update tick state — only advance lastTickTime when messages were committed,
-    # so an empty run (no new messages in the corpus) does not skip history.
+    # Update tick state — advance lastTickTime only when it is safe to do so.
+    #
+    # We advance when:
+    #   • messages were actually committed (success), OR
+    #   • no API errors occurred AND 0 messages were committed — that means the
+    #     scope was genuinely empty or all messages were already committed from a
+    #     prior run; advancing skips the empty window so the next tick moves on.
+    #
+    # We do NOT advance when API errors occurred and 0 messages were committed:
+    # that means quota/rate-limit stopped the agents before they could do useful
+    # work, and we need to retry the same window once the quota recovers.
+    #
     # Use --through when given (enables historical replay), else use now.
     through_bound = getattr(args, "through", None)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if through_bound or committed > 0:
+    has_api_errors = any(item.get("apiErrors") for item in results)
+    if committed > 0 or not has_api_errors:
         tick_state["lastTickTime"] = through_bound or now
+    else:
+        log("tick: API errors with 0 committed messages — lastTickTime NOT advanced"
+            " (retry this window once quota recovers)")
     tick_state["lastRunMessages"] = committed
     tick_state["lastRunSeconds"] = round(elapsed, 1)
     tick_state_path.write_text(
@@ -1715,6 +1824,12 @@ def main() -> int:
                           " the merged wiki from stating each fact twice")
     run.add_argument("--max-stalls", type=int, default=2)
     run.add_argument("--stall-backoff-seconds", type=int, default=30)
+    run.add_argument("--max-api-retries", type=int, default=5,
+                     help="retry transient API errors this many times with exponential backoff"
+                          " (default 5; separate from stall budget)")
+    run.add_argument("--api-retry-seconds", type=int, default=120,
+                     help="base wait seconds before the first API-error retry (doubles each"
+                          " retry, capped at 30 min; default 120)")
     run.add_argument("--batch-timeout", type=int, default=3600)
     run.add_argument("--agent", default="pi", choices=["pi", "claude", "codex", "gemini", "command"],
                      help="coding agent to run each batch under; `command` takes any other"
@@ -1804,6 +1919,10 @@ def main() -> int:
         p.add_argument("--max-batch-messages", type=int)
         p.add_argument("--max-stalls", type=int, default=2)
         p.add_argument("--stall-backoff-seconds", type=int, default=30)
+        p.add_argument("--max-api-retries", type=int, default=5,
+                       help="retry transient API errors this many times (default 5)")
+        p.add_argument("--api-retry-seconds", type=int, default=120,
+                       help="base wait before first API-error retry in seconds (default 120)")
         p.add_argument("--max-batches", type=int, default=1000)
 
     tick = subparsers.add_parser(
