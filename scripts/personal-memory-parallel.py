@@ -1559,7 +1559,17 @@ def command_tick(args: argparse.Namespace) -> int:
 
     binary = greenbubbles_binary(args.greenbubbles)
     shards = plan["shards"]
-    parallel = max(1, min(getattr(args, "parallel", 1), len(shards)))
+    requested_parallel = max(1, min(getattr(args, "parallel", 1), len(shards)))
+    if requested_parallel > 1:
+        # All tick shards write to the SAME user-project directory (domain files,
+        # manifest).  Concurrent LLM agents would race on those files: the last
+        # writer overwrites earlier additions, silently losing facts.  Force
+        # sequential execution (parallel=1) to prevent corruption.
+        log(f"tick: --parallel {requested_parallel} requested but tick shards share a "
+            f"user-project; capping at 1 to prevent concurrent write races")
+        parallel = 1
+    else:
+        parallel = requested_parallel
     log(f"tick: {total:,} new messages across {len(shards)} shard(s), {parallel} at a time")
 
     started = time.time()
