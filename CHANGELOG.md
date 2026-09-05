@@ -4,6 +4,43 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
+## 0.3.1 - 2026-09-05
+
+### Added
+
+- `tick` and `revise`: `--language` flag selects the output language for all
+  extracted content — domain file text, field values, manifest summaries,
+  constraint messages, and any prose. Free-form value: any natural language a
+  model understands (`Chinese (Simplified)`, `English`, `日本語`, `Français`, …).
+  When omitted on the first tick, the language is auto-detected from the OS
+  locale (`LANGUAGE` / `LANG` / `LC_ALL` / `LC_MESSAGES` env vars, then
+  `locale.getlocale()`). The resolved language is stored in
+  `.greenbubbles-tick-state.json` so every subsequent tick and revise pass uses
+  the same language without repeating the flag. `revise` reads the stored
+  language from state and only falls back to OS locale when neither the flag
+  nor state is present.
+- `detect_os_language()`: internal helper that maps POSIX locale codes to
+  human-readable language names; covered by 7 new unit tests.
+- Tick agent prompt: **canonical domain names**. The driver now supplies a
+  closed list of 12 fixed domain names (`identity`, `work`, `family`, `social`,
+  `health`, `finance`, `travel`, `home`, `vehicles`, `education`,
+  `entertainment`, `legal`) with per-domain scope definitions. All shards must
+  use the exact canonical name — never synonyms. This prevents cross-shard
+  fragmentation (e.g. `household` vs `home` vs `housing` landing in separate
+  files). The agent may still create a new name when a fact genuinely falls
+  outside all 12.
+- `family` domain scope tightened to **people only** — spouse, parents,
+  siblings, relatives, their relationships, health, and milestones. Household
+  purchases, equipment, and logistics now route to `home` instead.
+
+### Fixed
+
+- Tick agent prompt: **sub-bullet State format**. Complex State entries — those
+  with multiple facts, time periods, or source citations — must now use
+  sub-bullets (`- **Field**:\n  - sub-fact *(source)*`) rather than one long
+  single-line bullet. This prevents runaway line lengths in generated domain
+  files while keeping the structure machine-readable.
+
 ## 0.3.0 - 2026-09-05
 
 ### Added
