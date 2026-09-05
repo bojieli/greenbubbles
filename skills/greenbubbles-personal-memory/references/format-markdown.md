@@ -26,9 +26,20 @@ user_project/
 ## `.gitignore`
 
 ```
+__pycache__/
+*.pyc
+*.pyo
 .DS_Store
 .greenbubbles-runs/
+.greenbubbles-tick.lock
+.greenbubbles-revise.log
 ```
+
+The driver writes this file on every `tick`, `manifest-refresh` and `revise`,
+so it stays current without being edited by hand. It writes one `.gitignore`
+for both formats, which is why the Python entries appear in a Markdown project
+too. The last two entries are the driver's process lock and internal log —
+never project state, never committed.
 
 ## `manifest.md` template
 

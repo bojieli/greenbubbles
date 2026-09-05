@@ -100,20 +100,33 @@ sentence is faithful. Gemini output can vary across runs and still needs human
 review. Each run creates a new immutable generation; automatic semantic merge,
 conflict resolution and promotion of an older inferred wiki are not built.
 
-**A canonical personal-memory corpus can cover every eligible message, but the
-wiki is still an inference.** A v2 `allMessages` preparation no longer omits
-inactive months or silent sessions. It scans every inventoried hashed message
-table, including tables whose conversation identity cannot be reversed;
-`rowCoverageComplete` can therefore be true while `sourceCoverageComplete` is
-false and `unmatchedMessageTable` remains reported. Rows with undecodable
-metadata or content remain explicit coverage failures. Per-message text still
-obeys `maximumMessageTextBytes`, attachments and unsupported payloads are
-represented by compact summaries rather than every source byte, and `tr=true`
-marks text that reached that bound. A completed unfiltered scope proves that Pi
-reviewed every hydrated corpus message, not that its Markdown captured every
-nuance. Citation checks cannot prove semantic faithfulness, so human review and
-the coverage report remain required. Legacy v1 corpora keep the old selective
+**A canonical personal-memory corpus can cover every eligible message, but what
+the agent writes from it is still an inference.** A v2 `allMessages` preparation
+no longer omits inactive months or silent sessions. It scans every inventoried
+hashed message table, including tables whose conversation identity cannot be
+reversed; `rowCoverageComplete` can therefore be true while
+`sourceCoverageComplete` is false and `unmatchedMessageTable` remains reported.
+Rows with undecodable metadata or content remain explicit coverage failures.
+Per-message text still obeys `maximumMessageTextBytes`, attachments and
+unsupported payloads are represented by compact summaries rather than every
+source byte, and `tr=true` marks text that reached that bound. A completed
+unfiltered scope proves that the agent reviewed every hydrated corpus message,
+not that the wiki or the UserAsCode project it wrote captured every nuance.
+Citation checks cannot prove semantic faithfulness, so human review and the
+coverage report remain required. Legacy v1 corpora keep the old selective
 account-holder-active behavior and cannot establish whole-database review.
+
+**The UserAsCode knowledge project is agent-written, and one tick at a time.**
+Each `tick` asks an agent to diff new facts against existing domain state and
+patch in place. Nothing mechanically proves it classified a fact into the right
+domain, noticed that an incoming fact contradicts a stored one, or avoided
+writing a duplicate in different words; `git diff` and the format's own tests
+are review aids, not proofs. Python constraints execute deterministically, but
+only over state the agent chose to record, and only once the agent has written
+the constraint. Shards do not run concurrently over one project — `tick` caps
+`--parallel` at 1 because concurrent agents raced on shared domain files — so
+extraction throughput is one agent, however many shards are requested. The
+Markdown format has no executable constraints at all; its alerts are notes.
 
 **Preparation is atomic but not resumable mid-scan.** An interrupted
 `memory prepare` leaves no published partial corpus and must restart. Once the

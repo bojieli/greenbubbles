@@ -38,7 +38,13 @@ __pycache__/
 *.pyo
 .DS_Store
 .greenbubbles-runs/
+.greenbubbles-tick.lock
+.greenbubbles-revise.log
 ```
+
+The driver writes this file on every `tick`, `manifest-refresh` and `revise`,
+so it stays current without being edited by hand. The last two entries are the
+driver's process lock and internal log — never project state, never committed.
 
 ## `manifest.py` template
 

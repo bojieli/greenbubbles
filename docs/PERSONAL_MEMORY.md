@@ -220,14 +220,15 @@ python3 scripts/personal-memory-parallel.py revise \
 The driver provides the primitives; cadence is entirely the user's choice and
 depends on their token budget and how fresh they need the project to be.
 
-| Batch frequency | Approximate cost (Gemini 3.8 Flash) | Typical use case |
+| Batch frequency | Approximate cost (Gemini Flash class) | Typical use case |
 |---|---|---|
 | Hourly (24x/day) | ~$1–3/day for active users | Power users who want near-real-time |
 | Daily | ~$0.05–0.20/day | Most users — good balance |
 | Weekly | ~$0.35–1.40/week | Casual use, large corpora |
 
 These are estimates based on measured corpus rates (~USD 1.15 per 1,000
-messages). Incremental `tick` passes cost proportionally less because only new
+messages, measured on the full corpus with `gemini-3.7-flash`; the recommended
+`gemini-3.8-flash` is the same price class but has not been re-measured). Incremental `tick` passes cost proportionally less because only new
 messages are processed, not the full corpus.
 
 Wire the driver into cron or launchd at whatever interval fits your budget:
@@ -268,9 +269,9 @@ only messages since `lastTickTime`.
 If no new activity is found, prints `tick: no new activity since <timestamp>`
 and exits 0.
 
-To divide the corpus across multiple agents, add `--shards N` (N agent
+To divide the corpus into smaller batches, add `--shards N` (N agent
 processes, run one at a time to avoid concurrent writes to shared domain
-files). See [Running shards in parallel](#running-shards-in-parallel) below.
+files). See [Running shards](#running-shards) below.
 
 ### `manifest-refresh`
 
@@ -337,23 +338,33 @@ message volume, active-month breadth, recency, and conversation kind — to cove
 a broad personal frontier early. It still schedules every canonical unit once.
 `chronological` is an explicit alternative.
 
-## Running shards in parallel
+## Running shards
 
-For large corpora, the parallel driver can shard the work across multiple agents
-running concurrently:
+For large corpora, `tick` can divide the work into several shards:
 
 ```sh
 python3 scripts/personal-memory-parallel.py tick \
   --corpus /private/path/corpus \
   --user-project ~/memory/me \
   --format python \
-  --shards 4 --parallel 4 \
+  --shards 4 \
   --agent claude
 ```
 
-Each shard writes to the same user project directory. Domain-level writes are
-generally disjoint across shards. The driver's git commit after each shard
-serializes any overlapping writes.
+Every shard writes to the same user project directory, so `tick` runs them **one
+at a time**. `--parallel` above 1 is refused for `tick`: it is capped to 1 and
+the driver logs why. Concurrent agents over one project caused last-writer-wins
+races on domain files that silently dropped extracted facts, and neither the
+per-shard git commit nor the per-project commit lock prevents that — they
+serialize the commits, not the agents' edits.
+
+Sharding still helps without concurrency: each shard gets a shorter corpus
+batch, so an interrupted run loses less work and each agent context stays
+smaller. Wall-clock time is not reduced.
+
+The `run` subcommand, which builds a derived wiki rather than a UserAsCode
+project, gives each shard its own output and does run agents concurrently —
+`--parallel` there defaults to 8.
 
 ## Coverage means what the agent actually saw
 

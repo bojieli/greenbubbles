@@ -66,6 +66,18 @@ Notable changes to GreenBubbles are documented here. The project follows
   with a sentence recommending Gemini 3.8 Flash, which that harness ignores
   without `--model`. Executable constraints are now attributed to the Python
   format only; the Markdown format's alerts are hand-maintained notes.
+- `docs/PERSONAL_MEMORY.md`: the sharding section still showed
+  `--shards 4 --parallel 4` running concurrently and claimed per-shard commits
+  serialized overlapping writes. `tick` has capped `--parallel` at 1 since the
+  write-race fix; the section now says so and explains what sharding still
+  buys. Cost table no longer attributes the measured rate to a model it was
+  not measured on.
+- `docs/KNOWN_LIMITATIONS.md`: records what the UserAsCode project itself does
+  not prove — agent-assigned domains, agent-detected contradictions and
+  duplicates, constraints that cover only recorded state, single-agent
+  throughput — and stops describing the extraction agent as Pi specifically.
+- Both format references now show the `.gitignore` the driver actually writes,
+  including the process lock and revise log.
 
 ## 0.2.0 - 2026-09-03
 
