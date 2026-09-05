@@ -20,7 +20,7 @@ getrandom = "0.4"
 hex = "0.4"
 hkdf = "0.12"
 libc = "0.2"
-md5 = "0.7"
+md5 = "0.8"
 prost = "0.13"
 rusqlite = { version = "0.40", features = ["backup", "bundled-sqlcipher", "hooks"] }
 roxmltree = "0.21"
