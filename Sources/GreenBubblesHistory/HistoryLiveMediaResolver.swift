@@ -261,11 +261,14 @@ public struct HistoryLiveMediaResolver: Sendable {
         throw HistoryLiveMediaError.requestTimedOut
       }
     }
-    let responseData = output.finish()
+    let outputStream = output.finish()
     _ = errors.finish()
     try Task.checkCancellation()
     guard !output.overflowed, !errors.overflowed else {
       throw HistoryLiveMediaError.invalidResponse
+    }
+    guard outputStream.reachedEnd else {
+      throw HistoryLiveMediaError.requestTimedOut
     }
     guard process.terminationReason == .exit, process.terminationStatus == 0 else {
       throw HistoryLiveMediaError.requestFailed(
@@ -273,7 +276,7 @@ public struct HistoryLiveMediaResolver: Sendable {
     }
     let response: LiveQueryResponse
     do {
-      response = try JSONDecoder().decode(LiveQueryResponse.self, from: responseData)
+      response = try JSONDecoder().decode(LiveQueryResponse.self, from: outputStream.data)
     } catch {
       throw HistoryLiveMediaError.invalidResponse
     }
@@ -611,12 +614,22 @@ private final class BoundedProcessStream: @unchecked Sendable {
     try pipe.fileHandleForWriting.close()
   }
 
-  func finish() -> Data {
-    if completed.wait(timeout: .now() + 2) == .timedOut {
+  /// Waits for the reader to reach end of file, and reports whether it did.
+  ///
+  /// Only called once the child has exited, so both copies of the write end are
+  /// closed and the reader has a bounded amount left to drain — normally
+  /// microseconds. The budget is generous anyway, because a loaded machine can
+  /// leave the reader thread unscheduled for seconds. Returning short data
+  /// silently is the thing to avoid: the caller cannot tell a truncated read
+  /// from a malformed response, so a drain that does not finish is reported as
+  /// one rather than parsed as the other.
+  func finish() -> (data: Data, reachedEnd: Bool) {
+    if completed.wait(timeout: .now() + .seconds(30)) == .timedOut {
       stop()
-      _ = completed.wait(timeout: .now() + 1)
+      _ = completed.wait(timeout: .now() + .seconds(1))
+      return (lock.withLock { storage }, false)
     }
-    return lock.withLock { storage }
+    return (lock.withLock { storage }, true)
   }
 
   func stop() {

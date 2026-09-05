@@ -50,6 +50,19 @@ Notable changes to GreenBubbles are documented here. The project follows
   writable and renames a `0700` root. Covered by
   `published_corpus_is_finalized_read_only`, which asserts the end state — root
   `0500`, every file `0400` — rather than the order it is reached in.
+- `HistoryLiveMediaResolver` no longer reports a starved reader as a malformed
+  response. Draining the local CLI's stdout had a fixed two-second budget, and
+  on expiry it closed the pipe and returned whatever had arrived; the short
+  buffer then failed to decode, so the caller saw `invalidResponse` rather than
+  the truncation that actually happened. `finish()` runs only after the child
+  has exited, so the reader has a bounded amount left to read — but a loaded
+  machine can leave its thread unscheduled past two seconds, which is how this
+  surfaced as an intermittent CI failure. The budget is now 30 seconds and a
+  drain that does not reach end of file raises `requestTimedOut` instead of
+  handing partial data to the decoder. The two sibling copies of this class,
+  `DirectBoundedProcessStream` and `SnapshotBoundedProcessStream`, already
+  waited for end of file and surfaced read errors; this brings the third into
+  line.
 - `tick` driver: `lastTickTime` is no longer advanced when API errors occurred
   and 0 messages were committed.  Quota exhaustion no longer silently skips
   processing windows; the same window is retried once quota recovers.
