@@ -21,6 +21,15 @@ Notable changes to GreenBubbles are documented here. The project follows
 
 ### Fixed
 
+- `THIRD_PARTY_NOTICES.md` regenerated against the current lockfile. The bundle
+  had not been reproduced since before the live-AI and personal-memory work
+  landed, so 43 shipped runtime crates carried no notice: the `ureq` HTTPS
+  client `ai-summarize-direct` uses, its `rustls` / `rustls-webpki` /
+  `webpki-roots` TLS stack, the ICU crates, `flate2`, `chrono-tz`, `url` and
+  `log`. `CDLA-Permissive-2.0` is now an accepted license in `about.toml`,
+  covering Mozilla's CA root store as redistributed by `webpki-roots`; its
+  text and disclaimers ship in the bundle. This unblocks CI, which fails the
+  notice-reproduction step, and with it the release workflow that gates on CI.
 - `tick` driver: `lastTickTime` is no longer advanced when API errors occurred
   and 0 messages were committed.  Quota exhaustion no longer silently skips
   processing windows; the same window is retried once quota recovers.
