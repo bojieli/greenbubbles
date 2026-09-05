@@ -21,7 +21,7 @@ hex = "0.4"
 hkdf = "0.12"
 libc = "0.2"
 md5 = "0.7"
-prost = "0.13"
+prost = "0.14"
 rusqlite = { version = "0.40", features = ["backup", "bundled-sqlcipher", "hooks"] }
 roxmltree = "0.21"
 serde = { version = "1", features = ["derive"] }
