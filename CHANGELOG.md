@@ -4,7 +4,7 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.3.0 - 2026-09-05
 
 ### Added
 

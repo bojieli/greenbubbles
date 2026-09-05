@@ -3,6 +3,10 @@
 The 0.1.1 source and macOS arm64 binary release is approved; a hosted launch
 still requires a green Release workflow. Last reviewed 2026-08-29.
 
+The 0.3.0 release is approved on the same boundary, extended to cover the
+personal-memory surface and the binary's first outbound network client. See
+[0.3.0 review](#030-review) for what changed and what the owner decided.
+
 This records the owner's explicit release decision and the mechanical gates CI
 must pass. Unchecked boxes are things that have genuinely not happened yet, and
 are left visible rather than tidied away.
@@ -10,6 +14,44 @@ are left visible rather than tidied away.
 It is not legal advice, and release **never** authorizes publishing real
 conversations, databases, credentials, media, captures, or owner-private
 diagnostic artefacts.
+
+## 0.3.0 review
+
+Reviewed 2026-09-05. 0.2.0 was tagged but never published: CI was failing at
+the notice-reproduction step, and the release workflow gates on CI. 0.3.0 is
+the first release carrying the personal-memory work.
+
+What it adds beyond the 0.1.1 boundary:
+
+- The personal-memory / UserAsCode extraction surface: `memory prepare`
+  (including `--extend`), the corpus protocol, and
+  `scripts/personal-memory-parallel.py`. A prepared corpus can duplicate every
+  eligible message into its own index, and `tick` hands that text to whichever
+  model the chosen coding-agent harness talks to. Both facts are now stated in
+  the README section that introduces the feature, not only in PRIVACY.md.
+- `ai-summarize-direct` and, with it, the first outbound HTTPS client in the
+  shipped binary (`ureq` and its `rustls` stack). The connector boundary still
+  decides what may reach a remote model; this is the client that carries it.
+- The driver script. Its decision logic and project setup are unit tested in
+  CI (`scripts/test_personal_memory_parallel.py`), but nothing tests an
+  end-to-end extraction pass — that needs a real corpus and a real agent, so
+  the tick/revise loop is exercised only by hand.
+
+- [x] The owner extends the approved distribution boundary to 0.3.0, covering
+      the personal-memory surface and the binary's outbound network client. The
+      categories in the table below are otherwise unchanged, and sending still
+      ships closed.
+- [x] `CDLA-Permissive-2.0` is accepted for the shipped notice bundle. It
+      covers Mozilla's CA root store as redistributed by `webpki-roots`, a
+      permissive data license whose redistribution condition is that its text
+      and disclaimers travel with the data; `THIRD_PARTY_NOTICES.md` carries
+      both.
+- [x] Version bumped to `0.3.0`, CHANGELOG entry dated, and the README install
+      block updated to the assets `v0.3.0` will publish.
+- [ ] Tag `v0.3.0` annotated on this commit and run
+      `bash scripts/check-public-release.sh v0.3.0` against it.
+- [ ] Confirm the tagged Release workflow is green, then independently verify
+      the published assets as the binary-release gates below require.
 
 ## Approved 0.1.1 boundary
 
@@ -55,12 +97,14 @@ acquisition route, or qualified legal advice for every jurisdiction.
 - [x] The repository owner is the release/security owner. Private vulnerability
       reporting, a three-business-day acknowledgement target, release holds,
       artifact revocation, and takedown procedures are defined.
-- [ ] Immediately before visibility changes, withdraw the published unsigned
-      `v0.1.0` prerelease so old assets cannot become public accidentally.
-- [ ] Make the repository public, enable private vulnerability reporting, and
-      configure the strongest branch rules available on the account plan.
-- [ ] Record the exact approved commit and annotated `v0.1.1` tag in the hosted
-      release.
+- [x] The unsigned `v0.1.0` prerelease was withdrawn; only its tag remains and
+      no release serves its assets. Verified 2026-09-05.
+- [x] The repository is public, private vulnerability reporting is enabled, and
+      `main` is protected: required `test` status check with strict
+      up-to-date-ness, required conversation resolution, force-push and deletion
+      blocked. Secret scanning and push protection are on. Verified 2026-09-05.
+- [x] The hosted `v0.1.1` prerelease is built from the annotated `v0.1.1` tag on
+      `main`. Verified 2026-09-05.
 
 ## Binary-release gates
 
@@ -114,6 +158,7 @@ swift build -c release
 swift scripts/check-distribution-inventory.swift
 swift scripts/check-secret-hygiene.swift
 swift scripts/check-pinned-build-profile.swift
+python3 -m unittest discover -s scripts -p 'test_*.py'
 
 cd Native/GreenBubbles
 cargo fmt --check

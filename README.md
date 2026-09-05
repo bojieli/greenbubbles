@@ -73,9 +73,9 @@ Download the latest `GreenBubbles-*-macos-arm64.dmg` from
 drag **GreenBubbles** to Applications:
 
 ```console
-grep ' GreenBubbles-0.2.0-macos-arm64.dmg$' SHA256SUMS-0.2.0.txt | \
+grep ' GreenBubbles-0.3.0-macos-arm64.dmg$' SHA256SUMS-0.3.0.txt | \
   shasum -a 256 -c -
-xcrun stapler validate GreenBubbles-0.2.0-macos-arm64.dmg
+xcrun stapler validate GreenBubbles-0.3.0-macos-arm64.dmg
 ```
 
 Every executable is Developer ID signed and Apple notarized. The same release
