@@ -302,6 +302,19 @@ python3 scripts/personal-memory-parallel.py revise \
 Commits with a message summarizing the changes. Run periodically — monthly or
 quarterly — rather than after every tick.
 
+## Testing the driver
+
+The driver's decision logic and project setup have unit tests that need no
+corpus, no agent and no network:
+
+```sh
+python3 -m unittest discover -s scripts -p 'test_*.py' -v
+```
+
+CI runs the same command. An end-to-end extraction pass is not covered — that
+needs a real corpus and a real agent — so changes to the tick loop still want a
+manual run against a small `--max-conversations` corpus before release.
+
 ## Run-state and continuation
 
 The `tick` command stores its internal run state in

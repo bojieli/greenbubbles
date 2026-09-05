@@ -39,6 +39,9 @@ jobs:
       - name: Check cross-language pinned build profile
         run: swift scripts/check-pinned-build-profile.swift
 
+      - name: Test the personal-memory driver
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+
       - name: Check packaging manifests
         run: |
           bash -n scripts/package-send-helper.sh

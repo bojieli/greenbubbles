@@ -18,6 +18,15 @@ Notable changes to GreenBubbles are documented here. The project follows
   subcommands.
 - `tick` driver: per-project `threading.Lock` in `git_commit_user_project`
   prevents concurrent shards from interleaving `git add -A` and `git commit`.
+- `scripts/test_personal_memory_parallel.py`: 53 unit tests over the driver's
+  decision logic and project setup — the API-error retry classifier, the stderr
+  snippet, timestamp comparison across timezones, scope splitting/fusing/
+  packing, batch bounds, harness and model selection, the `tick` concurrency
+  cap, the project lock, git init and commit, and the remote-privacy warning.
+  Nothing in the suite launches an agent, reads a corpus, or makes a network
+  request. CI runs it as its own step; it was previously only byte-compiled.
+- `tick_parallelism()` extracted from `command_tick` so the concurrency cap is
+  testable on its own. Behaviour is unchanged: always 1, and it says so.
 
 ### Fixed
 
