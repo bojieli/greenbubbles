@@ -15,6 +15,47 @@ use greenbubbles::personal_memory::{
 use rusqlite::{params, Connection};
 use serde_json::Value;
 
+/// A published corpus is immutable evidence: its root is traversal-only and
+/// every file below it is read-only. The root is sealed after the publishing
+/// rename rather than before, because Darwin will not rename a directory its
+/// owner cannot write — so this pins the end state that resequencing must
+/// preserve, not the order it is reached in.
+#[test]
+fn published_corpus_is_finalized_read_only() {
+    let fixture = Fixture::new();
+    let policy_path = write_policy(&fixture);
+    let source = LiveQuerySource::open(&fixture.root, QueryDatabaseAccess::Decrypted).unwrap();
+    let corpus = fixture.directory.path().join("corpus");
+    prepare_personal_memory_corpus(&source, &policy_path, &corpus).unwrap();
+
+    let root_mode = fs::metadata(&corpus).unwrap().permissions().mode() & 0o777;
+    assert_eq!(root_mode, 0o500, "corpus root must be traversal-only");
+
+    let mut checked_files = 0usize;
+    let mut checked_directories = 0usize;
+    for entry in walkdir::WalkDir::new(&corpus).min_depth(1) {
+        let entry = entry.unwrap();
+        let mode = entry.metadata().unwrap().permissions().mode() & 0o777;
+        if entry.file_type().is_dir() {
+            assert_eq!(
+                mode,
+                0o500,
+                "{} must be traversal-only",
+                entry.path().display()
+            );
+            checked_directories += 1;
+        } else {
+            assert_eq!(mode, 0o400, "{} must be read-only", entry.path().display());
+            checked_files += 1;
+        }
+    }
+    assert!(checked_files > 0, "corpus published no files");
+    assert!(
+        checked_directories > 0,
+        "corpus published no subdirectories"
+    );
+}
+
 #[test]
 fn corpus_selection_is_owner_active_and_batch_state_is_crash_safe() {
     let fixture = Fixture::new();

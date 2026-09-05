@@ -39,6 +39,17 @@ Notable changes to GreenBubbles are documented here. The project follows
   covering Mozilla's CA root store as redistributed by `webpki-roots`; its
   text and disclaimers ship in the bundle. This unblocks CI, which fails the
   notice-reproduction step, and with it the release workflow that gates on CI.
+- `personal-memory` publication no longer renames a directory it has already
+  made read-only. `protect_immutable_corpus_tree` sealed the staging root to
+  `0500` and the next statement renamed it into place; Darwin refuses to rename
+  a directory its owner cannot write, so preparation failed with
+  `Permission denied` on that platform. The root is now sealed by
+  `seal_published_corpus_root` immediately after the rename, at the final path,
+  so the finalized tree is identical and the ordering no longer depends on
+  platform rename semantics. The extend path was never affected: it finalizes
+  writable and renames a `0700` root. Covered by
+  `published_corpus_is_finalized_read_only`, which asserts the end state — root
+  `0500`, every file `0400` — rather than the order it is reached in.
 - `tick` driver: `lastTickTime` is no longer advanced when API errors occurred
   and 0 messages were committed.  Quota exhaustion no longer silently skips
   processing windows; the same window is retried once quota recovers.

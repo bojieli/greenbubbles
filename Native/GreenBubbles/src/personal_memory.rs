@@ -1648,6 +1648,7 @@ pub fn prepare_personal_memory_corpus_with_progress(
     File::open(staging.path())?.sync_all()?;
     protect_immutable_corpus_tree(staging.path())?;
     fs::rename(staging.path(), output_directory)?;
+    seal_published_corpus_root(output_directory)?;
     File::open(parent)?.sync_all()?;
     progress(&PersonalMemoryProgress {
         phase: "complete",
@@ -6650,6 +6651,13 @@ fn protect_extendable_corpus_tree(root: &Path) -> Result<(), RestoreError> {
     Ok(())
 }
 
+/// Finalize a prepared corpus tree read-only, except for its root.
+///
+/// The root keeps its writable mode until publication has happened. Darwin
+/// refuses to rename a directory whose owner cannot write it, so sealing the
+/// staging root here would make the `fs::rename` that publishes it fail with
+/// `EACCES`. `seal_published_corpus_root` closes the gap immediately after the
+/// rename, at the final path.
 fn protect_immutable_corpus_tree(root: &Path) -> Result<(), RestoreError> {
     for entry in walkdir::WalkDir::new(root)
         .contents_first(true)
@@ -6672,6 +6680,9 @@ fn protect_immutable_corpus_tree(root: &Path) -> Result<(), RestoreError> {
             }
             fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o400))?;
         } else if metadata.is_dir() {
+            if entry.path() == root {
+                continue;
+            }
             fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o500))?;
         } else {
             return Err(RestoreError::Integrity(
@@ -6679,6 +6690,25 @@ fn protect_immutable_corpus_tree(root: &Path) -> Result<(), RestoreError> {
             ));
         }
     }
+    Ok(())
+}
+
+/// Seal a published corpus root traversal-only, completing the finalization
+/// that `protect_immutable_corpus_tree` deliberately left open so the tree
+/// could be renamed into place.
+fn seal_published_corpus_root(root: &Path) -> Result<(), RestoreError> {
+    let metadata = fs::symlink_metadata(root)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(RestoreError::Integrity(
+            "published corpus root is not a directory".into(),
+        ));
+    }
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(RestoreError::Integrity(
+            "published corpus root is owned by another account".into(),
+        ));
+    }
+    fs::set_permissions(root, fs::Permissions::from_mode(0o500))?;
     Ok(())
 }
 
