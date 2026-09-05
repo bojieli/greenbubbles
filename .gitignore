@@ -35,3 +35,7 @@ decrypted/
 
 # Python bytecode from the packaging checks.
 __pycache__/
+
+# Local agent scratch space, including agent worktrees checked out in place.
+# Ignored, and therefore outside the secret-hygiene scan, like /.tmp above.
+/.claude
