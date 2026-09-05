@@ -54,9 +54,11 @@ it read-only.
 - **Back it up so it outlives WeChat.** Encrypted with its own key and 24
   recovery words, so a backup still opens if you lose the app or the account.
 - **Turn your history into a living knowledge project.** Extract into a
-  git-versioned Python or Markdown project with executable constraints that
-  proactively alert you to cross-domain conflicts — passport expiry vs. upcoming
-  trip, allergy vs. new prescription, conflicting instructions across sessions.
+  git-versioned Python or Markdown project. The Python format carries
+  executable constraints that proactively alert you to cross-domain conflicts —
+  passport expiry vs. upcoming trip, allergy vs. new prescription, conflicting
+  instructions across sessions; the Markdown format keeps the same alerts as
+  notes you maintain by hand.
 - **Turn a million messages into a wiki.** Coding agents you already pay for
   read your history in parallel and write cited Markdown, one message at a
   time, never a summary of a summary.
@@ -231,26 +233,43 @@ reversible.
 
 ```console
 # Prepare the corpus once (local, no API cost)
-greenbubbles memory prepare corpus-v2 \
-  --selection-policy selection-policy.json --profile live-account
-
-# Extend it incrementally when new messages arrive
-greenbubbles memory prepare corpus-v3 \
-  --extend corpus-v2 \
-  --selection-policy selection-policy.json --profile live-account
+greenbubbles memory prepare /private/path/corpus-v2 \
+  --selection-policy /private/path/selection-policy.json --profile live-account
 
 # Run an incremental extraction pass into a Python knowledge project
 python3 scripts/personal-memory-parallel.py tick \
-  --corpus corpus-v2 \
+  --corpus /private/path/corpus-v2 \
   --user-project ~/memory/me \
   --format python \
-  --agent claude
+  --agent gemini --model gemini-3.8-flash
+
+# When new messages arrive, extend the corpus, then tick against the new one
+greenbubbles memory prepare /private/path/corpus-v3 \
+  --extend /private/path/corpus-v2 \
+  --selection-policy /private/path/selection-policy.json --profile live-account
+
+python3 scripts/personal-memory-parallel.py tick \
+  --corpus /private/path/corpus-v3 \
+  --user-project ~/memory/me \
+  --format python \
+  --agent gemini --model gemini-3.8-flash
 ```
 
 The first `tick` creates `~/memory/me/` as a git repo and processes the full
 corpus. Subsequent ticks process only new messages since the last run. Cadence
 is user-configured — see [docs/PERSONAL_MEMORY.md](docs/PERSONAL_MEMORY.md) for
-a cost table. Gemini 3.8 Flash is the recommended model.
+a cost table.
+
+**This step sends message text off your machine.** Preparation is local, but
+extraction is not: `tick` runs a coding agent — `--agent gemini`, `claude`,
+`codex`, `pi` or your own command — and every page of chat text it reads goes
+to whatever model that harness talks to, under that provider's terms.
+GreenBubbles makes no request itself and cannot audit what happens next.
+Gemini 3.8 Flash is the recommended model; with `--agent claude`, `codex` or
+`gemini` and no `--model`, the harness uses whatever model it is already
+configured with. The prepared corpus is equally sensitive — it can duplicate
+every eligible message into its own index — so keep it, and the selection
+policy, in an owner-only directory and protect them like the source database.
 
 The Python project looks like this after the first pass:
 
@@ -267,7 +286,8 @@ ACTIVE_ALERTS: list[str] = [
 ]
 ```
 
-The equivalent Markdown manifest:
+The equivalent Markdown manifest, where the same alerts are notes the agent
+writes rather than output of a constraint it can execute:
 
 ```markdown
 # Personal Memory Manifest

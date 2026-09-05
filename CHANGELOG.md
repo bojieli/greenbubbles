@@ -57,6 +57,16 @@ Notable changes to GreenBubbles are documented here. The project follows
 - Markdown commit step now carries the same urgency language as Python: names
   both validation checks and warns that skipping causes duplication on retry.
 
+### Documentation
+
+- README: the memory-extraction section now states that `tick` sends message
+  text to whichever model the chosen harness talks to, and that the prepared
+  corpus can duplicate every eligible message. Its example ticked the old
+  corpus straight after extending to a new one, and paired `--agent claude`
+  with a sentence recommending Gemini 3.8 Flash, which that harness ignores
+  without `--model`. Executable constraints are now attributed to the Python
+  format only; the Markdown format's alerts are hand-maintained notes.
+
 ## 0.2.0 - 2026-09-03
 
 ### Added
