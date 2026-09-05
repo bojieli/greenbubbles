@@ -422,6 +422,60 @@ class WikiMerge(unittest.TestCase):
         self.assertEqual(driver.merge_markdown("a\nb\n", "b\n"), "a\nb\n")
 
 
+class MarkdownLineWrap(unittest.TestCase):
+    """_wrap_markdown_line and reformat_markdown_domain_files keep lines short."""
+
+    def test_short_line_unchanged(self):
+        line = "- **Field**: short value *(source: s1, 2026-01-01)*\n"
+        self.assertEqual(driver._wrap_markdown_line(line, width=100), line)
+
+    def test_long_bullet_is_wrapped(self):
+        long_line = "- **Field**: " + ("word " * 30) + "*(source: s1, 2026-01-01)*\n"
+        result = driver._wrap_markdown_line(long_line, width=100)
+        for line in result.splitlines():
+            self.assertLessEqual(len(line), 100, f"line too long: {line!r}")
+
+    def test_continuation_uses_two_space_indent(self):
+        long_line = "- **F**: " + ("word " * 30) + "\n"
+        result = driver._wrap_markdown_line(long_line, width=100)
+        lines = result.splitlines()
+        # Every continuation line must start with 2 spaces (relative to bullet dash)
+        for cont in lines[1:]:
+            self.assertTrue(cont.startswith("  "), f"no indent on continuation: {cont!r}")
+
+    def test_heading_line_not_wrapped(self):
+        heading = "## State\n"
+        self.assertEqual(driver._wrap_markdown_line(heading, width=10), heading)
+
+    def test_blank_line_not_wrapped(self):
+        self.assertEqual(driver._wrap_markdown_line("\n", width=10), "\n")
+
+    def test_reformat_writes_file_when_too_long(self):
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td)
+            domains = proj / "domains"
+            domains.mkdir()
+            f = domains / "work.md"
+            long_content = "## State\n\n- **Job**: " + ("word " * 30) + "\n"
+            f.write_text(long_content, encoding="utf-8")
+            changed = driver.reformat_markdown_domain_files(proj, width=100)
+            self.assertTrue(changed)
+            result = f.read_text(encoding="utf-8")
+            for line in result.splitlines():
+                self.assertLessEqual(len(line), 100)
+
+    def test_reformat_no_change_when_already_short(self):
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td)
+            (proj / "domains").mkdir()
+            f = proj / "domains" / "work.md"
+            content = "## State\n\n- **Job**: engineer *(source: s1, 2026-01-01)*\n"
+            f.write_text(content, encoding="utf-8")
+            changed = driver.reformat_markdown_domain_files(proj, width=100)
+            self.assertFalse(changed)
+            self.assertEqual(f.read_text(encoding="utf-8"), content)
+
+
 class LanguageDetection(unittest.TestCase):
     """detect_os_language() maps locale codes to human-readable names."""
 

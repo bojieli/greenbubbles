@@ -117,17 +117,20 @@ as needed — the taxonomy is a starting point, not a closed set.
 | Domain | What it covers |
 |---|---|
 | `identity` | Full name, nicknames, date of birth, nationality, passport and ID numbers, email, phone, home address |
-| `travel` | Past and upcoming trips, flights, hotels, passports, visas, travel preferences, loyalty programs |
-| `finance` | Bank accounts, credit cards, investments, expenses, transfers, debts, insurance, financial goals |
+| `work` | Employer, role, projects, schedule, colleagues, career events, job-search, professional goals |
+| `family` | **People only**: spouse, parents, siblings, relatives — relationships, ages, schools, health concerns, milestones. Does NOT include household purchases, equipment, or logistics. |
+| `social` | Close friends, acquaintances, social activities, clubs, recurring plans, communication preferences |
 | `health` | Medical conditions, allergies, current medications, prescriptions, fitness habits, appointments |
+| `finance` | Bank accounts, income, expenses, investments, transfers, debts, insurance, financial goals, taxes |
+| `travel` | Past and upcoming trips, flights, hotels, passports, visas, travel preferences, loyalty programs |
 | `vehicles` | Cars, bikes, registration, insurance, service history, upcoming maintenance |
-| `family` | Household members, relatives, relationships, ages, schools, health concerns, life events |
-| `social` | Close friends, social activities, clubs, recurring plans, communication preferences |
-| `work` | Employer, role, projects, schedule, colleagues, career events, professional goals |
 | `entertainment` | Media preferences, subscriptions, hobbies, memberships |
+| `home` | Household equipment, appliances, purchases, renovation, real estate, home logistics |
 
-Create a new domain (e.g., `property`, `legal`, `education`) whenever facts
-accumulate in a life area that none of the above captures.
+Create a new domain (e.g., `property`, `legal`, `education`, `hobbies`) whenever
+facts accumulate in a life area that none of the above captures. **Prefer a precise
+new domain over forcing a fact into the nearest existing domain** — a fact about a
+printer belongs in `home`, not `family`.
 
 ## Deduplication and correct-in-place
 
