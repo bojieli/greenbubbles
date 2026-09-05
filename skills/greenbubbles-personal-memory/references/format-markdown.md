@@ -79,6 +79,29 @@ Messages committed: 446,435
 
 **Active Alerts (Markdown format):** Since Markdown format has no executable constraint runner, alerts are maintained manually. When you notice a cross-domain issue during extraction (e.g., a passport expiry date conflicts with an upcoming trip), add a bullet to the Active Alerts section. When the issue is resolved or no longer relevant, remove or cross out the bullet.
 
+## Canonical domain names
+
+All shards in a parallel run write to the same domain files. Use EXACTLY these
+names — never synonyms:
+
+| Name | Covers |
+|---|---|
+| `identity` | Personal profile: name, contacts, education, background, goals |
+| `work` | Employment, career, projects, colleagues, job-search, offers |
+| `family` | **People only**: spouse, parents, siblings, relatives — relationships, health, milestones. NOT household purchases or home logistics. |
+| `social` | Friends, acquaintances, social activities, clubs |
+| `health` | Medical, medications, fitness, appointments |
+| `finance` | Accounts, income, expenses, investments, taxes, transfers |
+| `travel` | Trips, flights, hotels, visas, itineraries |
+| `home` | Housing, household appliances and purchases, renovation, real estate |
+| `vehicles` | Cars, bikes, registration, insurance, service |
+| `education` | Academic history, degrees, courses, research, academic service |
+| `entertainment` | Media, games, hobbies, subscriptions, memberships |
+| `legal` | Contracts, agreements, disputes, compliance |
+
+Create a new domain name only when a fact genuinely belongs to a life area not
+covered above. Never use synonyms (`household` → `home`, `career` → `work`).
+
 ## `domains/<domain>.md` template
 
 ```markdown
@@ -88,20 +111,23 @@ Messages committed: 446,435
 
 <!-- Ontology: concepts and relationships this domain tracks -->
 - **PassportInfo**: number (string, redacted), expiry (date), issuing_country, nationality
-- **Trip**: destination, departure (date), return_date (date), booking_refs (list), is_international (bool), notes
+- **Trip**: destination, departure (date), return_date (date), booking_refs (list), notes
 - **TravelProfile**: seat_preference (string), frequent_flyer (list)
 
 ## State
 
-<!-- One entry per fact, deduplicated. Never add duplicate fields.
-     Format: - **Field**: value  *(source: session_N, YYYY-MM-DD)* -->
+<!-- One entry per concept, deduplicated. Never add duplicate fields.
+     Simple fact  → single line: - **Field**: value *(source: session_N, YYYY-MM-DD)*
+     Complex fact → sub-bullets: - **Field**:\n  - sub-fact *(source)*\n  - sub-fact *(source)* -->
 
-- **PassportNumber**: AB*****67  *(source: session_003, 2026-01-20)*
-- **PassportExpiry**: 2026-06-01  *(source: session_003, 2026-01-20)*
-- **PassportIssuingCountry**: US  *(source: session_003, 2026-01-20)*
-- **UpcomingTrip_Singapore**: departs 2026-06-15, returns 2026-06-22, booking SQ-1234  *(source: session_005, 2026-01-18)*
-- **SeatPreference**: Aisle on flights over 4 hours, window on shorter legs  *(source: session_001, 2025-11-10)*
-- **FrequentFlyer**: Singapore Airlines KrisFlyer  *(source: session_002, 2025-11-25)*
+- **PassportNumber**: AB*****67 *(source: session_003, 2026-01-20)*
+- **PassportExpiry**: 2026-06-01 *(source: session_003, 2026-01-20)*
+- **UpcomingTrip_Singapore**: departs 2026-06-15, returns 2026-06-22, SQ-1234 *(source: session_005, 2026-01-18)*
+- **SeatPreference**: aisle on flights >4 h, window on shorter legs *(source: session_001, 2025-11-10)*
+- **Employment_Acme**:
+  - Joined 2024-03 as Staff Engineer, remote *(source: session_001, 2024-03-01)*
+  - Promoted to Principal 2025-06 *(source: session_012, 2025-06-15)*
+  - Left 2026-01, severance negotiated *(source: session_030, 2026-01-20)*
 
 ## History
 
@@ -144,8 +170,15 @@ And append to History:
 When a fact does not yet appear in `## State`:
 
 1. Verify by scanning every existing line in the State section. If any line starts with `- **FieldName**:` for the same field, do not add — update instead.
-2. Append the new line at the end of the State section, before the `## History` heading.
-3. Use the format: `- **FieldName**: value  *(source: session_N, YYYY-MM-DD)*`
+2. Append at the end of the State section, before the `## History` heading.
+3. **Simple fact** (one datum, one source): `- **FieldName**: value *(source: session_N, YYYY-MM-DD)*`
+4. **Complex entry** (multiple facts, time periods, or sources): use sub-bullets:
+   ```
+   - **FieldName**:
+     - First fact or time period *(source: session_N, YYYY-MM-DD)*
+     - Second fact or update *(source: session_M, YYYY-MM-DD)*
+   ```
+   Never put multiple distinct facts or sources on one long single-line bullet.
 
 ### Unchanged facts
 

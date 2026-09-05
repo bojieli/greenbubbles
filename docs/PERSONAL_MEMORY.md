@@ -114,23 +114,28 @@ checks without pre-computed alerts).
 Facts are classified into standard life domains. The agent creates new domains
 as needed — the taxonomy is a starting point, not a closed set.
 
+All shards in a parallel run write to the same domain files, so they must agree
+on domain names. The driver enforces canonical names:
+
 | Domain | What it covers |
 |---|---|
 | `identity` | Full name, nicknames, date of birth, nationality, passport and ID numbers, email, phone, home address |
-| `work` | Employer, role, projects, schedule, colleagues, career events, job-search, professional goals |
-| `family` | **People only**: spouse, parents, siblings, relatives — relationships, ages, schools, health concerns, milestones. Does NOT include household purchases, equipment, or logistics. |
+| `work` | Employer, role, projects, schedule, colleagues, career events, job-search, offers, professional goals |
+| `family` | **People only**: spouse, parents, siblings, relatives — relationships, ages, schools, health concerns, milestones. Does NOT include household purchases, equipment, or home logistics. |
 | `social` | Close friends, acquaintances, social activities, clubs, recurring plans, communication preferences |
 | `health` | Medical conditions, allergies, current medications, prescriptions, fitness habits, appointments |
 | `finance` | Bank accounts, income, expenses, investments, transfers, debts, insurance, financial goals, taxes |
-| `travel` | Past and upcoming trips, flights, hotels, passports, visas, travel preferences, loyalty programs |
+| `travel` | Past and upcoming trips, flights, hotels, passports, visas, travel preferences, itineraries |
+| `home` | Housing, household appliances and purchases, renovation, real estate, home logistics |
 | `vehicles` | Cars, bikes, registration, insurance, service history, upcoming maintenance |
-| `entertainment` | Media preferences, subscriptions, hobbies, memberships |
-| `home` | Household equipment, appliances, purchases, renovation, real estate, home logistics |
+| `education` | Academic history, degrees, courses, research, academic service (e.g. conference PC membership) |
+| `entertainment` | Media preferences, games, hobbies, subscriptions, memberships |
+| `legal` | Contracts, agreements, disputes, compliance, IP |
 
-Create a new domain (e.g., `property`, `legal`, `education`, `hobbies`) whenever
-facts accumulate in a life area that none of the above captures. **Prefer a precise
-new domain over forcing a fact into the nearest existing domain** — a fact about a
-printer belongs in `home`, not `family`.
+Create a new domain with a new name only when facts genuinely belong to a life
+area not covered above. Never use synonyms (`household` instead of `home`,
+`career` instead of `work`) — exact canonical names ensure all shards write to
+the same file.
 
 ## Deduplication and correct-in-place
 
