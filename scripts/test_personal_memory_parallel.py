@@ -422,5 +422,80 @@ class WikiMerge(unittest.TestCase):
         self.assertEqual(driver.merge_markdown("a\nb\n", "b\n"), "a\nb\n")
 
 
+class LanguageDetection(unittest.TestCase):
+    """detect_os_language() maps locale codes to human-readable names."""
+
+    def _detect(self, env: dict) -> str:
+        old = {k: os.environ.get(k) for k in ("LANGUAGE", "LANG", "LC_ALL", "LC_MESSAGES")}
+        try:
+            for k in old:
+                os.environ.pop(k, None)
+            os.environ.update(env)
+            return driver.detect_os_language()
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_zh_cn_maps_to_chinese_simplified(self):
+        self.assertEqual(self._detect({"LANG": "zh_CN.UTF-8"}), "Chinese (Simplified)")
+
+    def test_zh_tw_maps_to_chinese_traditional(self):
+        self.assertEqual(self._detect({"LANG": "zh_TW.UTF-8"}), "Chinese (Traditional)")
+
+    def test_ja_maps_to_japanese(self):
+        self.assertEqual(self._detect({"LANG": "ja_JP.UTF-8"}), "Japanese")
+
+    def test_en_us_maps_to_english(self):
+        self.assertEqual(self._detect({"LANG": "en_US.UTF-8"}), "English")
+
+    def test_c_locale_defaults_to_english(self):
+        self.assertEqual(self._detect({"LANG": "C"}), "English")
+
+    def test_unknown_locale_returns_readable_code(self):
+        result = self._detect({"LANG": "xy_ZZ.UTF-8"})
+        self.assertIn("xy", result.lower())
+
+    def test_language_env_takes_priority_over_lang(self):
+        result = self._detect({"LANGUAGE": "zh_CN", "LANG": "en_US.UTF-8"})
+        self.assertEqual(result, "Chinese (Simplified)")
+
+
+class LanguagePromptInjection(unittest.TestCase):
+    """tick_agent_prompt injects the language line when language is set."""
+
+    def _make_prompt(self, language: str) -> str:
+        from pathlib import Path
+        return driver.tick_agent_prompt(
+            binary="/usr/local/bin/greenbubbles",
+            corpus=Path("/corpus"),
+            state=Path("/state.json"),
+            user_project=Path("/project"),
+            scope_args=[],
+            fmt="markdown",
+            max_text_bytes=327680,
+            max_messages=2520,
+            skill="",
+            language=language,
+        )
+
+    def test_language_appears_in_prompt(self):
+        prompt = self._make_prompt("Chinese (Simplified)")
+        self.assertIn("Chinese (Simplified)", prompt)
+        self.assertIn("Language:", prompt)
+
+    def test_no_language_omits_language_line(self):
+        prompt = self._make_prompt("")
+        self.assertNotIn("Language:", prompt)
+
+    def test_language_covers_all_output_kinds(self):
+        prompt = self._make_prompt("Japanese")
+        # The instruction must name domain files, manifest, and prose broadly
+        self.assertIn("domain file", prompt)
+        self.assertIn("manifest", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

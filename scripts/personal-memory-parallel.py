@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+import locale
 import os
 import re
 import shlex
@@ -79,6 +80,59 @@ PRINT_LOCK = threading.Lock()
 # Per-project locks so concurrent shards don't interleave git add / git commit.
 _GIT_LOCKS: dict[str, threading.Lock] = {}
 _GIT_LOCKS_GUARD = threading.Lock()
+
+
+def detect_os_language() -> str:
+    """Return a human-readable language name derived from the OS locale.
+
+    Examples: "Chinese (Simplified)", "English", "Japanese", "French".
+    Falls back to "English" when the locale cannot be determined.
+    """
+    # LANGUAGE / LANG env vars take priority (user-set, most reliable)
+    for var in ("LANGUAGE", "LANG", "LC_ALL", "LC_MESSAGES"):
+        val = os.environ.get(var, "")
+        if val and val not in ("C", "POSIX", "C.UTF-8"):
+            lang_code = val.split(".")[0].split("@")[0]  # strip encoding and modifier
+            break
+    else:
+        # Fall back to Python's locale module
+        try:
+            lang_code = (locale.getlocale()[0] or "").split(".")[0] or ""
+        except Exception:  # noqa: BLE001
+            lang_code = ""
+
+    if not lang_code or lang_code in ("C", "POSIX"):
+        return "English"
+
+    # Normalize to a readable label; covers the most common cases.
+    _LANG_NAMES = {
+        "zh_CN": "Chinese (Simplified)", "zh_SG": "Chinese (Simplified)",
+        "zh_TW": "Chinese (Traditional)", "zh_HK": "Chinese (Traditional)",
+        "zh": "Chinese (Simplified)",
+        "en": "English",
+        "ja": "Japanese",
+        "ko": "Korean",
+        "fr": "French",
+        "de": "German",
+        "es": "Spanish",
+        "pt": "Portuguese",
+        "ru": "Russian",
+        "ar": "Arabic",
+        "hi": "Hindi",
+        "it": "Italian",
+        "nl": "Dutch",
+        "pl": "Polish",
+        "sv": "Swedish",
+        "tr": "Turkish",
+        "vi": "Vietnamese",
+        "th": "Thai",
+    }
+    # Try exact match first, then prefix
+    name = _LANG_NAMES.get(lang_code)
+    if not name:
+        prefix = lang_code.split("_")[0].lower()
+        name = _LANG_NAMES.get(prefix)
+    return name or lang_code.replace("_", " ")
 
 
 def _git_lock(project: Path) -> threading.Lock:
@@ -1317,7 +1371,7 @@ def git_commit_user_project(user_project: Path, message: str) -> bool:
 def tick_agent_prompt(binary: str, corpus: Path, state: Path, user_project: Path,
                       scope_args: list[str], fmt: str,
                       max_text_bytes: int, max_messages: int,
-                      skill: str = "") -> str:
+                      skill: str = "", language: str = "") -> str:
     """Agent prompt for one UserAsCode extraction batch."""
     rendered = " ".join(scope_args)
     preamble = (
@@ -1379,7 +1433,11 @@ def tick_agent_prompt(binary: str, corpus: Path, state: Path, user_project: Path
         f"State: {state}\n"
         f"User project (UserAsCode output directory — write here, not a wiki): {user_project}\n"
         f"Format: {fmt}\n"
-        "Exact commands to use (copy-paste these, do not modify):\n"
+        + (f"Language: Write ALL extracted content — domain file text, field values, comments,"
+           f" manifest summaries, constraint messages, and any prose — in {language}."
+           f" Whatever language the evidence is in, the output is {language}.\n"
+           if language else "")
+        + "Exact commands to use (copy-paste these, do not modify):\n"
         f"  memory next  : {next_cmd}\n"
         f"  memory page  : {page_cmd}  (replace <batchId> with the batchId from memory next output)\n"
         f"  memory commit: {commit_cmd}\n"
@@ -1449,6 +1507,7 @@ def run_tick_shard(args: argparse.Namespace, plan: dict, shard: dict, binary: st
         prompt = tick_agent_prompt(
             binary, corpus, state, user_project, arguments, args.format,
             max_text_bytes, max_batch_messages, skill,
+            language=getattr(args, "language", ""),
         )
         stalls = 0
         api_errors = 0
@@ -1586,6 +1645,23 @@ def command_tick(args: argparse.Namespace) -> int:
         tick_state = json.loads(tick_state_path.read_text(encoding="utf-8"))
     last_tick_time: str | None = tick_state.get("lastTickTime")
 
+    # Resolve the output language: CLI flag > persisted state > OS locale.
+    # Once resolved, persist it so every future tick uses the same language
+    # automatically (even if the flag is omitted).
+    cli_language: str = getattr(args, "language", None) or ""
+    stored_language: str = tick_state.get("language", "")
+    if cli_language:
+        language = cli_language
+        if language != stored_language:
+            log(f"tick: language set to '{language}'"
+                + (f" (was '{stored_language}')" if stored_language else ""))
+    elif stored_language:
+        language = stored_language
+    else:
+        language = detect_os_language()
+        log(f"tick: --language not set; using OS locale language '{language}'")
+    tick_state["language"] = language
+
     corpus = Path(args.corpus).resolve()
     ts_suffix = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = user_project / ".greenbubbles-runs" / f"tick-{ts_suffix}"
@@ -1634,6 +1710,9 @@ def command_tick(args: argparse.Namespace) -> int:
     shards = plan["shards"]
     parallel = tick_parallelism(getattr(args, "parallel", 1), len(shards))
     log(f"tick: {total:,} new messages across {len(shards)} shard(s), {parallel} at a time")
+
+    # Inject resolved language into args so run_tick_shard can pass it to the prompt.
+    args.language = language
 
     started = time.time()
     results = []
@@ -1748,7 +1827,8 @@ def command_manifest_refresh(args: argparse.Namespace) -> int:
     return 0
 
 
-def revise_agent_prompt(user_project: Path, fmt: str, skill: str = "") -> str:
+def revise_agent_prompt(user_project: Path, fmt: str, skill: str = "",
+                        language: str = "") -> str:
     """Agent prompt for a holistic revision pass over the full user project."""
     preamble = (
         "Follow the GreenBubbles personal-memory skill reproduced at the end of this message"
@@ -1776,7 +1856,11 @@ def revise_agent_prompt(user_project: Path, fmt: str, skill: str = "") -> str:
         preamble
         + f"User project (UserAsCode output directory): {user_project}\n"
         f"Format: {fmt}\n"
-        "This is a holistic revision pass. Do NOT run memory next or process new messages.\n"
+        + (f"Language: All content MUST remain in {language}."
+           f" Do not translate or change the language of any existing text."
+           f" Any new text you add must also be in {language}.\n"
+           if language else "")
+        + "This is a holistic revision pass. Do NOT run memory next or process new messages.\n"
         "Instead, read the full project and perform these improvements:\n"
         "1. Read manifest.py or manifest.md and all domain state files.\n"
         "2. Identify opportunities: domains to split or merge, stale state, schema gaps,"
@@ -1803,8 +1887,20 @@ def command_revise(args: argparse.Namespace) -> int:
     check_remote_privacy(user_project)
     _lock_fd = acquire_project_lock(user_project)
 
+    # Resolve language: CLI flag > persisted tick state > OS locale.
+    tick_state_path = user_project / ".greenbubbles-tick-state.json"
+    stored_language = ""
+    if tick_state_path.is_file():
+        try:
+            stored_language = json.loads(
+                tick_state_path.read_text(encoding="utf-8")
+            ).get("language", "")
+        except Exception:  # noqa: BLE001
+            pass
+    language = getattr(args, "language", None) or stored_language or detect_os_language()
+
     skill = skill_text(args)
-    prompt = revise_agent_prompt(user_project, fmt, skill)
+    prompt = revise_agent_prompt(user_project, fmt, skill, language=language)
     working_directory = args.cwd if not skill else str(user_project)
     environment = agent_environment(args, user_project)
 
@@ -2027,6 +2123,11 @@ def main() -> int:
                       help="cap on number of conversations to include (for testing)")
     tick.add_argument("--max-messages", type=int,
                       help="cap on total messages to include (for testing)")
+    tick.add_argument("--language",
+                      help="language for extracted content, e.g. 'Chinese (Simplified)',"
+                           " 'English', 'Japanese'; free-form, any language a model understands."
+                           " Detected from OS locale when omitted and stored in the project"
+                           " state so all subsequent ticks use the same language automatically.")
     add_agent_args(tick)
     tick.set_defaults(handler=command_tick)
 
@@ -2043,6 +2144,9 @@ def main() -> int:
     )
     revise.add_argument("--user-project", required=True)
     revise.add_argument("--format", default="python", choices=["python", "markdown"])
+    revise.add_argument("--language",
+                        help="language for revised content; defaults to the language"
+                             " stored in the project state from the original tick run.")
     add_agent_args(revise)
     revise.set_defaults(handler=command_revise)
 

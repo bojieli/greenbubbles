@@ -8,6 +8,21 @@ Notable changes to GreenBubbles are documented here. The project follows
 
 ### Added
 
+- `tick` and `revise` driver commands: `--language` selects the output language
+  for all extracted content — domain file text, field values, manifest summaries,
+  constraint messages, and prose. Free-form: any value a model understands works
+  (`Chinese (Simplified)`, `English`, `日本語`, `Français`, …). When omitted on
+  the first tick, the language is auto-detected from the OS locale (via the
+  `LANGUAGE` / `LANG` / `LC_ALL` / `LC_MESSAGES` environment variables, then
+  `locale.getlocale()`). The resolved language is persisted in
+  `.greenbubbles-tick-state.json` so every subsequent tick and revise pass uses
+  the same language automatically without repeating the flag. `revise` reads the
+  stored language from state and only falls back to OS locale when neither the
+  flag nor state is present.
+- `detect_os_language()`: internal helper that maps POSIX locale codes to
+  human-readable language names; covered by 7 new unit tests in
+  `scripts/test_personal_memory_parallel.py`.
+- Language prompt injection covered by 3 new unit tests (63 total).
 - `tick` command: process-level exclusive flock on `.greenbubbles-tick.lock`
   prevents concurrent cron invocations from racing on the same user project.
   Same guard applied to `manifest-refresh` and `revise`.
