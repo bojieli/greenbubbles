@@ -23,8 +23,11 @@ or a plaintext source.
 ### Do I have to create a profile or pass a directory?
 
 No, for the live database. After capture, `greenbubbles chats`
-opens the newest installed WeChat `db_storage` directory and reads
-`~/.greenbubbles-acquire/passphrase.txt`. A different database or passphrase
+opens the WeChat account that is actually in use and reads
+`~/.greenbubbles-acquire/passphrase.txt`. Older account directories left
+behind after an account change are ignored. If two accounts were both
+written in the last 14 days, the command stops and asks you to set
+`source.root` in `~/.greenbubbles/config.toml`. A different database or passphrase
 file goes in `~/.greenbubbles/config.toml` under `[source]`. A profile is only
 for a second account or a snapshot. A missing passphrase file returns
 `invalidProfile` and prints neither the path nor the key. The same message

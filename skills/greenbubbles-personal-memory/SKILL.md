@@ -14,9 +14,13 @@ require the GreenBubbles source checkout.
 If the user requests evidence directly from the live WeChat database, use
 `../greenbubbles-context/SKILL.md` for bounded live queries. Do not inspect or
 reuse a prepared corpus, prior extraction, or test output as source evidence.
-For a selective memory request, choose conversations by the user's stated
-criteria (for example, direct chats with substantial self-authored participation)
-and report the reviewed scope rather than implying whole-history coverage.
+For a selective memory request, read
+[references/priorities.md](references/priorities.md) before choosing
+conversations. Measure the database with `source status`, then rank with
+`chats rank`. The default metric is the account holder's own messages: at
+least 10 self-sent messages, direct chats before groups, then recency. Start
+at the newest self-authored messages and page backward. Report the reviewed
+scope rather than implying whole-history coverage.
 
 ## Choose the workflow
 

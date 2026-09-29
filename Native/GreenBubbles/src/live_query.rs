@@ -2565,6 +2565,216 @@ pub fn list_conversations(
     })
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RankedConversation {
+    pub id: String,
+    pub kind: &'static str,
+    pub display_name: Option<String>,
+    pub self_message_count: u64,
+    pub message_count: u64,
+    pub last_self_message_unix: Option<i64>,
+    pub last_message_unix: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationRankReport {
+    pub schema: &'static str,
+    pub format_version: u32,
+    pub operation: &'static str,
+    pub ok: bool,
+    pub source: QuerySourceDescription,
+    pub account_holder_known: bool,
+    pub conversation_count: usize,
+    pub qualifying_conversation_count: usize,
+    pub minimum_self_messages: u64,
+    pub coverage_complete: bool,
+    pub warnings: Vec<QueryWarning>,
+    pub items: Vec<RankedConversation>,
+}
+
+/// Rank conversations by how many messages the account holder sent.
+///
+/// Direct chats come before groups. Within each kind, a larger self-message
+/// count comes first, then the more recently active chat. Chats below
+/// `minimum_self_messages` are counted in the report and omitted from the
+/// returned items. The scan is read-only and returns no message text.
+pub fn rank_conversations(
+    source: &LiveQuerySource<'_>,
+    minimum_self_messages: u64,
+    limit: usize,
+) -> Result<ConversationRankReport, LiveQueryError> {
+    validate_limit(limit)?;
+    let account_holder = source.account_holder_source_id().map(str::to_owned);
+    let open_shards = open_message_shards(source)?;
+    let mut warnings = open_shards.warnings.clone();
+    let mut coverage_complete = open_shards.warnings.is_empty();
+    let mut counts = BTreeMap::<String, (u64, u64, Option<i64>, Option<i64>)>::new();
+
+    for shard in &open_shards.shards {
+        reset_query_deadline(&shard.connection)?;
+        let mut tables = match shard.connection.prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'Msg_%' ORDER BY name ASC",
+        ) {
+            Ok(statement) => statement,
+            Err(_) => {
+                coverage_complete = false;
+                warnings.push(QueryWarning {
+                    code: "messageTableInventoryUnavailable",
+                    message: "a message shard could not be ranked".into(),
+                    shard_id: Some(shard.shard_id),
+                    count: None,
+                });
+                continue;
+            }
+        };
+        let names = tables
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| database_error(&error.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| database_error(&error.to_string()))?;
+        drop(tables);
+        for name in names {
+            let Some(digest) = name.strip_prefix("Msg_") else {
+                continue;
+            };
+            if digest.len() != 32 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                continue;
+            }
+            let quoted = name.replace('"', "\"\"");
+            let sql = format!(
+                "SELECT COUNT(*), \
+                        SUM(CASE WHEN n.user_name = ?1 THEN 1 ELSE 0 END), \
+                        MAX(create_time), \
+                        MAX(CASE WHEN n.user_name = ?1 THEN create_time END) \
+                 FROM \"{quoted}\" AS m \
+                 LEFT JOIN Name2Id AS n ON m.real_sender_id = n.rowid"
+            );
+            let mut statement = match shard.connection.prepare(&sql) {
+                Ok(statement) => statement,
+                Err(_) => {
+                    coverage_complete = false;
+                    warnings.push(QueryWarning {
+                        code: "conversationRankUnavailable",
+                        message: "one conversation could not be counted".into(),
+                        shard_id: Some(shard.shard_id),
+                        count: Some(1),
+                    });
+                    continue;
+                }
+            };
+            let row = statement
+                .query_row(params![account_holder.as_deref().unwrap_or("")], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                })
+                .map_err(|error| database_error(&error.to_string()))?;
+            let entry = counts.entry(digest.to_ascii_lowercase()).or_insert((0, 0, None, None));
+            entry.0 += u64::try_from(row.0).unwrap_or(0);
+            entry.1 += u64::try_from(row.1).unwrap_or(0);
+            entry.2 = entry.2.max(row.2);
+            entry.3 = entry.3.max(row.3);
+        }
+    }
+
+    let connection = source.open_database(Path::new("session/session.db"))?;
+    let mut statement = connection
+        .prepare("SELECT username FROM SessionTable")
+        .map_err(|error| database_error(&error.to_string()))?;
+    let usernames = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| database_error(&error.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| database_error(&error.to_string()))?;
+    drop(statement);
+    drop(connection);
+
+    let mut ranked = Vec::new();
+    for username in usernames {
+        let digest = format!("{:x}", md5::compute(username.as_bytes()));
+        let Some(&(message_count, self_count, last_message, last_self)) = counts.get(&digest) else {
+            continue;
+        };
+        let kind = if wx_db::is_group_chat(&username) {
+            "group"
+        } else {
+            "direct"
+        };
+        ranked.push(RankedConversation {
+            id: username,
+            kind,
+            display_name: None,
+            self_message_count: self_count,
+            message_count,
+            last_self_message_unix: last_self,
+            last_message_unix: last_message,
+        });
+    }
+    let conversation_count = ranked.len();
+    ranked.retain(|item| item.self_message_count >= minimum_self_messages);
+    ranked.sort_by(|left, right| {
+        let left_direct = u8::from(left.kind == "direct");
+        let right_direct = u8::from(right.kind == "direct");
+        right_direct
+            .cmp(&left_direct)
+            .then(right.self_message_count.cmp(&left.self_message_count))
+            .then(right.last_self_message_unix.cmp(&left.last_self_message_unix))
+            .then(left.id.cmp(&right.id))
+    });
+    let qualifying_conversation_count = ranked.len();
+    ranked.truncate(limit);
+    let mut items = ranked;
+    let _ = enrich_ranked_display_names(source, &mut items);
+
+    Ok(ConversationRankReport {
+        schema: QUERY_SCHEMA,
+        format_version: QUERY_FORMAT_VERSION,
+        operation: "conversations.rank",
+        ok: true,
+        source: source_description(source),
+        account_holder_known: account_holder.is_some(),
+        conversation_count,
+        qualifying_conversation_count,
+        minimum_self_messages,
+        coverage_complete,
+        warnings,
+        items,
+    })
+}
+
+fn enrich_ranked_display_names(
+    source: &LiveQuerySource<'_>,
+    items: &mut [RankedConversation],
+) -> Result<(), LiveQueryError> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let mut placeholders = items
+        .iter()
+        .map(|item| ConversationItem {
+            id: item.id.clone(),
+            display_name: None,
+            summary: None,
+            summary_decode_state: "complete",
+            summary_truncated: false,
+            sort_timestamp: 0,
+            last_message_type: None,
+            last_message_sender: None,
+            last_sender_display_name: None,
+        })
+        .collect::<Vec<_>>();
+    let _ = enrich_conversation_items(source, &mut placeholders)?;
+    for (item, enriched) in items.iter_mut().zip(placeholders) {
+        item.display_name = enriched.display_name;
+    }
+    Ok(())
+}
+
 pub fn find_conversation(
     source: &LiveQuerySource<'_>,
     conversation: &str,

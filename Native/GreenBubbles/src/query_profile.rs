@@ -275,13 +275,16 @@ pub fn default_live_credential_path() -> Result<PathBuf, QueryProfileError> {
         .join(DEFAULT_LIVE_CREDENTIAL_FILE))
 }
 
-/// The installed WeChat `db_storage` directory written most recently.
+/// The one WeChat database the signed-in account is using now.
 ///
-/// Discovery matches the Swift account finder: account directories under
-/// `~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files`
-/// and under WeChat group containers. A directory qualifies only when it is a
-/// real, current-user-owned directory containing `contact`, `session`, and
-/// `message`. The newest database modification time selects the active account.
+/// WeChat can leave several complete `db_storage` directories behind after an
+/// account change. Only one of them is live. A directory qualifies when it is
+/// a real, current-user-owned directory containing `contact`, `session`, and
+/// `message`. The live one is the directory whose database files were written
+/// most recently, not the directory whose own timestamp is newest. A leftover
+/// account whose files are more than 14 days older is ignored. Two accounts
+/// written within that window are ambiguous, and the command asks for an
+/// explicit `source.root` instead of guessing.
 pub fn discover_default_live_source_root() -> Result<PathBuf, QueryProfileError> {
     let home = current_user_home()?;
     let mut candidates = Vec::new();
@@ -299,7 +302,7 @@ pub fn discover_default_live_source_root() -> Result<PathBuf, QueryProfileError>
         }
     }
 
-    let mut newest: Option<(i64, PathBuf)> = None;
+    let mut found = Vec::new();
     for files_root in candidates {
         let Ok(accounts) = fs::read_dir(&files_root) else {
             continue;
@@ -312,14 +315,24 @@ pub fn discover_default_live_source_root() -> Result<PathBuf, QueryProfileError>
             let Some(modified) = database_root_recency(&database_root) else {
                 continue;
             };
-            if newest.as_ref().is_none_or(|(current, _)| modified > *current) {
-                newest = Some((modified, database_root));
-            }
+            found.push((modified, database_root));
         }
     }
-    newest
-        .map(|(_, path)| path)
-        .ok_or_else(|| QueryProfileError::Unavailable("no live WeChat database was found".into()))
+    found.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    let Some((newest, path)) = found.first() else {
+        return Err(QueryProfileError::Unavailable(
+            "no live WeChat database was found".into(),
+        ));
+    };
+    if let Some((older, _)) = found.get(1) {
+        const AMBIGUOUS_WINDOW_SECONDS: i64 = 14 * 24 * 60 * 60;
+        if newest.saturating_sub(*older) < AMBIGUOUS_WINDOW_SECONDS {
+            return Err(QueryProfileError::Unavailable(
+                "more than one WeChat account was written recently; set source.root in ~/.greenbubbles/config.toml to the account you are signed in to".into(),
+            ));
+        }
+    }
+    Ok(path.clone())
 }
 
 fn current_user_home() -> Result<PathBuf, QueryProfileError> {
@@ -351,13 +364,27 @@ fn is_usable_live_database_root(path: &Path) -> bool {
 }
 
 fn database_root_recency(path: &Path) -> Option<i64> {
-    let mut newest = fs::metadata(path).ok()?.mtime();
-    for name in ["contact", "session", "message"] {
-        if let Ok(metadata) = fs::metadata(path.join(name)) {
-            newest = newest.max(metadata.mtime());
+    // Directory timestamps stay behind after an account switch. The files
+    // WeChat is writing — databases, journals, and shared-memory files — are
+    // the evidence that this account is the one in use.
+    let mut newest = None;
+    for component in ["contact", "session", "message"] {
+        let directory = path.join(component);
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if !metadata.is_file() {
+                continue;
+            }
+            let modified = metadata.mtime();
+            newest = Some(newest.map_or(modified, |current: i64| current.max(modified)));
         }
     }
-    Some(newest)
+    newest
 }
 
 /// Optional everyday settings, in the same style as a coding agent's config.
@@ -381,6 +408,13 @@ pub fn default_query_settings_path() -> Result<PathBuf, QueryProfileError> {
     Ok(current_user_home()?
         .join(DEFAULT_CONFIGURATION_DIRECTORY)
         .join(DEFAULT_SETTINGS_FILE))
+}
+
+pub fn profile_uses_placeholder_source(profile: &QueryProfile) -> bool {
+    profile
+        .source_root
+        .components()
+        .any(|component| component.as_os_str() == "ABSOLUTE")
 }
 
 pub fn load_query_settings() -> Result<QuerySettings, QueryProfileError> {
@@ -749,28 +783,36 @@ mod tests {
             }
         }
         fs::create_dir_all(incomplete.join("contact")).unwrap();
-        let now = std::time::SystemTime::now();
-        filetime::set_file_mtime(&older, filetime::FileTime::from_system_time(now)).unwrap();
-        // Recency uses whole-second libc mtime, so the newer tree must land
-        // in a later second than the older one.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 24 * 60 * 60);
+        for component in ["contact", "session", "message"] {
+            let file = older.join(component).join("stale.db");
+            fs::write(&file, b"old").unwrap();
+            filetime::set_file_mtime(&file, filetime::FileTime::from_system_time(stale)).unwrap();
+        }
         let later = std::time::SystemTime::now();
         for component in ["contact", "session", "message"] {
-            filetime::set_file_mtime(
-                &newer.join(component),
-                filetime::FileTime::from_system_time(later),
-            )
-            .unwrap();
+            let file = newer.join(component).join("live.db");
+            fs::write(&file, b"new").unwrap();
+            filetime::set_file_mtime(&file, filetime::FileTime::from_system_time(later)).unwrap();
         }
 
         let previous = env::var_os("HOME");
         env::set_var("HOME", home.path());
         let discovered = discover_default_live_source_root();
+        assert_eq!(discovered.unwrap(), newer);
+
+        // A second recently written account is not a guess.
+        let recent_other = files.join("account-also-live/db_storage");
+        for component in ["contact", "session", "message"] {
+            fs::create_dir_all(recent_other.join(component)).unwrap();
+            fs::write(recent_other.join(component).join("live.db"), b"also").unwrap();
+        }
+        let ambiguous = discover_default_live_source_root();
         match previous {
             Some(value) => env::set_var("HOME", value),
             None => env::remove_var("HOME"),
         }
-        assert_eq!(discovered.unwrap(), newer);
+        assert!(ambiguous.is_err());
     }
 
     #[test]

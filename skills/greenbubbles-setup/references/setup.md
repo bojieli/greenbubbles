@@ -28,8 +28,8 @@ greenbubbles source status
 greenbubbles chats --limit 20
 ```
 
-With no profile file and no settings file, these commands open the newest
-installed WeChat `db_storage` directory and read
+With no profile file and no settings file, these commands open the one
+WeChat account currently in use and read
 `~/.greenbubbles-acquire/passphrase.txt`. They do not print the key or the
 source path. A missing passphrase file or an unreadable database returns
 `invalidProfile`, with a plain-language explanation on the terminal.

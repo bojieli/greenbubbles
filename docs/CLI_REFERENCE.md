@@ -86,6 +86,8 @@ second account or a snapshot.
 `greenbubbles` and `greenbubbles help` show the everyday commands.
 `greenbubbles help --all` shows the complete list. `greenbubbles chats` lists
 conversations; `conversations list` remains the same command.
+`greenbubbles chats rank` counts how many messages the account holder sent in
+each chat, with direct chats before groups, and returns no message text.
 
 ## Bounds and how to read a response
 

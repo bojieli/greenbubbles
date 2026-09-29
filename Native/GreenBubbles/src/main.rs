@@ -45,6 +45,7 @@ use greenbubbles::{
         find_conversations as find_live_conversations, get_message as get_live_message,
         get_search_result_message as get_live_search_result_message,
         list_contacts as list_live_contacts, list_conversations as list_live_conversations,
+        rank_conversations as rank_live_conversations,
         list_messages as list_live_messages, search_messages as search_live_messages,
         serialize_query_error, serialize_query_response, source_status as live_source_status,
         ContactKind, LiveQueryError, LiveQuerySource, QueryDatabaseAccess, DEFAULT_PAGE_LIMIT,
@@ -67,7 +68,8 @@ use greenbubbles::{
     prepare_catalog_batch_with_progress, prepare_catalog_with_progress,
     query_profile::{
         default_live_credential_path, default_query_profile_path,
-        discover_default_live_source_root, load_query_settings, read_private_32_byte_credential,
+        discover_default_live_source_root, load_query_settings, profile_uses_placeholder_source,
+        read_private_32_byte_credential,
         read_private_snapshot_passphrase, QueryProfile, QueryProfileAccess, QueryProfileError,
         QueryProfileStore, DEFAULT_LIVE_PROFILE_NAME, QUERY_PROFILE_FORMAT_VERSION,
         QUERY_PROFILE_SCHEMA,
@@ -162,8 +164,15 @@ fn process_attachment_operation() -> Option<&'static str> {
 fn process_query_operation() -> Option<&'static str> {
     let arguments = env::args().skip(1).take(2).collect::<Vec<_>>();
     match arguments.as_slice() {
-        [command, subcommand] if command == "conversations" && subcommand == "list" => {
+        [command, subcommand]
+            if (command == "conversations" || command == "chats") && subcommand == "list" =>
+        {
             Some("conversations.list")
+        }
+        [command, subcommand]
+            if (command == "conversations" || command == "chats") && subcommand == "rank" =>
+        {
+            Some("conversations.rank")
         }
         [command, subcommand] if command == "contacts" && subcommand == "list" => {
             Some("contacts.list")
@@ -564,9 +573,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let subcommand = arguments
                 .next()
                 .unwrap_or_else(|| "list".to_string());
-            if subcommand != "list" {
+            if subcommand != "list" && subcommand != "rank" {
                 return Err(format!(
-                    "'{subcommand}' is not a conversations command. Use 'greenbubbles chats'."
+                    "'{subcommand}' is not a conversations command. Use 'greenbubbles chats' or 'greenbubbles chats rank'."
                 )
                 .into());
             }
@@ -589,6 +598,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "--profile",
                     "--limit",
                     "--cursor",
+                    "--minimum-self-messages",
                     "--snapshot-recovery-kit",
                     "--snapshot-local-credential",
                 ],
@@ -602,9 +612,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let invocation = resolve_query_invocation(database_root, &remaining)?;
             let source = invocation.access.open_source(&invocation.source_root)?;
             let limit = option_usize(&remaining, "--limit")?.unwrap_or(DEFAULT_PAGE_LIMIT);
-            let cursor = option_string(&remaining, "--cursor")?;
-            let response = list_live_conversations(&source, limit, cursor.as_deref())?;
-            println!("{}", serialize_query_response(&response)?);
+            if subcommand == "rank" {
+                let minimum = option_usize(&remaining, "--minimum-self-messages")?.unwrap_or(10);
+                let response = rank_live_conversations(&source, minimum as u64, limit)?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                let cursor = option_string(&remaining, "--cursor")?;
+                let response = list_live_conversations(&source, limit, cursor.as_deref())?;
+                println!("{}", serialize_query_response(&response)?);
+            }
         }
         "contacts" => {
             let subcommand = arguments
@@ -2874,6 +2890,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 concat!(
                     "Read your WeChat history on this Mac.\n\n",
                     "After greenbubbles-acquire capture, these commands need no directory or key:\n\n",
+                    "  greenbubbles chats rank\n",
                     "  greenbubbles chats\n",
                     "  greenbubbles messages list --conversation <id>\n",
                     "  greenbubbles messages search --query-stdin\n",
@@ -2896,6 +2913,7 @@ const fn complete_command_listing() -> &'static str {
     concat!(
         "Complete command list. Most people only need the commands in 'greenbubbles help'.\n\n",
         "Browse:\n",
+        "  greenbubbles chats rank [--minimum-self-messages <n>] [--limit <1..500>]\n",
         "  greenbubbles chats [--profile <name>] [--limit <1..500>] [--cursor <token>]\n",
         "  greenbubbles messages list --conversation <id> [--limit <1..500>] [--cursor <token>]\n",
         "  greenbubbles messages search --query-stdin [--conversation <id>] [--limit <1..200>]\n",
@@ -3719,6 +3737,15 @@ fn load_configured_query_invocation(
     match QueryProfileStore::load_default() {
         Ok((configuration_file, store)) => {
             let (profile_name, profile) = store.select(requested_profile)?;
+            // An untouched template still has the printed placeholder path.
+            // Treat that as "no profile" so the installed WeChat database is used.
+            if requested_profile.is_none()
+                && store.profiles.len() == 1
+                && profile_uses_placeholder_source(profile)
+            {
+                let invocation = load_implicit_live_query_invocation()?;
+                return Ok((configuration_file, invocation));
+            }
             let access = load_query_profile_access(profile)?;
             Ok((
                 configuration_file,

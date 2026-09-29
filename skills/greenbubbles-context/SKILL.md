@@ -16,7 +16,10 @@ For a maintained Markdown/Python memory project, read
 summarizer when the user wants this agent to do the summarization.
 
 For ordinary local browsing, use `chats` (the same command as
-`conversations list`), `messages list`, `messages search`, and `message get`. They query the selected
+`conversations list`), `messages list`, `messages search`, and `message get`.
+To decide which chats matter before reading them, use `chats rank`: it counts
+messages the account holder sent and returns no message text. `chats` alone
+is only a recent-activity list. They query the selected
 live WeChat SQLite/WCDB source or independently encrypted snapshot read-only and
 return one bounded, versioned JSON response. Do not invoke `sqlite3`, issue raw
 SQL, request `--all`, or create a full JSONL archive/replica merely to answer a

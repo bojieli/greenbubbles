@@ -15,7 +15,13 @@ Notable changes to GreenBubbles are documented here. The project follows
   for extra accounts and snapshots.
 - `greenbubbles` and `greenbubbles help` show the everyday commands. The
   complete list is `greenbubbles help --all`. `greenbubbles chats` lists
-  conversations. Query errors now say what to check and what to run next.
+  conversations. `greenbubbles chats rank` orders chats by how many messages
+  the account holder sent, with direct chats before groups. Query errors now
+  say what to check and what to run next.
+- The live default is the one WeChat account currently being written. A
+  leftover account directory is ignored. Two accounts written within 14 days
+  require `source.root` in `~/.greenbubbles/config.toml`. An untouched profile
+  template no longer hides the live database.
 - Replaced the project icon with a simpler conversation-and-memory mark.
 - Shortened the README, clarified Homebrew skill paths and first-time setup,
   and corrected privacy boundaries, incremental-update guidance, and release status.
