@@ -75,7 +75,7 @@ brew trust --formula bojieli/greenbubbles/greenbubbles
 
 **Prefer an app?** Download the DMG from
 [Releases](https://github.com/bojieli/greenbubbles/releases) and drag
-**GreenBubbles** to Applications. It is signed and notarized by Apple. Releases
+**GreenBubbles** to Applications. It is Developer ID signed and Apple notarized. Releases
 also include the command-line tool as a ZIP. See
 [CLI releases and Homebrew](docs/HOMEBREW.md) to verify downloads or upgrade.
 
