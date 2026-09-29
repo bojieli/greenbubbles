@@ -1,14 +1,16 @@
-# Which conversations to index first
+# Which conversations to read first
 
-Ask for the time scope and any existing summary before measuring or reading.
+Ask for the time scope and any existing project before measuring or reading.
 A 7-day snapshot, a 30-day snapshot, a year, and a lifetime are different
 tasks. If the user points at an existing summary, that directory is the
-project to update. Do not create a parallel one.
+project to revise.
 
-The output is a personal memory and a knowledge base. Keep durable facts
-about the account holder, and durable facts about the people, projects, and
+The output is a knowledge base of articles, linked from `index.md`, written
+in the language the account holder usually writes. The language rule is in
+[format-markdown.md](format-markdown.md). Keep
+durable facts about the account holder and about the people, projects, and
 decisions in the reviewed chats. Attribute other people's claims to them.
-Do not keep a transcript.
+Do not keep a transcript, and do not stop at a bullet list of facts.
 
 ## Measure the database first
 
@@ -65,9 +67,8 @@ actually read, and that the rest was not reviewed.
 
 ## Long passes: a year, two years, or a lifetime
 
-A long pass is a knowledge-base build, not a snapshot. The failure mode is
-reading the newest page of a few chats and writing one paragraph per person.
-That is not this workflow.
+A long pass is a knowledge base, not a snapshot. The failure mode is reading
+the newest page of a few chats and filing one line per person.
 
 Order:
 
@@ -79,30 +80,28 @@ Order:
 3. Select every direct chat whose last self-sent message is inside the window
    and whose self-sent count is at least 10. Then select groups by the same
    self-sent threshold. Do not stop at the first page of names.
-4. Prepare a corpus with the Markdown selection policy. Page it with
-   `memory next` and `memory page`. Read each delivered page completely.
-5. Organize into domain files. Follow
-   [format-markdown.md](format-markdown.md): one domain per life area, a
-   schema, one state entry per fact, and an append-only history. Update the
-   manifest after each committed batch. A person is a relationship in
-   `family` or `social`, not a substitute for the domains their messages
-   inform.
+4. Read with `messages list` and `messages search`, as in
+   [cli.md](cli.md). Page each selected chat from the newest message
+   backward. For a year or longer, one page is not enough. Search for the
+   projects, organizations, and decisions you have already seen so older
+   mentions are not missed.
+5. Revise the articles as you go. Follow
+   [format-markdown.md](format-markdown.md): `index.md` plus one article per
+   life area. A person is a relationship in `family` or `social`, and also
+   appears inside the articles their messages inform. Write prose sections,
+   not a list of extracted lines.
 6. Continue until the window is covered or the user sets a smaller bound.
-   Record chats not yet paged as remaining scope. Do not describe a partial
-   pass as the two-year or lifetime record.
+   Record chats not yet paged as remaining scope in `manifest.md`. Do not
+   describe a partial pass as the two-year or lifetime record.
 
-Enough means every qualifying chat in the window has had its delivered pages
-read, acknowledged, and either filed into a domain or explicitly marked as
-having no durable fact. A count of recent pages is not enough.
+Enough means every qualifying chat in the window has been paged far enough
+that its durable facts are in the articles, or the chat was marked as having
+no durable fact. A count of recent pages is not enough.
 
-## What becomes memory
+## What becomes an article sentence
 
-Keep a fact only when it is still useful after the conversation is closed:
-who someone is to the account holder, a durable role or project, a decision,
-or a correction of an earlier fact. Record other people's claims as their
-claims. Do not copy affection, routine logistics, prices, or a passing
-denial into memory just because it appeared in a recent page.
-
-Cite the evidence alias and date when the memory workflow provides one. A
-bounded `messages list` page has opaque message IDs; keep those IDs in the
-private project, not in a summary you send back unprompted.
+Keep a fact when it is still useful after the conversation is closed: who
+someone is to the account holder, a durable role or project, a decision, or
+a correction of an earlier fact. Record other people's claims as their
+claims. Do not copy affection, routine logistics, prices, phone numbers,
+addresses, or meeting and form links into the articles.

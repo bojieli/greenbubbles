@@ -1,33 +1,19 @@
-# Personal memory: your WeChat history as a living knowledge project
+# Personal memory: a Wikipedia-style knowledge base
 
 For use in your current Codex, Claude Code, OpenCode, Kimi Code, Gemini CLI, or Grok Build session, start with the
 [portable agent skills guide](AGENT_SKILLS.md). It uses your existing agent
-configuration and needs no embedded-model API key. The driver instructions
-below are an optional way to launch separate agent batches. For a shared domain
-project, keep `--shards 1 --parallel 1`; commit locking alone does not protect
-concurrent domain edits. Timestamp-limited updates need broader reconciliation
-for late-imported older messages or old-timestamp edits.
+configuration and needs no embedded-model API key.
 
-GreenBubbles turns a large live WeChat history into a structured, incrementally
-maintained knowledge project following the UserAsCode methodology. Rather than
-producing a wiki or a flat list of facts, the pipeline maintains a
-**git-versioned software project** — typed Python dataclasses with executable
-constraints, or structured Markdown with ontology headings — that agents
-CRUD-patch from message evidence. The project evolves with each new extraction
-pass; no full re-extraction is required when new messages arrive.
+The knowledge base is a private git project of articles:
 
-The two-phase pipeline is:
+- `index.md` is the front page.
+- `domains/*.md` are the articles, one life area each, written in prose.
+- `manifest.md` records the time window and what has actually been read.
 
-1. **Fact extraction (per message unit):** The agent reads message units from
-   the GreenBubbles corpus and extracts every fact as a plain string — anything
-   about people, events, preferences, dates, relationships, possessions, health,
-   or plans.
-2. **CRUD-patch (per domain):** Each fact is classified into a life domain
-   (identity, travel, finance, health, vehicles, family, social, work,
-   entertainment, or a new domain the agent creates). The agent reads existing
-   domain state, diffs incoming facts against it, and patches in place: new
-   facts are added, changed facts are updated, unchanged facts are skipped. The
-   manifest is regenerated and the project is git-committed.
+The agent reads the live database with `messages list` and `messages search`,
+then revises those files. Rank chats first with `chats rank`. A later pass
+opens the same project and edits the articles. It does not prepare a corpus,
+and it does not start a second project.
 
 The project skill is
 [`skills/greenbubbles-personal-memory`](../skills/greenbubbles-personal-memory/SKILL.md).
@@ -35,22 +21,29 @@ The project skill is
 ## Quick start
 
 ```sh
-# 1. Prepare the corpus (one-time; see Corpus preparation below)
-greenbubbles memory prepare /private/path/corpus \
-  --selection-policy selection-policy.json --profile live-account
-
-# 2. Run an incremental extraction pass
-python3 scripts/personal-memory-parallel.py tick \
-  --corpus /private/path/corpus \
-  --user-project ~/memory/me \
-  --format python \
-  --agent codex --shards 1 --parallel 1
+greenbubbles source status
+greenbubbles chats rank --minimum-self-messages 10 --limit 2000
+greenbubbles messages list --conversation ID --limit 80
 ```
 
-The first `tick` creates `~/memory/me/` as a git repo, processes all messages
-in the corpus, and writes a Python or Markdown knowledge project. Subsequent
-ticks use a saved time window. Extend the corpus first to include newly arrived
-messages; older imports and edits require a broader reconciliation pass.
+Search text goes through standard input:
+
+```sh
+printf '%s\n' 'query' | greenbubbles messages search --query-stdin --limit 25
+```
+
+Ask for the time scope, and for the path of any knowledge base that already
+exists, before reading. Write every Markdown file in the language the
+account holder usually writes. Someone who writes Chinese gets a Chinese
+knowledge base. Keep the project private.
+
+## Older evidence-archive commands
+
+`memory prepare` copies the history into a local evidence archive before any
+article is written. The knowledge base above does not use that archive, including
+for an incremental update. The commands remain in the CLI. The notes below
+describe that archive for anyone operating it directly. They are not a step
+in building or refreshing the articles.
 
 ## Corpus preparation
 

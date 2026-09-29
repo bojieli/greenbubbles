@@ -111,20 +111,22 @@ Discovery details: [Codex skills](https://learn.chatgpt.com/docs/build-skills),
 
 Example request after reading the skill directly or enabling discovery:
 
-> Use greenbubbles-personal-memory with my GreenBubbles profile `live` to
-> organize my WeChat history into a Markdown memory project at `~/memory/me`.
-> Do the extraction in this session. Preserve source citations and update
-> existing facts without duplication. Start with September's direct chats.
+> Use greenbubbles-personal-memory to organize my WeChat history into a
+> Wikipedia-style knowledge base at `~/memory/me`. Read the live database
+> in this session. Ask me the time scope if I have not given one. Revise
+> the articles in place.
 
 For a follow-up:
 
-> Refresh that memory project from my latest WeChat history. Resume any
-> incomplete batch first, and report the dates covered and coverage limitations.
+> Refresh that knowledge base from my latest WeChat history. Keep the same
+> project, and report the dates covered and which chats are still unread.
 
-The agent checks access, prepares a private local corpus, reads bounded pages,
-patches `manifest.md` and `domains/*.md`, acknowledges reviewed evidence, and
-commits progress. It uses the model you already configured. No extra embedded
-model API key or nested agent is required.
+The agent checks access, ranks chats, reads them with `messages list` and
+`messages search`, and revises `index.md`, `manifest.md`, and the articles
+in `domains/`. It writes the project in the language the account holder
+usually uses. It uses the model you already configured. No extra embedded
+model API key or nested agent is required. Building the knowledge base does
+not prepare a corpus.
 
 For diagnostics only:
 
@@ -145,13 +147,11 @@ artifacts; installation does not copy them into the skill package.
 
 ## Incremental updates and limits
 
-The skill resumes outstanding batches using the same state. A new immutable
-corpus generation uses a new state path and the same domain project. Routine
-updates use an explicit completed time window with inclusive overlap and
-deduplicate facts. Late-imported historical messages or old-timestamp edits
-require a broader reconciliation pass; timestamp windows are not a complete
-change feed. The skill documents both paths and does not silently advance a
-checkpoint after incomplete work.
+An update opens the same project, re-queries the live database, and revises
+the articles. Late-imported historical messages or old-timestamp edits can
+be missed by a window that starts at the previous end date. When that
+matters, page the selected chats again across the original window. A search
+that does not mention a fact is not evidence that the fact was deleted.
 
 Use one writer per domain project. A git commit lock does not prevent two agents
 from overwriting each other's domain edits. No scheduler is installed by the

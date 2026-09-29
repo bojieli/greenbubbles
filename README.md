@@ -209,7 +209,7 @@ Keep that output private: account paths can contain identifiers.
 | --- | --- |
 | First-time setup and browsing | [User guide](docs/USER_GUIDE.md) |
 | Use your own agent to organize memory | [Portable agent skills](docs/AGENT_SKILLS.md) |
-| Understand memory formats and incremental updates | [Personal memory](docs/PERSONAL_MEMORY.md) |
+| Build a knowledge base from live history | [Personal memory](docs/PERSONAL_MEMORY.md) |
 | Restrict access through a policy-scoped connector | [AI context CLI](docs/AI_CONTEXT_CLI.md) |
 | Back up and recover your history | [Recoverable snapshots](docs/RECOVERABLE_SNAPSHOTS.md) |
 | Troubleshoot | [FAQ](docs/FAQ.md) and [known limitations](docs/KNOWN_LIMITATIONS.md) |

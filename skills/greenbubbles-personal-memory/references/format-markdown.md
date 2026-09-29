@@ -1,27 +1,54 @@
-# Markdown format reference
+# Article format
 
-This file is the agent reference for `--format markdown` UserAsCode extraction runs. Read it when using `--format markdown`, directly or through the optional driver.
+The knowledge base is a private wiki. `index.md` is the front page. Each
+file in `domains/` is one Wikipedia-style article. Write prose. A page that
+is only a bullet list of facts is not finished.
 
-The Markdown format is simpler than the Python format: no Python dependency, human-editable, and directly readable in any text editor or git viewer. It does not support executable constraints; cross-domain alerts appear as manually maintained bullet items in `manifest.md`.
-
-## Directory layout
+## Layout
 
 ```
 user_project/
 ├── .gitignore
-├── manifest.md                   # Always-in-context index: domain summaries + active alerts
+├── index.md
+├── manifest.md
 └── domains/
     ├── identity.md
-    ├── travel.md
-    ├── finance.md
-    ├── health.md
-    ├── vehicles.md
+    ├── education.md
+    ├── work.md
     ├── family.md
     ├── social.md
-    ├── work.md
+    ├── health.md
+    ├── finance.md
+    ├── travel.md
+    ├── home.md
+    ├── vehicles.md
     ├── entertainment.md
-    └── <domain>.md               # Created as facts accumulate in new life areas
+    ├── legal.md
+    └── <domain>.md
 ```
+
+Create a domain file when the reviewed messages support an article. Do not
+create an empty page for a life area that has not come up.
+
+## Language
+
+Write the whole project in the language the account holder usually uses in
+their own messages. Read several substantive self-sent messages before
+choosing. Chat with family, editors, and colleagues counts. A few English
+product names do not make the project English.
+
+Apply that language to `index.md`, `manifest.md`, article titles, headings,
+prose, see-also lines, references, revision notes, and alerts. Keep personal
+names, book titles, and product names as they are written. Translate the
+surrounding sentences.
+
+If an existing project is in another language, rewrite it into the account
+holder's language on the next pass. Do not leave an English scaffold beside
+Chinese evidence. Ask which language to use only when their own messages do
+not settle it.
+
+The sample later in this file shows structure. Do not copy its English into
+the user's project.
 
 ## `.gitignore`
 
@@ -35,230 +62,139 @@ __pycache__/
 .greenbubbles-revise.log
 ```
 
-The driver writes this file on every `tick`, `manifest-refresh` and `revise`,
-so it stays current without being edited by hand. It writes one `.gitignore`
-for both formats, which is why the Python entries appear in a Markdown project
-too. The last two entries are the driver's process lock and internal log —
-never project state, never committed.
+Add `coverage/` when the project keeps a private list of chat ids. Do not commit that list.
 
-## `manifest.md` template
+## `index.md`
+
+The front page stands alone. Open with the person's name as the title and a
+lead of one or two paragraphs: who they are, in the period the knowledge
+base covers. Then link every article, and add sections a reader would scan:
+people, organizations, works, places. Link to the heading inside the
+article, for example `[图解大模型](domains/identity.md#books)`.
+
+Update the index when an article, person, organization, or work is added.
+Do not paste article bodies into the index.
+
+## `manifest.md`
+
+The manifest is the agent's ledger, not the public front page.
 
 ```markdown
 # Personal Memory Manifest
 
 **Last updated:** 2026-01-20T14:30:00+08:00
 
+## Scope
+
+- Project path, continued-from path, and the requested window.
+
 ## Domains
 
 | Domain | Summary | Updated |
 |---|---|---|
-| [identity](domains/identity.md) | Name, DOB, passport | 2026-01-20 |
-| [travel](domains/travel.md) | 2 upcoming trips; passport expires 2026-06-01 | 2026-01-20 |
-| [finance](domains/finance.md) | 2 accounts; 1 pending transfer | 2026-01-10 |
-| [health](domains/health.md) | Allergies: peanuts; Rx: cetirizine | 2025-12-01 |
-| [vehicles](domains/vehicles.md) | Toyota Camry 2022 | 2025-11-20 |
-| [family](domains/family.md) | Spouse: Alex; Daughter: Maya (6) | 2026-01-05 |
-| [social](domains/social.md) | Weekly tennis, book club | 2025-12-15 |
-| [work](domains/work.md) | Software engineer at Acme; remote | 2026-01-18 |
-| [entertainment](domains/entertainment.md) | Sci-fi books; hiking; Netflix | 2025-12-20 |
+| [identity](domains/identity.md) | One-line scope of that article | 2026-01-20 |
 
 ## Active Alerts
 
-<!-- Update manually when cross-domain issues are identified. -->
-<!-- Format: - [SEVERITY] constraint: description -->
-- [WARNING] travel_readiness: Passport expires 2026-06-01, Singapore trip departs 2026-06-15 (expires 14 days before departure)
+- [WARNING] coverage: which qualifying chats are still unread
 
 ## Coverage
 
-Corpus: `corpus-v2`  
-Sessions committed: 12  
-Messages committed: 446,435
+Window, source identity, chats ranked, chats read, searches run, and the
+unread remainder. Name the commands used. Do not claim a complete window
+while chats remain unread.
 ```
 
-**Updating the manifest:** After patching any domain file, update the corresponding row in the Domains table (new summary, updated date). After patching all domains, update the Active Alerts section with any newly identified cross-domain issues. Always update the Last updated timestamp.
-
-**Active Alerts (Markdown format):** Since Markdown format has no executable constraint runner, alerts are maintained manually. When you notice a cross-domain issue during extraction (e.g., a passport expiry date conflicts with an upcoming trip), add a bullet to the Active Alerts section. When the issue is resolved or no longer relevant, remove or cross out the bullet.
+After revising articles, update the domain row, the alerts, and the
+timestamp. Severity is `CRITICAL`, `WARNING`, or `INFO`. Remove an alert
+when the underlying issue is gone.
 
 ## Canonical domain names
 
-Use one writer per project; concurrent domain edits can lose updates. Prefer these
-names and reuse existing domains instead of adding synonyms:
+Use one writer per project. Prefer these names:
 
 | Name | Covers |
 |---|---|
-| `identity` | Personal profile: name, contacts, education, background, goals |
-| `work` | Employment, career, projects, colleagues, job-search, offers |
-| `family` | **People only**: spouse, parents, siblings, relatives — relationships, health, milestones. NOT household purchases or home logistics. |
-| `social` | Friends, acquaintances, social activities, clubs |
-| `health` | Medical, medications, fitness, appointments |
-| `finance` | Accounts, income, expenses, investments, taxes, transfers |
-| `travel` | Trips, flights, hotels, visas, itineraries |
-| `home` | Housing, household appliances and purchases, renovation, real estate |
-| `vehicles` | Cars, bikes, registration, insurance, service |
-| `education` | Academic history, degrees, courses, research, academic service |
-| `entertainment` | Media, games, hobbies, subscriptions, memberships |
-| `legal` | Contracts, agreements, disputes, compliance |
+| `identity` | Name, public role, biography that is not its own article |
+| `work` | Employment, companies, products, colleagues, offers |
+| `family` | Relatives and the closest household relationships. Not purchases or logistics. |
+| `social` | Friends, collaborators, editors, communities |
+| `health` | Medical events, medications, fitness |
+| `finance` | Income, payments, investments, taxes |
+| `travel` | Trips, flights, visas |
+| `home` | Housing and household |
+| `vehicles` | Cars and registration |
+| `education` | Degrees, schools, teaching, research training |
+| `entertainment` | Media, hobbies, memberships |
+| `legal` | Companies' legal affairs, contracts, compliance, disputes |
 
-Create a new domain name only when a fact genuinely belongs to a life area not
-covered above. Never use synonyms (`household` → `home`, `career` → `work`).
+Add a domain only when the facts belong to a life area this list does not
+cover. Never use a synonym (`career` stays `work`).
 
-## `domains/<domain>.md` template
+Books and a public role usually belong in `identity`, with the publishing
+work linked from `work`. A person belongs in `social` or `family`, and is
+named again inside the article their messages inform.
 
-```markdown
-# Travel Domain
-
-## Schema
-
-<!-- Ontology: concepts and relationships this domain tracks -->
-- **PassportInfo**: number (string, redacted), expiry (date), issuing_country, nationality
-- **Trip**: destination, departure (date), return_date (date), booking_refs (list), notes
-- **TravelProfile**: seat_preference (string), frequent_flyer (list)
-
-## State
-
-<!-- One entry per concept, deduplicated. Never add duplicate fields.
-     Simple fact  → single line: - **Field**: value *(source: session_N, YYYY-MM-DD)*
-     Complex fact → sub-bullets: - **Field**:\n  - sub-fact *(source)*\n  - sub-fact *(source)* -->
-
-- **PassportNumber**: AB*****67 *(source: session_003, 2026-01-20)*
-- **PassportExpiry**: 2026-06-01 *(source: session_003, 2026-01-20)*
-- **UpcomingTrip_Singapore**: departs 2026-06-15, returns 2026-06-22, SQ-1234 *(source: session_005, 2026-01-18)*
-- **SeatPreference**: aisle on flights >4 h, window on shorter legs *(source: session_001, 2025-11-10)*
-- **Employment_Acme**:
-  - Joined 2024-03 as Staff Engineer, remote *(source: session_001, 2024-03-01)*
-  - Promoted to Principal 2025-06 *(source: session_012, 2025-06-15)*
-  - Left 2026-01, severance negotiated *(source: session_030, 2026-01-20)*
-
-## History
-
-<!-- Ordered log of changes. Never delete history entries. Append only. -->
-- 2026-01-20 (session_003): Passport renewed, new number AB*****67, new expiry 2026-06-01
-- 2026-01-18 (session_005): Added Singapore trip, departs 2026-06-15
-```
-
-## Deduplication rules for Markdown
-
-The agent must check these rules; CLI format validation does not enforce deduplication.
-
-### Updating a `## State` line in place
-
-When a fact already in `## State` changes value:
-
-1. Find the exact line: `- **FieldName**: old_value  *(source: session_N, old_date)*`
-2. Replace it with: `- **FieldName**: new_value  *(source: session_M, new_date)*`
-3. Do not add a second line for the same field. The State section has exactly one line per field.
-
-Example — passport renewed:
-
-Before:
-```
-- **PassportExpiry**: 2025-02-18  *(source: session_001, 2024-10-15)*
-```
-
-After (value changed, source updated):
-```
-- **PassportExpiry**: 2026-06-01  *(source: session_003, 2026-01-20)*
-```
-
-And append to History:
-```
-- 2026-01-20 (session_003): Passport renewed, new expiry 2026-06-01 (was 2025-02-18)
-```
-
-### Adding a new `## State` entry
-
-When a fact does not yet appear in `## State`:
-
-1. Verify by scanning every existing line in the State section. If any line starts with `- **FieldName**:` for the same field, do not add — update instead.
-2. Append at the end of the State section, before the `## History` heading.
-3. **Simple fact** (one datum, one source): `- **FieldName**: value *(source: session_N, YYYY-MM-DD)*`
-4. **Complex entry** (multiple facts, time periods, or sources): use sub-bullets:
-   ```
-   - **FieldName**:
-     - First fact or time period *(source: session_N, YYYY-MM-DD)*
-     - Second fact or update *(source: session_M, YYYY-MM-DD)*
-   ```
-   Never put multiple distinct facts or sources on one long single-line bullet.
-
-### Unchanged facts
-
-If the field already exists in `## State` with the same value, skip entirely. Do not add a duplicate line or append a History entry.
-
-### Field naming
-
-Use PascalCase for field names. Compound keys (e.g., multiple trips) use `_` separators: `UpcomingTrip_Tokyo`, `UpcomingTrip_Singapore`. When a fact is a list, either use separate lines per item (e.g., one `FrequentFlyer_*` per program) or a comma-separated value field.
-
-### History section
-
-The History section is an immutable, append-only log. Every meaningful state change (new fact, updated value) gets one History entry:
-
-```
-- YYYY-MM-DD (session_N): <human-readable description of what changed and why>
-```
-
-Never:
-- Delete a History entry
-- Edit a past History entry
-- Combine multiple changes into one entry if they occurred in different sessions
-
-## `## Schema` section
-
-The Schema section is a human-readable ontology for the domain: what concepts it tracks and what fields each concept has. Update it when you add a new field type:
+## Article shape
 
 ```markdown
-## Schema
+# Education
 
-<!-- Ontology: concepts and relationships this domain tracks -->
-- **PassportInfo**: number (string, redacted), expiry (date), issuing_country, nationality
-- **Trip**: destination, departure (date), return_date (date), booking_refs (list), is_international (bool), notes
+Lead paragraph. The first sentence states what this article is about. The
+rest of the lead summarizes the article without depending on other pages.
+
+## School
+
+Prose. Dates and names appear in sentences. A later correction replaces the
+sentence and leaves the old dated claim visible when the two disagree.
+
+## Teaching
+
+More prose.
+
+## See also
+
+- [Identity](identity.md)
+- [Work](work.md)
+
+## References
+
+Reviewed directly from the live database. Native search freshness is unverified.
+
+- 刘美英, direct chat, 2026-09-14. `messages list`, newest pages.
+- Search "图解大模型", hits kept from 2026-04 through 2026-05.
+
+## Revision notes
+
+- 2026-09-29: Article rewritten from the two-year reading pass.
 ```
 
-The Schema section is not executable — it documents intent. Keep it in sync with what actually appears in `## State`.
+Rules:
 
-## Cross-domain constraints in `manifest.md`
+- Title the page with the life area. Use stable `##` headings so the index
+  can link to them.
+- The lead comes before any section. A reader who stops there should know
+  the shape of the subject.
+- Prefer paragraphs. Use a list only for a real enumeration, such as a
+  series of books or the references.
+- One topic has one section. Merge a new fact into that section. Do not
+  append a second paragraph that repeats the first.
+- Say who is speaking. "He told Tracy" is his statement. "Tracy said" is hers.
+- When evidence conflicts, keep both dates in the prose. Do not silently
+  replace the older claim.
+- References name the chat display name, the message date, and whether the
+  line came from `messages list` or `messages search`. Do not cite a corpus
+  alias. Do not copy phone numbers, street addresses, meeting links, or
+  form links into the article or the references.
+- Revision notes are append-only and short. They record that the article
+  changed. The prose above them is the current account. Git holds the
+  older wording.
+- Do not copy sample facts from this file into the user's project.
 
-Without an executable constraint runner, cross-domain issues must be identified during extraction and recorded manually. When you notice a cross-domain implication (e.g., health allergy + new medication, passport expiry + upcoming trip), add a bullet to the `## Active Alerts` section of `manifest.md`:
+## Revise pass
 
-```markdown
-## Active Alerts
-
-- [CRITICAL] travel_readiness: Passport expires 2026-06-01, Singapore trip departs 2026-06-15 (expires 14 days before departure)
-- [WARNING] health_safety: Prescribed amoxicillin — check penicillin allergy compatibility
-```
-
-Severity levels: `CRITICAL` (must act before deadline), `WARNING` (should be aware), `INFO` (informational).
-
-Remove alerts that are no longer relevant during a revise pass.
-
-## Workflow summary (Markdown format)
-
-1. Run `memory next` → review pages → extract facts.
-2. For each touched domain: read `domains/<domain>.md`, identify new/changed/unchanged facts.
-3. CRUD-patch `## State` section (update in place, append new, skip unchanged).
-4. Append to `## History` for every meaningful change.
-5. Update `## Schema` if new field types were added.
-6. Run `git diff HEAD` in user_project — verify only expected changes appear.
-7. Check for cross-domain implications; update `## Active Alerts` in `manifest.md`.
-8. Update `manifest.md` domain table row (summary, date).
-9. Acknowledge every reviewed page as described in `cli.md`, then run `memory commit CORPUS --state STATE --wiki PROJECT`. The format was selected on `memory next`.
-10. Run `memory status`.
-11. Git-commit changed project files (the optional driver handles this when used): `git -C <user_project> add -A && git -C <user_project> commit -m "memory update: ..."`.
-
-## Revise pass (Markdown format)
-
-During a holistic revise pass (`personal-memory-parallel.py revise`), the agent:
-
-1. Reads the full manifest and all domain files.
-2. Identifies: stale State entries that should be archived, schema additions, domains that should be split or merged, outdated Active Alerts.
-3. Archives stale state: move old State entries to an `## Archive` section at the bottom of the domain file with an `# archived: YYYY-MM-DD` note.
-4. Removes or resolves outdated Active Alerts in manifest.md.
-5. Updates the Schema section to reflect any new field types added since last revision.
-6. Commits with message: `periodic revision: <summary>`.
-
-## Exact provenance
-
-The session/date annotations above illustrate layout only. For actual extracted facts,
-also record the corpus generation and exact delivered evidence aliases, for example
-`*(corpus: corpus-v2; source: E000000123; session_003, 2026-01-20)*`.
-Preserve dated contradictions and distinguish other people’s claims from owner state.
-Never copy sample facts from this reference into the user’s project.
+Read `index.md`, the manifest, and every article. Fold duplicated facts
+into the section that owns them. Split an article that covers two life
+areas. Delete an index link that points nowhere. Leave a dated
+contradiction in the prose. Append one revision note per article you
+change, then git-commit the project.

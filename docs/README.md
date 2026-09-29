@@ -15,7 +15,7 @@ document next.
 | Understand what it will and will not do before installing | [Known limitations](KNOWN_LIMITATIONS.md) and [threat model](THREAT_MODEL.md) |
 | Fix something that is not working | [FAQ](FAQ.md) |
 | Give an AI access to some of your history | [AI context CLI](AI_CONTEXT_CLI.md), then [AI tool boundary](AI_TOOL_BOUNDARY.md) |
-| Build a cited personal wiki from a large corpus | [Personal memory](PERSONAL_MEMORY.md) |
+| Build a knowledge base from live WeChat history | [Personal memory](PERSONAL_MEMORY.md) |
 | Keep a backup that survives losing WeChat | [Recoverable snapshots](RECOVERABLE_SNAPSHOTS.md) |
 | Decide whether to acquire the database key | [Passphrase acquisition](PASSPHRASE_ACQUISITION.md) |
 | Understand the design | [Architecture](ARCHITECTURE.md), then [storage format](STORAGE_FORMAT.md) |
@@ -52,9 +52,8 @@ document next.
   for, and what it can never reach.
 - [AI memory integration](AI_MEMORY_INTEGRATION.md) — citation-preserving
   projections into local memory and retrieval systems.
-- [Personal memory](PERSONAL_MEMORY.md) — canonical preparation,
-  composable command-line conversation/kind/sender filters, RFC 3339 time
-  bounds, compact durable batches, and agent-refined Markdown.
+- [Personal memory](PERSONAL_MEMORY.md) — a Wikipedia-style knowledge base
+  written from live `messages list` and `messages search` queries.
 - [Connector API](CONNECTOR_API.md) — the versioned local request/response
   contract, the source connector requirements, and the resumable change
   consumer.
