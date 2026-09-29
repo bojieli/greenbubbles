@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-labelledby="title desc">
   <title id="title">GreenBubbles</title>
-  <desc id="desc">An emerald chat bubble containing a cream pixel chatbot with an antenna, two eyes, and a small smile, on a pale mint rounded square.</desc>
+  <desc id="desc">An emerald chat bubble containing a cream pixel chatbot with an antenna and two eyes, on a pale mint rounded square.</desc>
   <rect x="16" y="16" width="480" height="480" rx="112" fill="#EAF5ED"/>
   <path d="M164 96h184c49 0 88 39 88 88v112c0 49-39 88-88 88H236l-76 56v-56c-47-2-84-40-84-88V184c0-49 39-88 88-88Z" fill="#087F5B"/>
   <g fill="#FFF4D6">
@@ -11,6 +11,5 @@
   </g>
   <g fill="#087F5B">
     <path d="M204 220h24v32h-24Zm80 0h24v32h-24Z"/>
-    <path d="M232 268h16v8h16v-8h16v20h-48Z"/>
   </g>
 </svg>
