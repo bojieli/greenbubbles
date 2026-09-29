@@ -73,19 +73,18 @@ Download the latest `GreenBubbles-*-macos-arm64.dmg` from
 drag **GreenBubbles** to Applications:
 
 ```console
-grep ' GreenBubbles-0.3.0-macos-arm64.dmg$' SHA256SUMS-0.3.0.txt | \
+grep ' GreenBubbles-0.4.0-macos-arm64.dmg$' SHA256SUMS-0.4.0.txt | \
   shasum -a 256 -c -
-xcrun stapler validate GreenBubbles-0.3.0-macos-arm64.dmg
+xcrun stapler validate GreenBubbles-0.4.0-macos-arm64.dmg
 ```
 
 Every executable is Developer ID signed and Apple notarized. The same release
 ships `greenbubbles-*-macos-arm64.zip` with the full command-line tool set.
-The public release verified on 2026-09-29 is [v0.3.0](https://github.com/bojieli/greenbubbles/releases/tag/v0.3.0);
-v0.4.0 prepares the updated skills/CLI workflow described below. Until its signed
-artifacts are published, build current source to use those changes.
+[v0.4.0](https://github.com/bojieli/greenbubbles/releases/tag/v0.4.0) includes
+portable agent skills, the optional skill installer, and the incremental-memory
+driver alongside the CLI binaries.
 
-A Homebrew formula and automatic release-to-formula updates are prepared in this
-repository. They become available to users once published on the default branch:
+Install the command-line tools through the upstream Homebrew tap:
 
 ```sh
 brew tap bojieli/greenbubbles https://github.com/bojieli/greenbubbles.git

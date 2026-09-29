@@ -28,7 +28,7 @@ class Greenbubbles < Formula
   end
 
   test do
-    assert_match "Usage", shell_output("#{bin}/greenbubbles --help")
-    assert_match "memory", shell_output("#{bin}/greenbubbles memory --help")
+    assert_match "Usage", shell_output("#{bin}/greenbubbles --help 2>&1")
+    assert_match "memory", shell_output("#{bin}/greenbubbles memory --help 2>&1")
   end
 end

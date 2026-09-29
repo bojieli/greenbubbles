@@ -1,22 +1,15 @@
 # CLI releases and Homebrew
 
-## Verified public artifacts
+## Published release
 
-The public release checked on 2026-09-29 is
-[v0.3.0](https://github.com/bojieli/greenbubbles/releases/tag/v0.3.0), a prerelease.
-Its assets include the signed/notarized Apple-silicon CLI ZIP, app DMG, checksums,
-SBOM, and notarization logs. The public v0.3.1 release URL returned 404 during
-this check; a local tag or Cargo version is not evidence of a published download.
+[v0.4.0](https://github.com/bojieli/greenbubbles/releases/tag/v0.4.0) is available
+as a research-alpha prerelease for Apple silicon and macOS 14+. Its assets include
+the signed/notarized CLI ZIP, app DMG, checksums, SBOM, and notarization logs.
+The CLI ZIP also includes the portable skills, optional installer, and memory driver.
 
-The seed formula in `Formula/greenbubbles.rb` uses the published CLI ZIP:
-
-- Asset: `greenbubbles-0.3.0-macos-arm64.zip`
-- SHA-256: `017767b9d2c1f32039eba06f531e335b74fe8a1dfd19100c1cb7b89d49bba22a`
-- Source: [GitHub's release asset listing](https://github.com/bojieli/greenbubbles/releases/expanded_assets/v0.3.0).
-
-The portable installer and expanded skill support are prepared for v0.4.0,
-not features claimed for that older binary release. For the updated memory
-protocol/help, build the current source until a release containing it is published.
+The formula in [`Formula/greenbubbles.rb`](../Formula/greenbubbles.rb) pins the
+published CLI ZIP by SHA-256. Compare its hash with the release's `SHA256SUMS`
+asset or [GitHub's release asset listing](https://github.com/bojieli/greenbubbles/releases/expanded_assets/v0.4.0).
 
 ## Tap setup
 
@@ -24,11 +17,7 @@ This repository doubles as an upstream tap through its top-level `Formula/`
 directory. No separate repository or cross-repository token is needed.
 This is an upstream tap, not a listing in `homebrew/core`.
 
-**Publication prerequisite:** merge/push `Formula/greenbubbles.rb` and the new
-workflows to the public repository before advertising these commands as live.
-Preparation in a local checkout alone does not make a Homebrew package available.
-
-Once the formula is published on the repository's default branch:
+Install from the published tap:
 
 ```sh
 brew tap bojieli/greenbubbles https://github.com/bojieli/greenbubbles.git
