@@ -4,6 +4,15 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
+## 0.8.0 - 2026-09-29
+
+### Changed
+
+- `ai-summarize-direct` now calls `gemini-3.8-flash` instead of
+  `gemini-3.7-flash`.
+- README, PRIVACY, and the onboarding guides are rewritten in plain language
+  for first-time users.
+
 ## 0.7.1 - 2026-09-29
 
 ### Fixed
