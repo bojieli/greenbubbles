@@ -5,6 +5,13 @@ description: Query owner-authorized WeChat history through GreenBubbles' bounded
 
 # GreenBubbles context
 
+Use these commands in the current agent session; no embedded agent or separate
+model API key is required. Resolve references relative to this skill directory.
+If the CLI/profile is missing, read `../greenbubbles-setup/SKILL.md`.
+For a maintained Markdown/Python memory project, read
+`../greenbubbles-personal-memory/SKILL.md`. Host discovery is optional. Do not invoke a separate model-backed
+summarizer when the user wants this agent to do the summarization.
+
 For ordinary local browsing, use the resource commands `conversations list`,
 `messages list`, `messages search`, and `message get`. They query the selected
 live WeChat SQLite/WCDB source or independently encrypted snapshot read-only and

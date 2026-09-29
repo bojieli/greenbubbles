@@ -4,6 +4,29 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
+## 0.4.0 - 2026-09-29
+
+### Added
+
+- Portable setup, context, and personal-memory skills for existing coding-agent
+  sessions, with optional discovery for Codex, Claude Code, OpenCode, Kimi Code,
+  Gemini CLI, and Grok Build. Skills can be read directly without installation.
+- A standalone skill bundle, conflict-safe optional installer, and read-only
+  environment/profile doctor. Release CLI archives include the skills and scripts.
+- An upstream Homebrew tap and release automation that verifies the signed CLI
+  archive's checksum before updating the formula for the exact published tag.
+- Documentation for using existing agent subscription allowances, embedded-agent
+  API billing, capture/decryption setup, provenance, and incremental memory updates.
+
+### Fixed
+
+- Incremental memory runs retain their pending corpus and fixed time window on
+  failure; checkpoints advance only after all planned shards complete.
+- Domain-memory prompts and skill references follow the actual page,
+  acknowledgement, and commit protocol, with correctly quoted CLI arguments.
+- CLI help exposes domain formats and corpus extension, and documentation
+  distinguishes structural validation from semantic/provenance review.
+
 ## 0.3.1 - 2026-09-05
 
 ### Added

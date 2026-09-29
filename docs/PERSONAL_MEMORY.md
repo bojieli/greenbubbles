@@ -1,5 +1,13 @@
 # Personal memory: your WeChat history as a living knowledge project
 
+For use in your current Codex, Claude Code, OpenCode, Kimi Code, Gemini CLI, or Grok Build session, start with the
+[portable agent skills guide](AGENT_SKILLS.md). It uses your existing agent
+configuration and needs no embedded-model API key. The driver instructions
+below are an optional way to launch separate agent batches. For a shared domain
+project, keep `--shards 1 --parallel 1`; commit locking alone does not protect
+concurrent domain edits. Timestamp-limited updates need broader reconciliation
+for late-imported older messages or old-timestamp edits.
+
 GreenBubbles turns a large live WeChat history into a structured, incrementally
 maintained knowledge project following the UserAsCode methodology. Rather than
 producing a wiki or a flat list of facts, the pipeline maintains a
@@ -358,6 +366,15 @@ The v2 two-pass algorithm:
 message volume, active-month breadth, recency, and conversation kind — to cover
 a broad personal frontier early. It still schedules every canonical unit once.
 `chronological` is an explicit alternative.
+
+## Interrupted driver ticks
+
+A partial tick exits nonzero and keeps `lastTickTime` unchanged, even if some
+messages were committed. Re-run with the same corpus, format, and scope options
+to resume its saved plan and shard state. Model/retry settings may change (for
+example after a quota reset). Complete the pending run before extending to a new
+corpus. The checkpoint advances to the run's fixed upper time bound only after
+all planned shards complete.
 
 ## Running shards
 

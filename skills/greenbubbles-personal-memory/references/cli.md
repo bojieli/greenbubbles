@@ -1,293 +1,165 @@
-# CLI contract
+# Direct agent CLI workflow
 
-## Access
+Use these commands in the current agent's shell. No driver, embedded agent,
+or separate API key is needed. Examples use `greenbubbles`; substitute the
+verified absolute Rust CLI path when it is not on PATH. Quote all paths.
 
-Prefer a private named profile so secrets never share standard input with other data:
+## Prerequisites and preparation
 
 ```sh
+greenbubbles memory --help
 greenbubbles profile list
 greenbubbles source status --profile NAME
 ```
 
-An explicit live source is also supported with `--passphrase-stdin`, but redirect the owner-only credential through standard input. Never interpolate or print it.
+The memory help must include `--format`. Resolve source failures with the setup
+skill. Use the user's existing profile and output choice. Create new private
+working directories under `umask 077` (directories 0700, files 0600). Keep the
+corpus and state outside the git-versioned memory project.
 
-## Contacts
-
-```sh
-greenbubbles contacts list [SOURCE] [--profile NAME] \
-  [--kind account-holder|person|group|official|service|unknown] \
-  [--limit 1..500] [--cursor OPAQUE] [--details] [ACCESS]
-```
-
-Follow `page.nextCursor` until `page.hasMore` is false only when the task actually needs the full contact list. Preserve the filter and `--details` setting across pages; cursors are bound to them.
-
-## Prepare one canonical corpus
-
-Create the output parent with mode `0700`. The output itself must not exist.
+Copy [selection-policy.json](selection-policy.json) to a private work directory,
+review its timezone and included conversation kinds, and obtain missing scope
+choices from the user. Its `allMessages` mode prepares all eligible history
+locally; `memory next` limits what this agent sees. It is not a remote-model
+release policy. Do not silently broaden a user's requested source scope.
 
 ```sh
-greenbubbles memory prepare NEW_CORPUS \
-  --selection-policy POLICY.json --profile NAME
-
-greenbubbles memory prepare SOURCE NEW_CORPUS \
-  --selection-policy POLICY.json --passphrase-stdin < PRIVATE_KEY_FILE
+greenbubbles memory prepare /private/work/corpus-v1 \
+  --selection-policy /private/work/selection-policy.json --profile NAME
 ```
 
-Use the v2 `allMessages` policy. `prepare` scans every inventoried message table in bounded SQL pages, identifies self-authored messages only by authenticated account-ID equality, and hydrates every eligible row. A hashed table that cannot be mapped to a source conversation is retained under a stable unresolved conversation alias; `unmatchedMessageTable` remains a coverage limitation because its identity is unavailable. Preparation atomically creates:
+The new corpus path must not exist. Never overwrite or edit a prepared corpus.
+Do not read its evidence/contact/message sidecars directly. A small manifest
+may be inspected for `largestUnitTextBytes` or generation metadata.
 
-`deliveryOrder` accepts `accountHolderRelevance` or `chronological`. The former is recommended for a new wiki. It changes only immutable unit scheduling; the canonical evidence set and eventual full traversal are unchanged. Legacy v1 policies still produce account-holder-active episode corpora and remain readable, but cannot prove whole-database review.
+Initialize the output as a private git repository if it is new. Read an existing
+manifest first and preserve user changes. For Markdown create `manifest.md`
+and `domains/`; use the format reference for their contents. Keep run state
+outside that repository. The CLI parameter is called `--wiki` for every format,
+including domain Markdown and Python.
 
-```text
-NEW_CORPUS/
-  manifest.json
-  coverage.json
-  contacts.jsonl
-  conversations.jsonl
-  activity.jsonl
-  evidence.jsonl
-  batches/index.json
-  batches/U######.json
-```
-
-New corpora use a compact v2 `batches/index.json`: evidence runs are represented
-by their first ordinal, repeated target paths are represented by person/sender
-keys, and verbose identity records stay deduplicated in sidecars. An all-message
-state does not repeat every canonical unit selection. Model pages then expose
-the real identity record once per used person or conversation rather than on
-every message, while stable `E#########` citations remain compact. Existing v1
-indexes remain readable when their identity sidecars are complete.
-
-Do not feed these sidecars wholesale to the model. `memory next` is the token-bounded interface.
-
-## Choose evidence scope and summary subject
-
-Put the scope directly on every `memory next` invocation. There is no scope JSON file:
+## Review one batch
 
 ```sh
-greenbubbles memory next CORPUS \
-  --state RUN_STATE.json --wiki WIKI \
-  --max-text-bytes 327680 --max-messages 2520 \
-  --conversation C000449 --conversation C000731 \
-  --conversation-kind group \
-  --from 2023-12-01T00:00:00+08:00 \
-  --through 2023-12-31T23:59:59+08:00 \
-  --sender self --sender P000123 \
-  --subject account-holder
+greenbubbles memory next /private/work/corpus-v1 \
+  --state /private/work/run-v1.json --wiki /private/memory/me \
+  --format markdown --max-text-bytes 65536 --max-messages 250
 ```
 
-The evidence filters are:
+Use `--format python` for Python; choose the format on the first `next` and keep
+it unchanged. Repeat the same scope on every `next`:
 
-- repeatable `--conversation`: an exact source conversation ID or stable `C######` key;
-- repeatable `--conversation-kind`: `direct`, `group`, `official`, or `service`;
-- `--from` and `--through`: inclusive RFC 3339 bounds with an explicit numeric offset or `Z`;
-- repeatable `--sender`: a source person ID or `P######` key. `self` and `accountHolder` select the authenticated account holder; `unknown` explicitly selects unresolved senders.
+- `--conversation ID` (repeatable), `--conversation-kind direct|group|official|service`;
+- `--sender self` or a source person ID / `P######` (repeatable);
+- `--from RFC3339 --through RFC3339` with explicit timezone offsets;
+- `--subject account-holder|person:ID|none` controls focus, not evidence filtering.
 
-Values within one repeatable category are ORed. The conversation, kind, time, and sender categories intersect. Omitting all four categories means every hydrated message in the canonical corpus; omitting `--sender` means every sender, never self-only.
+Selections within a category are ORed; categories intersect. Empty filters mean
+all prepared messages, including other senders. Do not silently select self-only
+and discard conversational context. Bounds are inclusive. `--max-messages` is a
+soft batch bound; an indivisible prepared unit can exceed it. If the CLI says a
+unit exceeds `--max-text-bytes`, increase only that bound enough to fit the unit
+and the current agent's context budget (CLI range 16384..2097152).
 
-`--subject` controls wiki focus without changing evidence selection. It defaults to `account-holder`; use `person:<source-id-or-P######>` for another person or `none` for conversation-centric memory. Unknown, duplicate, oversized, ambiguous, inverted, offset-free, or malformed values fail before state creation.
-
-RFC 3339 fractional bounds are applied exactly to the source's whole-second timestamps: a fractional `--from` advances to the next whole second, while a fractional `--through` retains its containing whole second. Returned scope times are the effective bounds normalized to the corpus timezone.
-
-## Process one durable batch
-
-Create the wiki and state parent as owner-only directories, including any
-`conversations/` and `people/` subdirectories, at mode 700: a directory created
-under a looser umask fails the commit at the end of the batch.
-
-Size the batch against your own context window, because you read the whole batch
-in one session. `--max-text-bytes` bounds stored chat text and must be at least
-`manifest.json.largestUnitTextBytes`; a practical Gemini 3.7 Flash starting
-bound is 327680. Text bytes alone under-predict delivery, though, because every
-message also carries about 130 bytes of envelope, so bound the message count as
-well. `--max-messages` is soft: it stops a batch taking another unit and never
-splits or refuses the one unit a batch must deliver whole. Page output remains
-independently capped, so a larger batch never makes a page unreadable.
+`next` contains a batch envelope, not messages. If `complete=true` with no batch,
+report status and stop; do not try to commit a nonexistent batch.
 
 ```sh
-greenbubbles memory next NEW_CORPUS \
-  --state RUN_STATE.json --wiki WIKI \
-  --max-text-bytes 327680 --max-messages 2520 \
-  [SCOPE ARGUMENTS]
+greenbubbles memory page /private/work/corpus-v1 --state /private/work/run-v1.json
 ```
 
-Keep `RUN_STATE.json` and `WIKI` outside the project and source control. Repeat the exact scope arguments on every `memory next`; supplying no evidence filters explicitly requests the whole corpus. A state cannot change scope while a batch is outstanding or the current scope is incomplete. After completion, a different set of arguments serially rebinds the state, preserves the committed wiki snapshot, and records the completed scope.
+A page is at most 49152 bytes including JSON. Ensure the shell tool's output
+limit can return it fully. Each message carries `e` (evidence alias), `a`
+(self/other/unknown), `t` (date/time), `k` (kind), and `x` (text). `tr=true` is a
+source-message text limit, not tool-output truncation. Preserve that limitation.
+Person/conversation aliases join the page's real identity metadata; use names
+in prose, aliases in citations. Do not infer self from a display name.
 
-For an unfiltered canonical scope, state records the all-message binding and
-count without serializing one redundant all-selected record for every unit.
-Sender-filter planning first uses compact sender-presence metadata as a safe
-negative filter, then verifies exact matches inside candidate units.
-
-`next`
-returns only a small envelope. Inspect `delivery` for the page count, progress,
-fixed output ceiling, `deliveryOrder`, and the resolved scope summary. The persisted state already
-identifies this uniquely current batch, so ordinary agent calls do not need to
-copy its opaque `batchId`. The envelope contains no chat messages.
-`accountHolderRelevance` is a deterministic weighted schedule:
-it favors self-message volume, active-month breadth, recency and direct context,
-interleaves strong months within a relationship, and still includes every
-prepared unit. It does not claim that a high-ranked message is true or durable.
-
-Fetch exactly the next unacknowledged page directly through the shell tool:
+Read every message, patch the relevant domain files, and cite retained evidence,
+for example `*(corpus: corpus-v1; source: E000000123; 2026-09-01)*`.
+The page's `targetPages` describes the legacy wiki, not the domain-format paths.
+Then acknowledge the current page with exactly its aliases retained in the project:
 
 ```sh
-greenbubbles memory page NEW_CORPUS \
-  --state RUN_STATE.json
+greenbubbles memory acknowledge /private/work/corpus-v1 \
+  --state /private/work/run-v1.json --retain-evidence E000000123,E000000141
 ```
 
-Each compact page, including its JSON envelope and newline, is at most 49152
-bytes, below Pi's 51200-byte built-in tool-output limit. A harness with a lower
-tool-output ceiling must have it raised, or it will truncate a complete page. A
-retry before acknowledgement is byte-identical. Never acknowledge output marked
-as truncated.
-The page contains:
-
-- `pageToken` and `pageSHA256`: deterministic bindings retained for audit and
-  explicit replay; ordinary acknowledgement resolves the uniquely current
-  delivered page from state.
-- `page.number`, `page.pageCount`, `messageCount`, and `textByteCount`.
-- `targetPages`: the only Markdown paths this page can inform.
-- `accountHolder`: the authenticated owner's real source ID and best available display name, plus distinct remark, nickname, and WeChat alias fields when the source contains them. When the source has no name of its own the display name is `Me`, which is what `me.md` should be titled; never title a page with a `wxid_…` source ID.
-- `people`: stable `P######` join keys to real source IDs, display names, remarks, nicknames, and WeChat aliases for this page.
-- `conversations`: stable `C######` join keys to real source IDs, titles, and kinds for this page.
-- `scope`: filter counts, whether the evidence scope is all messages, and the resolved summary subject.
-- `episodes`: chronological prepared-unit fragments. `u` is the unit alias,
-  `o` is the fragment's zero-based message offset, and `n` is the unit's total
-  message count; the same unit may continue on the next page.
-- In each episode, `c` is the stable conversation alias and `m` is its message array.
-- In each message, `e` is the evidence alias, `a` is `self`, `other`, or
-  `unknown`, `p` is an optional person join key, `t` is RFC 3339 in the corpus timezone, `k` is payload
-  kind, `x` is concise text, and `tr=true` means only that this message's text
-  reached the configured per-message bound. Sticker, location and system
-  payloads arrive as the human text inside their WeChat markup envelope, or as
-  an `[Emoji]`-style placeholder when the envelope holds nothing readable. `tr`
-  is not a page or tool truncation signal; only an explicit shell-tool
-  truncation notice makes the page unsafe to acknowledge.
-
-Keep the wiki private:
-
-```text
-WIKI/
-  index.md
-  me.md
-  people/P######.md
-  conversations/C######.md
-```
-
-Treat conversation pages as chronological leaf memory, person and `me.md` pages as durable rollups, and `index.md` as navigation plus a compact global overview. A page for an account-holder subject can target `me.md`, relevant people, and relevant conversations. A person subject targets that person's page and relevant conversations. A `none` subject targets conversation pages, not `me.md`. Do not promote every line upward: retain durable facts, relationship changes, dated events, conflicts, and patterns while leaving transient chatter represented only by explicit review accounting.
-
-Use real names and titles in every heading, link label, and prose reference. Keep `P######` and `C######` only in collision-safe paths and machine joins. When the source has no display label, use its real source ID; never invent `Person P######`, `Group C######`, or another anonymous substitute. Preserve distinct remark, nickname, and alias values in page metadata when they differ.
-
-Use stable headings and comprehensive but concise factual bullets. Put exact
-citations on every factual prose line, for example:
-
-```markdown
-- Prefers tea when working late. [E000000123] [E000000141]
-```
-
-When evidence conflicts, retain the dated conflict or qualify confidence. Do not silently replace a cited historical fact with the newest statement.
-Prefer a representative citation set over attaching every repetition of the
-same claim. Reconcile and consolidate existing prose on every page; do not grow
-the wiki as an append-only transcript. A factual prose line may contain at most
-eight exact aliases; ordinary commit enforces this token-bloat boundary.
-Check that a target page exists before reading it; a missing page is normal and
-should be created only when the current evidence supports useful prose. A prior
-alias may remain on or be consolidated within the same page that already cited
-it. Do not introduce that old alias on a different page unless it is also
-present in and retained from the current batch; this prevents cross-page
-citation laundering.
-Every factual line on `me.md` must also contain at least one self-authored
-alias. Incoming-only facts belong on the relevant person page; commit resolves
-actor provenance from the immutable local evidence sidecar and enforces this.
-
-Acknowledge only after reading every message in the page and durably writing its
-useful memory into the wiki. List exactly the page aliases now cited by durable
-wiki prose as one comma-separated argument:
+When all messages were reviewed but none contributed durable evidence:
 
 ```sh
-greenbubbles memory acknowledge NEW_CORPUS \
-  --state RUN_STATE.json \
-  --retain-evidence E000000123,E000000141
+greenbubbles memory acknowledge /private/work/corpus-v1 \
+  --state /private/work/run-v1.json --reviewed-no-durable-memory
 ```
 
-If and only if the fully reviewed page has no durable evidence, keep its aliases
-out of the wiki and record the explicit page disposition:
+Repeat page → patch → acknowledge until review is complete. Repeated `page`
+before acknowledgement returns the same page. Once acknowledged, it cannot be
+reclassified; do not acknowledge speculative candidate facts before saving them.
+For unchanged facts, either retain and record their new supporting evidence or
+record no new durable memory; do not append duplicate facts.
+
+Update the manifest and verify the diff and attribution, then:
 
 ```sh
-greenbubbles memory acknowledge NEW_CORPUS \
-  --state RUN_STATE.json \
-  --reviewed-no-durable-memory
+greenbubbles memory commit /private/work/corpus-v1 \
+  --state /private/work/run-v1.json --wiki /private/memory/me
+greenbubbles memory status /private/work/corpus-v1 --state /private/work/run-v1.json
 ```
 
-Repeat `page` then `acknowledge` until `reviewComplete` is true. Acknowledgement
-is sequential, requires prior delivery, validates retained aliases against that
-exact page, and cannot later be reclassified. Retained aliases are not a scratch
-candidate list: each must remain cited in the wiki through commit. `page`,
-`acknowledge`, and `commit` default to the uniquely current persisted batch;
-`acknowledge` likewise defaults to its current unreviewed delivered page. Use
-`--batch ID` and `--page-token TOKEN` only when an operator needs to bind an
-explicit audit/replay invocation. The literal selector `current` is also
-accepted.
+**`--format` belongs to `next`, not `commit`.** Commit rejects undelivered or
+unacknowledged pages. Domain Markdown validation checks `manifest.md` and the
+`## Schema`, `## State`, and `## History` headings in domain files; it does not
+enforce the wiki's citation checks. Verify exact citations and accuracy yourself.
+A batch with no new facts can still use the normal domain-format commit after
+review and acknowledgement. Avoid fabricating a change to obtain a commit.
 
-Commit only after edits are durably written with file mode `0600` and directories
-mode `0700`. Do not touch all `targetPages` mechanically: create or edit only
-useful pages. Every page must have been fetched and acknowledged. At least one
-changed non-index page must contain prose and cite retained evidence; empty,
-heading-only, uncited, retained-but-uncited, stale-evidence-only,
-unretained-evidence, over-cited prose, and accidental no-op commits are
-rejected. Changed `me.md` prose without self-authored support is also rejected:
+Stage only project files changed for this task and git-commit them if changed.
+Do not sweep unrelated user edits into a commit. If Git identity is unavailable,
+report that separately; do not falsify identity or roll back successful CLI progress.
+Repeat `next` with the same state until complete or the user's limit is reached.
+
+## Resume and incremental refresh
+
+On interruption, use the same corpus, state, output format, and scope. `next`
+returns the outstanding batch. Check status before creating any new state.
+Never delete state to get past a rejection. Fix the reported problem and retry;
+if the same failure persists after one targeted correction, report it with the
+outstanding batch preserved.
+
+To include new source data, first complete the previous run, then:
 
 ```sh
-greenbubbles memory commit NEW_CORPUS \
-  --state RUN_STATE.json --wiki WIKI
+greenbubbles memory prepare /private/work/corpus-v2 \
+  --extend /private/work/corpus-v1 \
+  --selection-policy /private/work/selection-policy.json --profile NAME
 ```
 
-If, and only if, every page was fully reviewed and acknowledged without retained
-evidence, do not invent a claim or placeholder. Leave the wiki byte-for-byte
-unchanged and record the deliberate batch disposition:
+A state is bound to one immutable corpus: **use a new state path for v2**, keep
+the same memory project, and retain v1 and its state for provenance/recovery.
+For a routine incremental pass, set `--from` to the previous completed run's
+explicit `--through` bound (inclusive overlap) and set a new `--through` bound.
+Persist these bounds and the corpus/state paths in the project's manifest only
+after that entire scoped run completes. On retries reuse the recorded pending
+scope, never replace it with the wall-clock time. Unchanged facts are deduplicated.
 
-```sh
-greenbubbles memory commit NEW_CORPUS \
-  --state RUN_STATE.json --wiki WIKI \
-  --reviewed-no-durable-memory
-```
+Timestamp-scoped updates can miss late-imported historical messages and edits
+with old timestamps. If the previous run lacks a trustworthy completed bound,
+or the user requests historical reconciliation, run a new state over the full
+extended corpus and deduplicate against existing domain state. This costs more
+model context but does not silently discard old-dated additions. Do not describe
+timestamp filtering as a complete change feed or claim deletions from absence.
 
-This mode rejects any wiki change. It is not a shortcut for incomplete review,
-uncertainty that should instead be expressed in cited prose, or tool failure.
+For unattended scheduling or sharding the repository has an optional
+`scripts/personal-memory-parallel.py tick` driver. It launches separate agents;
+it is not needed by these installed skills. Prefer one writer (`--shards 1
+--parallel 1`) for a shared domain project. Scheduling and provider billing
+remain the user's choices.
 
-Commit checks immutable unit and deterministic page hashes, complete delivery and
-review accounting, safe owner-only wiki paths, changed-page scope, retained
-evidence aliases, citations on every factual prose line, and the explicit
-unchanged-wiki disposition above. It does not merge Markdown. A rejected commit
-leaves the same batch outstanding; correct the wiki and retry. The rejection
-lists every problem it found in one message, with one-based line numbers for
-offending prose lines and the exact aliases and paths at fault, so fix all of
-them before retrying rather than one per attempt. Repeating a successful commit
-is idempotent.
+## Report completion honestly
 
-## Status and recovery
-
-```sh
-greenbubbles memory status NEW_CORPUS --state RUN_STATE.json
-```
-
-- After interruption, call `next` with the same state and wiki.
-- Status reports `scannedMessageCount`, `selectedMessageCount`, cumulative
-  `committedMessageCount`, `eligibleMessageCount`, `corpusMessageCount`, resolved
-  `scope`, `completedScopeCount`, source/content coverage flags, unmatched-table count,
-  and aggregate `limitationCodes`. `corpusMessageCount` is the hydrated canonical evidence count; `selectedMessageCount` is the current scope's matched count. Use these fields for the final handoff; do
-  not open private corpus sidecars from the agent.
-- `reviewComplete` and the outstanding review counters are `null`/zero when no
-  batch is outstanding. After commit, use the `lastCommitted` object for the
-  preceding batch's reviewed page, message and retained-evidence counts.
-- During page review, call `page` again; the same unacknowledged page repeats
-  byte-for-byte. Do not manually advance state; acknowledgement resolves the
-  same delivered current page, or an operator can pass its exact token.
-- Never delete or manually advance the state cursor.
-- Never edit the wiki after a successful commit and before the next `next`; its
-  hashes are bound to state, and out-of-protocol drift is rejected even at
-  completion.
-- If `sourceCoverageComplete` or `contentComplete` is false, carry the status
-  limitations into the handoff and never infer what missing messages said.
-- Batch commit requires `acknowledgedPageCount == outstandingPageCount` and
-  `reviewComplete=true`. Corpus completion additionally requires no outstanding
-  batch and `nextUnitIndex == unitCount`. This proves whole-corpus review only when `scope.allMessages` is true on a canonical v2 corpus. Otherwise it proves completion of that exact scoped view.
+Report `committedMessageCount`, current scope, completion/outstanding status,
+`sourceCoverageComplete`, `contentComplete`, and `limitationCodes` from status.
+After commit, the previous batch counters live under `lastCommitted`;
+`reviewComplete` may be null when no batch is outstanding. Whole-corpus review
+requires completion of an unfiltered canonical all-message scope, not merely a
+successful batch or a recent timestamp window.

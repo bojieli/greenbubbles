@@ -42,6 +42,9 @@ jobs:
       - name: Test the personal-memory driver
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
+      - name: Check Homebrew formula syntax
+        run: ruby -c Formula/greenbubbles.rb
+
       - name: Check packaging manifests
         run: |
           bash -n scripts/package-send-helper.sh

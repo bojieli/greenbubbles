@@ -17,6 +17,15 @@ require_file() {
   fi
 }
 
+require_file Formula/greenbubbles.rb
+require_file Packaging/Homebrew/greenbubbles.rb.in
+require_file scripts/homebrew-release.py
+require_file .github/workflows/homebrew.yml
+require_file scripts/install-skills.py
+require_file skills/greenbubbles-setup/SKILL.md
+require_file skills/greenbubbles-setup/scripts/doctor.py
+require_file skills/greenbubbles-personal-memory/references/wiki.md
+require_file docs/AGENT_SKILLS.md
 require_file LICENSE
 require_file THIRD_PARTY_NOTICES.md
 require_file NOTICE.md

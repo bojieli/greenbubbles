@@ -137,6 +137,8 @@ jobs:
             THIRD_PARTY_NOTICES.md \
             "$staging/"
           cp -R assets skills "$staging/"
+          mkdir -p "$staging/scripts"
+          cp scripts/install-skills.py scripts/personal-memory-parallel.py "$staging/scripts/"
           cp -R docs/. "$staging/docs/"
           swift scripts/check-distribution-inventory.swift --print \
             >"$staging/sbom.json"
@@ -519,11 +521,21 @@ jobs:
           mounted=
           trap - EXIT
 
+      - name: Generate Homebrew formula for this signed CLI archive
+        run: |
+          python3 scripts/homebrew-release.py \
+            --version "${{ steps.tag.outputs.version }}" \
+            --repository "$GITHUB_REPOSITORY" \
+            --archive "${{ steps.archive.outputs.archive }}" \
+            --output dist/greenbubbles.rb
+          ruby -c dist/greenbubbles.rb
+
       - name: Write release checksums
         run: |
           set -euo pipefail
           cd dist
           shasum -a 256 \
+            greenbubbles.rb \
             "$(basename "${{ steps.archive.outputs.archive }}")" \
             "$(basename "${{ steps.archive.outputs.dmg }}")" \
             "$(basename "${{ steps.archive.outputs.sbom }}")" \
@@ -563,6 +575,12 @@ jobs:
             echo
           } >release-notes.md
 
+          # Include the curated version notes as well as GitHub's commit summary.
+          awk -v version="${{ steps.tag.outputs.version }}" '
+            /^## / { if (found) exit; found = ($2 == version); next }
+            found { print }
+          ' CHANGELOG.md >>release-notes.md
+
           gh api "repos/${{ github.repository }}/releases/generate-notes" \
             -f tag_name="$tag" \
             --jq '.body' >>release-notes.md
@@ -583,7 +601,8 @@ jobs:
             "${{ steps.archive.outputs.sbom }}" \
             "${{ steps.archive.outputs.app_notary_log }}" \
             "${{ steps.archive.outputs.cli_notary_log }}" \
-            "${{ steps.archive.outputs.dmg_notary_log }}"
+            "${{ steps.archive.outputs.dmg_notary_log }}" \
+            dist/greenbubbles.rb
 
       - name: Remove signing material and temporary keychain
         if: always()
@@ -605,3 +624,11 @@ jobs:
             security list-keychains -d user -s "${remaining[@]}"
             security delete-keychain "$GREENBUBBLES_RELEASE_KEYCHAIN"
           fi
+
+  homebrew:
+    needs: publish
+    permissions:
+      contents: write
+    uses: ./.github/workflows/homebrew.yml
+    with:
+      tag: ${{ inputs.tag || github.ref_name }}

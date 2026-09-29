@@ -1,5 +1,7 @@
 # Giving an AI context
 
+For installation and direct use from Codex, Claude Code, OpenCode, Kimi Code, Gemini CLI, or Grok Build, see [Portable agent skills](AGENT_SKILLS.md).
+
 The `greenbubbles` command line is the primary agent surface. It serves
 source-faithful WeChat context without a long-running process, without SQL, and
 without access to restoration secrets. The repository skill in

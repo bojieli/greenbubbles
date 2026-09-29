@@ -497,5 +497,77 @@ class LanguagePromptInjection(unittest.TestCase):
         self.assertIn("manifest", prompt)
 
 
+class PortableSkillPrompts(unittest.TestCase):
+    def test_only_selected_format_references_are_inlined(self):
+        root = Path(__file__).resolve().parent.parent / "skills/greenbubbles-personal-memory"
+        for fmt, included, excluded in (
+            ("markdown", "format-markdown.md", "format-python.md"),
+            ("python", "format-python.md", "format-markdown.md"),
+            ("wiki", "wiki.md", "format-markdown.md"),
+        ):
+            text = driver.skill_text(Namespace(skill="auto", agent="codex", skill_dir=str(root), format=fmt))
+            self.assertIn(f"----- {included} -----", text)
+            self.assertNotIn(f"----- {excluded} -----", text)
+
+    def test_driver_commands_preserve_paths_and_scope_as_arguments(self):
+        import shlex
+        text = driver.tick_agent_prompt("/path with spaces/greenbubbles", Path("/corpus x"),
+            Path("/state x"), Path("/project x"), ["--conversation", "id;echo nope"],
+            "markdown", 65536, 250)
+        next_line = next(line for line in text.splitlines() if line.startswith("1. Run: "))
+        args = shlex.split(next_line.removeprefix("1. Run: "))
+        self.assertEqual(args[0], "/path with spaces/greenbubbles")
+        self.assertEqual(args[-1], "id;echo nope")
+        self.assertIn("acknowledge", text)
+        commit_line = next(line for line in text.splitlines() if line.startswith("6. Run: "))
+        self.assertNotIn("--format", shlex.split(commit_line))
+
+
+class TickCheckpointRecovery(unittest.TestCase):
+    def test_partial_tick_preserves_checkpoint_and_resumes_same_plan(self):
+        import json
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = Namespace(user_project=str(root / "project"), corpus=str(root / "corpus"),
+                format="markdown", language="English", shards=1, parallel=1,
+                kind=None, min_self_messages=1, group_min_self_per_month=5,
+                group_kind=None, through="2026-09-01T00:00:00Z", greenbubbles="fake")
+            planned = []
+            def plan(ns):
+                planned.append(ns)
+                (Path(ns.run) / "plan.json").write_text(json.dumps({
+                    "run": ns.run, "corpus": ns.corpus, "totals": {"messages": 10},
+                    "shards": [{"index": 0}]}))
+            with patch.object(driver, "command_plan", side_effect=plan), \
+                 patch.object(driver, "greenbubbles_binary", return_value="fake"), \
+                 patch.object(driver, "check_remote_privacy"), \
+                 patch.object(driver, "run_tick_shard", side_effect=[
+                     {"complete": False, "committedMessages": 5, "completedScopes": 0, "scopes": 1},
+                     {"complete": True, "committedMessages": 10, "completedScopes": 1, "scopes": 1}]):
+                self.assertEqual(driver.command_tick(args), 1)
+                state_path = Path(args.user_project) / ".greenbubbles-tick-state.json"
+                failed = json.loads(state_path.read_text())
+                self.assertNotIn("lastTickTime", failed)
+                pending = failed["pendingRun"]
+                self.assertEqual(pending["through"], args.through)
+                old_corpus = args.corpus
+                args.corpus = str(root / "new-corpus")
+                with self.assertRaisesRegex(SystemExit, "incomplete tick"):
+                    driver.command_tick(args)
+                args.corpus = old_corpus
+                self.assertEqual(driver.command_tick(args), 0)
+                finished = json.loads(state_path.read_text())
+                self.assertNotIn("pendingRun", finished)
+                self.assertEqual(finished["lastTickTime"], args.through)
+                self.assertEqual(len(planned), 1, "resume must reuse existing shard state/plan")
+
+    def test_errors_or_missing_shards_do_not_complete_a_tick(self):
+        self.assertFalse(driver.tick_results_complete([{"error": "timeout"}], 1))
+        self.assertFalse(driver.tick_results_complete([{"complete": True}], 2))
+        self.assertFalse(driver.tick_results_complete([], 0))
+        self.assertTrue(driver.tick_results_complete([{"complete": True}], 1))
+
+
 if __name__ == "__main__":
     unittest.main()

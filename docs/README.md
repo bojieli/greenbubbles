@@ -1,9 +1,13 @@
 # GreenBubbles documentation
 
+- [Portable agent skills](AGENT_SKILLS.md): use Codex, Claude Code, OpenCode, Kimi Code, Gemini CLI, or Grok Build for extraction and memory updates.
+
 GreenBubbles reads your own WeChat history on your own Mac and releases bounded,
 cited slices of it to tools you approve. The [repository
 README](../README.md) is the introduction; this page is how you find the right
 document next.
+
+- [CLI releases and Homebrew](HOMEBREW.md): verified downloads, tap setup, and release automation.
 
 ## Start here
 

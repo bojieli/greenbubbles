@@ -342,7 +342,7 @@ def test_no_past_departure_in_upcoming():
 5. Write or update any new constraints in `constraints/`.
 6. Run `python runner.py` and capture output.
 7. Update `manifest.py` DOMAINS summaries and ACTIVE_ALERTS from runner output.
-8. Run `memory commit --format python`.
+8. Run `memory commit CORPUS --state STATE --wiki PROJECT`.
 9. Run `memory status`.
 10. (Driver handles): `git -C <user_project> add -A && git -C <user_project> commit -m "memory update: ..."`.
 
@@ -358,3 +358,11 @@ During a holistic revise pass (`personal-memory-parallel.py revise`), the agent:
 6. Cross-domain reference audit: verify all cross-domain references in constraints are still valid.
 7. Regenerates manifest.py.
 8. Commits with message: `periodic revision: <summary>`.
+
+## Direct-session protocol
+
+Follow `cli.md` for page acknowledgements and commit syntax. `--format python`
+is set on `memory next`, never on `memory commit`. Use one writer per project.
+Keep corpus generation and exact E######### evidence aliases in source comments;
+a session/date label alone is insufficient provenance. CLI syntax validation
+does not prove the extracted facts or generated constraints are correct.

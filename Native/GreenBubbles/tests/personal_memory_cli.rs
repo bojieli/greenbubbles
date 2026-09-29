@@ -1441,3 +1441,95 @@ fn assert_success(output: &Output) {
     );
     assert!(output.stderr.is_empty());
 }
+
+#[test]
+fn domain_markdown_cli_requires_page_review_and_commits_without_format_flag() {
+    let fixture = Fixture::new();
+    let policy = write_policy(&fixture);
+    let corpus = fixture.directory.path().join("domain-corpus");
+    let project = fixture.directory.path().join("domain-project");
+    let state = fixture.directory.path().join("domain-state.json");
+    fs::create_dir_all(project.join("domains")).unwrap();
+    fs::set_permissions(&project, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(project.join("domains"), fs::Permissions::from_mode(0o700)).unwrap();
+    let c = corpus.to_str().unwrap();
+    let p = project.to_str().unwrap();
+    let st = state.to_str().unwrap();
+    assert!(run(&[
+        "memory",
+        "prepare",
+        fixture.root.to_str().unwrap(),
+        c,
+        "--selection-policy",
+        policy.to_str().unwrap(),
+        "--decrypted"
+    ])
+    .status
+    .success());
+    let next = run(&[
+        "memory",
+        "next",
+        c,
+        "--state",
+        st,
+        "--wiki",
+        p,
+        "--format",
+        "markdown",
+        "--max-text-bytes",
+        "65536",
+    ]);
+    assert!(
+        next.status.success(),
+        "{}",
+        String::from_utf8_lossy(&next.stderr)
+    );
+    let commit = ["memory", "commit", c, "--state", st, "--wiki", p];
+    assert!(
+        !run(&commit).status.success(),
+        "unreviewed batch must not commit"
+    );
+    loop {
+        let result = run(&["memory", "page", c, "--state", st]);
+        assert!(result.status.success());
+        let page: Value = serde_json::from_slice(&result.stdout).unwrap();
+        if page["reviewComplete"] == true {
+            break;
+        }
+        // Synthetic no-durable-memory review exercises the direct-session protocol.
+        assert!(run(&[
+            "memory",
+            "acknowledge",
+            c,
+            "--state",
+            st,
+            "--reviewed-no-durable-memory"
+        ])
+        .status
+        .success());
+    }
+    fs::write(project.join("manifest.md"), "# Memory\n").unwrap();
+    fs::write(
+        project.join("domains/work.md"),
+        "# Work\n## Schema\n## State\n## History\n",
+    )
+    .unwrap();
+    for file in [project.join("manifest.md"), project.join("domains/work.md")] {
+        fs::set_permissions(file, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let committed = run(&commit);
+    assert!(
+        committed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&committed.stderr)
+    );
+    assert!(run(&commit).status.success(), "retry must be idempotent");
+    let status = run(&["memory", "status", c, "--state", st]);
+    let status: Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["complete"], true);
+    assert_eq!(status["committedMessageCount"], 6);
+    let help = run(&["memory", "--help"]);
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("--format wiki|markdown|python"));
+    assert!(help.contains("--extend <base-corpus-index>"));
+}

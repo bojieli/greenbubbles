@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Read your own WeChat history from the command line, and give an AI only the parts you choose.</strong><br>
-  A Mac app and CLI. Everything stays on your machine.
+  A Mac app and CLI. Local storage; you choose what your AI sees.
 </p>
 
 <p align="center">
@@ -73,13 +73,27 @@ Download the latest `GreenBubbles-*-macos-arm64.dmg` from
 drag **GreenBubbles** to Applications:
 
 ```console
-grep ' GreenBubbles-0.3.1-macos-arm64.dmg$' SHA256SUMS-0.3.1.txt | \
+grep ' GreenBubbles-0.3.0-macos-arm64.dmg$' SHA256SUMS-0.3.0.txt | \
   shasum -a 256 -c -
-xcrun stapler validate GreenBubbles-0.3.1-macos-arm64.dmg
+xcrun stapler validate GreenBubbles-0.3.0-macos-arm64.dmg
 ```
 
 Every executable is Developer ID signed and Apple notarized. The same release
 ships `greenbubbles-*-macos-arm64.zip` with the full command-line tool set.
+The public release verified on 2026-09-29 is [v0.3.0](https://github.com/bojieli/greenbubbles/releases/tag/v0.3.0);
+v0.4.0 prepares the updated skills/CLI workflow described below. Until its signed
+artifacts are published, build current source to use those changes.
+
+A Homebrew formula and automatic release-to-formula updates are prepared in this
+repository. They become available to users once published on the default branch:
+
+```sh
+brew tap bojieli/greenbubbles https://github.com/bojieli/greenbubbles.git
+brew install bojieli/greenbubbles/greenbubbles
+```
+
+See [CLI releases and Homebrew](docs/HOMEBREW.md) for publication status,
+checksums, upgrades, and maintainer setup.
 
 <details>
 <summary><strong>Build from source</strong></summary>
@@ -97,6 +111,58 @@ swift run greenbubbles-history
 The CLI lands at `Native/GreenBubbles/target/release/greenbubbles`. Point the
 app at it when it asks.
 </details>
+
+## Use your existing coding agent (recommended)
+
+You can organize your WeChat history with **GreenBubbles’ embedded model workflow**,
+or let **your existing Codex, Claude Code, OpenCode, Kimi Code, Gemini CLI, Grok Build,
+or another compatible coding agent**
+use the GreenBubbles CLI through portable skills. The skills let your current
+agent extract facts, summarize conversations, maintain Markdown or Python memory,
+and apply incremental updates without running the embedded agent.
+
+**If you already pay for a coding-agent subscription, start with that agent and
+the skills.** Using its included allowance can avoid an additional API bill.
+The embedded `ai-summarize-direct` workflow requires its own `GEMINI_API_KEY`
+and is billed separately by the API provider; your coding-agent subscription
+does not cover that API usage. API processing can cost more than using an
+existing subscription allowance, especially for large histories. Actual costs
+depend on the model, volume, plan limits, and overage settings; subscriptions
+are not unlimited. Make sure your agent is signed in through its subscription
+rather than configured for API-key billing. See
+[Codex authentication](https://learn.chatgpt.com/docs/auth) and
+[Claude Code costs](https://code.claude.com/docs/en/costs).
+
+**No skill installation is required.** From this checkout or an extracted CLI
+release, point your agent at the documentation:
+
+> Read `skills/greenbubbles-personal-memory/SKILL.md` and follow its references
+> to organize my WeChat history into Markdown at ~/memory/me using my
+> GreenBubbles profile. Work in this session, preserve citations, and
+> incrementally update existing memory. If setup is needed, read
+> `skills/greenbubbles-setup/SKILL.md`.
+
+The GreenBubbles CLI is the executable dependency. Skills are instructions plus
+optional helpers. For automatic discovery across sessions, optionally copy them
+into your agent's skills directory (choose one):
+
+```sh
+python3 scripts/install-skills.py --agent codex
+python3 scripts/install-skills.py --agent claude
+python3 scripts/install-skills.py --agent opencode
+python3 scripts/install-skills.py --agent kimi
+python3 scripts/install-skills.py --agent gemini
+python3 scripts/install-skills.py --agent grok  # Grok Build CLI
+```
+
+The package includes setup diagnostics, bounded context retrieval, and the
+personal-memory workflow. Installation copies self-contained skills; it does
+not change your model settings or require another model API key. Initial
+WeChat key capture is still a separate owner-operated setup step. Message
+pages read by your agent go to its configured model provider.
+
+See [the portable skills guide](docs/AGENT_SKILLS.md) for project-scoped installs,
+updates, diagnostics, supported incremental behavior, and redistribution.
 
 ## Getting your database key
 
@@ -191,8 +257,8 @@ and readable memory, not merely a transcript export. Its model input uses
 compact `M###` evidence aliases; exact canonical message IDs remain in a
 private sidecar for citation verification.
 
-There is an agent skill in [`skills/`](skills/greenbubbles-context/SKILL.md) that
-teaches a compatible assistant to use this properly.
+The [portable skills package](docs/AGENT_SKILLS.md) teaches your existing agent
+to query this data and maintain memory in its own session.
 
 See the [AI context guide](docs/AI_CONTEXT_CLI.md) for the full surface.
 
@@ -223,6 +289,9 @@ See [docs/AI_CONTEXT_CLI.md](docs/AI_CONTEXT_CLI.md) for the full surface.
 
 ### Turning your history into a living knowledge project
 
+For interactive use with your current agent, follow the [skills guide](docs/AGENT_SKILLS.md).
+The commands below are the optional driver route, which launches separate coding-agent runs.
+
 GreenBubbles extracts your message history into a self-evolving software project
 — typed Python dataclasses with executable constraints, or structured Markdown
 — following the UserAsCode methodology. Memory is organized by life domain
@@ -241,7 +310,7 @@ python3 scripts/personal-memory-parallel.py tick \
   --corpus /private/path/corpus-v2 \
   --user-project ~/memory/me \
   --format python \
-  --agent gemini --model gemini-3.8-flash
+  --agent codex --shards 1 --parallel 1
 
 # When new messages arrive, extend the corpus, then tick against the new one
 greenbubbles memory prepare /private/path/corpus-v3 \
@@ -252,11 +321,12 @@ python3 scripts/personal-memory-parallel.py tick \
   --corpus /private/path/corpus-v3 \
   --user-project ~/memory/me \
   --format python \
-  --agent gemini --model gemini-3.8-flash
+  --agent codex --shards 1 --parallel 1
 ```
 
 The first `tick` creates `~/memory/me/` as a git repo and processes the full
-corpus. Subsequent ticks process only new messages since the last run. Cadence
+corpus. Subsequent ticks use a saved timestamp window. Late-imported older messages
+or old-timestamp edits need a broader reconciliation pass; this is not a complete change feed. Cadence
 is user-configured — see [docs/PERSONAL_MEMORY.md](docs/PERSONAL_MEMORY.md) for
 a cost table.
 
@@ -265,7 +335,7 @@ extraction is not: `tick` runs a coding agent — `--agent gemini`, `claude`,
 `codex`, `pi` or your own command — and every page of chat text it reads goes
 to whatever model that harness talks to, under that provider's terms.
 GreenBubbles makes no request itself and cannot audit what happens next.
-Gemini 3.8 Flash is the recommended model; with `--agent claude`, `codex` or
+Prefer your existing subscription-backed agent when suitable. With `--agent claude`, `codex` or
 `gemini` and no `--model`, the harness uses whatever model it is already
 configured with. The prepared corpus is equally sensitive — it can duplicate
 every eligible message into its own index — so keep it, and the selection
@@ -306,6 +376,7 @@ and [format-markdown reference](skills/greenbubbles-personal-memory/references/f
 | [User guide](docs/USER_GUIDE.md) | Setup, browsing, backups, recovery |
 | [FAQ](docs/FAQ.md) | What goes wrong, and why |
 | [CLI reference](docs/CLI_REFERENCE.md) | Every command |
+| [Portable agent skills](docs/AGENT_SKILLS.md) | Use your own agent, install/update skills, diagnose setup |
 | [Giving an AI access](docs/AI_CONTEXT_CLI.md) | Policies, exports, memory tools |
 | [Living knowledge project](docs/PERSONAL_MEMORY.md) | UserAsCode extraction: corpus, formats, tick, manifest-refresh, revise |
 | [Replica operations](docs/REPLICA_OPERATIONS.md) | Replica lifecycle, sync, and recovery |

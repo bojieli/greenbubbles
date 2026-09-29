@@ -1,6 +1,6 @@
 # Markdown format reference
 
-This file is the agent reference for `--format markdown` UserAsCode extraction runs. Read it when the driver passes `--format markdown`.
+This file is the agent reference for `--format markdown` UserAsCode extraction runs. Read it when using `--format markdown`, directly or through the optional driver.
 
 The Markdown format is simpler than the Python format: no Python dependency, human-editable, and directly readable in any text editor or git viewer. It does not support executable constraints; cross-domain alerts appear as manually maintained bullet items in `manifest.md`.
 
@@ -66,7 +66,7 @@ never project state, never committed.
 
 <!-- Update manually when cross-domain issues are identified. -->
 <!-- Format: - [SEVERITY] constraint: description -->
-- [WARNING] travel_readiness: Passport expires 2026-06-01, Singapore trip departs 2026-06-15 (only 14 days validity)
+- [WARNING] travel_readiness: Passport expires 2026-06-01, Singapore trip departs 2026-06-15 (expires 14 days before departure)
 
 ## Coverage
 
@@ -81,8 +81,8 @@ Messages committed: 446,435
 
 ## Canonical domain names
 
-All shards in a parallel run write to the same domain files. Use EXACTLY these
-names — never synonyms:
+Use one writer per project; concurrent domain edits can lose updates. Prefer these
+names and reuse existing domains instead of adding synonyms:
 
 | Name | Covers |
 |---|---|
@@ -138,7 +138,7 @@ covered above. Never use synonyms (`household` → `home`, `career` → `work`).
 
 ## Deduplication rules for Markdown
 
-These rules are strictly enforced. Violating them creates corrupt state.
+The agent must check these rules; CLI format validation does not enforce deduplication.
 
 ### Updating a `## State` line in place
 
@@ -222,7 +222,7 @@ Without an executable constraint runner, cross-domain issues must be identified 
 ```markdown
 ## Active Alerts
 
-- [CRITICAL] travel_readiness: Passport expires 2026-06-01, Singapore trip departs 2026-06-15 (only 14 days validity)
+- [CRITICAL] travel_readiness: Passport expires 2026-06-01, Singapore trip departs 2026-06-15 (expires 14 days before departure)
 - [WARNING] health_safety: Prescribed amoxicillin — check penicillin allergy compatibility
 ```
 
@@ -240,9 +240,9 @@ Remove alerts that are no longer relevant during a revise pass.
 6. Run `git diff HEAD` in user_project — verify only expected changes appear.
 7. Check for cross-domain implications; update `## Active Alerts` in `manifest.md`.
 8. Update `manifest.md` domain table row (summary, date).
-9. Run `memory commit --format markdown`.
+9. Acknowledge every reviewed page as described in `cli.md`, then run `memory commit CORPUS --state STATE --wiki PROJECT`. The format was selected on `memory next`.
 10. Run `memory status`.
-11. (Driver handles): `git -C <user_project> add -A && git -C <user_project> commit -m "memory update: ..."`.
+11. Git-commit changed project files (the optional driver handles this when used): `git -C <user_project> add -A && git -C <user_project> commit -m "memory update: ..."`.
 
 ## Revise pass (Markdown format)
 
@@ -254,3 +254,11 @@ During a holistic revise pass (`personal-memory-parallel.py revise`), the agent:
 4. Removes or resolves outdated Active Alerts in manifest.md.
 5. Updates the Schema section to reflect any new field types added since last revision.
 6. Commits with message: `periodic revision: <summary>`.
+
+## Exact provenance
+
+The session/date annotations above illustrate layout only. For actual extracted facts,
+also record the corpus generation and exact delivered evidence aliases, for example
+`*(corpus: corpus-v2; source: E000000123; session_003, 2026-01-20)*`.
+Preserve dated contradictions and distinguish other people’s claims from owner state.
+Never copy sample facts from this reference into the user’s project.
