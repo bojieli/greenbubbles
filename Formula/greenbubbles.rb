@@ -5,6 +5,7 @@ class Greenbubbles < Formula
   url "https://github.com/bojieli/greenbubbles/releases/download/v0.4.0/greenbubbles-0.4.0-macos-arm64.zip"
   sha256 "0b6914b0f2ac6b43e4d661ce32505a770170d94c984c93aed8f4c58d4f11bacb"
   license "MIT"
+  revision 1
 
   depends_on arch: :arm64
   depends_on macos: :sonoma
@@ -15,6 +16,12 @@ class Greenbubbles < Formula
   def install
     libexec.install Dir["*"]
     bin.install_symlink (libexec/"bin").children
+  end
+
+  post_install_steps do
+    # Homebrew moves top-level documentation out of libexec during installation.
+    # Keep the portable bundle's license lookup valid after that relocation.
+    symlink "LICENSE", "libexec/LICENSE"
   end
 
   def caveats
