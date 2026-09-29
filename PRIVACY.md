@@ -1,148 +1,128 @@
 # Privacy
 
-GreenBubbles collects nothing. There is no telemetry, no analytics, no crash
-reporting, no update check, and no license check. Ordinary live/snapshot reads,
-replica queries, exports and memory projections have no network client. The
-explicit `ai-summarize-direct` command is the one exception: after policy and
-destination checks, it sends only its compact authorized model input to the
-Gemini API. Nothing about your use reaches the project author.
+GreenBubbles collects nothing about you. It has no telemetry, analytics, crash
+reporting, update check, or license check, and nothing about your use reaches
+the project author.
 
-That is the easy half. The rest of this page is the part that actually matters:
-what stays on your machine, what can leave it, and who decides.
+Reading, searching, backups, exports, and note-building never use the network.
+The one command that sends your messages anywhere is `ai-summarize-direct`,
+and only when you run it (see [below](#what-can-leave-your-mac)).
 
-## What lives on your machine
+The rest of this page explains what stays on your Mac, what can leave it, and
+who decides.
 
-| Thing | Where | Sensitivity |
+## What lives on your Mac
+
+| What | Where | What it exposes |
 | --- | --- | --- |
-| WeChat's own databases | untouched, where WeChat put them | your entire history |
-| Snapshots | wherever you created them | your entire history, re-encrypted |
-| The database key | wherever you stored it | opens everything, cannot be rotated |
-| Recovery kit (24 words) | wherever you put it | opens a snapshot forever |
-| Replica key | wherever you stored it | opens the serving replica |
-| Query profiles | `~/.greenbubbles/` | paths, not secrets — still revealing |
-| Audit journals | wherever you configured them | operations and counts, no bodies |
-| Progress and evidence reports | wherever you wrote them | aggregates, sometimes schema paths |
-| Generated-memory generations | wherever you wrote them | compact source text, model output, and private citation mapping |
-| Personal-memory corpus indexes | wherever you wrote them | potentially every eligible chat message plus complete private citation/contact provenance |
-| Personal-memory wiki and run state | wherever you wrote them | inferred facts, relationships, citations and processing progress |
+| WeChat's own databases | where WeChat put them; GreenBubbles never changes them | your whole history |
+| Backups (snapshots) | wherever you created them | your whole history, encrypted again |
+| Database key | `~/.greenbubbles-acquire/passphrase.txt` or wherever you moved it | opens everything; it cannot be changed |
+| Recovery phrase (24 words) | wherever you keep it | opens a backup, forever |
+| Replica key | wherever you stored it | opens a replica (a local copy of your history kept for faster queries) |
+| Query profiles | `~/.greenbubbles/` | file paths, not secrets, but still revealing |
+| Audit logs | wherever you configured them | which operations ran and how many items; no message text |
+| Progress reports | wherever you wrote them | totals, sometimes database paths |
+| Built-in summarizer output | wherever you wrote it | message text, AI summaries, and links back to source messages |
+| Personal-memory corpus | wherever you wrote it | possibly a copy of every included message, with contact details |
+| Personal-memory notes and progress | wherever you wrote them | facts about you and others, relationships, and citations |
 
-GreenBubbles reads WeChat's files read-only and never writes to them. Every
-private file it creates is mode `0600` in a mode-`0700` directory, and it
-refuses to operate on files that are group- or world-accessible, symlinked, or
-owned by another account.
+GreenBubbles only reads WeChat's files and never writes to them. Every private
+file it creates can be read only by your account (mode `0600`, in a `0700`
+folder). It refuses to use a file that other accounts can read, that is a
+symbolic link, or that another account owns.
 
-One deliberate exception is a completed personal-memory corpus generation:
-its files are finalized read-only (`0400`) and its directories traversal-only
-(`0500`) so an agent cannot accidentally rewrite its evidence while updating
-the separate wiki. The wiki and run state remain owner-only and writable.
+A finished personal-memory corpus is the exception: its files are made
+read-only (`0400`, folders `0500`) so an agent cannot accidentally change the
+evidence while it edits your notes. The notes themselves stay writable.
 
-## What can leave, and how
+## What can leave your Mac
 
-Content crosses GreenBubbles' AI boundary only when **you invoke a query or
-export and choose its destination.**
+Messages leave only when **you** run a command and choose where its output goes.
 
-- A **local model** receives whatever a policy you wrote permits — specific
-  conversations, specific fields, a specific time range.
-- A **remote model** receives nothing unless you explicitly enable remote
-  release for that specific conversation. `destination: remote` is a property
-  of the request envelope, never something a model can infer or assert for
-  itself.
-- **`ai-summarize-direct`** performs that remote release itself, only for
-  conversation scopes marked `allowRemoteModel`. It sends short aliases and
-  compact actor/time/type/text fields to Gemini 3.7 Flash; exact canonical
-  message IDs, sender IDs, database metadata, policy and audit records stay
-  local. `GEMINI_API_KEY` is read from the environment, not an argument.
-- **`getArtifact`** — the only operation that reveals a file path — is
-  unconditionally denied to a remote destination, even when message text for
-  that conversation is remotely enabled.
-- **`memory prepare/next/page/acknowledge/commit`** make no network request.
-  A v2 canonical corpus can duplicate every eligible message into its private
-  read-only index, so protect it like the source database. `memory next` prints
-  only a delivery envelope; the Pi agent sees the selected chat text in
-  deterministic at-most-49,152-byte `memory page` responses. Empty scope filters
-  deliberately select the whole hydrated corpus. Personal-memory pages also
-  include the real account/contact/conversation source IDs, names, aliases, and
-  group titles needed for a faithful private wiki; only verbose canonical
-  message provenance and database metadata remain in sidecars. If Pi uses a
-  remote model, both page text and these identities leave the machine under
-  that provider's terms even though GreenBubbles itself makes no request.
+- **A local AI model** gets only what your policy file allows: specific chats,
+  specific fields, a specific time range.
+- **A cloud AI model** gets nothing unless you turn on cloud access for that
+  specific chat. The AI cannot turn this on for itself.
+- **`ai-summarize-direct`** sends chats to Google's Gemini API itself, but only
+  chats your policy marks `allowRemoteModel`. It sends short stand-in names and
+  each message's sender, time, type, and text. Real message IDs, sender IDs,
+  database details, and your policy and audit files stay on your Mac. It reads
+  `GEMINI_API_KEY` from the environment, never from the command line.
+- **File paths** on your Mac are never given to a cloud model, even for chats
+  where cloud access is on.
+- **The personal-memory commands** (`memory prepare`, `next`, `page`,
+  `acknowledge`, `commit`) make no network requests themselves. But the agent
+  reading their pages sees message text plus real names, contact IDs, and group
+  titles. If that agent uses a cloud model, all of that goes to its provider.
 
-Every one of those decisions, allowed or denied, is appended to a hash-chained,
-body-free journal you can verify with `audit-connector-log`.
+Every decision, allowed or denied, is written to a tamper-evident audit log
+that holds no message text. Check it with `audit-connector-log`.
 
-### The boundary GreenBubbles cannot enforce
+### What GreenBubbles cannot control
 
-A local-first tool leaks everything if what is behind it is remote. Once a page
-leaves this process, its privacy depends on:
+Once text leaves GreenBubbles, its privacy depends on everything that handles
+it next:
 
-- the model — local weights, or somebody's API;
-- the embedder, if you build a memory index;
-- the vector store;
-- the agent framework's transcript and log retention;
-- log collectors and crash reporters on the machine.
+- the AI model: running on your Mac, or someone else's service;
+- the embedding service and vector database, if you build a search index;
+- how long your agent tool keeps transcripts and logs;
+- any log collectors or crash reporters on your Mac.
 
-GreenBubbles marks a remote destination explicitly and refuses to release
-artifact paths to one. It cannot audit what happens next. Approving each of
-those is your job, and it is the part people get wrong. See
-[THREAT_MODEL.md](docs/THREAT_MODEL.md).
+GreenBubbles labels cloud destinations and keeps file paths away from them,
+but it cannot see what happens after that. Checking those services is up to
+you, and it is the part people most often get wrong. See the
+[threat model](docs/THREAT_MODEL.md).
 
 ## Other people
 
-Your WeChat history is not only yours. It contains what other people said to
-you, in confidence, without any expectation that it would be readable by a
-language model years later.
+Your WeChat history isn't only yours. It holds what other people told you in
+confidence, never expecting an AI to read it years later.
 
-Nothing technical resolves this. What the design gives you is the ability to be
-narrow: policy scopes to conversations, fields and time ranges, so releasing
-one project thread does not release the rest of your life or theirs. The
-minimized view omits raw columns, source paths, packed metadata and raw XML;
-exported bundles carry opaque participant IDs rather than WeChat identifiers.
+No technical feature solves this. What GreenBubbles gives you is a way to share
+narrowly: a policy can limit access to certain chats, fields, and dates, so
+sharing one project's chat doesn't share the rest of your life or theirs. The
+limited view also leaves out raw database columns, file paths, and hidden
+metadata, and exports replace WeChat IDs with anonymous ones.
 
-Use the narrow scope. It exists for this.
+Use the narrow scope. That is what it is for.
 
 ## What the project sees
 
 Nothing, unless you send it.
 
-If you file an issue, send only content-free reports — most commands emit one
-specifically for this purpose. Never attach a database, key, recovery phrase,
-message, media file, account identifier, absolute path or memory dump. Security
-reports follow [SECURITY.md](SECURITY.md).
+When you report a problem, share only reports that contain no personal content;
+most commands can print one for exactly this purpose. Never attach a database,
+key, recovery phrase, message, photo or file, account ID, full file path, or
+notes. Report security problems as described in [SECURITY.md](SECURITY.md).
 
-The repository contains no real user data, and CI enforces that: a pre-commit
-secret guard, `scripts/check-secret-hygiene.swift`, and a CI step that asserts
-no release key or private material is present. Every test runs on synthetic
-fixtures.
+The repository contains no real user data. Automated checks look for secrets
+before every commit and in CI, and all tests use made-up data.
 
-## Retention
+## Keeping and deleting data
 
-GreenBubbles never age-purges or automatically discards a completed snapshot,
-archive, replica, audit journal or query profile. Retention operations move
-retired snapshots and archives into quarantine by atomic rename and leave them
-there until you decide.
+GreenBubbles never deletes a finished backup, replica, audit log, or query
+profile on its own, no matter how old. When you retire an old backup, it is
+moved to a quarantine folder and stays there until you delete it.
 
-It does remove its own unpublished staging directories after a failed or
-cancelled operation, and it removes session-only scratch files when a session
-closes. Those cleanup paths cannot select a completed backup generation for
-deletion.
+GreenBubbles does clean up its own half-finished temporary files after a failed
+or cancelled operation, and temporary files when a session ends. That cleanup
+can never delete a finished backup.
 
-That is deliberate — losing a backup silently is worse than keeping one too
-long — but it means **removal is your responsibility.** If you want an old
-generation gone, delete it yourself, after a recovery drill on the one you are
-keeping.
+This is on purpose: silently losing a backup is worse than keeping one too
+long. But it means **deleting old data is your job.** Before you delete an old
+backup, make sure you can restore the one you're keeping.
 
 ## Uninstalling
 
-Remove the application and the CLI binaries, then remove what you created:
-snapshots, recovery kits, key files, replicas, audit journals, query profiles
-under `~/.greenbubbles/`, any `~/.greenbubbles-acquire/passphrase.txt`, and
-derived history indexes under
-`Application Support/GreenBubbles/HistoryIndexes`.
+1. Delete the app and the command-line tools.
+2. Delete anything you created: backups, recovery phrases, key files, replicas,
+   audit logs, query profiles in `~/.greenbubbles/`,
+   `~/.greenbubbles-acquire/passphrase.txt`, and search indexes in
+   `~/Library/Application Support/GreenBubbles/HistoryIndexes`.
+3. If you installed the send helper, run `greenbubbles-send uninstall-helper`.
+   It removes the login item and prints the `tccutil reset` commands that take
+   back its Accessibility and Screen Recording permissions.
 
-If you installed the send helper, `greenbubbles-send uninstall-helper`
-unregisters the login item and prints the `tccutil reset` commands that revoke
-its Accessibility and Screen Recording grants. Nothing third-party was
-installed, so nothing third-party remains.
-
-Your WeChat data is untouched by all of this, because GreenBubbles never wrote
-to it.
+GreenBubbles installs nothing from third parties, so nothing else is left
+behind. Your WeChat data is untouched, because GreenBubbles never wrote to it.

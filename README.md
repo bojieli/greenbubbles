@@ -25,15 +25,19 @@
   <img src="https://img.shields.io/badge/status-research%20alpha-f59e0b" alt="Status: research alpha">
 </p>
 
-GreenBubbles is a macOS app and command-line toolkit for reading your own WeChat
-history directly from WeChat’s original local databases. There is no export or
-duplicate chat database to keep in sync for ordinary live queries. Browse and
-search locally, create an encrypted backup, or ask your
-existing coding agent to turn selected conversations into cited Markdown memory.
+GreenBubbles is a Mac app and command-line tool for reading your own WeChat
+history. It reads the database files WeChat already keeps on your Mac, so there
+is no export step and no second copy to keep up to date. You can:
 
-**Research alpha · Apple silicon · macOS 14+.** Live encrypted access requires
-key capture from your own WeChat client. Local queries upload nothing. If you
-use a cloud AI agent, the message pages it reads go to its model provider.
+- browse and search your chats on your own computer;
+- ask a coding agent you already use (Claude Code, Codex, and others) to turn
+  chosen conversations into Markdown notes that cite the original messages;
+- make an encrypted backup you can open later, even without WeChat.
+
+**Research alpha. Needs a Mac with Apple silicon and macOS 14 or later.**
+Setup copies a key out of your own WeChat app, which needs administrator access.
+Reading and searching happen entirely on your Mac. If you use a cloud AI, the
+messages it reads are sent to that AI's provider.
 
 <p align="center">
   <img src="assets/how-it-works.svg" alt="GreenBubbles queries WeChat’s original encrypted databases locally and returns live results to your agent, without maintaining an exported chat database. A separate optional path creates an encrypted backup you can unlock and query later without WeChat." width="820">
@@ -41,48 +45,44 @@ use a cloud AI agent, the message pages it reads go to its model provider.
 
 ## What you can do
 
-- **Browse and search:** list conversations, page through messages, and retrieve attachments.
-- **Build personal memory:** use Codex, Claude Code, OpenCode, Kimi Code, Gemini CLI,
-  Grok Build, or another shell-capable agent to maintain cited Markdown or Python files.
-- **Update incrementally:** process new messages and retain a reviewable Git history.
-  Late-imported or edited older messages need a broader reconciliation pass.
-- **Make recoverable backups:** create an independently encrypted snapshot with
-  a 24-word recovery kit.
+- **Browse and search:** list chats, read messages, and open attachments.
+- **Build notes about your life:** have your coding agent write Markdown notes
+  from your chats, with a link back to each source message.
+- **Keep notes current:** later runs add only new messages, and Git records
+  every change so you can review it.
+- **Back up:** make an encrypted copy of your history, protected by a 24-word
+  recovery phrase.
 
-The query commands open WeChat's data read-only. Backups, prepared memory corpora,
-and agent-written memory are separate outputs you choose to create.
+GreenBubbles never changes WeChat's files; it only reads them. Backups and notes
+are created only when you ask for them.
 
 ## Install
 
-macOS 14 or later, Apple silicon.
-
-Install the command-line tools through the upstream Homebrew tap:
+You need macOS 14 or later on Apple silicon. Install the command-line tool with
+Homebrew:
 
 ```sh
 brew tap bojieli/greenbubbles https://github.com/bojieli/greenbubbles.git
 brew install bojieli/greenbubbles/greenbubbles
 ```
 
-If Homebrew reports an untrusted formula, explicitly trust this formula and retry
-the tap/install commands:
+If Homebrew says the formula is untrusted, run this and then repeat the two
+commands above. Older Homebrew versions don't have `brew trust` and don't need it.
 
 ```sh
 brew trust --formula bojieli/greenbubbles/greenbubbles
 ```
 
-Older Homebrew versions without `brew trust` do not need this step.
-
-Prefer the Mac app? Download the Developer ID signed and Apple notarized DMG from
-[Releases](https://github.com/bojieli/greenbubbles/releases), verify it, and drag
-**GreenBubbles** to Applications. The release also includes a standalone CLI ZIP.
-
-See [CLI releases and Homebrew](docs/HOMEBREW.md) for download verification,
-upgrades, and packaging details.
+**Prefer an app?** Download the DMG from
+[Releases](https://github.com/bojieli/greenbubbles/releases) and drag
+**GreenBubbles** to Applications. It is signed and notarized by Apple. Releases
+also include the command-line tool as a ZIP. See
+[CLI releases and Homebrew](docs/HOMEBREW.md) to verify downloads or upgrade.
 
 <details>
 <summary><strong>Build from source</strong></summary>
 
-Needs Swift 6, the macOS developer tools, and Rust:
+You need Swift 6, Xcode's command-line tools, and Rust:
 
 ```console
 git clone https://github.com/bojieli/greenbubbles.git
@@ -92,8 +92,8 @@ swift build --product greenbubbles-history
 swift run greenbubbles-history
 ```
 
-The CLI lands at `Native/GreenBubbles/target/release/greenbubbles`. Point the
-app at it when it asks.
+The command-line tool is built at `Native/GreenBubbles/target/release/greenbubbles`.
+The app asks for this path the first time it runs.
 </details>
 
 ## Getting your database key
@@ -102,147 +102,137 @@ app at it when it asks.
   <img src="assets/key-flow.svg" width="900" alt="The account key is captured into a private file on your Mac. That key and the database file’s salt derive the key used for local read-only access to WeChat’s original database.">
 </p>
 
-WeChat stores your chats in encrypted SQLite database files on your Mac.
-GreenBubbles needs the account key—the master secret from which each file's
-key is derived—to read them. Keys apply to database files, each of which can
-contain many tables.
+WeChat encrypts its chat databases. To read them, GreenBubbles needs your
+account's key, which it copies from your running WeChat app one time.
 
-Setup captures and verifies the account key from your own WeChat client, then
-stores it in a private local file. It requires administrator access and re-signing
-WeChat. Follow the [key acquisition guide](docs/PASSPHRASE_ACQUISITION.md) for
-commands, compatibility, credential storage, and troubleshooting.
+This one-time setup needs administrator access and re-signs your copy of
+WeChat. The [key setup guide](docs/PASSPHRASE_ACQUISITION.md) has the steps and
+troubleshooting help. The key is saved to
+`~/.greenbubbles-acquire/passphrase.txt`, a file only your account can read.
 
-After capture, ordinary commands need no profile and no directory path. They
-open the newest installed WeChat `db_storage` directory and read the key from
-`~/.greenbubbles-acquire/passphrase.txt`, the file capture already wrote.
-Create a [query profile](docs/QUERY_PROFILES.md) only for another account or a
-snapshot.
+After that, commands work with no extra arguments: they find your WeChat data
+and key on their own. You need a [query profile](docs/QUERY_PROFILES.md) only
+to read a second WeChat account or a backup.
 
 ## Use your existing coding agent (recommended)
 
-Use your existing Codex, Claude Code, OpenCode, Kimi Code, Gemini CLI, or Grok Build
-session. An available subscription allowance can avoid an additional API bill;
-check that the agent is signed in through your intended plan.
+You can let a coding agent you already pay for do the reading and writing:
+Codex, Claude Code, OpenCode, Kimi Code, Gemini CLI, or Grok Build. If you're
+signed in with a subscription, this usually costs nothing extra.
 
-The agent uses GreenBubbles through **skills: Markdown instructions with
-supporting references and optional helpers**. Reading a skill requires no installation.
-
-For a Homebrew installation, find the skill to give your agent:
+GreenBubbles gives the agent a **skill**: a Markdown file of instructions,
+with helper files next to it. Nothing needs to be installed. With Homebrew,
+this prints where the skill is:
 
 ```sh
 echo "$(brew --prefix greenbubbles)/libexec/skills/greenbubbles-personal-memory/SKILL.md"
 ```
 
-Then ask it:
+Then tell your agent something like:
 
-> Read the GreenBubbles personal-memory SKILL.md at that path. Use my
-> GreenBubbles profile to organize the selected conversations into Markdown at
-> ~/memory/me. Work in this session, preserve source citations, and update
-> existing memory incrementally. Follow the setup skill if access is not ready.
+> Read the GreenBubbles personal-memory SKILL.md at that path. Organize my
+> chosen conversations into Markdown notes in ~/memory/me. Cite the source
+> messages, and update existing notes instead of starting over. If GreenBubbles
+> isn't set up yet, follow its setup skill.
 
-In a source checkout or extracted CLI ZIP, the same file is
-`skills/greenbubbles-personal-memory/SKILL.md`. Keep the skill's references and
-helpers beside it. For automatic discovery in future sessions, an optional
-installer copies the package into your agent's skills directory:
+If you use the ZIP or a source checkout, the skill is at
+`skills/greenbubbles-personal-memory/SKILL.md`; keep the files around it in
+place. To have your agent find the skill automatically in future sessions,
+copy it into the agent's skills folder:
 
 ```sh
-# Homebrew example; replace codex with claude, opencode, kimi, gemini, or grok.
+# Replace codex with claude, opencode, kimi, gemini, or grok.
 python3 "$(brew --prefix greenbubbles)/libexec/scripts/install-skills.py" --agent codex
 ```
 
-Your agent reads selected message pages through the CLI and writes memory files
-locally. If it uses a cloud model, that message text goes to its provider. Do not
-paste database keys or recovery words into prompts.
+The agent reads messages through GreenBubbles and writes notes on your Mac. If
+the agent uses a cloud model, the messages it reads go to that provider. Never
+paste your database key or recovery phrase into a prompt.
 
-See [the agent skills guide](docs/AGENT_SKILLS.md) for diagnostics, optional
-discovery, and incremental updates.
+More help: [agent skills guide](docs/AGENT_SKILLS.md).
 
-## Use the embedded summarizer (optional)
+## Use the built-in summarizer (optional)
 
-GreenBubbles can also call Gemini directly through `ai-summarize-direct` and
-save a cited summary as local `memory.md` and `memory.json` files. This route
-requires a dedicated **`GEMINI_API_KEY`** and incurs separate API charges; your
-coding-agent subscription does not cover it.
+If you don't use a coding agent, GreenBubbles can send chosen chats to Google's
+Gemini itself and save a cited summary as `memory.md` and `memory.json`. Run it
+with `ai-summarize-direct`.
 
-You choose the conversations through a policy that explicitly permits remote
-model access. The summarizer sends selected message content to Gemini and saves
-the result locally. It creates a new output generation each time.
+This needs your own `GEMINI_API_KEY` and is billed by Google separately. Only
+conversations you have explicitly allowed in a policy file are sent. Each run
+writes a fresh summary; to keep improving the same set of notes over time, use
+a coding agent instead.
 
-Follow the [embedded summarizer guide](docs/AI_CONTEXT_CLI.md#model-generated-live-memory)
-for the policy, API-key setup, and command. For ongoing edits to an existing
-memory project, use the agent skills above.
+Setup steps: [built-in summarizer guide](docs/AI_CONTEXT_CLI.md#model-generated-live-memory).
 
 ## Usage
 
-After capture, these commands open the live WeChat database directly. No
-profile, source directory, or passphrase argument is required:
+Once the key is set up, these commands read your live WeChat data:
 
 ```sh
-# List conversations, then use an ID from the result.
+# List chats, then use an ID from the result.
 greenbubbles chats --limit 20
 greenbubbles messages list --conversation <conversation-id> --limit 50
 
-# Enter the search text on stdin, then press Control-D.
+# Type what to search for, then press Control-D.
 greenbubbles messages search --query-stdin
 
 greenbubbles contacts list --limit 50
 greenbubbles message get --conversation <conversation-id> --message <message-id>
 ```
 
-`messages list` and `messages search` print a compact reading page: one header,
-then one line per message. Each line names the sender, says whether it is the
-account holder, and gives the local time and the text. An image, video, or
-document also includes a local path. Phone numbers, email addresses,
-identity numbers, and links stay on the page. `--redact` leaves those out
-and turns a meeting invitation into `[meeting]`. `chats rank` prints the same kind of page
-for choosing which chats matter. Follow `nextCursor` until `hasMore` is false.
-`--json` prints the full page, which is what `message get` needs for an id.
-The reading rules are in the [CLI reference](docs/CLI_REFERENCE.md).
+`messages list` and `messages search` print one line per message: who sent it,
+whether it was you, the local time, and the text. Photos, videos, and files
+show where they are on disk.
 
-Prefer a window? Install the app and choose **Browse Live or Snapshot…**. The
-live source is the same installed WeChat database the CLI opens by default.
-To locate account directories yourself:
+- **More results:** if the output says `hasMore: true`, run the same command
+  again with `--cursor` set to the `nextCursor` value it printed.
+- **Hide personal details:** add `--redact` to leave out phone numbers, email
+  addresses, ID numbers, and links.
+- **Message IDs:** add `--json` to see full details, including the message IDs
+  that `message get` needs.
+- **Which chats matter:** `chats rank` lists your chats by how many messages
+  you sent in each, with one-on-one chats first.
 
-```sh
-greenbubbles-discover accounts --include-paths
-```
+Details: [CLI reference](docs/CLI_REFERENCE.md).
 
-Keep that output private: account paths can contain identifiers.
+**Prefer a window?** Open the app and choose **Browse Live or Snapshot…**. It
+reads the same WeChat data as the command-line tool.
 
 ## Choose your next step
 
-| Goal | Guide |
+| I want to… | Read |
 | --- | --- |
-| First-time setup and browsing | [User guide](docs/USER_GUIDE.md) |
-| Use your own agent to organize memory | [Portable agent skills](docs/AGENT_SKILLS.md) |
-| Build a knowledge base from live history | [Personal memory](docs/PERSONAL_MEMORY.md) |
-| Restrict access through a policy-scoped connector | [AI context CLI](docs/AI_CONTEXT_CLI.md) |
-| Back up and recover your history | [Recoverable snapshots](docs/RECOVERABLE_SNAPSHOTS.md) |
-| Troubleshoot | [FAQ](docs/FAQ.md) and [known limitations](docs/KNOWN_LIMITATIONS.md) |
+| Set up and start browsing | [User guide](docs/USER_GUIDE.md) |
+| Have my agent write notes from my chats | [Agent skills](docs/AGENT_SKILLS.md) |
+| Understand how the notes are organized | [Personal memory](docs/PERSONAL_MEMORY.md) |
+| Give an AI access to only some chats | [AI context CLI](docs/AI_CONTEXT_CLI.md) |
+| Back up and restore my history | [Recoverable snapshots](docs/RECOVERABLE_SNAPSHOTS.md) |
+| Fix a problem | [FAQ](docs/FAQ.md) and [known limitations](docs/KNOWN_LIMITATIONS.md) |
 | Understand the design | [Architecture](docs/ARCHITECTURE.md) and [threat model](docs/THREAT_MODEL.md) |
 
-The [documentation index](docs/README.md) includes replica operations, integration
-contracts, measurements, and contributor references.
+Everything else is in the [documentation index](docs/README.md).
 
-## Status and privacy
+## Privacy
 
-Your source databases, credential files, backups, and generated memory are
-stored locally. Local database queries do not upload them. Cloud AI is an
-explicit workflow: an external cloud agent sends the message text it reads to
-its provider, and the embedded summarizer sends policy-approved content to
-Gemini. GreenBubbles also has an optional public-article fetcher, so the project
-as a whole is not network-free. See [privacy](PRIVACY.md) for the boundaries.
+Everything GreenBubbles reads or writes stays on your Mac: WeChat's databases,
+your key file, backups, and notes. There is no telemetry or update check.
 
+Message text leaves your Mac only when you choose a cloud AI:
 
-GreenBubbles is intended for technical users working with their own data.
-WeChat's private formats change; unsupported data is reported as a coverage gap.
-Public builds ship with sending disabled. See [known limitations](docs/KNOWN_LIMITATIONS.md).
+- **Your coding agent** sends the messages it reads to its model provider.
+- **The built-in summarizer** sends the conversations you allowed to Gemini.
 
-A policy-scoped connector enforces its configured scope. An agent with general
-shell and filesystem access has your local permissions; a skill is guidance,
-not a sandbox. Prepared corpora and generated memory can contain private data.
-See [privacy](PRIVACY.md) and [the agent skills guide](docs/AGENT_SKILLS.md) before
-processing a large history.
+A coding agent that can run commands has the same access to your files as you
+do. The skill tells it what to do but cannot restrict it. Notes and backups
+contain private information, so protect them as carefully as WeChat's own data.
+Details: [PRIVACY.md](PRIVACY.md).
+
+## Status
+
+GreenBubbles is a research alpha for technical users reading their own data.
+WeChat changes its private formats; when GreenBubbles meets data it can't read,
+it says so instead of guessing. Public builds cannot send messages. See
+[known limitations](docs/KNOWN_LIMITATIONS.md).
 
 ## Contributing
 
