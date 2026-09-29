@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 570" width="960" height="570" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif" role="img" aria-labelledby="title desc">
+  <title id="title">How one account key unlocks WeChat's database files</title>
+  <desc id="desc">Owner-operated capture obtains the account secret from WeChat during login and stores it in an owner-only credential file. Locally, that secret and each database file's salt derive a per-file key. GreenBubbles uses the keys to read the original encrypted files; each file can hold many tables. Only selected query results are returned to the app or agent, not key material.</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 1 9 5 0 9Z" fill="#087F5B"/></marker></defs>
+  <rect width="960" height="570" rx="20" fill="#F3F8F4"/>
+  <text x="32" y="39" font-size="23" font-weight="700" fill="#12382D">One account secret. A key for each database file.</text>
+  <text x="32" y="65" font-size="15" fill="#46645A">Capture and key derivation happen on your Mac.</text>
+  <g stroke="#B8CFC2" stroke-width="2" fill="#FFFFFF">
+    <rect x="32" y="93" width="260" height="96" rx="14"/>
+    <rect x="378" y="93" width="550" height="96" rx="14" fill="#E0EDE3"/>
+    <rect x="32" y="254" width="244" height="94" rx="14"/>
+    <rect x="32" y="378" width="244" height="94" rx="14"/>
+    <rect x="356" y="254" width="236" height="94" rx="14" fill="#087F5B" stroke="#087F5B"/>
+    <rect x="356" y="378" width="236" height="94" rx="14" fill="#087F5B" stroke="#087F5B"/>
+    <rect x="674" y="254" width="254" height="94" rx="14"/>
+    <rect x="674" y="378" width="254" height="94" rx="14"/>
+  </g>
+  <g text-anchor="middle">
+    <text x="162" y="128" font-size="18" font-weight="700" fill="#12382D">WeChat at login</text>
+    <text x="162" y="157" font-size="15" fill="#46645A">32-byte account secret in memory</text>
+    <text x="653" y="125" font-size="18" font-weight="700" fill="#12382D">Private local credential file</text>
+    <text x="653" y="151" font-size="15" fill="#46645A">Stores the account key (master secret)</text>
+    <text x="653" y="174" font-size="13" fill="#46645A">Owner-only permissions · plaintext secret · query profile holds its path</text>
+    <text x="335" y="120" font-size="12" fill="#46645A">Capture</text>
+    <text x="154" y="291" font-size="18" font-weight="700" fill="#12382D">Database A’s salt</text>
+    <text x="154" y="319" font-size="14" fill="#46645A">Read from its file header</text>
+    <text x="154" y="415" font-size="18" font-weight="700" fill="#12382D">Database B’s salt</text>
+    <text x="154" y="443" font-size="14" fill="#46645A">Read from its file header</text>
+    <text x="474" y="289" font-size="18" font-weight="700" fill="#FFFFFF">Derive key A locally</text>
+    <text x="474" y="318" font-size="14" fill="#FFFFFF">Account secret + salt A</text>
+    <text x="474" y="413" font-size="18" font-weight="700" fill="#FFFFFF">Derive key B locally</text>
+    <text x="474" y="442" font-size="14" fill="#FFFFFF">Account secret + salt B</text>
+    <text x="801" y="288" font-size="18" font-weight="700" fill="#12382D">Original database A</text>
+    <text x="801" y="318" font-size="14" fill="#46645A">Encrypted file · many tables</text>
+    <text x="801" y="412" font-size="18" font-weight="700" fill="#12382D">Original database B</text>
+    <text x="801" y="442" font-size="14" fill="#46645A">Encrypted file · many tables</text>
+    <text x="633" y="281" font-size="12" fill="#46645A">Unlock</text>
+    <text x="633" y="405" font-size="12" fill="#46645A">Unlock</text>
+  </g>
+  <g fill="none" stroke="#087F5B" stroke-width="2.5">
+    <path d="M297 141h70"/>
+    <path d="M474 194v49"/>
+    <path d="M396 194v28h-80v140h158v5"/>
+    <path d="M281 301h64"/><path d="M281 425h64"/>
+    <path d="M597 301h66"/><path d="M597 425h66"/>
+  </g>
+  <text x="32" y="513" font-size="16" font-weight="700" fill="#12382D">Live read-only queries → selected message pages → your app or agent</text>
+  <text x="32" y="542" font-size="14" fill="#46645A">Keys stay local. Ordinary queries do not export the database or persist a separate key for each table.</text>
+  <g fill="#087F5B"><polygon points="367,141 356,135 356,147"/><polygon points="474,243 468,232 480,232"/><polygon points="474,367 468,356 480,356"/><polygon points="345,301 334,295 334,307"/><polygon points="345,425 334,419 334,431"/><polygon points="663,301 652,295 652,307"/><polygon points="663,425 652,419 652,431"/></g>
+</svg>

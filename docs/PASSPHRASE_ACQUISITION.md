@@ -1,9 +1,23 @@
 # Acquiring your database key
 
-WeChat encrypts its local databases with a 32-byte account key that it derives
-at login and never writes down. Getting a copy of that key is the first step of
-setting GreenBubbles up, and this page is the long version of it: the three
-commands, how each one works, and what to do when one of them stops.
+WeChat keeps messages, contacts, and session information in local SQLite database
+files. SQLCipher encrypts those files, so filesystem access alone is not enough
+to read them. On the tested clients, one 32-byte account secret (called the
+account key or account passphrase here) supplies the key derivation for the
+account's databases.
+
+Each database file has its own salt. Combining that salt with the account secret
+produces a distinct encryption key for the file, covering the tables inside it.
+An account may have dozens of database files and thousands of tables: there is
+not a separate encryption key for each table. See the
+[SQLCipher design](https://www.zetetic.net/sqlcipher/design/) for the underlying
+per-file derivation and page-encryption model.
+
+The helper captures the account secret, derives and verifies the database keys
+locally, and persists only the account secret in a private credential file.
+Queries can then unlock the original encrypted databases without first exporting
+or copying the chat history. This page explains the capture commands, their
+prerequisites, and failure modes.
 
 The [README](../README.md#getting-your-database-key) has the short version if
 you just want to run it.
@@ -23,6 +37,8 @@ A few practical notes before you start:
 The passive pipeline — discovery, snapshot, restore, replica, connector — never
 uses this mechanism, so nothing about the rest of GreenBubbles changes whether
 or not you run it.
+
+![Account key capture and per-database key derivation](../assets/key-flow.svg)
 
 ## What actually happens
 
@@ -103,17 +119,21 @@ so a new capture is not needed for them.
 
 ### Where the key goes
 
-Only to the `--output` file, as 64 lowercase hex characters plus a newline,
+The persisted credential is the account secret, not a collection of derived
+keys. The capture verifier derives each database encryption key in memory and
+zeroizes it after verification. The account secret is written only to the
+`--output` file, as 64 lowercase hex characters plus a newline,
 mode `0600` in a mode-`0700` parent, with no silent overwrite (`--overwrite`
 is required to replace one). It never appears on a command line, in a JSON
 report, or in a log.
 
-The file is shaped to be piped:
+This is a plaintext secret file protected by filesystem permissions; it is not
+itself encrypted. A [query profile](QUERY_PROFILES.md) can reference it for
+repeated live access. Alternatively, pass it through standard input:
 
 ```sh
-cat <passphrase-file> | greenbubbles restore \
-  <snapshot-directory> <private-output-directory> \
-  --account-root <authorized-account-directory> --passphrase-stdin
+cat <passphrase-file> | greenbubbles conversations list \
+  <db_storage-directory> --passphrase-stdin --limit 20
 ```
 
 ## What you have to do yourself

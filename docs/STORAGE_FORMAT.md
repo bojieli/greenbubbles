@@ -23,9 +23,10 @@ family does not block restoration. The pinned `4.1.13`/`269579` fingerprint
 reports `supportedPinned`; other qualifying versions report
 `supportedCompatible`.
 
-The debugger-based [acquisition helper](PASSPHRASE_ACQUISITION.md) stays
-exact-build-bound, because attaching to a live process has a much narrower
-safety boundary than reading files.
+The debugger-based [acquisition helper](PASSPHRASE_ACQUISITION.md) is a separate
+owner-operated path. It targets a system key-derivation function and has its own
+prerequisites and tested-client limits; it does not use these passive snapshot
+identity checks as a capture version gate.
 
 The snapshotter opens the executable read-only without following symlinks,
 hashes it while checking file identity for mutation, invokes `codesign` and

@@ -6,6 +6,29 @@ a storage format.
 
 This document explains why, and what that costs.
 
+![Live access to the original WeChat databases](../assets/how-it-works.svg)
+
+## Live access, without an exported chat database
+
+WeChat's original local database files remain the source of truth. The default
+query path does not create a second chat database or require an export to be
+refreshed before an agent can read new messages. It opens the encrypted source
+read-only, decodes the requested rows, and returns bounded results. Messages are
+available once WeChat has written them locally; data absent from this Mac is
+not fetched from WeChat's servers by GreenBubbles.
+
+A private local credential supplies the account secret. Each database file's salt
+is used to derive its encryption key; one file can contain many tables. The
+capture helper persists the account secret, not one key per table. See
+[key acquisition](PASSPHRASE_ACQUISITION.md) for storage and verification details.
+
+This avoids divergence caused by querying an old export. It does not freeze a
+changing source: separate pages and separate database files can reflect different
+moments. Use an explicit snapshot when you need a stable input. Recoverable
+backups, forensic exports, and prepared personal-memory corpora are optional
+separate outputs; a prepared corpus must be extended or rebuilt to include new
+source data. Generated agent memory also needs an explicit update pass.
+
 ## The measurement that decided it
 
 The project originally restored the whole corpus first and served queries from

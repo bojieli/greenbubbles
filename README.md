@@ -26,7 +26,9 @@
 </p>
 
 GreenBubbles is a macOS app and command-line toolkit for reading your own WeChat
-history. Browse and search locally, create an encrypted backup, or ask your
+history directly from WeChat’s original local databases. There is no export or
+duplicate chat database to keep in sync for ordinary live queries. Browse and
+search locally, create an encrypted backup, or ask your
 existing coding agent to turn selected conversations into cited Markdown memory.
 
 **Research alpha · Apple silicon · macOS 14+.** Live encrypted access requires
@@ -34,7 +36,7 @@ key capture from your own WeChat client. Local queries upload nothing. If you
 use a cloud AI agent, the message pages it reads go to its model provider.
 
 <p align="center">
-  <img src="assets/how-it-works.svg" alt="GreenBubbles reads local WeChat databases and provides selected context to your tools, with optional encrypted backups." width="820">
+  <img src="assets/how-it-works.svg" alt="Live access: a private local account key unlocks read-only queries against WeChat’s original encrypted databases. GreenBubbles returns selected message pages to your app or agent without maintaining an exported chat database. Backups and prepared memory corpora are optional separate copies." width="820">
 </p>
 
 ## What you can do
@@ -151,10 +153,37 @@ keys or recovery words into an agent prompt.
 
 ## Getting your database key
 
-For encrypted live history, GreenBubbles needs the matching key. The acquisition
-helper can capture it during login on supported WeChat builds. This requires
-administrator access and re-signing your installed copy of WeChat. Read the
-[acquisition guide](docs/PASSPHRASE_ACQUISITION.md) before starting.
+WeChat stores messages, contacts, and other chat information in SQLite database
+files on your Mac, under your account's `db_storage` directory. Those files
+contain tables, but they are encrypted with SQLCipher: an ordinary SQLite reader
+cannot open them just because it can access the files.
+
+On the supported WeChat clients, a 32-byte **account key** acts as the master
+secret. WeChat combines it with each database file's salt to derive that file's
+encryption key. An account can have dozens of database files and thousands of
+tables; the derived encryption keys are per **file**, not per table.
+
+GreenBubbles needs that account key to authenticate and decrypt database pages
+locally as you query them. The acquisition helper captures it during login,
+verifies it against the discovered databases, and saves it in an owner-only file
+on your Mac. A query profile references that file. Derived keys are calculated
+locally as needed; you do not need to store a separate list of table keys.
+The saved account key is a secret protected by file permissions, not an encrypted
+backup of your chats. Keep it out of prompts and shared folders.
+
+With access configured, each live query reads WeChat's original databases rather
+than a previous export. New messages become available when WeChat writes them to
+its local storage, without an export-and-sync cycle. Separate queries can observe
+different moments while WeChat is changing; this does not promise one atomic view
+across every database. Optional snapshots and prepared memory corpora are separate
+point-in-time copies and must be refreshed when you want newer data.
+
+<p align="center">
+  <img src="assets/key-flow.svg" width="900" alt="The account secret is captured into a private local credential file. Each database file’s salt combines with that secret to derive its key locally. GreenBubbles reads the original encrypted files and returns selected messages, not keys, to the app or agent.">
+</p>
+
+Capture requires administrator access and re-signing your installed copy of
+WeChat. Read the [acquisition guide](docs/PASSPHRASE_ACQUISITION.md) before starting.
 
 ```sh
 # Re-sign your own copy, then restart WeChat.
