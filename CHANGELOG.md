@@ -4,6 +4,22 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
+## 0.9.0 - 2026-09-30
+
+### Changed
+
+- The personal-memory skill keeps articles readable as they grow: a short
+  lead, short paragraphs, and dated or nested lists for long episodes, with
+  no sentences that only deny an inference or announce an omission.
+- The Homebrew workflow commits the formula to a staging branch, runs CI on
+  it, and fast-forwards main, so releases update the tap without bypassing
+  branch protection.
+
+### Fixed
+
+- The live media tests no longer time out when a CI runner is slow to
+  approve a freshly written test script.
+
 ## 0.8.0 - 2026-09-29
 
 ### Changed
