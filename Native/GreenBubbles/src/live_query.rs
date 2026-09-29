@@ -5479,9 +5479,7 @@ fn readable_fragment(value: &str, redact: bool) -> Option<String> {
 }
 
 fn present_name(value: Option<&str>, redact: bool) -> Option<String> {
-    let Some(trimmed) = value.map(str::trim).filter(|name| !name.is_empty()) else {
-        return None;
-    };
+    let trimmed = value.map(str::trim).filter(|name| !name.is_empty())?;
     if !redact {
         return Some(trimmed.to_string());
     }

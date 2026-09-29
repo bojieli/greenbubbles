@@ -4,6 +4,13 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
+## 0.7.1 - 2026-09-29
+
+### Fixed
+
+- The release check treats Clippy warnings as errors. Naming a sender now uses
+  `?`, so the Rust 1.98 `question_mark` lint no longer stops the build.
+
 ## 0.7.0 - 2026-09-29
 
 ### Added
