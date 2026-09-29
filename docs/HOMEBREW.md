@@ -71,20 +71,20 @@ research-alpha prerelease. It includes:
 ## Check a download
 
 Download the file you want and the `SHA256SUMS` file from the same release. The
-examples below use version 0.6.0; replace it with the version you downloaded.
+examples below use version 0.9.0; replace it with the version you downloaded.
 
 For the app DMG, check the checksum, then check Apple's notarization:
 
 ```sh
-grep ' GreenBubbles-0.6.0-macos-arm64.dmg$' SHA256SUMS-0.6.0.txt | \
+grep ' GreenBubbles-0.9.0-macos-arm64.dmg$' SHA256SUMS-0.9.0.txt | \
   shasum -a 256 -c -
-xcrun stapler validate GreenBubbles-0.6.0-macos-arm64.dmg
+xcrun stapler validate GreenBubbles-0.9.0-macos-arm64.dmg
 ```
 
 For the command-line ZIP:
 
 ```sh
-grep ' greenbubbles-0.6.0-macos-arm64.zip$' SHA256SUMS-0.6.0.txt | \
+grep ' greenbubbles-0.9.0-macos-arm64.zip$' SHA256SUMS-0.9.0.txt | \
   shasum -a 256 -c -
 ```
 
@@ -104,29 +104,36 @@ The signed release workflow builds, signs, and notarizes the binaries. Then it:
 3. Runs the `Update Homebrew` workflow.
 
 The `Update Homebrew` job downloads the release's CLI ZIP and checksums for
-that exact tag, checks them (and GitHub's asset digest when available), and
-updates only `Formula/greenbubbles.rb` on the default branch through GitHub's
-contents API. It uses the repository's normal `GITHUB_TOKEN` with
-`contents: write`. It is safe to rerun:
+that exact tag and checks them (and GitHub's asset digest when available).
+Main requires a passing `test` check, so the job doesn't write to main
+directly. Instead it:
+
+1. Commits the new `Formula/greenbubbles.rb` to a staging branch,
+   `homebrew/vX.Y.Z`, based on the tip of main.
+2. Starts CI on that branch and waits for it to pass.
+3. Fast-forwards main to the tested commit, then deletes the staging branch.
+
+It uses the repository's normal `GITHUB_TOKEN` with `contents: write` and
+`actions: write`, and nothing gets around branch protection. It is safe to
+rerun:
 
 - If the formula is already current, it does nothing.
 - It never rolls the formula back to an older release.
 - It rejects a different checksum for a version already published.
-- If branch protection blocks the update, the job fails visibly instead of
-  getting around it. Maintainers can then apply the generated formula through
-  normal review.
+- If someone pushes to main while CI runs, the fast-forward fails. Rerun the
+  workflow to stage the formula on the new tip.
 
 To rerun only the Homebrew step for an existing tag:
 
 ```sh
-gh workflow run homebrew.yml --repo bojieli/greenbubbles -f tag=v0.6.0
+gh workflow run homebrew.yml --repo bojieli/greenbubbles -f tag=v0.9.0
 ```
 
 To generate a formula on your own machine from a signed archive:
 
 ```sh
-python3 scripts/homebrew-release.py --version 0.6.0 \
-  --archive /private/path/greenbubbles-0.6.0-macos-arm64.zip \
+python3 scripts/homebrew-release.py --version 0.9.0 \
+  --archive /private/path/greenbubbles-0.9.0-macos-arm64.zip \
   --output /tmp/greenbubbles.rb
 ```
 

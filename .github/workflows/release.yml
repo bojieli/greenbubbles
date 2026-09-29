@@ -629,6 +629,7 @@ jobs:
     needs: publish
     permissions:
       contents: write
+      actions: write
     uses: ./.github/workflows/homebrew.yml
     with:
       tag: ${{ inputs.tag || github.ref_name }}

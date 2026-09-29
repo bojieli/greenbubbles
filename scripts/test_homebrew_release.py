@@ -51,7 +51,7 @@ class HomebrewRelease(unittest.TestCase):
                 return json.dumps({"draft": False, "tag_name": "v0.3.1", "assets": [
                     {"name": archive_name, "digest": f"sha256:{digest}"}, {"name": checksum_name}]})
             if args[1].endswith("/contents/Formula/greenbubbles.rb"):
-                return "{}" if payload else json.dumps(self.existing(old))
+                return '{"commit":{"sha":"formula-commit"}}' if payload else json.dumps(self.existing(old))
             return '{"default_branch":"main"}'
         with patch.object(release, "gh", side_effect=fake_gh), patch("builtins.print"):
             release.publish("0.3.1", "bojieli/greenbubbles")
@@ -61,6 +61,53 @@ class HomebrewRelease(unittest.TestCase):
         self.assertEqual(args, ("api", "repos/bojieli/greenbubbles/contents/Formula/greenbubbles.rb", "-X", "PUT"))
         self.assertIn(digest, base64.b64decode(payload["content"]).decode())
         self.assertEqual(payload["branch"], "main")
+
+    def test_staging_branch_is_reset_to_default_tip_before_formula_commit(self):
+        archive_name = "greenbubbles-0.3.1-macos-arm64.zip"
+        checksum_name = "SHA256SUMS-0.3.1.txt"
+        content = b"synthetic signed release"
+        digest = hashlib.sha256(content).hexdigest()
+        calls = []
+        old = release.render("0.3.0", "b" * 64, "bojieli/greenbubbles")
+        def fake_gh(*args, payload=None):
+            calls.append((args, payload))
+            if args[0] == "release":
+                directory = Path(args[args.index("--dir") + 1])
+                (directory / archive_name).write_bytes(content)
+                (directory / checksum_name).write_text(f"{digest}  {archive_name}\n")
+                return ""
+            if "releases/tags" in args[1]:
+                return json.dumps({"draft": False, "tag_name": "v0.3.1", "assets": [
+                    {"name": archive_name}, {"name": checksum_name}]})
+            if args[1].endswith("/git/ref/heads/main"):
+                return '{"object":{"sha":"main-tip"}}'
+            if args[1].endswith("/git/refs") and "POST" in args:
+                raise release.subprocess.CalledProcessError(1, "gh")
+            if args[1].endswith("/git/refs/heads/homebrew/v0.3.1"):
+                return "{}"
+            if args[1].endswith("/contents/Formula/greenbubbles.rb"):
+                return '{"commit":{"sha":"formula-commit"}}' if payload else json.dumps(self.existing(old))
+            return '{"default_branch":"main"}'
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "github-output"
+            with patch.object(release, "gh", side_effect=fake_gh), patch("builtins.print"), \
+                    patch.dict(release.os.environ, {"GITHUB_OUTPUT": str(output)}):
+                release.publish("0.3.1", "bojieli/greenbubbles", "homebrew/v0.3.1")
+            self.assertEqual(output.read_text(), "commit=formula-commit\n")
+        reset = [payload for args, payload in calls if args[1].endswith("/git/refs/heads/homebrew/v0.3.1")]
+        self.assertEqual(reset, [{"sha": "main-tip", "force": True}])
+        formula_read = [args for args, payload in calls
+                        if args[1].endswith("/contents/Formula/greenbubbles.rb") and payload is None]
+        self.assertIn("ref=homebrew/v0.3.1", formula_read[0])
+        write = [payload for args, payload in calls
+                 if args[1].endswith("/contents/Formula/greenbubbles.rb") and payload is not None]
+        self.assertEqual(write[0]["branch"], "homebrew/v0.3.1")
+
+    def test_staging_branch_names_cannot_escape_refs(self):
+        release.validate_branch("homebrew/v0.3.1")
+        for invalid in ("", "../main", "homebrew/../main", "homebrew//v1", "-x", "a b"):
+            with self.assertRaises(ValueError):
+                release.validate_branch(invalid)
 
     def test_draft_release_does_not_download_or_publish(self):
         with patch.object(release, "gh", return_value='{"draft":true,"tag_name":"v0.3.1"}') as gh:
