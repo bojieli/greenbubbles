@@ -3690,7 +3690,7 @@ const fn ai_summarize_direct_help() -> &'static str {
             "  greenbubbles ai-summarize-direct <source-root> <policy-file> <audit-log> <new-output-directory> --requester <id> (--passphrase-stdin | --decrypted) [--max-messages-per-conversation <n>]\n\n",
             "Reads only remotely authorized direct-connector scopes, derives account-holder\n",
             "attribution from the authenticated live account directory, replaces long canonical\n",
-            "message IDs with short evidence aliases, and invokes gemini-3.7-flash through the\n",
+            "message IDs with short evidence aliases, and invokes gemini-3.8-flash through the\n",
             "Gemini API.\n",
             "GEMINI_API_KEY must be present in the environment and is never accepted as an\n",
             "argument. The new owner-only output contains memory.json, memory.md, the exact\n",

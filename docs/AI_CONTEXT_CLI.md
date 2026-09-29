@@ -285,7 +285,7 @@ scope must explicitly set `allowRemoteModel`. The passphrase remains stdin-only;
 the Gemini key is read only from `GEMINI_API_KEY` and is sent as an in-process
 HTTPS header, never as a subprocess argument.
 
-The command invokes `gemini-3.7-flash`. Before the request, it replaces every
+The command invokes `gemini-3.8-flash`. Before the request, it replaces every
 potentially long canonical message ID with a short `M###` alias and sends only
 conversation label/kind/coverage plus compact message actor, speaker, time,
 kind and text fields. The model never receives canonical IDs, sender IDs,

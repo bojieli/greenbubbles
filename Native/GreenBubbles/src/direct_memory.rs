@@ -25,7 +25,7 @@ use crate::{ConversationKind, RestoreError};
 
 pub const DIRECT_MEMORY_SCHEMA: &str = "greenbubbles.direct-memory.v1";
 pub const DIRECT_MEMORY_FORMAT_VERSION: u32 = 1;
-pub const DIRECT_MEMORY_MODEL: &str = "gemini-3.7-flash";
+pub const DIRECT_MEMORY_MODEL: &str = "gemini-3.8-flash";
 const MODEL_INPUT_SCHEMA: &str = "greenbubbles.compact-chat.v1";
 const DEFAULT_MAXIMUM_MESSAGES_PER_CONVERSATION: usize = 200;
 const MAXIMUM_MESSAGES_PER_CONVERSATION: usize = 1_000;

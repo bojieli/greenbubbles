@@ -23,7 +23,7 @@ fn ai_commands_expose_help_without_opening_private_inputs() {
         ),
         (
             "ai-summarize-direct",
-            "invokes gemini-3.7-flash through the",
+            "invokes gemini-3.8-flash through the",
         ),
         ("audit-ai-memory", "without printing content"),
     ] {

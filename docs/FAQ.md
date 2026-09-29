@@ -179,7 +179,7 @@ Reading, searching, exports, and notes upload nothing. There's no background
 service, telemetry, or cloud component.
 
 The one exception is `ai-summarize-direct`, and only when you run it. It sends
-the chats your policy marks `allowRemoteModel` to Google's Gemini 3.7 Flash and
+the chats your policy marks `allowRemoteModel` to Google's Gemini 3.8 Flash and
 records that in the audit log. It sends message text, senders, and times, but
 not real message IDs, sender IDs, your policy or audit files, or database
 details.
