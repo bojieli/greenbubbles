@@ -1,15 +1,23 @@
 # Public release checklist
 
-The 0.1.1 source and macOS arm64 binary release is approved; a hosted launch
-still requires a green Release workflow. Last reviewed 2026-08-29.
+The latest published release is [v0.4.0](https://github.com/bojieli/greenbubbles/releases/tag/v0.4.0),
+verified on 2026-09-29. Earlier review sections below are historical records;
+their unchecked items describe the state at the time of those reviews.
 
-The 0.3.0 release is approved on the same boundary, extended to cover the
-personal-memory surface and the binary's first outbound network client. See
-[0.3.0 review](#030-review) for what changed and what the owner decided.
+## 0.4.0 publication
 
-This records the owner's explicit release decision and the mechanical gates CI
-must pass. Unchecked boxes are things that have genuinely not happened yet, and
-are left visible rather than tidied away.
+The owner explicitly authorized the v0.4.0 release and upstream Homebrew tap.
+
+- [x] Annotated tag, matching Cargo version, dated changelog, and reviewed dependency inventory.
+- [x] [Release workflow](https://github.com/bojieli/greenbubbles/actions/runs/36521955913) passed CI, signing, and notarization.
+- [x] Downloaded assets match every entry in `SHA256SUMS-0.4.0.txt`.
+- [x] App, CLI, and DMG notarization logs report `Accepted`; the DMG's stapled ticket validates.
+- [x] Homebrew installation and CLI smoke tests pass; installed CLI signature verifies.
+- [x] Homebrew packaging revision `0.4.0_1` preserves the license path required by skill-bundle export.
+
+The workflow token's formula update failed; an authorized maintainer published
+the verified formula. The retry then passed. Branch protection may require the
+same maintainer step for future releases; see [Homebrew](HOMEBREW.md).
 
 It is not legal advice, and release **never** authorizes publishing real
 conversations, databases, credentials, media, captures, or owner-private

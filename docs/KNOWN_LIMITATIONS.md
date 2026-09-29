@@ -10,8 +10,8 @@ number attached, the number is in [MEASUREMENTS.md](MEASUREMENTS.md).
 GreenBubbles cannot open encrypted history without the matching 32-byte key,
 and it contains no decryption bypass. The bundled helper captures it from your
 own running client, which requires root for the debugger attach and an ad-hoc
-re-sign that replaces Apple's signature on WeChat until you reinstall or it
-auto-updates. It is a one-minute step and it is documented end to end in
+re-sign that replaces WeChat's original signature until you reinstall or it
+auto-updates. Its prerequisites and compatibility limits are documented in
 [PASSPHRASE_ACQUISITION.md](PASSPHRASE_ACQUISITION.md) — but if you cannot run
 as root on this machine, you cannot complete setup.
 

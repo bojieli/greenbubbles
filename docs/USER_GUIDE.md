@@ -16,15 +16,15 @@ will tell you exactly which conditions are unmet, and
 
 ## What you need
 
-- macOS 14 or later;
+- macOS 14 or later on Apple silicon for published binaries;
 - Swift 6 and Rust/Cargo, if you are building from source;
 - an owner-authorized WeChat `db_storage` directory;
 - the matching 32-byte (or 64-hex-character) database key, for encrypted live
   access;
 - free space for a snapshot, if you create one.
 
-If you do not have the key yet, capture it first — three commands, about a
-minute, in [PASSPHRASE_ACQUISITION.md](PASSPHRASE_ACQUISITION.md).
+If you do not have the key yet, review the capture prerequisites and client
+limitations in [PASSPHRASE_ACQUISITION.md](PASSPHRASE_ACQUISITION.md).
 
 **Never paste a key, passphrase, recovery phrase or private message into a
 model prompt, an issue, or a chat.**
@@ -34,6 +34,7 @@ model prompt, an issue, or a chat.**
 | If you want to… | Do this |
 | --- | --- |
 | Browse current history on this Mac | History app → **Browse Live or Snapshot…** → **Live WeChat (read-only)** |
+| Organize history with your existing coding agent | [Portable agent skills](AGENT_SKILLS.md) |
 | Query repeatedly from a terminal | Set up a [query profile](QUERY_PROFILES.md) |
 | See how much space WeChat actually uses | Open the live source; read **SQLite files**, **WAL** and **Total** in Overview |
 | Keep a backup independent of WeChat | History app → **Create Recoverable Snapshot…** |
@@ -53,12 +54,16 @@ not select an individual `.db` file.
 If you do not know where it is:
 
 ```sh
-swift run greenbubbles-discover accounts --include-paths
+greenbubbles-discover accounts --include-paths
 ```
 
 Path-bearing output may contain a stable account identifier — keep it private.
 
 ## Install or build
+
+For the CLI and portable agent skills, follow the [Homebrew guide](HOMEBREW.md).
+A release installation does not require Swift or Rust. The discovery command above
+is included in the CLI distribution; source users can run it with `swift run`.
 
 For the signed release, download the `GreenBubbles-*-macos-arm64.dmg` and its
 checksum file from [GitHub Releases](https://github.com/bojieli/greenbubbles/releases),
@@ -69,7 +74,7 @@ the `greenbubbles` CLI inside its own bundle automatically.
 To build from source, from the repository root:
 
 ```sh
-cargo build --release --manifest-path Native/GreenBubbles/Cargo.toml
+cargo build --locked --release --manifest-path Native/GreenBubbles/Cargo.toml
 swift build --product greenbubbles-history
 swift run greenbubbles-history
 ```

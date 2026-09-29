@@ -1,23 +1,21 @@
 # GreenBubbles documentation
 
-- [Portable agent skills](AGENT_SKILLS.md): use Codex, Claude Code, OpenCode, Kimi Code, Gemini CLI, or Grok Build for extraction and memory updates.
-
 GreenBubbles reads your own WeChat history on your own Mac and releases bounded,
 cited slices of it to tools you approve. The [repository
 README](../README.md) is the introduction; this page is how you find the right
 document next.
 
-- [CLI releases and Homebrew](HOMEBREW.md): verified downloads, tap setup, and release automation.
-
 ## Start here
 
 | If you want to… | Read |
 | --- | --- |
+| Install the CLI or verify a download | [CLI releases and Homebrew](HOMEBREW.md) |
+| Use an existing coding agent to maintain Markdown memory | [Portable agent skills](AGENT_SKILLS.md) |
 | Install it and browse your history | [User guide](USER_GUIDE.md) |
 | Understand what it will and will not do before installing | [Known limitations](KNOWN_LIMITATIONS.md) and [threat model](THREAT_MODEL.md) |
 | Fix something that is not working | [FAQ](FAQ.md) |
 | Give an AI access to some of your history | [AI context CLI](AI_CONTEXT_CLI.md), then [AI tool boundary](AI_TOOL_BOUNDARY.md) |
-| Build a cited personal wiki from a large corpus | [Personal memory and Pi](PERSONAL_MEMORY.md) |
+| Build a cited personal wiki from a large corpus | [Personal memory](PERSONAL_MEMORY.md) |
 | Keep a backup that survives losing WeChat | [Recoverable snapshots](RECOVERABLE_SNAPSHOTS.md) |
 | Decide whether to acquire the database key | [Passphrase acquisition](PASSPHRASE_ACQUISITION.md) |
 | Understand the design | [Architecture](ARCHITECTURE.md), then [storage format](STORAGE_FORMAT.md) |
@@ -45,13 +43,16 @@ document next.
 
 ## Give an AI access
 
+- [Portable agent skills](AGENT_SKILLS.md) — direct use with your current agent,
+  optional discovery, diagnostics, and incremental updates.
+
 - [AI context CLI](AI_CONTEXT_CLI.md) — the one-shot query surface, the
   policy-scoped connector, and the static export bundle.
 - [AI tool boundary](AI_TOOL_BOUNDARY.md) — what a tool is permitted to ask
   for, and what it can never reach.
 - [AI memory integration](AI_MEMORY_INTEGRATION.md) — citation-preserving
   projections into local memory and retrieval systems.
-- [Personal memory and Pi](PERSONAL_MEMORY.md) — canonical preparation,
+- [Personal memory](PERSONAL_MEMORY.md) — canonical preparation,
   composable command-line conversation/kind/sender filters, RFC 3339 time
   bounds, compact durable batches, and agent-refined Markdown.
 - [Connector API](CONNECTOR_API.md) — the versioned local request/response

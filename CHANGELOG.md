@@ -4,6 +4,14 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- Replaced the project icon with a simpler conversation-and-memory mark.
+- Shortened the README, clarified Homebrew skill paths and first-time setup,
+  and corrected privacy boundaries, incremental-update guidance, and release status.
+
 ## 0.4.0 - 2026-09-29
 
 ### Added

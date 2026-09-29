@@ -7,8 +7,8 @@ The questions people actually ask, including the ones whose honest answer is
 
 ### I do not have the database key. Can I use this at all?
 
-You capture it. That is the normal first step, and it takes about a minute:
-re-sign your own copy of WeChat so a debugger can attach, run
+Capture is the normal setup route for supported clients. It requires administrator
+access and a login cycle: re-sign your own copy of WeChat so a debugger can attach, run
 `greenbubbles-acquire preflight`, then run `greenbubbles-acquire capture` and
 log out of WeChat and back in. The helper reads the key as WeChat derives it,
 verifies it against every database, and writes it to an owner-only file.
@@ -33,7 +33,7 @@ Not the WeChat container, not `xwechat_files`, and not an individual `.db`
 file. If you do not know which account directory is yours:
 
 ```sh
-swift run greenbubbles-discover accounts --include-paths
+greenbubbles-discover accounts --include-paths
 ```
 
 Path-bearing output contains a stable account identifier. Keep it private.
@@ -122,28 +122,28 @@ tool boundary can request one.
 
 ### Can an AI read all my chats?
 
-Only what a policy you wrote permits. Policy binds one account and grants each
+Through the policy-scoped connector, only what your policy permits. It binds
+one account and grants each
 conversation an independent set of operations, message fields, an optional time
 range, and a local-versus-remote destination decision. Remote release is off
 unless you explicitly enable it for that conversation. Everything allowed and
 everything denied is appended to a hash-chained, body-free journal.
 
 Without a policy, the CLI runs with your own filesystem authority — which is
-appropriate for you at a terminal, and is exactly why the AI surface uses a
-policy instead.
+also true of a coding agent with general shell access. Skills do not restrict
+that authority. Use the connector when you need its policy-enforced boundary.
 
-The corpus-scale Pi workflow is an explicit owner-run exception to per-chat
+The personal-memory workflow is an explicit owner-run exception to per-chat
 policy enumeration: one local `memory prepare` process may scan the live
 account and a v2 corpus may retain every eligible message locally. A composable
 run scope can then intersect repeatable conversation/kind/sender arguments and
 inclusive RFC 3339 time bounds; leaving those filters empty deliberately selects
 the whole hydrated corpus.
 `memory next` returns only a delivery envelope and deterministic `memory page`
-calls release at most 49,152 bytes at a time. Pi never receives the database key
-or verbose citation sidecars, but personal-memory pages intentionally include
-real contact and conversation identities and it eventually receives every page
-in the chosen scope. Use separate private corpus/wiki/state paths, review the status
-coverage fields, and remember that a remote Pi model receives those released
+calls release at most 49,152 bytes at a time. The memory-page protocol excludes
+the database key and verbose citation sidecars, but includes real contact and
+conversation identities. The agent eventually receives every page in the chosen scope. Use separate private corpus/wiki/state paths, review the status
+coverage fields, and remember that a remote model receives those released
 pages under that model provider's privacy terms.
 
 ### Can I list my WeChat contacts from the CLI?

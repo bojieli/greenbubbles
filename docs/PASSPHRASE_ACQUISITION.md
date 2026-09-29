@@ -11,10 +11,11 @@ you just want to run it.
 A few practical notes before you start:
 
 - You need **root** for the capture step, and you will re-sign your own copy of
-  WeChat, which replaces Apple's signature until you reinstall it or it
+  WeChat, which replaces WeChat's original signature until you reinstall it or it
   auto-updates. Repeat that step after an update.
-- The key is **stable**. Capture it once; databases WeChat creates later are
-  covered by `verify` without another capture.
+- The account key has remained stable on the tested clients. Reuse it while
+  `verify` authenticates the databases you need; do not assume this will hold
+  across every account change or future WeChat release.
 - It is also **long-lived and not rotatable by you** — it decrypts every local
   database copy you have, including old snapshots. Keep it in an owner-only
   file, which is what the tool writes by default.
@@ -29,8 +30,9 @@ WeChat's macOS client derives each database key from a stable 32-byte account
 passphrase **at login**, by calling the exported CommonCrypto symbol
 `CCKeyDerivationPBKDF`. Because the breakpoint targets a *system library*
 symbol rather than anything in the client binary, the mechanism is
-build-agnostic: `greenbubbles-acquire` does no version, hash or signature
-gating, and has been validated on 4.1.12 and 4.1.13.
+not tied to a fixed client address. `greenbubbles-acquire` does no version, hash
+or signature gating and has been validated on 4.1.12 and 4.1.13. That is not a
+guarantee of compatibility with future clients.
 
 `greenbubbles-acquire capture`:
 

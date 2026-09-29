@@ -111,7 +111,7 @@ than the technology can encode. A conversation policy scoped to the threads you
 actually need is the mechanism; using it is on you.
 
 **Changes you make to your own client.** Key acquisition re-signs WeChat ad
-hoc, which replaces Apple's signature until you reinstall or the app updates.
+hoc, which replaces WeChat's original signature until you reinstall or the app updates.
 That is a change to your machine's software state, and GreenBubbles reports it
 honestly rather than pretending the client is pristine afterwards.
 

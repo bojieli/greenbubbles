@@ -36,6 +36,19 @@ Keep each skill's references and helpers alongside its `SKILL.md`. The local
 GreenBubbles CLI is the executable dependency. The agent needs shell access and
 permission to read the selected source and edit the memory project.
 
+## Homebrew paths
+
+The Homebrew package stores the skills and helpers under `libexec`:
+
+```sh
+echo "$(brew --prefix greenbubbles)/libexec/skills/greenbubbles-personal-memory/SKILL.md"
+python3 "$(brew --prefix greenbubbles)/libexec/scripts/install-skills.py" --agent codex
+```
+
+The second command is optional. For the relative commands below, first change
+into `$(brew --prefix greenbubbles)/libexec`, or use the corresponding absolute
+script path. Source checkouts and extracted release ZIPs use their own root.
+
 ## Optional automatic discovery
 
 From this checkout or an extracted CLI release, choose your host:

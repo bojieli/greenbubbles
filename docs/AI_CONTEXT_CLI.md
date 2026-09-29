@@ -312,7 +312,9 @@ it does not mutate or silently merge an earlier model-generated wiki. Run it
 again with a new output path after live data changes, then compare or promote
 the reviewed generation explicitly.
 
-## Corpus-scale Pi memory
+<a id="corpus-scale-pi-memory"></a>
+
+## Corpus-scale personal memory
 
 `ai-summarize-direct` is deliberately bounded per selected conversation. For a
 whole live account, use a v2 `memory prepare`: one local process inventories the
@@ -334,19 +336,18 @@ account-holder relevance and active-period coverage, rather than exhausting
 the oldest conversation slice first; the schedule still traverses every
 prepared unit.
 
-One ReAct agent updates `conversations/C######.md`, `me.md`,
-`people/P######.md` and `index.md` directly according to the resolved subject.
-GreenBubbles does not semantically merge prose. The agent updates useful target
-pages before acknowledging each fully read evidence page. The crash-safe `commit`
-step validates immutable input hashes, complete page review, allowed page paths,
-and exact retained/cited evidence before it advances to the next batch. The
-uncommitted page and batch are returned again after a restart.
+Your existing agent can follow the [personal-memory skill](../skills/greenbubbles-personal-memory/SKILL.md)
+to review pages and update a Markdown or Python domain project. Use one writer
+per project. The optional driver launches separate coding-agent runs for this
+same workflow; see [personal memory](PERSONAL_MEMORY.md).
 
-The complete algorithm, policy and command contract are in
-[PERSONAL_MEMORY.md](PERSONAL_MEMORY.md). Pi discovers the project skill at
-`skills/greenbubbles-personal-memory` through `.pi/settings.json`, and other
-harnesses receive the same skill text in their prompt; no custom agent runtime
-or tool extension is present.
+The older `wiki` format writes `conversations/C######.md`, `me.md`,
+`people/P######.md`, and `index.md`. Its commit checks include allowed page paths
+and retained/cited evidence. Domain Markdown and Python commits check structure
+and page acknowledgements; they do not verify the truth of facts or the quality
+of citations. Review the resulting diffs. An interrupted batch resumes from its
+saved state; GreenBubbles does not semantically merge prose.
+
 
 ## Progress
 

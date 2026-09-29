@@ -44,12 +44,13 @@ python3 scripts/personal-memory-parallel.py tick \
   --corpus /private/path/corpus \
   --user-project ~/memory/me \
   --format python \
-  --agent gemini --model gemini-3.8-flash
+  --agent codex --shards 1 --parallel 1
 ```
 
 The first `tick` creates `~/memory/me/` as a git repo, processes all messages
 in the corpus, and writes a Python or Markdown knowledge project. Subsequent
-ticks process only new messages since the last run.
+ticks use a saved time window. Extend the corpus first to include newly arrived
+messages; older imports and edits require a broader reconciliation pass.
 
 ## Corpus preparation
 
@@ -122,8 +123,8 @@ checks without pre-computed alerts).
 Facts are classified into standard life domains. The agent creates new domains
 as needed — the taxonomy is a starting point, not a closed set.
 
-All shards in a parallel run write to the same domain files, so they must agree
-on domain names. The driver enforces canonical names:
+Domain updates write to shared files, so use one writer and consistent names.
+The driver prompt specifies these canonical names:
 
 | Domain | What it covers |
 |---|---|
@@ -188,7 +189,7 @@ function.
 modules automatically, runs each `check()` function, and aggregates their
 alerts. The output populates `manifest.py:ACTIVE_ALERTS`.
 
-**Surface:** `ACTIVE_ALERTS` is always loaded into the agent's context at the
+**Surface:** The driver instructs the agent to read `ACTIVE_ALERTS` at the
 start of every session. An alert that appears there is visible before the user
 asks any question, enabling proactive warnings.
 
@@ -236,18 +237,19 @@ python3 scripts/personal-memory-parallel.py revise \
 The driver provides the primitives; cadence is entirely the user's choice and
 depends on their token budget and how fresh they need the project to be.
 
-| Batch frequency | Approximate cost (Gemini Flash class) | Typical use case |
-|---|---|---|
-| Hourly (24x/day) | ~$1–3/day for active users | Power users who want near-real-time |
-| Daily | ~$0.05–0.20/day | Most users — good balance |
-| Weekly | ~$0.35–1.40/week | Casual use, large corpora |
+Choose a cadence based on how quickly the memory needs to reflect new messages,
+then measure a small representative run. Daily or weekly runs are reasonable
+starting points; retries, model reasoning, prompt size, and message volume all
+affect usage. Subscription allowances and API billing are different, so a fixed
+per-day dollar estimate would be misleading.
 
-These are estimates based on measured corpus rates (~USD 1.15 per 1,000
-messages, measured on the full corpus with `gemini-3.7-flash`; the recommended
-`gemini-3.8-flash` is the same price class but has not been re-measured). Incremental `tick` passes cost proportionally less because only new
-messages are processed, not the full corpus.
+Extend the corpus before a scheduled tick. Reusing an unchanged corpus does not
+fetch new WeChat messages. Resume a pending run with its original corpus before
+switching to a newly prepared generation.
 
-Wire the driver into cron or launchd at whatever interval fits your budget:
+Wire the driver into cron or launchd at the chosen interval. The sketch below
+shows only the tick step; schedule corpus extension separately. launchd does not
+expand `~`, so use absolute paths:
 
 ```sh
 # Example launchd plist (~/Library/LaunchAgents/me.greenbubbles.tick.plist):
@@ -256,7 +258,7 @@ Wire the driver into cron or launchd at whatever interval fits your budget:
 #   /path/to/scripts/personal-memory-parallel.py
 #   tick
 #   --corpus /private/path/corpus
-#   --user-project ~/memory/me
+#   --user-project /Users/you/memory/me
 #   --format python
 #   --agent claude
 # StartCalendarInterval: { Hour: 2; Minute: 0 }
