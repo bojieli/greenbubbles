@@ -36,8 +36,8 @@
         "licenseMetadata" : "MIT OR Apache-2.0",
         "name" : "base64",
         "optional" : false,
-        "requirement" : "^0.22",
-        "resolvedVersion" : "0.22.1",
+        "requirement" : "^0.23",
+        "resolvedVersion" : "0.23.1",
         "source" : "registry+https://github.com/rust-lang/crates.io-index",
         "usesDefaultFeatures" : true
       },
@@ -142,8 +142,8 @@
         "licenseMetadata" : "MIT OR Apache-2.0",
         "name" : "hkdf",
         "optional" : false,
-        "requirement" : "^0.12",
-        "resolvedVersion" : "0.12.4",
+        "requirement" : "^0.13",
+        "resolvedVersion" : "0.13.0",
         "source" : "registry+https://github.com/rust-lang/crates.io-index",
         "usesDefaultFeatures" : true
       },
@@ -165,11 +165,11 @@
 
         ],
         "kind" : "normal",
-        "licenseMetadata" : "Apache-2.0/MIT",
+        "licenseMetadata" : "Apache-2.0 OR MIT",
         "name" : "md5",
         "optional" : false,
-        "requirement" : "^0.7",
-        "resolvedVersion" : "0.7.0",
+        "requirement" : "^0.8",
+        "resolvedVersion" : "0.8.1",
         "source" : "registry+https://github.com/rust-lang/crates.io-index",
         "usesDefaultFeatures" : true
       },
@@ -181,8 +181,8 @@
         "licenseMetadata" : "Apache-2.0",
         "name" : "prost",
         "optional" : false,
-        "requirement" : "^0.13",
-        "resolvedVersion" : "0.13.5",
+        "requirement" : "^0.14",
+        "resolvedVersion" : "0.14.4",
         "source" : "registry+https://github.com/rust-lang/crates.io-index",
         "usesDefaultFeatures" : true
       },
@@ -248,8 +248,8 @@
         "licenseMetadata" : "MIT OR Apache-2.0",
         "name" : "sha2",
         "optional" : false,
-        "requirement" : "^0.10",
-        "resolvedVersion" : "0.10.9",
+        "requirement" : "^0.11",
+        "resolvedVersion" : "0.11.0",
         "source" : "registry+https://github.com/rust-lang/crates.io-index",
         "usesDefaultFeatures" : true
       },

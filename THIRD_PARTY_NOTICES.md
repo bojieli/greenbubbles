@@ -160,6 +160,7 @@ repository-level license checksum.
 - `argon2 0.5.3` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/password-hashes/tree/master/argon2
 - `arrayvec 0.7.8` — `MIT OR Apache-2.0` — https://github.com/bluss/arrayvec
 - `base64 0.22.1` — `MIT OR Apache-2.0` — https://github.com/marshallpierce/rust-base64
+- `base64 0.23.1` — `MIT OR Apache-2.0` — https://github.com/marshallpierce/rust-base64
 - `base64ct 1.8.3` — `Apache-2.0 OR MIT` — https://github.com/RustCrypto/formats
 - `bip39 2.2.2` — `CC0-1.0` — https://github.com/rust-bitcoin/rust-bip39/
 - `bitcoin_hashes 0.14.101` — `CC0-1.0` — https://github.com/rust-bitcoin/rust-bitcoin
@@ -179,6 +180,7 @@ repository-level license checksum.
 - `cipher 0.4.4` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/traits
 - `cipher 0.5.2` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/traits
 - `cmov 0.5.4` — `Apache-2.0 OR MIT` — https://github.com/RustCrypto/utils
+- `const-oid 0.10.2` — `Apache-2.0 OR MIT` — https://github.com/RustCrypto/formats
 - `core-foundation-sys 0.8.7` — `MIT OR Apache-2.0` — https://github.com/servo/core-foundation-rs
 - `cpubits 0.1.1` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/utils
 - `cpufeatures 0.2.17` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/utils
@@ -193,6 +195,7 @@ repository-level license checksum.
 - `curve25519-dalek 4.1.3` — `BSD-3-Clause` — https://github.com/dalek-cryptography/curve25519-dalek/tree/main/curve25519-dalek
 - `dashmap 6.2.1` — `MIT` — https://github.com/xacrimon/dashmap
 - `digest 0.10.7` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/traits
+- `digest 0.11.3` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/traits
 - `dirs 6.0.0` — `MIT OR Apache-2.0` — https://github.com/soc/dirs-rs
 - `dirs-sys 0.5.0` — `MIT OR Apache-2.0` — https://github.com/dirs-dev/dirs-sys-rs
 - `displaydoc 0.2.7` — `MIT OR Apache-2.0` — https://github.com/yaahc/displaydoc
@@ -215,8 +218,9 @@ repository-level license checksum.
 - `hashlink 0.12.1` — `MIT OR Apache-2.0` — https://github.com/djc/hashlink
 - `hex 0.4.3` — `MIT OR Apache-2.0` — https://github.com/KokaKiwi/rust-hex
 - `hex-conservative 0.2.2` — `CC0-1.0` — https://github.com/rust-bitcoin/hex-conservative
-- `hkdf 0.12.4` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/KDFs/
+- `hkdf 0.13.0` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/KDFs/
 - `hmac 0.12.1` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/MACs
+- `hmac 0.13.0` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/MACs
 - `hybrid-array 0.4.14` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/hybrid-array
 - `iana-time-zone 0.1.65` — `MIT OR Apache-2.0` — https://github.com/strawlab/iana-time-zone
 - `icu_collections 2.3.0` — `Unicode-3.0` — https://github.com/unicode-org/icu4x
@@ -239,6 +243,7 @@ repository-level license checksum.
 - `log 0.4.34` — `MIT OR Apache-2.0` — https://github.com/rust-lang/log
 - `mach2 0.6.0` — `BSD-2-Clause OR MIT OR Apache-2.0` — https://github.com/JohnTitor/mach2
 - `md5 0.7.0` — `Apache-2.0 OR MIT` — https://github.com/stainless-steel/md5
+- `md5 0.8.1` — `Apache-2.0 OR MIT` — https://github.com/stainless-steel/md5
 - `memchr 2.8.3` — `Unlicense OR MIT` — https://github.com/BurntSushi/memchr
 - `miniz_oxide 0.9.1` — `MIT OR Zlib OR Apache-2.0` — https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide
 - `mio 1.2.2` — `MIT` — https://github.com/tokio-rs/mio
@@ -256,7 +261,9 @@ repository-level license checksum.
 - `potential_utf 0.1.6` — `Unicode-3.0` — https://github.com/unicode-org/icu4x
 - `proc-macro2 1.0.107` — `MIT OR Apache-2.0` — https://github.com/dtolnay/proc-macro2
 - `prost 0.13.5` — `Apache-2.0` — https://github.com/tokio-rs/prost
+- `prost 0.14.4` — `Apache-2.0` — https://github.com/tokio-rs/prost
 - `prost-derive 0.13.5` — `Apache-2.0` — https://github.com/tokio-rs/prost
+- `prost-derive 0.14.4` — `Apache-2.0` — https://github.com/tokio-rs/prost
 - `quote 1.0.47` — `MIT OR Apache-2.0` — https://github.com/dtolnay/quote
 - `rand_core 0.6.4` — `MIT OR Apache-2.0` — https://github.com/rust-random/rand
 - `rand_core 0.10.1` — `MIT OR Apache-2.0` — https://github.com/rust-random/rand_core
@@ -281,6 +288,7 @@ repository-level license checksum.
 - `serde_json 1.0.151` — `MIT OR Apache-2.0` — https://github.com/serde-rs/json
 - `serde_spanned 1.1.1` — `MIT OR Apache-2.0` — https://github.com/toml-rs/toml
 - `sha2 0.10.9` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/hashes
+- `sha2 0.11.0` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/hashes
 - `signal-hook-registry 1.4.8` — `MIT OR Apache-2.0` — https://github.com/vorner/signal-hook
 - `signature 2.2.0` — `Apache-2.0 OR MIT` — https://github.com/RustCrypto/traits/tree/master/signature
 - `silk-rs 0.2.0` — `MIT` — https://github.com/lz1998/silk-rs
@@ -634,7 +642,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 Used by:
 
 - `prost-derive 0.13.5`
+- `prost-derive 0.14.4`
 - `prost 0.13.5`
+- `prost 0.14.4`
 - `ring 0.17.14`
 
 ```text
@@ -2505,7 +2515,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- `hkdf 0.12.4`
+- `hkdf 0.13.0`
 
 ```text
 Copyright (c) 2015-2018 Vlad Filippov
@@ -2817,8 +2827,47 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
+- `sha2 0.11.0`
+
+```text
+Copyright (c) 2016-2026 The RustCrypto Project Developers
+Copyright (c) 2016 Artyom Pavlov
+Copyright (c) 2009-2013 Mozilla Foundation
+Copyright (c) 2006-2009 Graydon Hoare
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+```
+
+### MIT License
+
+Used by:
+
 - `digest 0.10.7`
 - `hmac 0.12.1`
+- `hmac 0.13.0`
 
 ```text
 Copyright (c) 2017 Artyom Pavlov
@@ -2927,6 +2976,42 @@ Used by:
 
 ```text
 Copyright (c) 2017 tokio-jsonrpc developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+```
+
+### MIT License
+
+Used by:
+
+- `digest 0.11.3`
+
+```text
+Copyright (c) 2017-2025 RustCrypto Developers
+Copyright (c) 2017 Artyom Pavlov
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -3598,6 +3683,41 @@ Used by:
 
 ```text
 Copyright (c) 2020-2025 The RustCrypto Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+```
+
+### MIT License
+
+Used by:
+
+- `const-oid 0.10.2`
+
+```text
+Copyright (c) 2020-2026 The RustCrypto Project Developers
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -4431,6 +4551,7 @@ Used by:
 - `chrono-tz 0.10.4`
 - `chrono 0.4.45`
 - `md5 0.7.0`
+- `md5 0.8.1`
 - `siphasher 1.0.3`
 
 ```text
@@ -4970,6 +5091,37 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+
+```
+
+### MIT License
+
+Used by:
+
+- `base64 0.23.1`
+
+```text
+The MIT License (MIT)
+
+Copyright (c) 2025 Alice Maz, Marshall Pierce
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 
 ```
 
