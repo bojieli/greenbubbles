@@ -19,6 +19,14 @@ return one bounded, versioned JSON response. Do not invoke `sqlite3`, issue raw
 SQL, request `--all`, or create a full JSONL archive/replica merely to answer a
 bounded question.
 
+When the user specifies live conversations, use only the live source for evidence;
+do not substitute a prepared corpus or earlier summaries. Establish access with
+one bounded read before planning a large extraction. If opening the source hangs,
+stop duplicate scans, report that no messages were read, and resolve the source
+access issue before drafting factual claims. For selective profiles, prioritize
+the user's participation and conversation kind, then read the chosen chats in
+context and cite exact message IDs; state the selection and coverage in the output.
+
 Use exactly one access mode: live WeChat key via `--passphrase-stdin`, ordinary
 snapshot reopening via `--snapshot-local-credential <owner-only-file>`, portable
 snapshot recovery via `--snapshot-recovery-kit <owner-only-file>`, optional

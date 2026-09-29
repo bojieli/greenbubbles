@@ -13,6 +13,11 @@ Run `python3 <this-skill>/scripts/doctor.py` first. Supply `--greenbubbles
 CLI capabilities and opens the configured source read-only; it does not print
 credentials or message text, capture keys, change profiles, or launch agents.
 A failing check is a setup diagnosis, not evidence that history is empty.
+If a live source hangs, test one directory open with a timeout before retrying
+database reads. Workspace permission, Unix ownership, and macOS privacy access
+are separate. Compare the user's terminal with the agent host; do not infer TCC
+attribution from parent PID alone or diagnose a denial from a preflight log.
+Verify any privacy change with a fresh read before claiming access is fixed.
 
 Read [references/setup.md](references/setup.md) for installation, source setup,
 or owner-operated capture. Reuse an existing profile or credential before

@@ -11,6 +11,13 @@ require a model API key unless the user explicitly chooses the optional driver.
 Resolve bundled references relative to this SKILL.md; an installed copy does not
 require the GreenBubbles source checkout.
 
+If the user requests evidence directly from the live WeChat database, use
+`../greenbubbles-context/SKILL.md` for bounded live queries. Do not inspect or
+reuse a prepared corpus, prior extraction, or test output as source evidence.
+For a selective memory request, choose conversations by the user's stated
+criteria (for example, direct chats with substantial self-authored participation)
+and report the reviewed scope rather than implying whole-history coverage.
+
 ## Choose the workflow
 
 Read [references/cli.md](references/cli.md) for setup checks, preparation,
