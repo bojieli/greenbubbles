@@ -32,5 +32,5 @@
   </g>
   <g fill="#087F5B"><polygon points="367,141 356,135 356,147"/><polygon points="474,249 468,238 480,238"/><polygon points="345,307 334,301 334,313"/><polygon points="663,307 652,301 652,313"/></g>
   <text x="32" y="395" font-size="16" font-weight="700" fill="#12382D">Read-only query → selected messages → your agent</text>
-  <text x="32" y="424" font-size="14" fill="#46645A">Key material stays local. The derived key covers the file, not an individual table.</text>
+  <text x="32" y="424" font-size="14" fill="#46645A">Database keys are stored or derived on your Mac; they are not included in query results.</text>
 </svg>

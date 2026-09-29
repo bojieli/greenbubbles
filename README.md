@@ -56,22 +56,6 @@ and agent-written memory are separate outputs you choose to create.
 
 macOS 14 or later, Apple silicon.
 
-Download the latest `GreenBubbles-*-macos-arm64.dmg` from
-[Releases](https://github.com/bojieli/greenbubbles/releases), verify it, then
-drag **GreenBubbles** to Applications:
-
-```console
-grep ' GreenBubbles-0.4.0-macos-arm64.dmg$' SHA256SUMS-0.4.0.txt | \
-  shasum -a 256 -c -
-xcrun stapler validate GreenBubbles-0.4.0-macos-arm64.dmg
-```
-
-Every executable is Developer ID signed and Apple notarized. The same release
-ships `greenbubbles-*-macos-arm64.zip` with the full command-line tool set.
-[v0.4.0](https://github.com/bojieli/greenbubbles/releases/tag/v0.4.0) includes
-portable agent skills, the optional skill installer, and the incremental-memory
-driver alongside the CLI binaries.
-
 Install the command-line tools through the upstream Homebrew tap:
 
 ```sh
@@ -88,8 +72,12 @@ brew trust --formula bojieli/greenbubbles/greenbubbles
 
 Older Homebrew versions without `brew trust` do not need this step.
 
-See [CLI releases and Homebrew](docs/HOMEBREW.md) for publication status,
-checksums, upgrades, and maintainer setup.
+Prefer the Mac app? Download the Developer ID signed and Apple notarized DMG from
+[Releases](https://github.com/bojieli/greenbubbles/releases), verify it, and drag
+**GreenBubbles** to Applications. The release also includes a standalone CLI ZIP.
+
+See [CLI releases and Homebrew](docs/HOMEBREW.md) for download verification,
+upgrades, and packaging details.
 
 <details>
 <summary><strong>Build from source</strong></summary>
@@ -108,20 +96,34 @@ The CLI lands at `Native/GreenBubbles/target/release/greenbubbles`. Point the
 app at it when it asks.
 </details>
 
+## Getting your database key
+
+<p align="center">
+  <img src="assets/key-flow.svg" width="900" alt="The account key is captured into a private file on your Mac. That key and the database file’s salt derive the key used for local read-only access to WeChat’s original database.">
+</p>
+
+WeChat stores your chats in encrypted SQLite database files on your Mac.
+GreenBubbles needs the account key—the master secret from which each file's
+key is derived—to read them. Keys apply to database files, each of which can
+contain many tables.
+
+Setup captures and verifies the account key from your own WeChat client, then
+stores it in a private local file. It requires administrator access and re-signing
+WeChat. Follow the [key acquisition guide](docs/PASSPHRASE_ACQUISITION.md) for
+commands, compatibility, credential storage, and troubleshooting.
+
+Next, [create and validate a query profile](docs/QUERY_PROFILES.md) that points
+to your WeChat data and credential file. You can then query the original live
+databases without exporting them first.
+
 ## Use your existing coding agent (recommended)
 
-If you already have a coding-agent subscription with available usage, start there.
-The agent can use GreenBubbles through **skills: Markdown instructions with
+Use your existing Codex, Claude Code, OpenCode, Kimi Code, Gemini CLI, or Grok Build
+session. An available subscription allowance can avoid an additional API bill;
+check that the agent is signed in through your intended plan.
+
+The agent uses GreenBubbles through **skills: Markdown instructions with
 supporting references and optional helpers**. Reading a skill requires no installation.
-
-| Route | What you need | Billing |
-| --- | --- | --- |
-| Your existing agent + skills | GreenBubbles CLI and an agent with shell access | Your agent's subscription allowance or configured API provider |
-| Embedded summarizer | GreenBubbles CLI and a dedicated `GEMINI_API_KEY` | Separate API usage, not covered by your coding-agent subscription |
-| Scripted memory driver | GreenBubbles CLI and an installed coding-agent CLI | The launched agent's configured billing |
-
-Using an existing subscription allowance can avoid another API bill. Costs still
-depend on plan limits, model choice, and workload; check how your agent is signed in.
 
 For a Homebrew installation, find the skill to give your agent:
 
@@ -146,66 +148,27 @@ installer copies the package into your agent's skills directory:
 python3 "$(brew --prefix greenbubbles)/libexec/scripts/install-skills.py" --agent codex
 ```
 
-See [the agent skills guide](docs/AGENT_SKILLS.md) for setup diagnostics,
-project-scoped discovery, updates, and the differences between direct sessions
-and scripted runs. Key capture is an owner-operated setup step; do not paste
-keys or recovery words into an agent prompt.
+Your agent reads selected message pages through the CLI and writes memory files
+locally. If it uses a cloud model, that message text goes to its provider. Do not
+paste database keys or recovery words into prompts.
 
-## Getting your database key
+See [the agent skills guide](docs/AGENT_SKILLS.md) for diagnostics, optional
+discovery, and incremental updates.
 
-WeChat stores messages, contacts, and other chat information in SQLite database
-files on your Mac, under your account's `db_storage` directory. Those files
-contain tables, but they are encrypted with SQLCipher: an ordinary SQLite reader
-cannot open them just because it can access the files.
+## Use the embedded summarizer (optional)
 
-On the supported WeChat clients, a 32-byte **account key** acts as the master
-secret. WeChat combines it with each database file's salt to derive that file's
-encryption key. An account can have dozens of database files and thousands of
-tables; the derived encryption keys are per **file**, not per table.
+GreenBubbles can also call Gemini directly through `ai-summarize-direct` and
+save a cited summary as local `memory.md` and `memory.json` files. This route
+requires a dedicated **`GEMINI_API_KEY`** and incurs separate API charges; your
+coding-agent subscription does not cover it.
 
-GreenBubbles needs that account key to authenticate and decrypt database pages
-locally as you query them. The acquisition helper captures it during login,
-verifies it against the discovered databases, and saves it in an owner-only file
-on your Mac. A query profile references that file. Derived keys are calculated
-locally as needed; you do not need to store a separate list of table keys.
-The saved account key is a secret protected by file permissions, not an encrypted
-backup of your chats. Keep it out of prompts and shared folders.
+You choose the conversations through a policy that explicitly permits remote
+model access. The summarizer sends selected message content to Gemini and saves
+the result locally. It creates a new output generation each time.
 
-With access configured, each live query reads WeChat's original databases rather
-than a previous export. New messages become available when WeChat writes them to
-its local storage, without an export-and-sync cycle. Separate queries can observe
-different moments while WeChat is changing; this does not promise one atomic view
-across every database. Optional snapshots and prepared memory corpora are separate
-point-in-time copies and must be refreshed when you want newer data.
-
-<p align="center">
-  <img src="assets/key-flow.svg" width="900" alt="The account secret is captured into a private local credential file. The database file’s salt combines with that secret to derive its key locally. GreenBubbles reads the original encrypted file and returns selected messages, not keys, to your agent.">
-</p>
-
-Capture requires administrator access and re-signing your installed copy of
-WeChat. Read the [acquisition guide](docs/PASSPHRASE_ACQUISITION.md) before starting.
-
-```sh
-# Re-sign your own copy, then restart WeChat.
-sudo codesign --force --deep --sign - /Applications/WeChat.app
-
-# Check prerequisites, then arm capture before logging out and back in.
-sudo greenbubbles-acquire preflight
-sudo greenbubbles-acquire capture
-```
-
-Re-signing replaces WeChat's original code signature until it is reinstalled or
-updated. Capture depends on the client and local permissions; its duration and
-coverage are not guaranteed. Follow the helper's verification result and reported
-credential-file path. Reuse a verified credential while it continues to authenticate.
-
-Next, [create a query profile](docs/QUERY_PROFILES.md) that names your account's
-`db_storage` directory and private credential file. Validate it before querying:
-
-```sh
-greenbubbles profile validate <profile-name>
-greenbubbles source status --profile <profile-name>
-```
+Follow the [embedded summarizer guide](docs/AI_CONTEXT_CLI.md#model-generated-live-memory)
+for the policy, API-key setup, and command. For ongoing edits to an existing
+memory project, use the agent skills above.
 
 ## Usage
 
@@ -242,7 +205,7 @@ Keep that output private: account paths can contain identifiers.
 | --- | --- |
 | First-time setup and browsing | [User guide](docs/USER_GUIDE.md) |
 | Use your own agent to organize memory | [Portable agent skills](docs/AGENT_SKILLS.md) |
-| Schedule extraction or choose a memory format | [Personal memory](docs/PERSONAL_MEMORY.md) |
+| Understand memory formats and incremental updates | [Personal memory](docs/PERSONAL_MEMORY.md) |
 | Restrict access through a policy-scoped connector | [AI context CLI](docs/AI_CONTEXT_CLI.md) |
 | Back up and recover your history | [Recoverable snapshots](docs/RECOVERABLE_SNAPSHOTS.md) |
 | Troubleshoot | [FAQ](docs/FAQ.md) and [known limitations](docs/KNOWN_LIMITATIONS.md) |
@@ -252,6 +215,14 @@ The [documentation index](docs/README.md) includes replica operations, integrati
 contracts, measurements, and contributor references.
 
 ## Status and privacy
+
+Your source databases, credential files, backups, and generated memory are
+stored locally. Local database queries do not upload them. Cloud AI is an
+explicit workflow: an external cloud agent sends the message text it reads to
+its provider, and the embedded summarizer sends policy-approved content to
+Gemini. GreenBubbles also has an optional public-article fetcher, so the project
+as a whole is not network-free. See [privacy](PRIVACY.md) for the boundaries.
+
 
 GreenBubbles is intended for technical users working with their own data.
 WeChat's private formats change; unsupported data is reported as a coverage gap.

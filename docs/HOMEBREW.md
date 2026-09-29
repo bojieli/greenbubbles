@@ -11,6 +11,24 @@ The formula in [`Formula/greenbubbles.rb`](../Formula/greenbubbles.rb) pins the
 published CLI ZIP by SHA-256. Compare its hash with the release's `SHA256SUMS`
 asset or [GitHub's release asset listing](https://github.com/bojieli/greenbubbles/releases/expanded_assets/v0.4.0).
 
+## Verify a download
+
+Download the desired archive and `SHA256SUMS-0.4.0.txt` from the same release.
+For the app DMG:
+
+```sh
+grep ' GreenBubbles-0.4.0-macos-arm64.dmg$' SHA256SUMS-0.4.0.txt | \
+  shasum -a 256 -c -
+xcrun stapler validate GreenBubbles-0.4.0-macos-arm64.dmg
+```
+
+For the standalone CLI ZIP:
+
+```sh
+grep ' greenbubbles-0.4.0-macos-arm64.zip$' SHA256SUMS-0.4.0.txt | \
+  shasum -a 256 -c -
+```
+
 ## Tap setup
 
 This repository doubles as an upstream tap through its top-level `Formula/`
