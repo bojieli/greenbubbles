@@ -1,9 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-labelledby="title desc">
   <title id="title">GreenBubbles</title>
-  <desc id="desc">An emerald conversation bubble with three cream page lines, on a pale mint rounded square. Conversations become organized memory.</desc>
+  <desc id="desc">An emerald chat bubble with a warm cream eight-point spark, on a pale mint rounded square. A conversation becomes understanding.</desc>
   <rect x="16" y="16" width="480" height="480" rx="112" fill="#EAF5ED"/>
-  <path d="M160 104h192c44 0 80 36 80 80v104c0 44-36 80-80 80H240l-80 64v-64c-44 0-80-36-80-80V184c0-44 36-80 80-80Z" fill="#087F5B"/>
-  <path d="M168 188h176M168 244h176M168 300h104" fill="none" stroke="#F5F9E9" stroke-width="24" stroke-linecap="round"/>
-  <circle cx="376" cy="376" r="64" fill="#EAF5ED"/>
-  <circle cx="376" cy="376" r="44" fill="#A8D86D"/>
+  <path d="M164 96h184c49 0 88 39 88 88v112c0 49-39 88-88 88H236l-76 56v-56c-47-2-84-40-84-88V184c0-49 39-88 88-88Z" fill="#087F5B"/>
+  <g fill="none" stroke="#FFF4D6" stroke-linecap="round">
+    <path d="M256 160v160M176 240h160" stroke-width="28"/>
+    <path d="m212 196 88 88m-88 0 88-88" stroke-width="24"/>
+  </g>
 </svg>
