@@ -1,7 +1,7 @@
 # Personal memory: notes about your life from your chats
 
 GreenBubbles can help your coding agent turn your WeChat history into a small,
-private, Wikipedia-style set of notes about your life. To set that up, start
+private wiki about your life. To set that up, start
 with the [agent skills guide](AGENT_SKILLS.md). It uses your agent's existing
 setup and needs no extra API key.
 
@@ -15,7 +15,8 @@ The notes are a private folder tracked with Git:
 
 - `index.md` is the front page, with links to the articles.
 - `domains/*.md` are the articles, one per life area (work, family, travel, and
-  so on), written as prose with a list of sources.
+  so on). Each has a short summary at the top, then short paragraphs, with
+  dated lists for long stories, and a list of sources at the end.
 - `manifest.md` records the time range covered and which chats were actually
   read.
 

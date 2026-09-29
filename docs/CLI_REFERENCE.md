@@ -211,6 +211,6 @@ true. See
 | The serving replica | [Replica specification](REPLICA_SPEC.md) · [operations](REPLICA_OPERATIONS.md) |
 | The local request contract | [Connector API](CONNECTOR_API.md) |
 | Giving an AI access | [AI context CLI](AI_CONTEXT_CLI.md) |
-| Wikipedia-style knowledge base from live history | [Personal memory](PERSONAL_MEMORY.md) |
+| Private knowledge base from live history | [Personal memory](PERSONAL_MEMORY.md) |
 | Verifying any of the above | [Auditing](AUDITING.md) |
 | The closed send path | [Send adapter](SEND_ADAPTER.md) |

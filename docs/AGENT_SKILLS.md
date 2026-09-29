@@ -56,7 +56,7 @@ command, and edit files in your notes folder.
 To build notes for the first time:
 
 > Use greenbubbles-personal-memory to organize my WeChat history into a
-> Wikipedia-style knowledge base at `~/memory/me`. Read the live database in
+> private knowledge base at `~/memory/me`. Read the live database in
 > this session. Ask me what time range to cover if I haven't said. Revise the
 > articles in place.
 
