@@ -5,7 +5,23 @@ help exits without opening private inputs or reading a key.
 
 ## Bounded live or snapshot query
 
-Ordinary local reads do not need restoration. Choose exactly one access mode:
+Ordinary live reads need no profile, source path, or access flag. They open
+the newest installed WeChat `db_storage` directory and read
+`~/.greenbubbles-acquire/passphrase.txt`:
+
+```text
+greenbubbles chats --limit 100
+greenbubbles messages list --conversation <id> --limit 100
+greenbubbles messages search --query-stdin
+```
+
+`chats` is the short form of `conversations list`. Both accept the same
+options. A custom database or passphrase path belongs in
+`~/.greenbubbles/config.toml` under `[source]`, as `root` and
+`passphrase_file`. Do not put those paths on every command.
+
+For a second account, a snapshot, or an explicit source, choose exactly one
+access mode:
 
 ```text
 --passphrase-stdin                  encrypted live WeChat database root

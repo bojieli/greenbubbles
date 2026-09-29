@@ -20,10 +20,20 @@ the key from your own client, it does not break the encryption. If you would
 rather not run it, the other routes in are a snapshot someone already made you,
 or a plaintext source.
 
-### What exactly do I select as the source?
+### Do I have to create a profile or pass a directory?
+
+No, for the live database. After capture, `greenbubbles chats`
+opens the newest installed WeChat `db_storage` directory and reads
+`~/.greenbubbles-acquire/passphrase.txt`. A different database or passphrase
+file goes in `~/.greenbubbles/config.toml` under `[source]`. A profile is only
+for a second account or a snapshot. A missing passphrase file returns
+`invalidProfile` and prints neither the path nor the key. The same message
+appears in plain language on the terminal.
+
+### What exactly is the source?
 
 The directory literally named `db_storage`, containing at least `contact`,
-`session` and `message`. On a current client it is under:
+`session` and `message`. The CLI finds it. On a current client it is under:
 
 ```text
 ~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/<account>/db_storage

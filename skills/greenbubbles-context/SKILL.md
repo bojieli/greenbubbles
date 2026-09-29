@@ -7,13 +7,16 @@ description: Query owner-authorized WeChat history through GreenBubbles' bounded
 
 Use these commands in the current agent session; no embedded agent or separate
 model API key is required. Resolve references relative to this skill directory.
-If the CLI/profile is missing, read `../greenbubbles-setup/SKILL.md`.
+If a live read fails, read `../greenbubbles-setup/SKILL.md`. Ordinary live
+commands need no profile, source path, or passphrase argument. Start with
+`greenbubbles chats`. `greenbubbles help` lists the everyday commands;
+`greenbubbles help --all` lists the rest.
 For a maintained Markdown/Python memory project, read
 `../greenbubbles-personal-memory/SKILL.md`. Host discovery is optional. Do not invoke a separate model-backed
 summarizer when the user wants this agent to do the summarization.
 
-For ordinary local browsing, use the resource commands `conversations list`,
-`messages list`, `messages search`, and `message get`. They query the selected
+For ordinary local browsing, use `chats` (the same command as
+`conversations list`), `messages list`, `messages search`, and `message get`. They query the selected
 live WeChat SQLite/WCDB source or independently encrypted snapshot read-only and
 return one bounded, versioned JSON response. Do not invoke `sqlite3`, issue raw
 SQL, request `--all`, or create a full JSONL archive/replica merely to answer a
@@ -27,11 +30,14 @@ access issue before drafting factual claims. For selective profiles, prioritize
 the user's participation and conversation kind, then read the chosen chats in
 context and cite exact message IDs; state the selection and coverage in the output.
 
-Use exactly one access mode: live WeChat key via `--passphrase-stdin`, ordinary
-snapshot reopening via `--snapshot-local-credential <owner-only-file>`, portable
-snapshot recovery via `--snapshot-recovery-kit <owner-only-file>`, optional
-Argon2id passphrase via `--snapshot-passphrase-stdin`, legacy raw snapshot key
-via `--snapshot-key-stdin`, or explicit plaintext fixtures via `--decrypted`.
+For the live database, pass no access mode. The command reads
+`~/.greenbubbles-acquire/passphrase.txt`, or the paths in
+`~/.greenbubbles/config.toml`. Use an explicit access mode only for a one-off
+source: live WeChat key via `--passphrase-stdin`, ordinary snapshot reopening
+via `--snapshot-local-credential <owner-only-file>`, portable snapshot recovery
+via `--snapshot-recovery-kit <owner-only-file>`, optional Argon2id passphrase
+via `--snapshot-passphrase-stdin`, legacy raw snapshot key via
+`--snapshot-key-stdin`, or explicit plaintext fixtures via `--decrypted`.
 Never ask the user to paste a key, passphrase, or recovery words into chat,
 put key material or search text in an argument, or invoke a key-acquisition
 utility. For live, legacy raw-key, or passphrase search, standard input is the

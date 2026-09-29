@@ -172,7 +172,7 @@ fn attachment_cli_rejects_unbounded_or_mismatched_requests_without_path_disclosu
         assert_eq!(error["ok"], false);
         assert!(!stdout.contains(fixture.account.to_str().unwrap()));
         assert!(!stderr.contains(fixture.account.to_str().unwrap()));
-        assert!(stderr.contains("see the JSON error"));
+        assert!(stderr.contains("A machine-readable copy of this error is on standard output"));
     }
     assert_eq!(relative_files(fixture.directory.path()), original_files);
 }
@@ -784,7 +784,7 @@ fn assert_attachment_failure(output: &Output, code: &str, fixture: &MessageFixtu
     assert!(!stderr.contains(fixture.account.to_str().unwrap()));
     assert!(!stderr.contains(fixture.database_root.to_str().unwrap()));
     assert!(!stderr.contains(fixture.output.to_str().unwrap()));
-    assert!(stderr.contains("see the JSON error"));
+    assert!(stderr.contains("A machine-readable copy of this error is on standard output"));
 }
 
 fn assert_success(output: &Output) {

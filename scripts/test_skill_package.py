@@ -111,13 +111,21 @@ class Diagnostics(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertNotIn(secret, json.dumps(result))
 
-    def test_validated_profile_and_cli_are_required(self):
+    def test_live_source_status_is_enough_without_a_profile(self):
         with patch.object(doctor.shutil, "which", return_value="/fake/greenbubbles"), \
              patch.object(doctor, "probe", side_effect=[
                  (0, "prepare next page acknowledge commit --format"),
-                 (0, '{"ok":true,"schema":"greenbubbles.query-profile-validation.v1"}')]) as probe:
-            self.assertTrue(doctor.check("greenbubbles", "live")["ok"])
-            self.assertEqual(probe.call_args.args[1], ["profile", "validate", "live"])
+                 (0, '{"ok":true,"schema":"greenbubbles.query.v1"}')]) as probe:
+            self.assertTrue(doctor.check("greenbubbles")["ok"])
+            self.assertEqual(probe.call_args.args[1], ["source", "status"])
+
+    def test_named_profile_uses_source_status(self):
+        with patch.object(doctor.shutil, "which", return_value="/fake/greenbubbles"), \
+             patch.object(doctor, "probe", side_effect=[
+                 (0, "prepare next page acknowledge commit --format"),
+                 (0, '{"ok":true,"schema":"greenbubbles.query.v1"}')]) as probe:
+            self.assertTrue(doctor.check("greenbubbles", "archive")["ok"])
+            self.assertEqual(probe.call_args.args[1], ["source", "status", "--profile", "archive"])
 
     def test_wrong_cli_does_not_try_source(self):
         with patch.object(doctor.shutil, "which", return_value="/fake/greenbubbles"), \

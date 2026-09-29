@@ -128,8 +128,16 @@ is required to replace one). It never appears on a command line, in a JSON
 report, or in a log.
 
 This is a plaintext secret file protected by filesystem permissions; it is not
-itself encrypted. A [query profile](QUERY_PROFILES.md) can reference it for
-repeated live access. Alternatively, pass it through standard input:
+itself encrypted. Ordinary live commands read this default file directly, so
+no query profile is required:
+
+```sh
+greenbubbles chats --limit 20
+```
+
+A [query profile](QUERY_PROFILES.md) can reference another credential file for
+a second account or a snapshot. Explicit access still accepts the key through
+standard input:
 
 ```sh
 cat <passphrase-file> | greenbubbles conversations list \

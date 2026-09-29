@@ -35,7 +35,7 @@ model prompt, an issue, or a chat.**
 | --- | --- |
 | Browse current history on this Mac | History app → **Browse Live or Snapshot…** → **Live WeChat (read-only)** |
 | Organize history with your existing coding agent | [Portable agent skills](AGENT_SKILLS.md) |
-| Query repeatedly from a terminal | Set up a [query profile](QUERY_PROFILES.md) |
+| Query the live database from a terminal | Run `greenbubbles chats` after capture |
 | See how much space WeChat actually uses | Open the live source; read **SQLite files**, **WAL** and **Total** in Overview |
 | Keep a backup independent of WeChat | History app → **Create Recoverable Snapshot…** |
 | Reopen a snapshot routinely on this Mac | Snapshot unlock via macOS Keychain |
@@ -85,12 +85,27 @@ build; pointing it at the release binary explicitly is noticeably faster.
 
 ## Browse live history
 
+From a terminal, after capture:
+
+```sh
+greenbubbles chats --limit 20
+```
+
+That opens the newest installed WeChat database and reads
+`~/.greenbubbles-acquire/passphrase.txt`. No profile, directory, or key
+argument is required.
+
+In the app:
+
 1. **Browse Live or Snapshot…**
 2. Confirm the bundled `greenbubbles` executable, or choose the one you built
    from source.
 3. Set **Access** to **Live WeChat (read-only)**.
-4. Choose the account's `db_storage` directory.
-5. Enter the database key and **Connect**.
+4. Choose the account's `db_storage` directory. `greenbubbles-discover accounts
+   --include-paths` prints it.
+5. Enter the database key and **Connect**. The same key is already in
+   `~/.greenbubbles-acquire/passphrase.txt` if you used the default capture
+   output.
 
 The key goes to the CLI's standard input for that connection only. It is not
 placed in process arguments or in app preferences.
@@ -200,24 +215,30 @@ storage, or changing your backup system.
 
 ## The command line
 
-The app runs the same commands you can. For repeated terminal use, set up an
-owner-only [query profile](QUERY_PROFILES.md) so you stop retyping a source
-path and re-supplying a key:
+The app runs the same commands you can. After `greenbubbles-acquire capture`,
+the live database needs no profile, source path, or key argument. The CLI
+opens the newest installed `db_storage` directory and reads
+`~/.greenbubbles-acquire/passphrase.txt`:
 
 ```sh
 GB_CLI="Native/GreenBubbles/target/release/greenbubbles"
 
-"$GB_CLI" profile validate
 "$GB_CLI" source status
 "$GB_CLI" conversations list --limit 100
 "$GB_CLI" messages list --conversation <conversation-id> --limit 100
+```
+
+Create an owner-only [query profile](QUERY_PROFILES.md) only when you also
+query a snapshot or a second account:
+
+```sh
 "$GB_CLI" conversations list --profile archive --limit 100
 ```
 
-The profile stores paths and access modes. Keys and passphrases stay in
+A profile stores paths and access modes. Keys and passphrases stay in
 separately referenced owner-only files, never in the general JSON settings.
 
-Without a profile, supply everything explicitly and keep the key in a file:
+To point at one directory explicitly, keep the key in a file:
 
 ```sh
 GB_CLI="Native/GreenBubbles/target/release/greenbubbles"

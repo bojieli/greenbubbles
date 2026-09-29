@@ -15,8 +15,19 @@ pub const QUERY_PROFILE_SCHEMA: &str = "greenbubbles.query-profiles.v1";
 pub const QUERY_PROFILE_FORMAT_VERSION: u32 = 1;
 pub const QUERY_PROFILE_ENVIRONMENT_VARIABLE: &str = "GREENBUBBLES_QUERY_PROFILES_FILE";
 
+/// Implicit live source used when no profile file and no explicit source exist.
+///
+/// `greenbubbles-acquire capture` writes the account secret here. Ordinary
+/// query commands read that file and the most recently written WeChat
+/// `db_storage` directory, so a first-time user does not create a profile.
+pub const DEFAULT_LIVE_PROFILE_NAME: &str = "live";
+pub const DEFAULT_LIVE_CREDENTIAL_DIRECTORY: &str = ".greenbubbles-acquire";
+pub const DEFAULT_LIVE_CREDENTIAL_FILE: &str = "passphrase.txt";
+
 const DEFAULT_CONFIGURATION_DIRECTORY: &str = ".greenbubbles";
 const DEFAULT_CONFIGURATION_FILE: &str = "query-profiles.json";
+const DEFAULT_SETTINGS_FILE: &str = "config.toml";
+pub const QUERY_SETTINGS_ENVIRONMENT_VARIABLE: &str = "GREENBUBBLES_CONFIG_FILE";
 const MAXIMUM_CONFIGURATION_BYTES: u64 = 64 * 1024;
 const MAXIMUM_PROFILE_COUNT: usize = 64;
 const MAXIMUM_PROFILE_NAME_BYTES: usize = 64;
@@ -257,12 +268,61 @@ impl QueryProfileAccess {
     }
 }
 
-pub fn default_query_profile_path() -> Result<PathBuf, QueryProfileError> {
-    if let Some(path) = env::var_os(QUERY_PROFILE_ENVIRONMENT_VARIABLE) {
-        let path = PathBuf::from(path);
-        validate_absolute_non_root_path(&path, QUERY_PROFILE_ENVIRONMENT_VARIABLE)?;
-        return Ok(path);
+pub fn default_live_credential_path() -> Result<PathBuf, QueryProfileError> {
+    let home = current_user_home()?;
+    Ok(home
+        .join(DEFAULT_LIVE_CREDENTIAL_DIRECTORY)
+        .join(DEFAULT_LIVE_CREDENTIAL_FILE))
+}
+
+/// The installed WeChat `db_storage` directory written most recently.
+///
+/// Discovery matches the Swift account finder: account directories under
+/// `~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files`
+/// and under WeChat group containers. A directory qualifies only when it is a
+/// real, current-user-owned directory containing `contact`, `session`, and
+/// `message`. The newest database modification time selects the active account.
+pub fn discover_default_live_source_root() -> Result<PathBuf, QueryProfileError> {
+    let home = current_user_home()?;
+    let mut candidates = Vec::new();
+    candidates.push(
+        home.join("Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"),
+    );
+    let groups = home.join("Library/Group Containers");
+    if let Ok(entries) = fs::read_dir(&groups) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy().to_ascii_lowercase();
+            if name.contains("wechat") || name.contains("xinwechat") {
+                candidates.push(entry.path().join("xwechat_files"));
+            }
+        }
     }
+
+    let mut newest: Option<(i64, PathBuf)> = None;
+    for files_root in candidates {
+        let Ok(accounts) = fs::read_dir(&files_root) else {
+            continue;
+        };
+        for account in accounts.flatten() {
+            let database_root = account.path().join("db_storage");
+            if !is_usable_live_database_root(&database_root) {
+                continue;
+            }
+            let Some(modified) = database_root_recency(&database_root) else {
+                continue;
+            };
+            if newest.as_ref().is_none_or(|(current, _)| modified > *current) {
+                newest = Some((modified, database_root));
+            }
+        }
+    }
+    newest
+        .map(|(_, path)| path)
+        .ok_or_else(|| QueryProfileError::Unavailable("no live WeChat database was found".into()))
+}
+
+fn current_user_home() -> Result<PathBuf, QueryProfileError> {
     let home = env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -272,7 +332,140 @@ pub fn default_query_profile_path() -> Result<PathBuf, QueryProfileError> {
             "HOME must be an absolute path".into(),
         ));
     }
-    Ok(home
+    Ok(home)
+}
+
+fn is_usable_live_database_root(path: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+    {
+        return false;
+    }
+    ["contact", "session", "message"]
+        .iter()
+        .all(|name| path.join(name).is_dir())
+}
+
+fn database_root_recency(path: &Path) -> Option<i64> {
+    let mut newest = fs::metadata(path).ok()?.mtime();
+    for name in ["contact", "session", "message"] {
+        if let Ok(metadata) = fs::metadata(path.join(name)) {
+            newest = newest.max(metadata.mtime());
+        }
+    }
+    Some(newest)
+}
+
+/// Optional everyday settings, in the same style as a coding agent's config.
+///
+/// The file stores paths only. It never stores a key, passphrase, or recovery
+/// words. A missing file means "use the installed WeChat database and the
+/// passphrase file written by capture."
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QuerySettings {
+    pub source_root: Option<PathBuf>,
+    pub passphrase_file: Option<PathBuf>,
+    pub default_profile: Option<String>,
+}
+
+pub fn default_query_settings_path() -> Result<PathBuf, QueryProfileError> {
+    if let Some(path) = env::var_os(QUERY_SETTINGS_ENVIRONMENT_VARIABLE) {
+        let path = PathBuf::from(path);
+        validate_absolute_non_root_path(&path, QUERY_SETTINGS_ENVIRONMENT_VARIABLE)?;
+        return Ok(path);
+    }
+    Ok(current_user_home()?
+        .join(DEFAULT_CONFIGURATION_DIRECTORY)
+        .join(DEFAULT_SETTINGS_FILE))
+}
+
+pub fn load_query_settings() -> Result<QuerySettings, QueryProfileError> {
+    let path = default_query_settings_path()?;
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(QuerySettings::default()),
+        Err(_) => Err(QueryProfileError::UnsafePath(
+            "settings file is unavailable".into(),
+        )),
+        Ok(_) => parse_query_settings(&read_private_file(
+            &path,
+            MAXIMUM_CONFIGURATION_BYTES,
+            "query settings",
+        )?),
+    }
+}
+
+fn parse_query_settings(bytes: &[u8]) -> Result<QuerySettings, QueryProfileError> {
+    let value: toml::Value = toml::from_slice(bytes)
+        .map_err(|_| invalid_configuration("settings file is not valid TOML"))?;
+    let table = value
+        .as_table()
+        .ok_or_else(|| invalid_configuration("settings file must be a TOML table"))?;
+    if table.keys().any(|key| key != "source" && key != "profile") {
+        return Err(invalid_configuration(
+            "settings file only accepts [source] and [profile]",
+        ));
+    }
+    let mut settings = QuerySettings::default();
+    if let Some(source) = table.get("source") {
+        let source = source
+            .as_table()
+            .ok_or_else(|| invalid_configuration("[source] must be a table"))?;
+        for key in source.keys() {
+            if key != "root" && key != "passphrase_file" {
+                return Err(invalid_configuration(
+                    "[source] only accepts root and passphrase_file",
+                ));
+            }
+        }
+        if let Some(root) = source.get("root") {
+            let root = required_settings_string(root, "source.root")?;
+            let path = PathBuf::from(root);
+            validate_absolute_non_root_path(&path, "source.root")?;
+            settings.source_root = Some(path);
+        }
+        if let Some(passphrase_file) = source.get("passphrase_file") {
+            let passphrase_file = required_settings_string(passphrase_file, "source.passphrase_file")?;
+            let path = PathBuf::from(passphrase_file);
+            validate_absolute_non_root_path(&path, "source.passphrase_file")?;
+            settings.passphrase_file = Some(path);
+        }
+    }
+    if let Some(profile) = table.get("profile") {
+        let profile = profile
+            .as_table()
+            .ok_or_else(|| invalid_configuration("[profile] must be a table"))?;
+        if profile.keys().any(|key| key != "default") {
+            return Err(invalid_configuration("[profile] only accepts default"));
+        }
+        if let Some(name) = profile.get("default") {
+            let name = required_settings_string(name, "profile.default")?;
+            validate_profile_name(name)?;
+            settings.default_profile = Some(name.to_string());
+        }
+    }
+    Ok(settings)
+}
+
+fn required_settings_string<'a>(
+    value: &'a toml::Value,
+    field: &str,
+) -> Result<&'a str, QueryProfileError> {
+    value.as_str().filter(|text| !text.is_empty()).ok_or_else(|| {
+        invalid_configuration(&format!("{field} must be a non-empty string"))
+    })
+}
+
+pub fn default_query_profile_path() -> Result<PathBuf, QueryProfileError> {
+    if let Some(path) = env::var_os(QUERY_PROFILE_ENVIRONMENT_VARIABLE) {
+        let path = PathBuf::from(path);
+        validate_absolute_non_root_path(&path, QUERY_PROFILE_ENVIRONMENT_VARIABLE)?;
+        return Ok(path);
+    }
+    Ok(current_user_home()?
         .join(DEFAULT_CONFIGURATION_DIRECTORY)
         .join(DEFAULT_CONFIGURATION_FILE))
 }
@@ -515,6 +708,69 @@ mod tests {
         let link = directory.path().join("key-link");
         std::os::unix::fs::symlink(&key, &link).unwrap();
         assert!(read_private_32_byte_credential(&link).is_err());
+    }
+
+    #[test]
+    fn settings_file_accepts_paths_and_rejects_secrets() {
+        let accepted = parse_query_settings(
+            br#"
+            [source]
+            root = "/private/wechat/db_storage"
+            passphrase_file = "/private/keys/wechat.txt"
+
+            [profile]
+            default = "archive"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            accepted.source_root.unwrap(),
+            PathBuf::from("/private/wechat/db_storage")
+        );
+        assert_eq!(accepted.default_profile.as_deref(), Some("archive"));
+
+        assert!(parse_query_settings(b"passphrase = \"secret\"\n").is_err());
+        assert!(parse_query_settings(b"[source]\nroot = \"relative/db_storage\"\n").is_err());
+    }
+
+    #[test]
+    fn live_discovery_selects_the_newest_complete_database_root() {
+        let home = tempfile::tempdir().unwrap();
+        fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let files = home
+            .path()
+            .join("Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files");
+        let older = files.join("account-older/db_storage");
+        let newer = files.join("account-newer/db_storage");
+        let incomplete = files.join("account-incomplete/db_storage");
+        for root in [&older, &newer] {
+            for component in ["contact", "session", "message"] {
+                fs::create_dir_all(root.join(component)).unwrap();
+            }
+        }
+        fs::create_dir_all(incomplete.join("contact")).unwrap();
+        let now = std::time::SystemTime::now();
+        filetime::set_file_mtime(&older, filetime::FileTime::from_system_time(now)).unwrap();
+        // Recency uses whole-second libc mtime, so the newer tree must land
+        // in a later second than the older one.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let later = std::time::SystemTime::now();
+        for component in ["contact", "session", "message"] {
+            filetime::set_file_mtime(
+                &newer.join(component),
+                filetime::FileTime::from_system_time(later),
+            )
+            .unwrap();
+        }
+
+        let previous = env::var_os("HOME");
+        env::set_var("HOME", home.path());
+        let discovered = discover_default_live_source_root();
+        match previous {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+        assert_eq!(discovered.unwrap(), newer);
     }
 
     #[test]

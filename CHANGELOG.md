@@ -4,10 +4,18 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.5.0 - 2026-09-29
 
 ### Changed
 
+- Ordinary live queries no longer require a query profile. With no profile
+  file, the CLI opens the newest installed WeChat `db_storage` directory and
+  reads `~/.greenbubbles-acquire/passphrase.txt`. A different database or
+  passphrase file goes in `~/.greenbubbles/config.toml`. Named profiles remain
+  for extra accounts and snapshots.
+- `greenbubbles` and `greenbubbles help` show the everyday commands. The
+  complete list is `greenbubbles help --all`. `greenbubbles chats` lists
+  conversations. Query errors now say what to check and what to run next.
 - Replaced the project icon with a simpler conversation-and-memory mark.
 - Shortened the README, clarified Homebrew skill paths and first-time setup,
   and corrected privacy boundaries, incremental-update guidance, and release status.

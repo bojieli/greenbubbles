@@ -112,9 +112,11 @@ stores it in a private local file. It requires administrator access and re-signi
 WeChat. Follow the [key acquisition guide](docs/PASSPHRASE_ACQUISITION.md) for
 commands, compatibility, credential storage, and troubleshooting.
 
-Next, [create and validate a query profile](docs/QUERY_PROFILES.md) that points
-to your WeChat data and credential file. You can then query the original live
-databases without exporting them first.
+After capture, ordinary commands need no profile and no directory path. They
+open the newest installed WeChat `db_storage` directory and read the key from
+`~/.greenbubbles-acquire/passphrase.txt`, the file capture already wrote.
+Create a [query profile](docs/QUERY_PROFILES.md) only for another account or a
+snapshot.
 
 ## Use your existing coding agent (recommended)
 
@@ -172,11 +174,12 @@ memory project, use the agent skills above.
 
 ## Usage
 
-With a validated default profile:
+After capture, these commands open the live WeChat database directly. No
+profile, source directory, or passphrase argument is required:
 
 ```sh
 # List conversations, then use an ID from the result.
-greenbubbles conversations list --limit 20
+greenbubbles chats --limit 20
 greenbubbles messages list --conversation <conversation-id> --limit 50
 
 # Enter the search text on stdin, then press Control-D.
@@ -190,8 +193,9 @@ These commands return paginated JSON. Follow continuation cursors to retrieve
 more results, and check coverage fields for skipped or unsupported data.
 For attachment retrieval and access modes, see the [CLI reference](docs/CLI_REFERENCE.md).
 
-Prefer a window? Install the app, choose **Browse Live or Snapshot…**, and select
-your account's `db_storage` directory. To locate account directories with the CLI:
+Prefer a window? Install the app and choose **Browse Live or Snapshot…**. The
+live source is the same installed WeChat database the CLI opens by default.
+To locate account directories yourself:
 
 ```sh
 greenbubbles-discover accounts --include-paths

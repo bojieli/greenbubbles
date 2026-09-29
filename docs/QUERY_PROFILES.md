@@ -1,9 +1,32 @@
 # Query profiles
 
-Typing a 200-character source path and re-supplying a key for every query is
-how people end up leaving a key in shell history. A profile stores the boring
-half — which source, and which credential file unlocks it — so ordinary
-commands become:
+Ordinary live queries do not need a profile. With no profile file, no source
+path, and no access flag, GreenBubbles opens the newest installed WeChat
+`db_storage` directory and reads the account key from
+`~/.greenbubbles-acquire/passphrase.txt`, the file
+`greenbubbles-acquire capture` already writes.
+
+```sh
+greenbubbles chats
+greenbubbles messages list --conversation <id>
+```
+
+A different database or passphrase file goes in `~/.greenbubbles/config.toml`,
+the same kind of settings file a coding agent uses. It stores paths only:
+
+```toml
+[source]
+root = "/absolute/path/to/db_storage"
+passphrase_file = "/absolute/path/to/passphrase.txt"
+```
+
+`root` overrides the newest installed WeChat database. `passphrase_file`
+overrides `~/.greenbubbles-acquire/passphrase.txt`. Leave either line out to
+keep that default. To use a saved snapshot by default, set
+`profile.default = "archive"` and leave `[source]` empty.
+
+A profile is for a second account or a snapshot. It stores which source and
+which credential file unlock it, so those commands stay short too:
 
 ```sh
 greenbubbles source status

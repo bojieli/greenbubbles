@@ -1,6 +1,6 @@
 [package]
 name = "greenbubbles"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 default-run = "greenbubbles"
 description = "Local-first WeChat history query, snapshot, restoration, and AI context engine"
@@ -29,6 +29,7 @@ serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"
+toml = "0.9"
 ureq = { version = "2.12", features = ["json"] }
 walkdir = "2"
 zeroize = { version = "1", features = ["derive"] }

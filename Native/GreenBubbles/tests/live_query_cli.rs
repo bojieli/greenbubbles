@@ -553,7 +553,7 @@ fn encrypted_cli_reads_directly_and_wrong_key_fails_without_disclosure() {
     assert_eq!(error["operation"], "conversations.list");
     assert_eq!(error["ok"], false);
     assert_eq!(error["error"]["code"], "databaseUnavailable");
-    assert!(stderr.contains("see the JSON error"));
+    assert!(stderr.contains("The database could not be opened"));
     assert!(!stderr.contains(fixture.root.to_str().unwrap()));
     assert!(!stderr.contains(&hex::encode(RAW_KEY)));
     assert!(!stderr.contains(&hex::encode([0xCD; 32])));
@@ -720,6 +720,71 @@ fn live_key_profile_keeps_key_out_of_arguments_and_search_stdin() {
     );
     assert!(!combined.contains(&hex::encode(RAW_KEY)));
     assert!(!combined.contains(fixture.root.to_str().unwrap()));
+}
+
+#[test]
+fn missing_profile_opens_the_newest_live_database_with_the_captured_key() {
+    let fixture = Fixture::new(true);
+    let home = tempfile::tempdir().unwrap();
+    fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let credential_directory = home.path().join(".greenbubbles-acquire");
+    fs::create_dir_all(&credential_directory).unwrap();
+    fs::set_permissions(&credential_directory, fs::Permissions::from_mode(0o700)).unwrap();
+    write_private_file(
+        &credential_directory.join("passphrase.txt"),
+        format!("{}\n", hex::encode(RAW_KEY)).as_bytes(),
+    );
+
+    let database_root = home.path().join(
+        "Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/acct/db_storage",
+    );
+    copy_directory(&fixture.root, &database_root);
+
+    let output = run_with_home(home.path(), &["conversations", "list", "--limit", "1"], None);
+    assert_success(&output);
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["source"]["mode"], "liveEncrypted");
+    assert_eq!(response["page"]["returned"], 1);
+
+    let search = run_with_home(
+        home.path(),
+        &[
+            "messages",
+            "search",
+            "--query-stdin",
+            "--conversation",
+            "wxid_talker",
+            "--limit",
+            "1",
+        ],
+        Some(b"hello\n"),
+    );
+    assert_success(&search);
+
+    let settings_directory = home.path().join(".greenbubbles");
+    fs::create_dir_all(&settings_directory).unwrap();
+    fs::set_permissions(&settings_directory, fs::Permissions::from_mode(0o700)).unwrap();
+    let alternate = home.path().join("alternate-passphrase.txt");
+    write_private_file(&alternate, format!("{}\n", hex::encode([0x11; 32])).as_bytes());
+    write_private_file(
+        &settings_directory.join("config.toml"),
+        format!("[source]\npassphrase_file = \"{}\"\n", alternate.display()).as_bytes(),
+    );
+    let overridden = run_with_home(home.path(), &["conversations", "list", "--limit", "1"], None);
+    assert!(!overridden.status.success());
+    let response: Value = serde_json::from_slice(&overridden.stdout).unwrap();
+    assert_eq!(response["error"]["code"], "databaseUnavailable");
+    fs::remove_file(settings_directory.join("config.toml")).unwrap();
+
+    fs::set_permissions(
+        credential_directory.join("passphrase.txt"),
+        fs::Permissions::from_mode(0o640),
+    )
+    .unwrap();
+    let failure = run_with_home(home.path(), &["conversations", "list"], None);
+    assert!(!failure.status.success());
+    let response: Value = serde_json::from_slice(&failure.stdout).unwrap();
+    assert_eq!(response["error"]["code"], "invalidProfile");
 }
 
 #[test]
@@ -1213,6 +1278,19 @@ impl ProfileHome {
             &self.config_path(),
             &serde_json::to_vec_pretty(&configuration).unwrap(),
         );
+    }
+}
+
+fn copy_directory(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let target = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_directory(&entry.path(), &target);
+        } else if entry.file_type().unwrap().is_file() {
+            fs::copy(entry.path(), target).unwrap();
+        }
     }
 }
 

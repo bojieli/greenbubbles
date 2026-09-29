@@ -66,9 +66,11 @@ use greenbubbles::{
     preflight_snapshot_with_progress, prepare_available_catalog_with_progress,
     prepare_catalog_batch_with_progress, prepare_catalog_with_progress,
     query_profile::{
-        default_query_profile_path, read_private_32_byte_credential,
+        default_live_credential_path, default_query_profile_path,
+        discover_default_live_source_root, load_query_settings, read_private_32_byte_credential,
         read_private_snapshot_passphrase, QueryProfile, QueryProfileAccess, QueryProfileError,
-        QueryProfileStore, QUERY_PROFILE_FORMAT_VERSION, QUERY_PROFILE_SCHEMA,
+        QueryProfileStore, DEFAULT_LIVE_PROFILE_NAME, QUERY_PROFILE_FORMAT_VERSION,
+        QUERY_PROFILE_SCHEMA,
     },
     reconcile::reconcile_archives,
     recoverable_snapshot::{
@@ -127,16 +129,16 @@ fn main() {
                 "{}",
                 serialize_query_error(operation, code, message, retryable)
             );
-            eprintln!("error: bounded query failed; see the JSON error on standard output");
+            eprintln!("error: {message}");
+            eprintln!("A machine-readable copy of this error is on standard output.");
         } else if let Some(operation) = attachment_operation {
             let (code, message, retryable) = attachment_error_details(error.as_ref());
             println!(
                 "{}",
                 serialize_attachment_error(operation, code, message, retryable)
             );
-            eprintln!(
-                "error: bounded attachment request failed; see the JSON error on standard output"
-            );
+            eprintln!("error: {message}");
+            eprintln!("A machine-readable copy of this error is on standard output.");
         } else {
             eprintln!("error: {error}");
         }
@@ -187,37 +189,37 @@ fn query_error_details(
         return match error {
             LiveQueryError::InvalidArgument(_) => (
                 "invalidQuery",
-                "The bounded query arguments are invalid.",
+                "This query is missing a required value or uses a value outside the allowed range. Run the same command with --help.",
                 false,
             ),
             LiveQueryError::UnsafeSource(_) => (
                 "unsafeSource",
-                "The selected database source failed path or ownership validation.",
+                "The selected database directory cannot be used. Choose your account's db_storage directory, and make sure you own it and it is not a shortcut.",
                 false,
             ),
             LiveQueryError::Database(_) => (
                 "databaseUnavailable",
-                "The database could not complete the bounded read-only operation with the supplied access material.",
+                "The database could not be opened. Check that WeChat is installed and that the passphrase file matches this account. If WeChat is writing, wait a moment and try again.",
                 true,
             ),
             LiveQueryError::InvalidCursor(_) => (
                 "invalidCursor",
-                "The cursor is invalid or does not belong to this operation and source.",
+                "That page token does not belong to this search. Start again without --cursor.",
                 false,
             ),
             LiveQueryError::NotFound(_) => (
                 "messageNotFound",
-                "The selected message is no longer available from this source.",
+                "That message is no longer in this database. List the conversation again and use a message ID from the new page.",
                 false,
             ),
             LiveQueryError::SearchUnavailable(_) => (
                 "searchUnavailable",
-                "No compatible bounded search path is available for this source.",
+                "This database has no search index GreenBubbles can use. List the conversation and read its pages instead.",
                 false,
             ),
             LiveQueryError::ResponseTooLarge { .. } => (
                 "responseTooLarge",
-                "The projected response exceeded the fixed serialization limit.",
+                "That page is too large to return safely. Repeat the command with a smaller --limit.",
                 false,
             ),
         };
@@ -232,27 +234,27 @@ fn query_error_details(
     ) {
         return (
             "invalidAccessMaterial",
-            "The supplied key material is not a valid bounded secret input.",
+            "The key or passphrase is the wrong length or format. A WeChat key is 64 hex characters or 32 bytes in its private file.",
             false,
         );
     }
     if error.downcast_ref::<RecoverableSnapshotError>().is_some() {
         return (
             "invalidSnapshot",
-            "The selected recoverable snapshot failed manifest or storage validation.",
+            "That directory is not a GreenBubbles snapshot this command can open. Check the snapshot path and its recovery file.",
             false,
         );
     }
     if error.downcast_ref::<QueryProfileError>().is_some() {
         return (
             "invalidProfile",
-            "The selected local query profile could not be loaded or validated.",
+            "GreenBubbles could not open a database. Capture writes the key to ~/.greenbubbles-acquire/passphrase.txt. To use another database or key file, set source.root or source.passphrase_file in ~/.greenbubbles/config.toml. A named profile must already exist in ~/.greenbubbles/query-profiles.json.",
             false,
         );
     }
     (
         "invalidRequest",
-        "The query invocation is invalid or incomplete.",
+        "That combination of options is not valid. Leave the source path and access flags off to use the saved settings, or run the command with --help.",
         false,
     )
 }
@@ -473,7 +475,21 @@ fn query_profile_template() -> Result<String, Box<dyn std::error::Error>> {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let mut arguments = env::args().skip(1).peekable();
+    let raw = env::args().skip(1).collect::<Vec<_>>();
+    if raw.iter().any(|value| value == "--help" || value == "-h") {
+        let command = raw
+            .iter()
+            .find(|value| !value.starts_with('-'))
+            .map(String::as_str)
+            .unwrap_or("help");
+        if let Some(help) = ai_command_help(command) {
+            println!("{help}");
+            return Ok(());
+        }
+        eprintln!("{}", complete_command_listing());
+        return Ok(());
+    }
+    let mut arguments = raw.into_iter().peekable();
     let command = arguments.next().unwrap_or_else(|| "help".to_string());
     if matches!(arguments.peek().map(String::as_str), Some("--help" | "-h")) {
         if let Some(help) = ai_command_help(&command) {
@@ -482,9 +498,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if command == "help" {
-        if let Some(help) = arguments.next().as_deref().and_then(ai_command_help) {
+        let topic = arguments.next();
+        if matches!(topic.as_deref(), Some("--all")) {
+            eprintln!("{}", complete_command_listing());
+            return Ok(());
+        }
+        if let Some(help) = topic.as_deref().and_then(ai_command_help) {
             println!("{help}");
             return Ok(());
+        }
+        if let Some(topic) = topic {
+            return Err(format!(
+                "'{topic}' is not a help topic. Run 'greenbubbles help' for the everyday commands."
+            )
+            .into());
         }
     }
     match command.as_str() {
@@ -494,10 +521,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "source" => {
             let subcommand = arguments
                 .next()
-                .ok_or("missing source subcommand; expected 'status'")?;
+                .unwrap_or_else(|| "status".to_string());
             if subcommand != "status" {
                 return Err(format!(
-                    "unsupported source subcommand: {subcommand}; expected 'status'"
+                    "'{subcommand}' is not a source command. Use 'greenbubbles source status'."
                 )
                 .into());
             }
@@ -533,13 +560,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let response = live_source_status(&source)?;
             println!("{}", serialize_query_response(&response)?);
         }
-        "conversations" => {
+        "chats" | "conversations" => {
             let subcommand = arguments
                 .next()
-                .ok_or("missing conversations subcommand; expected 'list'")?;
+                .unwrap_or_else(|| "list".to_string());
             if subcommand != "list" {
                 return Err(format!(
-                    "unsupported conversations subcommand: {subcommand}; expected 'list'"
+                    "'{subcommand}' is not a conversations command. Use 'greenbubbles chats'."
                 )
                 .into());
             }
@@ -582,10 +609,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "contacts" => {
             let subcommand = arguments
                 .next()
-                .ok_or("missing contacts subcommand; expected 'list'")?;
+                .unwrap_or_else(|| "list".to_string());
             if subcommand != "list" {
                 return Err(format!(
-                    "unsupported contacts subcommand: {subcommand}; expected 'list'"
+                    "'{subcommand}' is not a contacts command. Use 'greenbubbles contacts list'."
                 )
                 .into());
             }
@@ -896,7 +923,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "messages" => {
             let subcommand = arguments
                 .next()
-                .ok_or("missing messages subcommand; expected 'list' or 'search'")?;
+                .unwrap_or_else(|| "list".to_string());
             if matches!(arguments.peek().map(String::as_str), Some("--help" | "-h")) {
                 println!("{}", messages_subcommand_help(&subcommand)?);
                 return Ok(());
@@ -990,10 +1017,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "message" => {
             let subcommand = arguments
                 .next()
-                .ok_or("missing message subcommand; expected 'get'")?;
+                .unwrap_or_else(|| "get".to_string());
             if subcommand != "get" {
                 return Err(format!(
-                    "unsupported message subcommand: {subcommand}; expected 'get'"
+                    "'{subcommand}' is not a message command. Use 'greenbubbles message get'."
                 )
                 .into());
             }
@@ -2839,97 +2866,55 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
         _ => {
+            if command != "help" && command != "--help" && command != "-h" {
+                eprintln!("error: '{command}' is not a GreenBubbles command.");
+                eprintln!("Run 'greenbubbles help' for the everyday commands, or 'greenbubbles help --all' for the complete list.\n");
+            }
             eprintln!(
                 concat!(
-                    "Usage:\n",
-                    "  greenbubbles profile path|template|list|show|validate|set-default ...\n",
-                    "  greenbubbles source status [--profile <name>]\n",
-                    "  greenbubbles source status <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
-                    "  greenbubbles conversations list [--profile <name>] [--limit <1..500>] [--cursor <opaque-cursor>]\n",
-                    "  greenbubbles conversations list <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n",
-                    "  greenbubbles contacts list [--profile <name>] [--kind <kind>] [--limit <1..500>] [--cursor <opaque-cursor>] [--details]\n",
-                    "  greenbubbles memory prepare [<source-root>] <new-corpus-index> --selection-policy <policy.json> [access mode]\n",
-                    "  greenbubbles memory next <corpus-index> --state <run-state.json> --wiki <wiki-dir> --max-text-bytes <n> [--format wiki|markdown|python] [--max-messages <n>] [scope filters]\n",
-                    "  greenbubbles memory page <corpus-index> --state <run-state.json> [--batch <id|current>]\n",
-                    "  greenbubbles memory acknowledge <corpus-index> --state <run-state.json> [--batch <id|current>] [--page-token <token|current>] (--retain-evidence <aliases> | --reviewed-no-durable-memory)\n",
-                    "  greenbubbles memory commit <corpus-index> --state <run-state.json> [--batch <id|current>] --wiki <wiki-dir> [--reviewed-no-durable-memory]\n",
-                    "  greenbubbles memory status <corpus-index> [--state <run-state.json>]\n",
-                    "  greenbubbles messages list --conversation <id> [--profile <name>] [--limit <1..500>] [--cursor <opaque-cursor>]\n",
-                    "  greenbubbles messages list <source-root> --conversation <id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n",
-                    "  greenbubbles messages search --query-stdin [--profile <name>] [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n",
-                    "  greenbubbles messages search <source-root> --query-stdin (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n",
-                    "  greenbubbles message get --conversation <id> --message <opaque-id> [--profile <name>]\n",
-                    "  greenbubbles message get <source-root> --conversation <id> --message <opaque-id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
-                    "  greenbubbles attachment inspect <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
-                    "  greenbubbles attachment materialize <account-or-source-root> --conversation <id> --message <opaque-id> --kind image|voice|video|document --attachment <opaque-id> --output <new-path> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
-                    "  greenbubbles snapshot recovery-kit create <new-private-file>\n",
-                    "  greenbubbles snapshot local-credential create <new-private-file>\n",
-                    "  greenbubbles snapshot create <WeChat-database-root> <new-snapshot-directory> (--source-passphrase-stdin | --source-decrypted) (--snapshot-recovery-kit <file> [--snapshot-local-credential <file>] [--snapshot-passphrase-stdin] | --snapshot-key-stdin)\n",
-                    "  greenbubbles snapshot create-capture <stable-acquisition-snapshot> <new-snapshot-directory> (--source-passphrase-stdin | --source-decrypted) (--snapshot-recovery-kit <file> [--snapshot-local-credential <file>] [--snapshot-passphrase-stdin] | --snapshot-key-stdin)\n",
-                    "  greenbubbles snapshot verify <snapshot-directory> (--snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin)\n",
-                    "  greenbubbles snapshot rewrap <snapshot-directory> <new-snapshot-directory> (--old-snapshot-recovery-kit <file> | --old-snapshot-local-credential <file> | --old-snapshot-passphrase-stdin) --new-snapshot-recovery-kit <file> [--new-snapshot-local-credential <file>] [--new-snapshot-passphrase-stdin]\n",
-                    "  greenbubbles snapshot retention quarantine <retiring> <replacement> <quarantine-directory> (--retiring-recovery-kit <file> | --retiring-local-credential <file> | --retiring-snapshot-passphrase-stdin) --replacement-recovery-kit <file>\n",
-                    "  greenbubbles snapshot retention restore <quarantined> <restored-directory> (--snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin)\n",
-                    "  greenbubbles snapshot rekey <snapshot-directory> <new-snapshot-directory> --old-snapshot-key-stdin --new-snapshot-key-stdin\n",
-                    "  greenbubbles synthetic-benchmark <private-work-directory> [--samples <n>] [--small-messages <n>] [--large-messages <n>] [--burst-messages <n>]\n",
-                    "  greenbubbles preflight <snapshot> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles probe <snapshot> [--passphrase-stdin | --database-keys-file <owner-only-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles restore <snapshot> <output> [--account-root <path>] [--defer-media] [--passphrase-stdin | --database-keys-file <owner-only-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles diagnose-batch <snapshot> <diagnostic-output> [--database-offset <n>] [--database-limit <n>] [--resolve-media --account-root <path>] [--passphrase-stdin | --database-keys-file <owner-only-json>] [--summary-file <private-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles diagnose-available <snapshot> <diagnostic-output> --database-keys-file <owner-only-json> [--resolve-media --account-root <path>] [--summary-file <private-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles diagnose-archive-payloads <archive> <private-report-json> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles diagnose-archive-schema <archive> <private-report-json> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles restore-publish <snapshot> <publication-output> <handoff-file> [--previous-snapshot <path> --previous-archive <path>] [--account-root <path>] [--defer-media] [--passphrase-stdin | --database-keys-file <owner-only-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles audit-archive <archive> [--summary-file <private-json>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles audit-acquisition-chain <previous-snapshot> <current-snapshot>\n",
-                    "  greenbubbles audit-connector-log <connector-audit-log>\n",
-                    "  greenbubbles audit-connector-state <replica-path> <policy-file> <connector-audit-log> <draft-directory> --replica-key-stdin\n",
-                    "  greenbubbles policy <archive> <policy-file> <conversation-id>... [--max-page-size <n>]\n",
-                    "  greenbubbles read <archive> <policy-file> <conversation-id> [--cursor <cursor>] [--limit <n>]\n",
-                    "  greenbubbles reconcile <previous-archive> <current-archive> <policy-file> <events-output>\n",
-                    "  greenbubbles merge-incremental <previous-archive> <fragment-archive> <output-archive>\n",
-                    "  greenbubbles replica-bootstrap <archive> <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles replica-status <replica-path> --replica-key-stdin\n",
-                    "  greenbubbles audit-replica <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles audit-replica-backup <pre-migration-backup-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles prepare-replica-recovery <pre-migration-backup-path> <new-candidate-path> --replica-key-stdin\n",
-                    "  greenbubbles replica-sync <archive> <replica-path> --replica-key-stdin [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles replica-publish <replica-eligible-archive> <handoff-file> --generation <positive-integer>\n",
-                    "  greenbubbles replica-archive-quarantine <handoff-file> <quarantine-directory> [--retain-publications <n, minimum 2>]\n",
-                    "  greenbubbles replica-archive-restore <handoff-file> <quarantine-directory> --generation <positive-integer>\n",
-                    "  greenbubbles compose-latency-evidence <private-snapshot-report> <private-offline-report> <private-follower-report> <private-handoff-file>\n",
-                    "  greenbubbles summarize-latency-evidence <private-sample-array-json>\n",
-                    "  greenbubbles replica-follow-once <handoff-file> <follow-state-file> <replica-path> --replica-key-stdin\n",
-                    "  greenbubbles replica-follow <handoff-file> <follow-state-file> <replica-path> --replica-key-stdin [--poll-milliseconds <100..60000>] [--maximum-polls <n>]\n",
-                    "  greenbubbles replica-follow-status <handoff-file> <follow-state-file> <replica-path> --replica-key-stdin\n",
-                    "  greenbubbles replica-changes <replica-path> --replica-key-stdin [--cursor <cursor>] [--limit <n>]\n",
-                    "  greenbubbles replica-search <replica-path> <private-filter-json> --replica-key-stdin [--cursor <cursor>] [--limit <n>]\n",
-                    "  greenbubbles replica-cached-moments <replica-path> --replica-key-stdin [--author <opaque-id>] [--content-type <n>] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--cursor <cursor>] [--limit <n>]\n",
-                    "  greenbubbles replica-message <replica-path> <canonical-id> --replica-key-stdin\n",
-                    "  greenbubbles replica-conversations <replica-path> --replica-key-stdin [--limit <n>]\n",
-                    "  greenbubbles replica-coverage <replica-path> --replica-key-stdin\n",
-                    "  greenbubbles ai-query <replica-path> <policy-file> <connector-audit-log> <private-request-json> --replica-key-stdin\n",
-                    "  greenbubbles ai-export <replica-path> <policy-file> <connector-audit-log> <new-output-directory> --replica-key-stdin --requester <id> [--destination local|remote] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles audit-ai-context <AI-context-bundle-directory> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles ai-memory-export <AI-context-bundle-directory> <new-output-directory> [--max-messages-per-chunk <n>] [--max-text-bytes-per-chunk <n>] [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles audit-ai-memory <AI-memory-output-directory> [--progress-file <private-ndjson>] [--progress-json | --quiet-progress]\n",
-                    "  greenbubbles connector-policy-direct <source-root> <new-policy-file> <conversation-id>... --capabilities list,read,search --fields sender,created-at,type,content (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--max-results <n>] [--max-summary-bytes <n>]\n",
-                    "  greenbubbles connector-query-direct <source-root> <policy-file> <audit-log> <private-request-json> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
-                    "  greenbubbles connector-serve-direct <source-root> <policy-file> <audit-log> <socket-path> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted)\n",
-                    "  greenbubbles ai-summarize-direct <source-root> <policy-file> <audit-log> <new-output-directory> --requester <id> (--passphrase-stdin | --decrypted) [--max-messages-per-conversation <n>]\n",
-                    "  greenbubbles connector-serve <replica-path> <policy-file> <audit-log> <draft-directory> <socket-path> --replica-key-stdin\n",
-                    "  greenbubbles connector-call <socket-path> <private-request-json>\n",
-                    "  greenbubbles tool-policy <archive> <policy-file> ([<conversation-id>...] | --all-conversations) [--capabilities list,read,search,draft] [--fields sender,created-at,direction,type,content,attachments,relationships] [--not-before-unix <seconds>] [--not-after-unix <seconds>] [--allow-remote-model] [--enable-cached-moments --cached-fields author,created-at,type,content,title,description,url,media-count,like-count,comment-count] [--cached-not-before-unix <seconds>] [--cached-not-after-unix <seconds>] [--allow-cached-remote-model] [--max-results <n>] [--max-summary-bytes <n>] [--max-draft-bytes <n>]\n",
-                    "  greenbubbles tool-list <archive> <policy-file> <audit-log> --requester <id> [--destination local|remote]\n",
-                    "  greenbubbles tool-recent <archive> <policy-file> <audit-log> <conversation-id> --requester <id> [--limit <n>] [--destination local|remote]\n",
-                    "  greenbubbles tool-search <archive> <policy-file> <audit-log> --requester <id> --query-stdin [--conversation <id>] [--limit <n>] [--destination local|remote]\n",
-                    "  greenbubbles tool-draft <archive> <policy-file> <audit-log> <draft-directory> <conversation-id> --requester <id> --body-stdin\n",
-                    "  greenbubbles send <subcommand>   (run 'greenbubbles send --help')"
+                    "Read your WeChat history on this Mac.\n\n",
+                    "After greenbubbles-acquire capture, these commands need no directory or key:\n\n",
+                    "  greenbubbles chats\n",
+                    "  greenbubbles messages list --conversation <id>\n",
+                    "  greenbubbles messages search --query-stdin\n",
+                    "  greenbubbles contacts list\n",
+                    "  greenbubbles source status\n\n",
+                    "A different database or passphrase file goes in ~/.greenbubbles/config.toml.\n",
+                    "A saved snapshot or second account goes in a named profile.\n\n",
+                    "More help:\n",
+                    "  greenbubbles help <command>     explain one command\n",
+                    "  greenbubbles help --all          show every command, including backups and exports\n\n",
+                    "Everyday commands: conversations, messages, message, contacts, source, profile, memory, attachment, snapshot.\n",
                 )
             );
         }
     }
     Ok(())
+}
+
+const fn complete_command_listing() -> &'static str {
+    concat!(
+        "Complete command list. Most people only need the commands in 'greenbubbles help'.\n\n",
+        "Browse:\n",
+        "  greenbubbles chats [--profile <name>] [--limit <1..500>] [--cursor <token>]\n",
+        "  greenbubbles messages list --conversation <id> [--limit <1..500>] [--cursor <token>]\n",
+        "  greenbubbles messages search --query-stdin [--conversation <id>] [--limit <1..200>]\n",
+        "  greenbubbles message get --conversation <id> --message <id>\n",
+        "  greenbubbles contacts list [--kind <kind>] [--limit <1..500>] [--details]\n",
+        "  greenbubbles source status\n",
+        "  greenbubbles attachment inspect|materialize --conversation <id> --message <id> --kind image|voice|video|document\n\n",
+        "Saved sources:\n",
+        "  greenbubbles profile path|template|list|show|validate|set-default\n\n",
+        "Memory:\n",
+        "  greenbubbles memory prepare|next|page|acknowledge|commit|status\n\n",
+        "Snapshots and backups:\n",
+        "  greenbubbles snapshot recovery-kit|local-credential|create|create-capture|verify|rewrap|retention|rekey\n\n",
+        "Advanced export, replica, and audit commands remain available. Run\n",
+        "'greenbubbles <command> --help' for one of them. Common names:\n",
+        "  restore, probe, preflight, diagnose-batch, audit-archive, reconcile\n",
+        "  replica-status, replica-search, replica-conversations, ai-query, ai-export\n",
+        "  connector-query-direct, send\n",
+    )
 }
 
 const fn query_profile_command_help() -> &'static str {
@@ -2941,13 +2926,25 @@ const fn query_profile_command_help() -> &'static str {
         "  greenbubbles profile show <name>\n",
         "  greenbubbles profile validate [<name>]\n",
         "  greenbubbles profile set-default <name>\n\n",
-        "Named query profiles live in ~/.greenbubbles/query-profiles.json by default.\n",
-        "The configuration remembers a source root and access mode. It never contains\n",
-        "a raw WeChat key, snapshot key, recovery phrase, or passphrase: encrypted modes\n",
-        "refer to a separate current-user-owned 0600 credential file inside an owner-only\n",
-        "directory. Configuration and credential symlinks are rejected.\n\n",
+        "Ordinary queries need no profile. With no settings, no profile file, no source\n",
+        "root, and no access arguments, GreenBubbles opens the newest installed WeChat\n",
+        "db_storage directory and reads the account key from\n",
+        "~/.greenbubbles-acquire/passphrase.txt, the file written by capture.\n\n",
+        "Put a different database or passphrase file in ~/.greenbubbles/config.toml:\n",
+        "  [source]\n",
+        "  root = \"/absolute/path/to/db_storage\"\n",
+        "  passphrase_file = \"/absolute/path/to/passphrase.txt\"\n",
+        "Set profile.default only when a named profile file already exists. The settings\n",
+        "file stores paths, never a key or passphrase.\n\n",
+        "Named query profiles live in ~/.greenbubbles/query-profiles.json. Create one\n",
+        "only for an extra account or a snapshot. The configuration remembers a source\n",
+        "root and access mode. It never contains a raw WeChat key, snapshot key,\n",
+        "recovery phrase, or passphrase: encrypted modes refer to a separate\n",
+        "current-user-owned 0600 credential file inside an owner-only directory.\n",
+        "Configuration and credential symlinks are rejected.\n\n",
         "Query use:\n",
-        "  omit both source and access arguments to use defaultProfile\n",
+        "  omit both source and access arguments to use the live default, or\n",
+        "  defaultProfile when a profile file exists\n",
         "  --profile <name> selects a different named profile\n",
         "  explicit <source-root> plus one access mode remains supported\n",
         "  profile selection cannot be mixed with explicit source/access arguments\n\n",
@@ -2970,7 +2967,7 @@ const fn source_status_help() -> &'static str {
         "rows are restored, decoded, exported, indexed, or copied. Absolute paths are\n",
         "not returned. The inventory is capped at 4,096 databases and 100,000 entries.\n\n",
         "Access modes:\n",
-        "  no access arguments   Use defaultProfile from the private profile file\n",
+        "  no access arguments   Use the live WeChat default, or defaultProfile when a profile file exists\n",
         "  --profile <name>      Use one named private query profile\n",
         "  --passphrase-stdin   Read the 32-byte WeChat database key from standard input\n",
         "  --snapshot-local-credential <file>  Use the owner-only local convenience file\n",
@@ -2991,7 +2988,8 @@ const fn conversations_command_help() -> &'static str {
         "The source is opened read-only with SQLite query_only enforcement; no archive,\n",
         "replica, staging database, search index, or media derivative is created.\n\n",
         "Access modes:\n",
-        "  no access arguments  Use defaultProfile from the private profile file\n",
+        "  no access arguments  Use the live WeChat default, or defaultProfile when\n",
+        "                       a private profile file exists\n",
         "  --profile <name>     Use one named private query profile\n",
         "  --passphrase-stdin  Read the 32-byte WeChat database key from standard input\n",
         "  --snapshot-local-credential <file>  Use a local snapshot convenience protector\n",
@@ -3101,7 +3099,8 @@ const fn messages_command_help() -> &'static str {
         "prefers compatible native WeChat FTS. If it is unavailable, each response scans at\n",
         "most 500 decoded source messages and returns a continuation without writing an index.\n\n",
         "Access modes:\n",
-        "  no access arguments  Use defaultProfile from the private profile file\n",
+        "  no access arguments  Use the live WeChat default, or defaultProfile when\n",
+        "                       a private profile file exists\n",
         "  --profile <name>     Use one named private query profile\n",
         "  --passphrase-stdin  Read the 32-byte WeChat database key from standard input\n",
         "  --snapshot-local-credential <file>  Use a local snapshot convenience protector\n",
@@ -3166,7 +3165,7 @@ const fn message_get_help() -> &'static str {
         "only the named read-only shard and performs one rowid/key lookup; it does not\n",
         "scan the conversation or create an archive, index, replica, or derivative.\n\n",
         "Access modes:\n",
-        "  no access arguments   Use defaultProfile from the private profile file\n",
+        "  no access arguments   Use the live WeChat default, or defaultProfile when a profile file exists\n",
         "  --profile <name>      Use one named private query profile\n",
         "  --passphrase-stdin   Read the 32-byte WeChat database key from standard input\n",
         "  --snapshot-local-credential <file>  Use a local snapshot convenience protector\n",
@@ -3717,17 +3716,78 @@ fn resolve_query_invocation(
 fn load_configured_query_invocation(
     requested_profile: Option<&str>,
 ) -> Result<(PathBuf, ResolvedQueryInvocation), Box<dyn std::error::Error>> {
-    let (configuration_file, store) = QueryProfileStore::load_default()?;
-    let (profile_name, profile) = store.select(requested_profile)?;
-    let access = load_query_profile_access(profile)?;
-    Ok((
-        configuration_file,
-        ResolvedQueryInvocation {
+    match QueryProfileStore::load_default() {
+        Ok((configuration_file, store)) => {
+            let (profile_name, profile) = store.select(requested_profile)?;
+            let access = load_query_profile_access(profile)?;
+            Ok((
+                configuration_file,
+                ResolvedQueryInvocation {
+                    source_root: profile.source_root.clone(),
+                    access,
+                    profile_name: Some(profile_name),
+                },
+            ))
+        }
+        Err(error) if requested_profile.is_none() && profile_file_is_absent(&error) => {
+            let invocation = load_implicit_live_query_invocation()?;
+            Ok((default_live_credential_path()?, invocation))
+        }
+        Err(error) => Err(Box::new(error)),
+    }
+}
+
+fn profile_file_is_absent(error: &QueryProfileError) -> bool {
+    match error {
+        QueryProfileError::UnsafePath(reason) => {
+            reason.contains("file is unavailable") || reason.contains("parent is unavailable")
+        }
+        QueryProfileError::Io(error) => error.kind() == std::io::ErrorKind::NotFound,
+        _ => false,
+    }
+}
+
+/// Ordinary queries need no profile file.
+///
+/// The source is the newest installed WeChat `db_storage` directory. The key
+/// is the owner-only file written by `greenbubbles-acquire capture`,
+/// `~/.greenbubbles-acquire/passphrase.txt`.
+fn load_implicit_live_query_invocation() -> Result<ResolvedQueryInvocation, QueryProfileError> {
+    let settings = load_query_settings()?;
+    if let Some(profile_name) = settings.default_profile.as_deref() {
+        if settings.source_root.is_some() || settings.passphrase_file.is_some() {
+            return Err(invalid_settings(
+                "profile.default cannot be combined with source.root or source.passphrase_file",
+            ));
+        }
+        let (_, store) = QueryProfileStore::load_default()?;
+        let (name, profile) = store.select(Some(profile_name))?;
+        let access = load_query_profile_access(profile)?;
+        return Ok(ResolvedQueryInvocation {
             source_root: profile.source_root.clone(),
             access,
-            profile_name: Some(profile_name),
-        },
-    ))
+            profile_name: Some(name),
+        });
+    }
+
+    let source_root = match settings.source_root {
+        Some(path) => path,
+        None => discover_default_live_source_root()?,
+    };
+    let credential = match settings.passphrase_file {
+        Some(path) => path,
+        None => default_live_credential_path()?,
+    };
+    let key = read_private_32_byte_credential(&credential)?;
+    Ok(ResolvedQueryInvocation {
+        source_root,
+        access: OwnedLiveQueryAccess::LiveEncrypted(DatabasePassphrase::from_bytes(*key)),
+        profile_name: Some(DEFAULT_LIVE_PROFILE_NAME.to_string()),
+    })
+}
+
+fn invalid_settings(reason: &str) -> QueryProfileError {
+    QueryProfileError::InvalidConfiguration(reason.into())
 }
 
 fn load_query_profile_access(

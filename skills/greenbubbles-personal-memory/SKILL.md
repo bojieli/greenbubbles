@@ -29,9 +29,13 @@ Only for the older people/conversation wiki layout, read
 [references/wiki.md](references/wiki.md) and use `--format wiki`.
 The formats have different output validation; do not mix their layouts.
 
-If source access is not configured, read `../greenbubbles-setup/SKILL.md`
-(or use that skill through host discovery), or ask for the existing CLI/profile location. Do not invent a profile,
-scan credential contents, or invoke capture as a side effect of extraction.
+If a live read fails, read `../greenbubbles-setup/SKILL.md`
+(or use that skill through host discovery). Do not invent a profile for the
+live database: with no profile file, `greenbubbles chats` opens the newest
+installed WeChat `db_storage` directory and reads
+`~/.greenbubbles-acquire/passphrase.txt`. A custom path belongs in
+`~/.greenbubbles/config.toml`. Do not scan credential contents or invoke
+capture as a side effect of extraction.
 
 ## Evidence and updates
 

@@ -37,7 +37,7 @@ GB_CLI="Native/GreenBubbles/target/release/greenbubbles"
 
 | Family | Commands | Use |
 | --- | --- | --- |
-| Query profiles | `profile path/template/list/show/validate/set-default` | Store private source and credential references for repeated queries |
+| Query profiles | `profile path/template/list/show/validate/set-default` | Optional named sources for a second account or a snapshot; live queries need none |
 | Direct resources | `source status`, `conversations list`, `contacts list`, `messages list/search`, `message get` | Read one bounded live or snapshot page without creating a restoration |
 | Exact attachments | `attachment inspect/materialize` | Inspect one message; copy one selected artefact to a new private path |
 | Recoverable snapshots | `snapshot recovery-kit/local-credential/create/create-capture/verify/rewrap/rekey/retention` | Create, reopen, rotate, verify and retain independently encrypted snapshots |
@@ -76,8 +76,16 @@ text in a shell argument.** Prefer an owner-only file redirected into stdin
 over an interactive shell literal — the literal enters shell history, and
 arguments are visible to every process on the machine.
 
-A [query profile](QUERY_PROFILES.md) removes most of this ceremony from daily
-use.
+Daily live use needs none of those flags. With no settings file, no profile
+file, no source path, and no access flag, the command opens the newest
+installed WeChat `db_storage` directory and reads
+`~/.greenbubbles-acquire/passphrase.txt`. A different path goes in
+`~/.greenbubbles/config.toml`. A [query profile](QUERY_PROFILES.md) is for a
+second account or a snapshot.
+
+`greenbubbles` and `greenbubbles help` show the everyday commands.
+`greenbubbles help --all` shows the complete list. `greenbubbles chats` lists
+conversations; `conversations list` remains the same command.
 
 ## Bounds and how to read a response
 

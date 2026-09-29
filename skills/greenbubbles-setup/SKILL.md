@@ -20,8 +20,12 @@ attribution from parent PID alone or diagnose a denial from a preflight log.
 Verify any privacy change with a fresh read before claiming access is fixed.
 
 Read [references/setup.md](references/setup.md) for installation, source setup,
-or owner-operated capture. Reuse an existing profile or credential before
-considering capture. Never paste keys into chat, arguments, logs, or projects.
+or owner-operated capture. For the live database, do not create a profile:
+after capture, `greenbubbles chats` opens the newest installed WeChat database
+and reads `~/.greenbubbles-acquire/passphrase.txt`. A different database or
+passphrase path belongs in `~/.greenbubbles/config.toml`, not in a command
+argument. Reuse an existing profile only for a snapshot or a second account.
+Never paste keys into chat, arguments, logs, or projects.
 
 Once ready, read the sibling `../greenbubbles-context/SKILL.md` for bounded
 queries or `../greenbubbles-personal-memory/SKILL.md` for a maintained

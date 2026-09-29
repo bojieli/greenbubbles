@@ -19,7 +19,35 @@ path or put it on PATH. A similarly named Swift discovery executable is not
 the memory CLI. `greenbubbles memory --help` must include `--format` and
 `acknowledge`. Never silently use a different executable after a failed check.
 
-## Reuse or configure a source
+## Open the live database
+
+After capture, do not create a profile for the ordinary live source:
+
+```sh
+greenbubbles source status
+greenbubbles chats --limit 20
+```
+
+With no profile file and no settings file, these commands open the newest
+installed WeChat `db_storage` directory and read
+`~/.greenbubbles-acquire/passphrase.txt`. They do not print the key or the
+source path. A missing passphrase file or an unreadable database returns
+`invalidProfile`, with a plain-language explanation on the terminal.
+
+A different database or passphrase file belongs in
+`~/.greenbubbles/config.toml`, not on the command line:
+
+```toml
+[source]
+root = "/absolute/path/to/db_storage"
+passphrase_file = "/absolute/path/to/passphrase.txt"
+```
+
+Leave a line out to keep its default. The file stores paths only. Never write
+the key into it, and never print the file's paths into chat.
+
+Create a profile only for a second account or a snapshot. Use an existing
+working profile when one is already configured:
 
 ```sh
 greenbubbles profile list
@@ -27,7 +55,7 @@ greenbubbles profile validate NAME
 greenbubbles source status --profile NAME
 ```
 
-Use an existing working profile. These commands do not expose credential contents.
+These commands do not expose credential contents.
 When creating a profile, use `greenbubbles profile path` to locate the effective
 configuration and `greenbubbles profile template` for its schema. Read the existing
 configuration before changing it; preserve other profiles and the existing default.

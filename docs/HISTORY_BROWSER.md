@@ -187,9 +187,19 @@ swift run greenbubbles-history
 swift run greenbubbles-history --bundle /absolute/path/to/ai-context-bundle
 ```
 
-For direct browsing or snapshot creation, select
-`Native/GreenBubbles/target/release/greenbubbles` as the local CLI, then
-**Browse Live or Snapshot…** or **Create Recoverable Snapshot…**.
+For the live database from a terminal, no profile or directory is required
+after capture:
+
+```sh
+Native/GreenBubbles/target/release/greenbubbles conversations list
+```
+
+That command opens the newest installed WeChat `db_storage` directory and
+reads `~/.greenbubbles-acquire/passphrase.txt`.
+
+For the window, select `Native/GreenBubbles/target/release/greenbubbles` as
+the local CLI, then **Browse Live or Snapshot…** or **Create Recoverable
+Snapshot…**.
 
 For exported mode, open a directory produced by `greenbubbles ai-export`, or
 drag it into the empty window. The `--bundle` option, the file panel,

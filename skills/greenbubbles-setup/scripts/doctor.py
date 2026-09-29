@@ -25,16 +25,19 @@ def check(binary, profile=None):
     compatible = code == 0 and all(word in output for word in ("prepare", "next", "page", "acknowledge", "commit", "--format"))
     checks = {"cli": "compatible" if compatible else "unsupported-memory-cli"}
     if compatible:
-        code, output = probe(resolved, ["profile", "validate", *([profile] if profile else [])])
+        # A named profile is optional. The live default is a bounded source
+        # status with no profile, source path, or passphrase argument.
+        source_args = ["source", "status", "--profile", profile] if profile else ["source", "status"]
+        code, output = probe(resolved, source_args)
         try:
             payload = json.loads(output)
-            valid = code == 0 and payload.get("ok") is True and payload.get("schema") == "greenbubbles.query-profile-validation.v1"
+            valid = code == 0 and payload.get("ok") is True and payload.get("schema") == "greenbubbles.query.v1"
         except (ValueError, AttributeError):
             valid = False
-        checks["source"] = "ready" if valid else "profile-or-source-unavailable"
+        checks["source"] = "ready" if valid else "live-source-unavailable"
     ready = compatible and checks.get("source") == "ready"
     return {"ok": ready, "binary": str(Path(resolved).resolve()), "checks": checks,
-            "next": "Use the context or personal-memory skill." if ready else "Read references/setup.md; inspect CLI help and profile validation locally. No capture was attempted."}
+            "next": "Use the context or personal-memory skill." if ready else "Read references/setup.md. A live source needs the captured passphrase file, not a new profile. No capture was attempted."}
 
 
 def main():
