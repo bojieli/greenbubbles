@@ -13,10 +13,11 @@ on:
 permissions:
   contents: read
 
-# A newer push to the same pull request supersedes the running check. Runs on
-# main and release verification always finish.
+# A newer push to the same pull request supersedes the running check. Every
+# other run gets a group of its own: a shared group would let a newer pending
+# run replace an older one, leaving that main commit untested.
 concurrency:
-  group: ci-${{ github.workflow_ref }}-${{ github.ref }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
