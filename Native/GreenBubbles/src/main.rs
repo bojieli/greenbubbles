@@ -614,7 +614,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let limit = option_usize(&remaining, "--limit")?.unwrap_or(DEFAULT_PAGE_LIMIT);
             if subcommand == "rank" {
                 let minimum = option_usize(&remaining, "--minimum-self-messages")?.unwrap_or(10);
-                let response = rank_live_conversations(&source, minimum as u64, limit)?;
+                let rank_limit = option_usize(&remaining, "--limit")?.unwrap_or(100);
+                let response = rank_live_conversations(&source, minimum as u64, rank_limit)?;
                 println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
                 let cursor = option_string(&remaining, "--cursor")?;

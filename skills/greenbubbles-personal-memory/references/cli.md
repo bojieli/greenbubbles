@@ -4,12 +4,26 @@ Use these commands in the current agent's shell. No driver, embedded agent,
 or separate API key is needed. Examples use `greenbubbles`; substitute the
 verified absolute Rust CLI path when it is not on PATH. Quote all paths.
 
+## Ask for scope before preparation
+
+Ask the user which memory they want unless the current request already says:
+
+- **7 days** — a snapshot of the last week.
+- **30 days** — about one month.
+- **1 year** or **2 years** — the recent durable record.
+- **lifetime** — every qualifying chat, paged from the newest message backward.
+
+Also ask whether an existing summary or memory project should be continued.
+When the user gives a path, read that project first and update it. Do not
+start a new project beside it. Record the scope and the continued path in
+`manifest.md` before reading messages.
+
 ## Prerequisites and preparation
 
 ```sh
 greenbubbles memory --help
-greenbubbles profile list
-greenbubbles source status --profile NAME
+greenbubbles source status
+greenbubbles chats rank --minimum-self-messages 10 --limit 2000
 ```
 
 The memory help must include `--format`. Resolve source failures with the setup

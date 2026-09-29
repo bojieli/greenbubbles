@@ -2605,7 +2605,11 @@ pub fn rank_conversations(
     minimum_self_messages: u64,
     limit: usize,
 ) -> Result<ConversationRankReport, LiveQueryError> {
-    validate_limit(limit)?;
+    if !(1..=2_000).contains(&limit) {
+        return Err(LiveQueryError::InvalidArgument(
+            "--limit must be between 1 and 2000 for chats rank".into(),
+        ));
+    }
     let account_holder = source.account_holder_source_id().map(str::to_owned);
     let open_shards = open_message_shards(source)?;
     let mut warnings = open_shards.warnings.clone();

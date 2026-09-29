@@ -14,13 +14,30 @@ require the GreenBubbles source checkout.
 If the user requests evidence directly from the live WeChat database, use
 `../greenbubbles-context/SKILL.md` for bounded live queries. Do not inspect or
 reuse a prepared corpus, prior extraction, or test output as source evidence.
-For a selective memory request, read
-[references/priorities.md](references/priorities.md) before choosing
-conversations. Measure the database with `source status`, then rank with
-`chats rank`. The default metric is the account holder's own messages: at
-least 10 self-sent messages, direct chats before groups, then recency. Start
-at the newest self-authored messages and page backward. Report the reviewed
-scope rather than implying whole-history coverage.
+Before selecting conversations, ask the user two things unless this request
+already answers them:
+
+1. **Time scope.** A 7-day snapshot, a month, a year, two years, and a
+   lifetime produce different memories. Do not invent the scope. Record the
+   exact start and end dates in the project manifest.
+2. **Existing summary.** Ask whether a summary already exists. If it does,
+   ask for its path and continue from that project. Read its manifest and
+   domain files before adding anything. An incremental pass adds, corrects,
+   and dates changes. It does not start a second memory.
+
+A year, two-year, or lifetime request is a knowledge-base build. Do not satisfy
+it with a snapshot of the newest page. Read
+[references/priorities.md](references/priorities.md) for the required order,
+then follow [references/format-markdown.md](references/format-markdown.md) so
+the result is organized domain files rather than a list of extracted lines. Measure the
+database with `source status`, then rank with `chats rank`. The default
+metric is the account holder's own messages: at least 10 self-sent messages,
+direct chats before groups, then recency. Inside the chosen time window,
+start at the newest self-authored messages and page backward. Report the
+reviewed scope rather than implying whole-history coverage. The output is
+both a personal memory and a knowledge base: durable facts about the account
+holder, and durable facts about the people, projects, and decisions in the
+reviewed chats. Other people's claims stay attributed to them.
 
 ## Choose the workflow
 

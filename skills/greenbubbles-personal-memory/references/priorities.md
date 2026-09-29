@@ -1,14 +1,20 @@
 # Which conversations to index first
 
-Do this before preparing a corpus or reading message pages. The goal is a
-durable memory of the account holder, not a transcript and not a knowledge
-base of other people's claims.
+Ask for the time scope and any existing summary before measuring or reading.
+A 7-day snapshot, a 30-day snapshot, a year, and a lifetime are different
+tasks. If the user points at an existing summary, that directory is the
+project to update. Do not create a parallel one.
+
+The output is a personal memory and a knowledge base. Keep durable facts
+about the account holder, and durable facts about the people, projects, and
+decisions in the reviewed chats. Attribute other people's claims to them.
+Do not keep a transcript.
 
 ## Measure the database first
 
 ```sh
 greenbubbles source status
-greenbubbles chats rank --minimum-self-messages 10 --limit 40
+greenbubbles chats rank --minimum-self-messages 10 --limit 2000
 ```
 
 `source status` reports database count and storage bytes. It does not print
@@ -43,9 +49,12 @@ participation, then by recency:
    self-message count.
 3. Within a kind, a larger `selfMessageCount` comes first. Recency breaks
    ties: `lastSelfMessageUnix`, newest first.
-4. Start at the newest self-authored messages in the selected chat and page
-   backward. Stop at the user's requested bound. Do not start at the oldest
-   message.
+4. Apply the requested time window before paging. `chats rank` shows
+   `lastSelfMessageUnix`; a chat whose last self-sent message is older than
+   the window still qualifies when the user asked for lifetime coverage, and
+   is skipped when the user asked for a recent window. Start at the newest
+   self-authored messages inside the window and page backward to the window
+   start. Do not start at the oldest message.
 5. Skip official accounts, service accounts, and file-transfer or system
    chats unless the user names them. Skip a direct chat whose recent pages
    are only logistics with no durable fact.
@@ -53,6 +62,38 @@ participation, then by recency:
 This is a selection metric, not a claim that unselected chats contain nothing
 important. Report the threshold, the qualifying count, how many chats were
 actually read, and that the rest was not reviewed.
+
+## Long passes: a year, two years, or a lifetime
+
+A long pass is a knowledge-base build, not a snapshot. The failure mode is
+reading the newest page of a few chats and writing one paragraph per person.
+That is not this workflow.
+
+Order:
+
+1. Ask for the time window and any existing project path. Record both.
+2. `source status`, then `chats rank --minimum-self-messages 10 --limit 2000`.
+   The default rank page is 100 and will hide most of a two-year set. If
+   `qualifyingConversationCount` is larger than the returned page, raise the
+   limit. The rank limit goes to 2000.
+3. Select every direct chat whose last self-sent message is inside the window
+   and whose self-sent count is at least 10. Then select groups by the same
+   self-sent threshold. Do not stop at the first page of names.
+4. Prepare a corpus with the Markdown selection policy. Page it with
+   `memory next` and `memory page`. Read each delivered page completely.
+5. Organize into domain files. Follow
+   [format-markdown.md](format-markdown.md): one domain per life area, a
+   schema, one state entry per fact, and an append-only history. Update the
+   manifest after each committed batch. A person is a relationship in
+   `family` or `social`, not a substitute for the domains their messages
+   inform.
+6. Continue until the window is covered or the user sets a smaller bound.
+   Record chats not yet paged as remaining scope. Do not describe a partial
+   pass as the two-year or lifetime record.
+
+Enough means every qualifying chat in the window has had its delivered pages
+read, acknowledged, and either filed into a domain or explicitly marked as
+having no durable fact. A count of recent pages is not enough.
 
 ## What becomes memory
 
