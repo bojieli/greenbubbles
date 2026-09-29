@@ -21,7 +21,7 @@ class Greenbubbles < Formula
   post_install_steps do
     # Homebrew moves top-level documentation out of libexec during installation.
     # Keep the portable bundle's license lookup valid after that relocation.
-    symlink "LICENSE", "libexec/LICENSE"
+    symlink "LICENSE", "libexec/LICENSE", overwrite: true
   end
 
   def caveats
