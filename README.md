@@ -36,7 +36,7 @@ key capture from your own WeChat client. Local queries upload nothing. If you
 use a cloud AI agent, the message pages it reads go to its model provider.
 
 <p align="center">
-  <img src="assets/how-it-works.svg" alt="Live access: a private local account key unlocks read-only queries against WeChat’s original encrypted databases. GreenBubbles returns selected message pages to your app or agent without maintaining an exported chat database. Backups and prepared memory corpora are optional separate copies." width="820">
+  <img src="assets/how-it-works.svg" alt="GreenBubbles queries WeChat’s original encrypted databases locally and returns live results to your agent, without maintaining an exported chat database. A separate optional path creates an encrypted backup you can unlock and query later without WeChat." width="820">
 </p>
 
 ## What you can do
@@ -179,7 +179,7 @@ across every database. Optional snapshots and prepared memory corpora are separa
 point-in-time copies and must be refreshed when you want newer data.
 
 <p align="center">
-  <img src="assets/key-flow.svg" width="900" alt="The account secret is captured into a private local credential file. Each database file’s salt combines with that secret to derive its key locally. GreenBubbles reads the original encrypted files and returns selected messages, not keys, to the app or agent.">
+  <img src="assets/key-flow.svg" width="900" alt="The account secret is captured into a private local credential file. The database file’s salt combines with that secret to derive its key locally. GreenBubbles reads the original encrypted file and returns selected messages, not keys, to your agent.">
 </p>
 
 Capture requires administrator access and re-signing your installed copy of
