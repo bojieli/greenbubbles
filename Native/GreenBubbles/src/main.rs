@@ -482,15 +482,56 @@ fn query_profile_template() -> Result<String, Box<dyn std::error::Error>> {
     }))?)
 }
 
+fn help_for_arguments(raw: &[String]) -> Option<&'static str> {
+    let positional: Vec<&str> = raw
+        .iter()
+        .filter(|value| !value.starts_with('-'))
+        .map(String::as_str)
+        .collect();
+    match positional.as_slice() {
+        ["source"] | ["source", "status"] => Some(source_status_help()),
+        ["messages"] => Some(messages_command_help()),
+        ["messages", sub] => messages_subcommand_help(sub)
+            .ok()
+            .or(Some(messages_command_help())),
+        ["message"] | ["message", "get"] => Some(message_get_help()),
+        ["attachment"] => Some(attachment_command_help()),
+        ["attachment", sub] => attachment_subcommand_help(sub)
+            .ok()
+            .or(Some(attachment_command_help())),
+        ["snapshot", "retention", action] => snapshot_retention_action_help(action)
+            .ok()
+            .or(Some(snapshot_retention_help())),
+        ["snapshot", "retention"] => Some(snapshot_retention_help()),
+        ["snapshot", "local-credential"] | ["snapshot", "local-credential", _] => {
+            Some(snapshot_local_credential_help())
+        }
+        ["snapshot"] => Some(snapshot_command_help()),
+        ["snapshot", sub] => snapshot_subcommand_help(sub)
+            .ok()
+            .or(Some(snapshot_command_help())),
+        ["memory"] => Some(memory_command_help()),
+        ["memory", sub] => memory_subcommand_help(sub)
+            .ok()
+            .or(Some(memory_command_help())),
+        ["chats"]
+        | ["conversations"]
+        | ["chats", "list"]
+        | ["conversations", "list"]
+        | ["chats", "rank"]
+        | ["conversations", "rank"] => Some(conversations_command_help()),
+        ["contacts"] | ["contacts", "list"] => Some(contacts_command_help()),
+        ["profile", ..] => Some(query_profile_command_help()),
+        [command] => ai_command_help(command),
+        [command, _, ..] => ai_command_help(command),
+        _ => None,
+    }
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let raw = env::args().skip(1).collect::<Vec<_>>();
     if raw.iter().any(|value| value == "--help" || value == "-h") {
-        let command = raw
-            .iter()
-            .find(|value| !value.starts_with('-'))
-            .map(String::as_str)
-            .unwrap_or("help");
-        if let Some(help) = ai_command_help(command) {
+        if let Some(help) = help_for_arguments(&raw) {
             println!("{help}");
             return Ok(());
         }
@@ -2903,7 +2944,7 @@ const fn complete_command_listing() -> &'static str {
     concat!(
         "Complete command list. Most people only need the commands in 'greenbubbles help'.\n\n",
         "Browse:\n",
-        "  greenbubbles chats rank [--minimum-self-messages <n>] [--limit <1..500>]\n",
+        "  greenbubbles chats rank [--minimum-self-messages <n>] [--limit <1..2000>]\n",
         "  greenbubbles chats [--profile <name>] [--limit <1..500>] [--cursor <token>]\n",
         "  greenbubbles messages list --conversation <id> [--limit <1..500>] [--cursor <token>]\n",
         "  greenbubbles messages search --query-stdin [--conversation <id>] [--limit <1..200>]\n",
@@ -2990,8 +3031,12 @@ const fn source_status_help() -> &'static str {
 const fn conversations_command_help() -> &'static str {
     concat!(
         "Usage:\n",
+        "  greenbubbles chats rank [--minimum-self-messages <n>] [--limit <1..2000>]\n",
         "  greenbubbles conversations list [--profile <name>] [--limit <1..500>] [--cursor <opaque-cursor>]\n",
         "  greenbubbles conversations list <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n\n",
+        "`chats` is the same command as `conversations list`. `chats rank` orders direct\n",
+        "chats before groups, then by how many messages the account holder sent, and\n",
+        "returns no message text. Rank --limit is 1..2000 and defaults to 100.\n\n",
         "Returns one bounded, keyset-paginated JSON page directly from session.db.\n",
         "The source is opened read-only with SQLite query_only enforcement; no archive,\n",
         "replica, staging database, search index, or media derivative is created.\n\n",
