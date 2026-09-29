@@ -1,77 +1,67 @@
 # User guide
 
-This is the normal path: find your data, browse it without restoring anything,
-make a backup that survives losing WeChat, and reopen that backup later.
+This guide walks you through the usual path:
 
-Two things to know before you start.
+1. Install GreenBubbles.
+2. Browse and search your WeChat history.
+3. Make a backup that still works if you lose WeChat or this Mac.
+4. Open that backup again later.
 
-**GreenBubbles is local software.** The query path sends nothing, uploads
-nothing, and does not copy your corpus into JSON. It opens your files read-only
-and returns one bounded page at a time.
+Two things to know first:
 
-**Sending is a separate path and it ships closed.** It is never reachable from
-a query or a tool call. If you want to know why, `greenbubbles send doctor`
-will tell you exactly which conditions are unmet, and
-[SEND_ADAPTER.md](SEND_ADAPTER.md) explains each one.
+- **Everything happens on your Mac.** Browsing and searching send nothing over
+  the network. GreenBubbles only reads WeChat's files, never changes them, and
+  shows one page of results at a time instead of copying your whole history.
+- **GreenBubbles can't send messages.** Public builds have sending turned off.
+  `greenbubbles send doctor` lists why, and [SEND_ADAPTER.md](SEND_ADAPTER.md)
+  explains each reason.
+
+**Never paste a key, passphrase, recovery phrase, or private message into an AI
+prompt, a GitHub issue, or a chat.**
 
 ## What you need
 
-- macOS 14 or later on Apple silicon for published binaries;
-- Swift 6 and Rust/Cargo, if you are building from source;
-- an owner-authorized WeChat `db_storage` directory;
-- the matching 32-byte (or 64-hex-character) database key, for encrypted live
-  access;
-- free space for a snapshot, if you create one.
+- A Mac with Apple silicon and macOS 14 or later.
+- WeChat for Mac, signed in to your own account.
+- Your database key. If you don't have it yet, follow the
+  [key setup guide](PASSPHRASE_ACQUISITION.md).
+- Free disk space, if you plan to make a backup.
+- Swift 6 and Rust, only if you build from source.
 
-If you do not have the key yet, review the capture prerequisites and client
-limitations in [PASSPHRASE_ACQUISITION.md](PASSPHRASE_ACQUISITION.md).
+## Pick what you want to do
 
-**Never paste a key, passphrase, recovery phrase or private message into a
-model prompt, an issue, or a chat.**
-
-## Which workflow do you want?
-
-| If you want to… | Do this |
+| I want to… | Do this |
 | --- | --- |
-| Browse current history on this Mac | History app → **Browse Live or Snapshot…** → **Live WeChat (read-only)** |
-| Organize history with your existing coding agent | [Portable agent skills](AGENT_SKILLS.md) |
-| Query the live database from a terminal | Run `greenbubbles chats` after capture |
-| See how much space WeChat actually uses | Open the live source; read **SQLite files**, **WAL** and **Total** in Overview |
-| Keep a backup independent of WeChat | History app → **Create Recoverable Snapshot…** |
-| Reopen a snapshot routinely on this Mac | Snapshot unlock via macOS Keychain |
-| Recover after losing this Mac, WeChat, or its key | A copied snapshot plus your separately stored 24 words |
-| Export the whole corpus for forensics | The explicit restoration workflow, not normal browsing |
+| Browse my current history | App → **Browse Live or Snapshot…** → **Live WeChat (read-only)** |
+| Search from a terminal | Run `greenbubbles chats` once the key is set up |
+| Have my coding agent write notes from my chats | [Agent skills](AGENT_SKILLS.md) |
+| See how much disk space WeChat really uses | Open your live history in the app and look at **Overview** |
+| Make a backup that doesn't depend on WeChat | App → **File → Create Recoverable Snapshot…** |
+| Open a backup day to day on this Mac | Unlock it with macOS Keychain |
+| Recover after losing this Mac, WeChat, or the key | Your backup copy plus your 24 recovery words, stored separately |
+| Export everything for forensic work | The restoration workflow, not normal browsing |
 
-The arrangement to aim for is **24 words stored somewhere else, plus Keychain
-for daily convenience.** Neither local convenience option replaces the words.
+The setup to aim for: **your 24 recovery words stored somewhere else, plus
+Keychain for everyday convenience.** Keychain is a convenience; it doesn't
+replace the words.
 
-## Find your data
+## Install
 
-The source is the directory named `db_storage` that contains at least
-`contact`, `session` and `message`. Do not select the WeChat container, and do
-not select an individual `.db` file.
+**Command-line tool:** follow the [Homebrew guide](HOMEBREW.md). You don't
+need Swift or Rust.
 
-If you do not know where it is:
+**Mac app:**
 
-```sh
-greenbubbles-discover accounts --include-paths
-```
+1. Download `GreenBubbles-<version>-macos-arm64.dmg` and its `SHA256SUMS` file
+   from [GitHub Releases](https://github.com/bojieli/greenbubbles/releases).
+2. Check the download as shown in
+   [Check a download](HOMEBREW.md#check-a-download).
+3. Open the DMG and drag **GreenBubbles** to Applications.
 
-Path-bearing output may contain a stable account identifier — keep it private.
+The app includes its own copy of the `greenbubbles` command-line tool and finds
+it automatically.
 
-## Install or build
-
-For the CLI and portable agent skills, follow the [Homebrew guide](HOMEBREW.md).
-A release installation does not require Swift or Rust. The discovery command above
-is included in the CLI distribution; source users can run it with `swift run`.
-
-For the signed release, download the `GreenBubbles-*-macos-arm64.dmg` and its
-checksum file from [GitHub Releases](https://github.com/bojieli/greenbubbles/releases),
-verify them as shown in the [repository README](../README.md#install), open the
-disk image, and copy **GreenBubbles** to Applications. The packaged app finds
-the `greenbubbles` CLI inside its own bundle automatically.
-
-To build from source, from the repository root:
+**Build from source** (from the repository folder):
 
 ```sh
 cargo build --locked --release --manifest-path Native/GreenBubbles/Cargo.toml
@@ -79,125 +69,148 @@ swift build --product greenbubbles-history
 swift run greenbubbles-history
 ```
 
-When the app asks for the local CLI, choose
-`Native/GreenBubbles/target/release/greenbubbles`. It may auto-detect a debug
-build; pointing it at the release binary explicitly is noticeably faster.
+When the app asks for the command-line tool, choose
+`Native/GreenBubbles/target/release/greenbubbles`. The app may find a debug
+build on its own, but the release build is much faster.
 
-## Browse live history
+## Find your WeChat data
 
-From a terminal, after capture:
+WeChat keeps each account's chats in a folder named `db_storage`. It contains
+at least `contact`, `session`, and `message` folders. When GreenBubbles asks
+for your data, choose this folder: not the WeChat app folder above it, and not
+a single `.db` file inside it.
+
+To find it:
+
+```sh
+greenbubbles-discover accounts --include-paths
+```
+
+This comes with the command-line tool. From a source checkout, run it with
+`swift run`. Keep its output private: the paths can contain your account ID.
+
+## Browse your history
+
+### From a terminal
+
+Once the key is set up:
 
 ```sh
 greenbubbles chats --limit 20
 ```
 
-That opens the newest installed WeChat database and reads
-`~/.greenbubbles-acquire/passphrase.txt`. No profile, directory, or key
-argument is required.
+You don't need to give a folder or key. GreenBubbles opens the newest WeChat
+data on your Mac and reads the key from
+`~/.greenbubbles-acquire/passphrase.txt`.
 
-In the app:
+### In the app
 
-1. **Browse Live or Snapshot…**
-2. Confirm the bundled `greenbubbles` executable, or choose the one you built
-   from source.
+1. Choose **Browse Live or Snapshot…**.
+2. Confirm the built-in `greenbubbles` tool, or choose the one you built.
 3. Set **Access** to **Live WeChat (read-only)**.
-4. Choose the account's `db_storage` directory. `greenbubbles-discover accounts
-   --include-paths` prints it.
-5. Enter the database key and **Connect**. The same key is already in
-   `~/.greenbubbles-acquire/passphrase.txt` if you used the default capture
-   output.
+4. Choose your `db_storage` folder (see [Find your WeChat data](#find-your-wechat-data)).
+5. Enter the database key and click **Connect**. If you used the default key
+   setup, the key is in `~/.greenbubbles-acquire/passphrase.txt`.
 
-The key goes to the CLI's standard input for that connection only. It is not
-placed in process arguments or in app preferences.
+The app hands the key to the command-line tool privately for this connection
+only. It isn't saved in the app's settings or visible in the list of running
+programs.
 
-The app authenticates the core databases, measures storage, and loads up to 100
-conversations. It does not start a restoration. From there:
+The app checks the databases, measures their size, and loads up to 100 chats.
+It doesn't copy anything. Then you can use:
 
-- **Overview** — source size and consistency information;
-- **Chats** — one 100-message page at a time;
-- **Search** — bounded native FTS, or the bounded no-write fallback;
-- **Load More** — only when you actually need the next page.
+- **Overview**: how big your WeChat data is, and whether it looks consistent;
+- **Chats**: messages, 100 at a time;
+- **Search**: search your messages;
+- **Load More**: fetches the next page when you need it.
 
-Live reads are consistent within each statement and each database. WeChat uses
-several independent databases, so a page is not one global instant. When
-repeated queries need a stable target, use a snapshot generation.
+WeChat keeps several separate databases and keeps writing to them while it
+runs. So a page of results reflects each database at the moment it was read,
+not one single moment across all of them. If you need results that don't
+change between queries, use a backup (snapshot) instead.
 
-## Reading the storage numbers
+## Understanding the size numbers
 
-**SQLite files** is the sum of the actual `.db` files. **WAL** and **SHM** are
-the sidecars the live application uses. **Total** adds those plus any rollback
-journals under the selected root.
+In **Overview**:
 
-That figure is often far smaller than an old restored output, and the
-difference is not an error. A forensic restoration duplicates every row as
-typed JSON plus raw provenance, base64-encodes binary values, builds indexes,
-creates a staging database and materializes media. Those derivatives can exceed
-30 GB from a source of a few gigabytes. Normal browsing creates none of them —
-that is the whole point of the design, and the numbers behind it are in
-[MEASUREMENTS.md](MEASUREMENTS.md).
+- **SQLite files** is the size of WeChat's `.db` database files.
+- **WAL** and **SHM** are temporary files WeChat keeps next to them while it
+  runs.
+- **Total** adds those together, plus any other journal files in the folder.
 
-## Create a recoverable snapshot
+This total is often much smaller than older export tools produce, and that's
+expected. A full export copies every row into JSON, re-encodes binary data,
+builds indexes, and copies media. That can grow a few gigabytes of WeChat data
+into more than 30 GB. Browsing with GreenBubbles creates none of that. The
+numbers are in [MEASUREMENTS.md](MEASUREMENTS.md).
 
-Use the graphical flow unless you need automation.
+## Make a backup (recoverable snapshot)
 
-1. **File → Create Recoverable Snapshot…**
-2. Select the native CLI and the source `db_storage` directory.
-3. Leave **Source is a complete stable acquisition capture** off for a normal
-   live source. Turn it on only when the directory is a complete GreenBubbles
-   acquisition snapshot with its manifest.
-4. Choose a new snapshot directory and a new recovery-kit file. Neither may
-   already exist.
-5. Keep **macOS Keychain** for convenient reopening, or choose an owner-only
-   hidden credential file. **None** is valid if you will always use the
-   recovery kit or a passphrase.
-6. Optionally add a snapshot passphrase. It is processed with Argon2id and does
-   **not** replace the recovery words.
-7. **Create Recovery Words.**
-8. Copy all 24 words, in order, somewhere independent — offline or in a
-   password manager. Never reuse a cryptocurrency wallet phrase.
-9. Answer the four randomly chosen word-position checks and confirm an
-   independent copy exists.
-10. **Confirm Words and Create Snapshot**, and let the conversion finish.
+A snapshot is an encrypted copy of your history that you can open later
+without WeChat or its key. It is protected by 24 recovery words.
 
-The recovery kit is written *before* the long conversion and is kept even if
-conversion is cancelled or fails. The snapshot gets a new random SQLCipher key;
-the WeChat key is used only to read the source and never lands in the snapshot.
-Destination databases are encrypted from their first write — there is no
-plaintext staging database at any point.
+1. Choose **File → Create Recoverable Snapshot…**.
+2. Choose the command-line tool and your `db_storage` folder.
+3. Leave **Source is a complete stable acquisition capture** off. Turn it on
+   only if the folder is a complete GreenBubbles capture that includes its
+   manifest file.
+4. Choose a new folder for the snapshot and a new file for the recovery kit.
+   Neither may exist yet.
+5. Choose how to unlock the snapshot day to day:
+   - **macOS Keychain**: easiest on this Mac;
+   - **a hidden credential file**, readable only by you;
+   - **None**, if you'll always use the recovery words or a passphrase.
+6. Optionally add a passphrase you can remember. It is an extra way to unlock
+   the snapshot; it does **not** replace the recovery words.
+7. Click **Create Recovery Words**.
+8. Write down or save all 24 words, in order, somewhere separate: on paper, or
+   in a password manager. Never reuse a cryptocurrency wallet phrase.
+9. Answer the four checks, which ask for words at random positions, and confirm
+   you've saved a separate copy.
+10. Click **Confirm Words and Create Snapshot** and wait for it to finish.
 
-**Do not store the only copy of the recovery kit beside the only copy of the
-snapshot.** A working backup is an intact snapshot generation *and* one
-reachable portable recovery copy, in different places.
+Good to know:
 
-## Reopen a snapshot
+- The recovery kit is saved *before* the long copy begins, and is kept even if
+  the copy fails or you cancel.
+- The snapshot has its own new random key. Your WeChat key is used only to read
+  WeChat's data and is never stored in the snapshot.
+- The snapshot is encrypted from the very first byte written. No unencrypted
+  copy exists at any point.
 
-**Browse Live or Snapshot…**, select the snapshot directory, then pick an
-access mode:
+**Don't keep the only copy of your recovery kit next to the only copy of your
+snapshot.** A real backup is a working snapshot *and* a copy of the recovery
+words, kept in different places.
+
+## Open a backup
+
+Choose **Browse Live or Snapshot…**, choose the snapshot folder, and pick how
+to unlock it:
 
 | Access mode | When to use it |
 | --- | --- |
-| Snapshot unlock in macOS Keychain | Routine access on the Mac that created the entry |
-| Snapshot hidden-file unlock | Routine access with the separately stored owner-only credential |
-| Snapshot passphrase (Argon2id) | Access with the optional memorized passphrase |
-| Snapshot recovery words (portable) | A recovery drill, or recovery on another installation |
-| Legacy snapshot raw key | Format-1 snapshots only |
+| Snapshot unlock in macOS Keychain | Everyday use on the Mac that made the snapshot |
+| Snapshot hidden-file unlock | Everyday use with your private credential file |
+| Snapshot passphrase (Argon2id) | If you set a passphrase |
+| Snapshot recovery words (portable) | Testing your recovery, or recovering on another Mac |
+| Legacy snapshot raw key | Only for very old (format 1) snapshots |
 
-Lost the Keychain item or hidden file? Do not try to reconstruct it — it was a
-random key. Open the snapshot with the recovery kit and create a new protector
-generation, as described in [RECOVERABLE_SNAPSHOTS.md](RECOVERABLE_SNAPSHOTS.md).
+**Lost the Keychain entry or the hidden file?** You can't recreate it; it was
+a random key. Open the snapshot with your recovery words, then set up a new
+unlock method as described in
+[RECOVERABLE_SNAPSHOTS.md](RECOVERABLE_SNAPSHOTS.md).
 
-## Run a recovery drill
+## Test your recovery
 
-Creation verifies the snapshot before reporting success, but that verification
-happened where the snapshot was born. Test the copy again once it reaches its
-actual backup location:
+GreenBubbles checks the snapshot when it creates it. But test it again after
+you copy it to where you'll actually keep it:
 
 ```sh
-greenbubbles snapshot verify <snapshot-directory> \
-  --snapshot-recovery-kit <owner-only-recovery-kit-file>
+greenbubbles snapshot verify <snapshot-folder> \
+  --snapshot-recovery-kit <recovery-kit-file>
 ```
 
-A passing drill reports:
+The recovery kit file must be readable only by you. A successful test shows:
 
 ```json
 {
@@ -209,90 +222,88 @@ A passing drill reports:
 }
 ```
 
-The first line is the one that matters: it opened with no WeChat key at all.
-Repeat the drill after copying the snapshot, rotating protectors, migrating
-storage, or changing your backup system.
+The first line matters most: the snapshot opened without your WeChat key.
+Test again whenever you copy the snapshot, change how it's unlocked, move it to
+new storage, or change your backup system.
 
-## The command line
+## Using the command line
 
-The app runs the same commands you can. After `greenbubbles-acquire capture`,
-the live database needs no profile, source path, or key argument. The CLI
-opens the newest installed `db_storage` directory and reads
-`~/.greenbubbles-acquire/passphrase.txt`:
+The app runs the same commands you can run yourself. Once the key is set up,
+you don't need to give a folder, profile, or key:
 
 ```sh
-GB_CLI="Native/GreenBubbles/target/release/greenbubbles"
-
-"$GB_CLI" source status
-"$GB_CLI" conversations list --limit 100
-"$GB_CLI" messages list --conversation <conversation-id> --limit 100
+greenbubbles source status
+greenbubbles conversations list --limit 100
+greenbubbles messages list --conversation <conversation-id> --limit 100
 ```
 
-`messages list` and `messages search` print one reading page: who sent each
-message, whether it was the account holder, the local time, and the text.
-An image or file includes a path you can open. Phone numbers, email
-addresses, identity numbers, and links stay on the page. `--redact` leaves
-those out.
-`chats rank` prints a short page for choosing chats. Add `--json` for the full page.
+If you built from source, use the full path
+`Native/GreenBubbles/target/release/greenbubbles` instead of `greenbubbles`.
 
-Create an owner-only [query profile](QUERY_PROFILES.md) only when you also
-query a snapshot or a second account:
+`messages list` and `messages search` print one line per message: who sent it,
+whether it was you, the local time, and the text. Photos and files show a path
+you can open. Phone numbers, email addresses, ID numbers, and links are shown
+as-is; add `--redact` to hide them. `chats rank` lists your chats to help you
+choose which ones matter. Add `--json` to see full details.
+
+To read a backup or a second WeChat account, create a
+[query profile](QUERY_PROFILES.md), then pass its name:
 
 ```sh
-"$GB_CLI" conversations list --profile archive --limit 100
+greenbubbles conversations list --profile archive --limit 100
 ```
 
-A profile stores paths and access modes. Keys and passphrases stay in
-separately referenced owner-only files, never in the general JSON settings.
+A profile stores folder paths and how to unlock them. Keys and passphrases are
+kept in separate private files, never in the profile itself.
 
-To point at one directory explicitly, keep the key in a file:
+To read one specific folder, keep its key in a private file and pass it on
+standard input:
 
 ```sh
-GB_CLI="Native/GreenBubbles/target/release/greenbubbles"
-GB_SOURCE="<WeChat-db_storage-root>"
-GB_KEY_FILE="<owner-only-WeChat-key-file>"
+GB_SOURCE="<WeChat-db_storage-folder>"
+GB_KEY_FILE="<private-WeChat-key-file>"
 
-cat "$GB_KEY_FILE" | "$GB_CLI" source status "$GB_SOURCE" --passphrase-stdin
-cat "$GB_KEY_FILE" | "$GB_CLI" conversations list "$GB_SOURCE" \
+cat "$GB_KEY_FILE" | greenbubbles source status "$GB_SOURCE" --passphrase-stdin
+cat "$GB_KEY_FILE" | greenbubbles conversations list "$GB_SOURCE" \
   --passphrase-stdin --limit 100
-cat "$GB_KEY_FILE" | "$GB_CLI" messages list "$GB_SOURCE" \
+cat "$GB_KEY_FILE" | greenbubbles messages list "$GB_SOURCE" \
   --passphrase-stdin --conversation <conversation-id> --limit 100
 ```
 
-The full surface is in [CLI_REFERENCE.md](CLI_REFERENCE.md).
+Every command is listed in [CLI_REFERENCE.md](CLI_REFERENCE.md).
 
-## When something is wrong
+## When something goes wrong
 
-Start with the [FAQ](FAQ.md) — slow search, missing contact names, a search
-that finds nothing, or a page that reports incomplete coverage are all covered
-there, and most of them are documented behaviour rather than faults.
+Start with the [FAQ](FAQ.md). Slow search, missing contact names, searches that
+find nothing, and pages that say coverage is incomplete are all covered there.
+Most of them are known behavior, not bugs.
 
-To check the bounded CLI against your own real databases and get a
-content-free report you can safely share:
+To test GreenBubbles against your own WeChat data and get a report that's safe
+to share (it contains no personal content), run this from a source checkout:
 
 ```sh
 swift scripts/check-live-database.swift
 ```
 
-It builds the release binaries, discovers readable accounts, tries your key
-against each, and for every source it authenticates verifies source status, a
-bounded conversation page, message lookup across up to 20 conversations, exact
-hydration of both a list identity and a search identity, and cursor
-continuation. Useful flags: `--key-file <path>` for a key elsewhere,
-`--skip-build` during iteration, and `--search-query-file <path>` when the
-bounded sample contains no suitable text to search for. Both files must be
-mode-`0600`, single-link, current-user-owned, in an owner-only directory.
+It builds the tools, finds your WeChat accounts, tries your key on each, and
+checks that listing chats, reading messages, searching, and paging all work.
+Useful options:
 
-Its output is one JSON report with aggregate counts, coverage flags and
-warning codes — no paths, account IDs, conversation or message IDs, queries,
-snippets or content. Exit status zero means every authenticated source passed,
-including a positive search hit and its exact hydration. The check is bounded,
-not exhaustive: it makes no claim about full-corpus, schema-variant or
-cross-database coverage, and snapshot, attachment, connector and replica
-behaviour are separate test surfaces.
+- `--key-file <path>`: use a key stored somewhere other than the default;
+- `--skip-build`: don't rebuild, when you run it repeatedly;
+- `--search-query-file <path>`: give it a word to search for, if it can't find
+  one on its own.
 
-## Next
+Both files must be readable only by you, owned by you, and in a folder only you
+can open.
 
-- [Give an AI access to some of this](AI_CONTEXT_CLI.md)
-- [Snapshot operations: rotation, retention, recovery](RECOVERABLE_SNAPSHOTS.md)
-- [What is not proven yet](KNOWN_LIMITATIONS.md)
+The script prints one JSON report of counts and warning codes. It never
+includes paths, account or message IDs, search words, or message text. It exits
+with status 0 if every account it could open passed. It checks a sample, not
+your whole history, and doesn't test backups, attachments, or the AI tools.
+
+## Next steps
+
+- [Give an AI access to some of your chats](AI_CONTEXT_CLI.md)
+- [More about backups: changing unlock methods, keeping, and recovering](RECOVERABLE_SNAPSHOTS.md)
+- [Known limitations](KNOWN_LIMITATIONS.md)

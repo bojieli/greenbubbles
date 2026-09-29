@@ -1,286 +1,286 @@
 # FAQ
 
-The questions people actually ask, including the ones whose honest answer is
-"that is a real limitation."
+Common questions, including the ones whose honest answer is "that's a real
+limitation."
 
 ## Getting it working
 
-### I do not have the database key. Can I use this at all?
+### I don't have the database key. Can I use this at all?
 
-Capture is the normal setup route for supported clients. It requires administrator
-access and a login cycle: re-sign your own copy of WeChat so a debugger can attach, run
-`greenbubbles-acquire preflight`, then run `greenbubbles-acquire capture` and
-log out of WeChat and back in. The helper reads the key as WeChat derives it,
-verifies it against every database, and writes it to an owner-only file.
-Walkthrough in the [README](../README.md#getting-your-database-key), full
-detail in [PASSPHRASE_ACQUISITION.md](PASSPHRASE_ACQUISITION.md).
+Yes, once you capture it. Capturing copies the key from your own WeChat app:
 
-GreenBubbles has no decryption bypass and will not grow one — the helper reads
-the key from your own client, it does not break the encryption. If you would
-rather not run it, the other routes in are a snapshot someone already made you,
-or a plaintext source.
+1. Re-sign your copy of WeChat so a debugger is allowed to attach.
+2. Run `greenbubbles-acquire preflight` to check you're ready.
+3. Run `sudo greenbubbles-acquire capture`, then log out of WeChat and back in.
 
-### Do I have to create a profile or pass a directory?
+The tool checks the key against every database and saves it to a file only you
+can read. This needs administrator access. Step-by-step:
+[key setup guide](PASSPHRASE_ACQUISITION.md).
 
-No, for the live database. After capture, `greenbubbles chats`
-opens the WeChat account that is actually in use and reads
-`~/.greenbubbles-acquire/passphrase.txt`. Older account directories left
-behind after an account change are ignored. If two accounts were both
-written in the last 14 days, the command stops and asks you to set
-`source.root` in `~/.greenbubbles/config.toml`. A different database or passphrase
-file goes in `~/.greenbubbles/config.toml` under `[source]`. A profile is only
-for a second account or a snapshot. A missing passphrase file returns
-`invalidProfile` and prints neither the path nor the key. The same message
-appears in plain language on the terminal.
+GreenBubbles doesn't break WeChat's encryption and never will; it reads the key
+from your own app. If you'd rather not capture it, you can still open a backup
+someone already made for you, or data that is already unencrypted.
 
-### What exactly is the source?
+### Do I need a profile or a folder path?
 
-The directory literally named `db_storage`, containing at least `contact`,
-`session` and `message`. The CLI finds it. On a current client it is under:
+Not for your live WeChat data. After capture, `greenbubbles chats` finds the
+WeChat account you're using and reads the key from
+`~/.greenbubbles-acquire/passphrase.txt`.
+
+- Old account folders left behind after switching accounts are ignored.
+- If two accounts were both used in the last 14 days, GreenBubbles won't guess.
+  Set `source.root` in `~/.greenbubbles/config.toml` to the one you want.
+- To use a different key file, set `source.passphrase_file` in the same file.
+- If the key file is missing, you get an `invalidProfile` error with a plain
+  explanation. It never prints the path or the key.
+
+You need a [profile](QUERY_PROFILES.md) only for a second account or a backup.
+
+### Which folder holds my WeChat data?
+
+The folder named `db_storage`, which contains `contact`, `session`, and
+`message`. GreenBubbles finds it for you. On current WeChat versions it is:
 
 ```text
 ~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/<account>/db_storage
 ```
 
-Not the WeChat container, not `xwechat_files`, and not an individual `.db`
-file. If you do not know which account directory is yours:
+Point at `db_storage` itself, not the folder above it and not a single `.db`
+file. To list your accounts and their folders:
 
 ```sh
 greenbubbles-discover accounts --include-paths
 ```
 
-Path-bearing output contains a stable account identifier. Keep it private.
+That output contains your account ID. Keep it private.
 
-### It authenticated, but a database will not open
+### The key works, but one database won't open
 
-Individual shards can fail while the source as a whole works. A page across
-shards will still return, but it names the skipped shard by opaque ID and marks
-coverage incomplete — GreenBubbles will not silently drop it. If a *required*
-database (contact, session, message) fails, the operation fails outright.
+WeChat splits your history across many database files. If one of them fails,
+you still get results from the others, and the output says which file was
+skipped and marks the results as incomplete. Nothing is dropped silently. If
+one of the essential databases (contacts, sessions, or messages) fails, the
+command fails.
 
-### How do I check it actually works against my real databases?
+### How do I check it works on my own data?
 
-There is a developer sanity check that runs the bounded CLI against your own
-live sources and emits a content-free report:
+Run this from a source checkout:
 
 ```sh
 swift scripts/check-live-database.swift
 ```
 
-It discovers readable accounts, tries your key against each, and for every
-source it authenticates checks source status, a bounded conversation page,
-message lookup across up to 20 real conversations, exact hydration of a list
-identity and a search identity, and cursor continuation. It never accepts a
-fixture database and is deliberately not a CI job — it needs your installed
-storage and your key. Output is one JSON report with no paths, IDs, queries or
-content in it, safe to paste into an issue.
+It finds your accounts, tries your key on each, and runs a set of reading and
+searching checks against real conversations. It prints one JSON report with no
+paths, IDs, search text, or message content, so it's safe to paste into an
+issue. It only works with your real data and key, so it doesn't run in CI.
 
-## Behaviour that looks like a bug
+## Things that look like bugs
 
 ### Why is search sometimes slow?
 
-When WeChat's own full-text index is unusable, GreenBubbles falls back to
-decrypting a fixed 500-message window and scanning it — about 246 ms p95 for
-one conversation and 352 ms p95 across sixteen. That is the deliberate cost of
-*not* maintaining a second encrypted copy of your messages on disk. The
-alternative was a persistent text cache, and 350 ms did not justify one. See
-[MEASUREMENTS.md](MEASUREMENTS.md).
+When WeChat's own search index can't be used, GreenBubbles searches the most
+recent 500 messages directly. That takes about a quarter of a second for one
+chat, or about a third of a second across 16 chats. The alternative would be
+keeping a second searchable copy of your messages on disk, and that speed
+didn't justify it. Numbers: [MEASUREMENTS.md](MEASUREMENTS.md).
 
-### Search returned nothing, but I know the message exists
+### Search found nothing, but I know the message exists
 
-Three different causes:
+There are three likely causes:
 
-1. **The fallback window has not reached it.** The fallback examines at most
-   500 messages and 16 conversations per response. An empty window is *not* the
-   end of the search — the response carries a continuation cursor, and
-   GreenBubbles never claims an empty window means "no results" while one
-   remains. Follow the cursor.
-2. **The native index is stale.** WeChat maintains its own FTS. When it is used
-   and its freshness could not be verified, the response says
+1. **The search hasn't reached it yet.** Each search result page looks at no
+   more than 500 messages across 16 chats. An empty page doesn't mean nothing
+   was found. If the output has `hasMore: true`, run the command again with
+   `--cursor` set to the `nextCursor` value.
+2. **WeChat's own index is out of date.** When GreenBubbles uses WeChat's index
+   and can't confirm it's current, the output says
    `nativeSearchIndexFreshnessUnverified`.
-3. **The message is not local.** History that lives only on WeChat's servers,
-   or only on your phone, is not on this Mac and nothing here can reach it.
+3. **The message isn't on this Mac.** Messages kept only on WeChat's servers or
+   only on your phone can't be reached from here.
 
-### Contact names show as `wxid_…` instead of people
+### Names show as `wxid_…` instead of people's names
 
-Name enrichment reads at most 500 unique IDs per request from `contact.db`. If
-a row is missing or the contact schema is a variant that could not be read, the
-response emits `contactDisplayNameUnresolved` or `contactEnrichmentUnavailable`,
-keeps the raw identifier, and marks enrichment incomplete. The message read
-itself never fails over a name. Group labels come from the group contact, never
-from the last person who spoke.
+GreenBubbles looks up names in WeChat's contact database, up to 500 people per
+command. If it can't find someone, the output keeps the raw ID and says
+`contactDisplayNameUnresolved` or `contactEnrichmentUnavailable`. Messages are
+still shown; only the name is missing. A group's name comes from the group
+itself, never from whoever spoke last.
 
-### Two pages disagree, or a response says `crossDatabaseAtomic: false`
+### Two pages disagree, or the output says `crossDatabaseAtomic: false`
 
-That is accurate reporting, not a fault. WeChat splits history across several
-databases; a page touching four of them is four separate statements and cannot
-be one atomic instant. If you need a stable view across pages or databases,
-create a snapshot and query that generation instead of the live source.
+That's an honest warning, not a bug. WeChat stores your history in several
+database files, and GreenBubbles reads them one after another, not all at the
+same instant. If WeChat writes in between, results can differ slightly. For a
+view that never changes, make a [backup](RECOVERABLE_SNAPSHOTS.md) and read
+that instead.
 
-### Does a long query interfere with WeChat?
+### Does a long query slow down WeChat?
 
-No. Every statement is finalized before anything is serialized, so a read
-transaction is never held open while a caller or a model is thinking, and
-WeChat's WAL checkpointing is never pinned. This is why there is no operation
-that streams the corpus.
+No. GreenBubbles finishes each database read before doing anything else, so it
+never holds a database open while you or an AI is thinking. WeChat can keep
+writing normally. That's also why there's no command that streams your whole
+history at once.
 
 ## Safety
 
-### Is my database key ever sent to a model?
+### Is my database key ever sent to an AI?
 
-No. Keys, passphrases, recovery words, search queries and draft text all arrive
-on standard input and never appear in process arguments, responses, logs,
-errors, manifests or cursors. Keys are zeroized after use. Nothing in the AI
-tool boundary can request one.
+No. Keys, passphrases, recovery phrases, search text, and draft messages are
+passed on standard input. They never appear on the command line or in output,
+logs, errors, or saved files, and keys are erased from memory after use. No AI
+tool can ask GreenBubbles for them.
 
 ### Can an AI read all my chats?
 
-Through the policy-scoped connector, only what your policy permits. It binds
-one account and grants each
-conversation an independent set of operations, message fields, an optional time
-range, and a local-versus-remote destination decision. Remote release is off
-unless you explicitly enable it for that conversation. Everything allowed and
-everything denied is appended to a hash-chained, body-free journal.
+It depends on how the AI reaches your data.
 
-Without a policy, the CLI runs with your own filesystem authority — which is
-also true of a coding agent with general shell access. Skills do not restrict
-that authority. Use the connector when you need its policy-enforced boundary.
+- **Through the AI connector with a policy:** only what the policy allows. A
+  policy covers one account and, for each chat, says which actions and message
+  fields are allowed, an optional date range, and whether a cloud AI may see
+  it. Cloud access is off unless you turn it on for that chat. Every allowed or
+  denied request is written to a tamper-evident audit log with no message text.
+  See [AI context CLI](AI_CONTEXT_CLI.md).
+- **Through the command line or a coding agent:** it has the same access to
+  your files that you have. A skill tells an agent what to do, but it can't
+  restrict it. Use the connector when you need enforced limits.
+- **Through personal memory:** you choose which chats, people, or dates to
+  include; if you leave those choices empty, every message is included. The
+  agent reads the chosen messages in pages of up to 48 KB, and the pages
+  include real names and contact IDs. It never sees your database key. The
+  agent eventually reads every page you selected, so if it uses a cloud model,
+  all of that goes to the model provider under their privacy terms. See
+  [Personal memory](PERSONAL_MEMORY.md).
 
-The personal-memory workflow is an explicit owner-run exception to per-chat
-policy enumeration: one local `memory prepare` process may scan the live
-account and a v2 corpus may retain every eligible message locally. A composable
-run scope can then intersect repeatable conversation/kind/sender arguments and
-inclusive RFC 3339 time bounds; leaving those filters empty deliberately selects
-the whole hydrated corpus.
-`memory next` returns only a delivery envelope and deterministic `memory page`
-calls release at most 49,152 bytes at a time. The memory-page protocol excludes
-the database key and verbose citation sidecars, but includes real contact and
-conversation identities. The agent eventually receives every page in the chosen scope. Use separate private corpus/wiki/state paths, review the status
-coverage fields, and remember that a remote model receives those released
-pages under that model provider's privacy terms.
+### Can I list my WeChat contacts?
 
-### Can I list my WeChat contacts from the CLI?
+Yes:
 
-Yes. `greenbubbles contacts list` is source-bound and paginated at 1..500 rows.
-Use `--kind person|group|official|service|account-holder|unknown` and
-`--details` only when remark/nickname/alias fields are needed. `person` means
-an ordinary address-book row, not proof that the relationship is current or
-reciprocal. The account holder is marked only by authenticated account-ID
-comparison and displayed as `You`.
+```sh
+greenbubbles contacts list --limit 50
+```
+
+It returns 1 to 500 contacts per page. Filter with
+`--kind person|group|official|service|account-holder|unknown`. Add `--details`
+only if you need remarks, nicknames, and aliases. `person` means an ordinary
+address-book entry; it doesn't prove you're still in touch. Your own account is
+shown as `You`.
 
 ### What if a message in my history tells the AI to do something?
 
-Nothing happens. A caller selects a typed operation, and that operation is
-checked against policy *before* any body is returned. A message asking an agent
-to open another conversation, enable a remote model, or send a reply stays
-inert text. The agent cannot reach the send adapter at all, and the adapter
-would refuse a recipient you never approved.
+Through the connector, nothing happens. The AI can only ask for specific
+actions, and each one is checked against your policy before any message text is
+returned. A message saying "open another chat," "turn on cloud access," or
+"send a reply" is just text. The AI can't send messages at all.
 
 ### Does anything get uploaded?
 
-Ordinary reads, exports and projections upload nothing: they have no network
-client, background service, telemetry or cloud component. The explicit
-`ai-summarize-direct` command is different. When—and only when—the selected
-policy scopes set `allowRemoteModel`, it uploads the compact authorized message
-projection to Gemini 3.7 Flash and records the remote reads in the connector
-audit. It does not send canonical message IDs, sender IDs, policy/audit data or
-database metadata. Any other remote model, embedder, vector store, log collector
-or crash reporter remains outside GreenBubbles' control; approving it is your
-call.
+Reading, searching, exports, and notes upload nothing. There's no background
+service, telemetry, or cloud component.
 
-### Can WeChat tell I am doing this?
+The one exception is `ai-summarize-direct`, and only when you run it. It sends
+the chats your policy marks `allowRemoteModel` to Google's Gemini 3.7 Flash and
+records that in the audit log. It sends message text, senders, and times, but
+not real message IDs, sender IDs, your policy or audit files, or database
+details.
 
-The read path never contacts WeChat's servers, injects code, or calls private
-APIs, so it produces nothing for them to observe. The optional acquisition
-helper is different: it re-signs the client and requires a logout and login,
-and a logout and login is obviously visible. See
-[THREAT_MODEL.md](THREAT_MODEL.md).
+Any other cloud AI, search index, log collector, or crash reporter you use is
+outside GreenBubbles' control; deciding whether to trust it is up to you.
 
-### What about the other people in my conversations?
+### Can WeChat tell I'm doing this?
 
-They are in your history and they did not choose your tooling. Nothing
-technical can resolve that for you. What GreenBubbles gives you is the ability
-to scope a policy to the threads you actually need rather than releasing
-everything — using it is a judgment call, and worth making deliberately.
+Reading never contacts WeChat's servers, injects code, or uses WeChat's private
+interfaces, so there's nothing for WeChat to notice. Capturing the key is
+different: it re-signs WeChat and needs a logout and login, which WeChat can
+obviously see. See the [threat model](THREAT_MODEL.md).
+
+### What about the other people in my chats?
+
+They're in your history, and they didn't choose your tools. No feature can
+settle that for you. What GreenBubbles offers is a way to share only the chats
+you actually need instead of everything. Deciding what to share is a judgment
+call worth making on purpose.
 
 ## Backups and recovery
 
 ### Is copying `db_storage` a backup?
 
-No, and this is the most expensive mistake available here. Those files are
-encrypted with WeChat's key, which lives in a running application and can become
-unavailable to you. A copy of them is a backup only for as long as you still
-have that key.
+No, and this is the most costly mistake you can make here. Those files are
+encrypted with WeChat's key. If you ever lose access to that key, the copy is
+useless.
 
-A GreenBubbles snapshot is re-encrypted under a fresh random key wrapped by 24
-portable recovery words. `snapshot verify` proves it by opening the snapshot
-with **no WeChat key at all**:
+A GreenBubbles backup (snapshot) is encrypted again with a new random key,
+protected by a 24-word recovery phrase you keep. To prove a backup works,
+`snapshot verify` opens it **without any WeChat key**:
 
 ```sh
 greenbubbles snapshot verify <snapshot-directory> \
   --snapshot-recovery-kit <owner-only-recovery-kit-file>
 ```
 
-### I lost my Keychain entry / hidden credential file
+See [Recoverable snapshots](RECOVERABLE_SNAPSHOTS.md).
 
-Open the same snapshot with the recovery-kit file instead, then create a new
-protector generation. Do not try to recreate the lost credential by guessing —
-it was a random key, not something derived from a password.
+### I lost my Keychain entry or hidden credential file
+
+Open the backup with your recovery-kit file instead, then create a new
+credential for it. Don't try to recreate the lost one; it was a random key, not
+something made from a password.
 
 ### I lost the 24 words
 
-If the Keychain entry or hidden credential still exists on the machine that
-created the snapshot, open it with that and immediately create new recovery
-material. If both are gone, the snapshot is unrecoverable. That is what the
-encryption is for.
+If the Keychain entry or hidden credential still exists on the Mac that made
+the backup, open the backup with it and create a new recovery phrase right
+away. If both are gone, the backup can't be opened. That's what the encryption
+is for.
 
-This is also why removing the last portable protector is forbidden, and why the
-recovery kit is written *before* the long conversion begins rather than after.
+This is also why GreenBubbles won't let you remove the last recovery phrase,
+and why it writes the recovery kit before the long backup starts, not after.
 
 ### Where should I keep the recovery words?
 
-Anywhere that is not beside the only copy of the snapshot. A backup needs an
-intact snapshot generation *and* one working portable recovery copy, in
-different places. Never reuse a cryptocurrency wallet phrase.
+Anywhere except next to the only copy of the backup. A real backup needs an
+intact backup copy **and** a working recovery phrase, kept in different places.
+Never reuse a cryptocurrency wallet phrase.
 
 ## Scope
 
 ### Can I send messages?
 
-No. Experimental code exists and public builds ship cryptographically closed: a
-default build has no pinned release verification key, so no rollout stage above
-`dryRun` can open. It is not reachable from any AI tool call, and opening it is
-an operator decision blocked on legal and account-safety questions rather than
-on code. See [SEND_ADAPTER.md](SEND_ADAPTER.md).
+No. Experimental sending code exists, but public builds lock it: they can only
+do a dry run. No AI tool can reach it. Unlocking it depends on legal and account
+safety questions, not on code. See [SEND_ADAPTER.md](SEND_ADAPTER.md).
 
 ### Windows? Linux? Android? iOS?
 
-None, and none planned. macOS 14+ on Apple silicon for released binaries.
+No, and none are planned. Released builds need macOS 14 or later on Apple
+silicon.
 
-### Will it survive a WeChat update?
+### Will it keep working after a WeChat update?
 
-Sometimes. The compatibility profile tracks a signed 4.1+ client, and an
-ordinary update does not break an acquisition chain — but the format is closed
-and changes without notice. When decoding breaks, GreenBubbles reports gaps and
-keeps the completion verdict false rather than guessing.
+Usually, but not always. It has been tested on WeChat 4.1, and a normal update
+doesn't make a captured key stop working. But WeChat's format is private and
+can change without notice. When GreenBubbles meets data it can't read, it says
+so instead of guessing.
 
-### Multiple WeChat accounts?
+### Can I use more than one WeChat account?
 
-Discovery finds every readable account. Each has its own key, its own policies
-and its own snapshots; a policy for one account is rejected for another rather
-than reinterpreted. Run per-account commands separately.
+Yes. GreenBubbles finds every account it can read. Each account has its own key,
+policies, and backups, and a policy made for one account is rejected for
+another. Run commands for each account separately, using a
+[profile](QUERY_PROFILES.md) for each.
 
-### How much disk does this need?
+### How much disk space does it need?
 
-Bounded queries need effectively none — that is the point of the architecture.
-A snapshot is roughly the size of the source databases. An explicit full
-restoration is the expensive path: in one recorded run, a 2.98 GB source
-produced a ~13.5 GB text archive with a ~7.4 GB staging peak, and eager media
-added roughly 30 GB. Numbers in [MEASUREMENTS.md](MEASUREMENTS.md).
+Reading and searching need almost none, because GreenBubbles reads WeChat's own
+files instead of copying them. A backup is about the size of WeChat's
+databases. A full restore to plain text is the expensive option: in one test, a
+2.98 GB WeChat database became a 13.5 GB text archive, briefly needing 7.4 GB of
+extra working space, and copying all media added about 30 GB. Numbers:
+[MEASUREMENTS.md](MEASUREMENTS.md).
 
-### Something is wrong that is not listed here
+### My problem isn't listed here
 
-Check [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) first — it may be a known
-constraint rather than a bug. If it is a bug, describe it structurally with no
-message content, identifiers or absolute paths. Security issues go to the
-private path in [SECURITY.md](../SECURITY.md), never a public issue.
+Check [known limitations](KNOWN_LIMITATIONS.md) first; it may be a known
+limit rather than a bug. When reporting a bug, describe what happened without
+message content, IDs, or full file paths. Report security problems privately as
+described in [SECURITY.md](../SECURITY.md), never in a public issue.

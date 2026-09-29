@@ -1,57 +1,86 @@
 # Use GreenBubbles with your own agent
 
-GreenBubbles provides the local data boundary; your current Codex, Claude Code,
-OpenCode, Kimi Code, Gemini CLI, Grok Build, or compatible shell-capable agent can do the extraction, summarization, and
-incremental memory edits. The embedded model workflow is optional.
+You can have a coding agent you already use read your WeChat history and write
+notes from it: Codex, Claude Code, OpenCode, Kimi Code, Gemini CLI, Grok Build,
+or any other agent that can run shell commands. GreenBubbles reads the data;
+your agent does the summarizing and writing.
 
-## Choose where the model runs
+GreenBubbles teaches the agent how through **skills**: Markdown files of
+instructions, with a few helper files next to them. Your agent can read a skill
+straight from where it is. Installing it is optional.
 
-| Route | Authentication and billing | Best fit |
+## Pick how the AI runs
+
+| Option | Who pays | Good for |
 | --- | --- | --- |
-| Existing coding agent + skills | Your agent's existing subscription login or provider configuration | Recommended if you already have a suitable subscription with available usage |
-| Embedded `ai-summarize-direct` workflow | Dedicated `GEMINI_API_KEY`; separate provider API billing | A bounded model-generated memory artifact directly through GreenBubbles |
-| Optional `personal-memory-parallel.py` driver | Launches your chosen coding agent; that agent's authentication determines billing | Scripted batches or scheduled runs |
+| **Your coding agent + skills** (recommended) | Your agent's existing subscription or provider setup | Most people, especially if you already have a subscription with spare usage |
+| **Built-in summarizer** (`ai-summarize-direct`) | Your own `GEMINI_API_KEY`, billed by Google | A one-off cited summary made by GreenBubbles itself |
+| **Batch script** (`personal-memory-parallel.py`) | Whatever agent it launches | Scripted or scheduled runs (advanced) |
 
-The embedded summarizer produces bounded artifacts; the personal-memory skill
-maintains the git-versioned domain project. They are different entry points,
-not interchangeable CLI commands. A subscription does not supply the embedded
-summarizer's API key. Using an already-paid subscription allowance can avoid
-additional API charges and is our preferred starting point. It is not a promise
-of unlimited or universally cheaper processing: limits, overage, model choice,
-and workload matter. Verify the agent is using subscription authentication,
-rather than API-key billing. See [Codex authentication](https://learn.chatgpt.com/docs/auth)
-and [Claude Code costs](https://code.claude.com/docs/en/costs).
+These are separate tools, not different settings of one command. The built-in
+summarizer writes a new summary each run. The personal-memory skill keeps one
+set of notes, tracked with Git, and updates it over time. A subscription does
+not give the built-in summarizer an API key.
 
-## Use directly — no skill installation required
+Using a subscription you already pay for often costs nothing extra, which is
+why we suggest starting there. It is not unlimited: plan limits, overage, model
+choice, and how much you ask the agent to read all matter. Check that your agent
+is signed in with your subscription and not an API key. See
+[Codex authentication](https://learn.chatgpt.com/docs/auth) and
+[Claude Code costs](https://code.claude.com/docs/en/costs).
 
-Skills are documentation with optional helper scripts. Your agent can read them
-from a checkout or extracted bundle without copying them into a discovery folder:
+## Get started
 
-> Read `/absolute/path/to/greenbubbles/skills/greenbubbles-personal-memory/SKILL.md`
-> and follow its references to extract and incrementally maintain my Markdown
-> memory in this session. If access needs setup, read the sibling
-> `greenbubbles-setup/SKILL.md`.
+1. Finish key setup first. See [Getting your database key](PASSPHRASE_ACQUISITION.md).
+2. Find the skill file. With Homebrew:
 
-Keep each skill's references and helpers alongside its `SKILL.md`. The local
-GreenBubbles CLI is the executable dependency. The agent needs shell access and
-permission to read the selected source and edit the memory project.
+   ```sh
+   echo "$(brew --prefix greenbubbles)/libexec/skills/greenbubbles-personal-memory/SKILL.md"
+   ```
 
-## Homebrew paths
+   In a source checkout or the extracted CLI ZIP, it is
+   `skills/greenbubbles-personal-memory/SKILL.md`.
+3. Open your agent and ask it something like:
 
-The Homebrew package stores the skills and helpers under `libexec`:
+   > Read `/absolute/path/to/greenbubbles-personal-memory/SKILL.md` and follow
+   > it to build Markdown notes from my WeChat history in `~/memory/me`, in
+   > this session. If GreenBubbles isn't set up yet, read the setup skill at
+   > `../greenbubbles-setup/SKILL.md` next to it.
 
-```sh
-echo "$(brew --prefix greenbubbles)/libexec/skills/greenbubbles-personal-memory/SKILL.md"
-python3 "$(brew --prefix greenbubbles)/libexec/scripts/install-skills.py" --agent codex
-```
+Keep each `SKILL.md` together with the files around it; the skill refers to
+them. The agent needs permission to run shell commands, run the `greenbubbles`
+command, and edit files in your notes folder.
 
-The second command is optional. For the relative commands below, first change
-into `$(brew --prefix greenbubbles)/libexec`, or use the corresponding absolute
-script path. Source checkouts and extracted release ZIPs use their own root.
+## What to ask your agent
 
-## Optional automatic discovery
+To build notes for the first time:
 
-From this checkout or an extracted CLI release, choose your host:
+> Use greenbubbles-personal-memory to organize my WeChat history into a
+> Wikipedia-style knowledge base at `~/memory/me`. Read the live database in
+> this session. Ask me what time range to cover if I haven't said. Revise the
+> articles in place.
+
+To bring them up to date later:
+
+> Refresh that knowledge base from my latest WeChat history. Keep the same
+> project, and tell me the dates covered and which chats are still unread.
+
+The agent will:
+
+1. check that GreenBubbles can read your data;
+2. rank your chats by how often you write in them, with `chats rank`;
+3. read them with `messages list` and `messages search`;
+4. write or update `index.md` (the front page), `manifest.md` (what was read
+   and when), and one article per life area in `domains/`.
+
+It writes in the language you usually use in WeChat, and it uses whatever model
+your agent is already set up with. No extra API key is needed. See
+[Personal memory](PERSONAL_MEMORY.md) for how the notes are organized.
+
+## Let your agent find the skills automatically (optional)
+
+Instead of giving the path each time, you can copy the skills into your agent's
+skills folder. Pick your agent:
 
 ```sh
 python3 scripts/install-skills.py --agent codex
@@ -62,116 +91,120 @@ python3 scripts/install-skills.py --agent gemini
 python3 scripts/install-skills.py --agent grok
 ```
 
-The installer only copies documentation and helpers into the host's discovery
-folder. Each target gets the same three skills:
+Run these from a source checkout or the extracted CLI ZIP. With Homebrew, run
+them from `$(brew --prefix greenbubbles)/libexec`, or use the full path:
 
-- `greenbubbles-setup`: read-only CLI/profile checks and initial setup guidance.
-- `greenbubbles-context`: bounded search and retrieval.
-- `greenbubbles-personal-memory`: prepare, review, cite, organize, and refresh memory.
+```sh
+python3 "$(brew --prefix greenbubbles)/libexec/scripts/install-skills.py" --agent codex
+```
 
-| Host / target | User discovery directory | With `--project PATH` |
+This copies three skills:
+
+- `greenbubbles-setup`: checks that GreenBubbles works and helps with first setup.
+- `greenbubbles-context`: searches and retrieves messages.
+- `greenbubbles-personal-memory`: builds and updates your notes.
+
+It only copies files. It doesn't change your agent's settings, sign-in, model,
+or permissions, and the copies keep working if you move the checkout.
+
+| Agent / `--agent` value | Installs to | With `--project PATH` |
 | --- | --- | --- |
 | Codex / `codex` | `~/.agents/skills` | `PATH/.agents/skills` |
 | Claude Code / `claude` | `~/.claude/skills` | `PATH/.claude/skills` |
 | OpenCode / `opencode` | `~/.config/opencode/skills` | `PATH/.opencode/skills` |
 | Kimi Code / `kimi` | `$KIMI_CODE_HOME/skills`, default `~/.kimi-code/skills` | `PATH/.kimi-code/skills` |
 | Gemini CLI / `gemini` | `~/.gemini/skills` | `PATH/.gemini/skills` |
-| Grok Build CLI / `grok` | `~/.grok/skills` | `PATH/.grok/skills` |
+| Grok Build / `grok` | `~/.grok/skills` | `PATH/.grok/skills` |
 
-The Grok target is xAI's local Grok Build (`grok`) coding CLI. It does not add
-local filesystem access to the Grok website or mobile app. OpenCode can also
-use Grok through a configured provider; that uses the OpenCode skill target.
-No target changes authentication or model selection. Subscription allowances
-and API charges depend on each host's configured provider, not the skill.
+Other options:
 
-Copies remain usable after the checkout is moved. No settings, credentials,
-host permissions, model configuration, or running agents are changed.
-For a project-scoped install add `--project /absolute/path/to/project`.
-Other Agent Skills-compatible hosts can use `--dest /path/to/their/skills`.
-The host still needs a shell, local CLI/source access, and file editing capability.
+- `--project /absolute/path/to/project` installs for one project instead of for
+  your whole account.
+- `--dest /path/to/skills` installs into any other folder, for agents not listed
+  above or a custom setup.
+- `--update` replaces an older copy made by this script. If you edited your
+  copy, it is left alone and reported as a conflict; move your changes out
+  first.
 
-Re-run with `--update` to replace an unmodified managed installation. Identical
-installs are a no-op; locally edited or unmanaged differing skills are preserved
-and reported as conflicts. Move or merge your customizations before updating.
-Restart the host if the skills do not appear. Codex supports `$greenbubbles-setup`;
-Claude Code and Grok Build support `/greenbubbles-setup`; Kimi Code uses
-`/skill:greenbubbles-setup`. In OpenCode, ask it to use `greenbubbles-setup`.
-In Gemini CLI, use `/skills reload`, then ask it to use the skill. Host skill
-activation and tool permissions still apply. If a custom configuration uses a
-different discovery root, pass `--dest` with that root's skills directory.
+After installing, restart your agent if the skills don't appear. Then start the
+setup skill:
 
-Discovery details: [Codex skills](https://learn.chatgpt.com/docs/build-skills),
-[Claude Code skills](https://code.claude.com/docs/en/skills),
-[OpenCode skills](https://opencode.ai/docs/skills/),
-[Kimi Code skills](https://www.kimi.com/code/docs/en/kimi-code-cli/customization/skills.html),
-[Gemini CLI skills](https://geminicli.com/docs/cli/using-agent-skills/), and
-[Grok Build skills](https://docs.x.ai/build/features/skills-plugins-marketplaces).
+| Agent | How to start the setup skill |
+| --- | --- |
+| Codex | `$greenbubbles-setup` |
+| Claude Code, Grok Build | `/greenbubbles-setup` |
+| Kimi Code | `/skill:greenbubbles-setup` |
+| OpenCode | ask it to use `greenbubbles-setup` |
+| Gemini CLI | run `/skills reload`, then ask it to use the skill |
 
-## Use the current agent
+The `grok` option is for xAI's Grok Build command-line tool. It doesn't give the
+Grok website or phone app access to your files. If you use Grok models through
+OpenCode, use the `opencode` option instead.
 
-Example request after reading the skill directly or enabling discovery:
+More about each agent's skills: [Codex](https://learn.chatgpt.com/docs/build-skills),
+[Claude Code](https://code.claude.com/docs/en/skills),
+[OpenCode](https://opencode.ai/docs/skills/),
+[Kimi Code](https://www.kimi.com/code/docs/en/kimi-code-cli/customization/skills.html),
+[Gemini CLI](https://geminicli.com/docs/cli/using-agent-skills/),
+[Grok Build](https://docs.x.ai/build/features/skills-plugins-marketplaces).
 
-> Use greenbubbles-personal-memory to organize my WeChat history into a
-> Wikipedia-style knowledge base at `~/memory/me`. Read the live database
-> in this session. Ask me the time scope if I have not given one. Revise
-> the articles in place.
+## If something isn't working
 
-For a follow-up:
-
-> Refresh that knowledge base from my latest WeChat history. Keep the same
-> project, and report the dates covered and which chats are still unread.
-
-The agent checks access, ranks chats, reads them with `messages list` and
-`messages search`, and revises `index.md`, `manifest.md`, and the articles
-in `domains/`. It writes the project in the language the account holder
-usually uses. It uses the model you already configured. No extra embedded
-model API key or nested agent is required. Building the knowledge base does
-not prepare a corpus.
-
-For diagnostics only:
+Run the setup check:
 
 ```sh
 python3 skills/greenbubbles-setup/scripts/doctor.py \
   --greenbubbles /absolute/path/to/greenbubbles --profile live
 ```
 
-The doctor never captures keys or prints subprocess output. Exit 0 means the
-memory CLI and selected profile validated; exit 1 means setup needs attention.
-It does not prove full source coverage. Missing credentials route to owner-operated
-capture guidance; capture may require a WeChat restart/re-login and re-signing.
-See [key acquisition](PASSPHRASE_ACQUISITION.md).
+- **Exit code 0:** GreenBubbles and the chosen profile work.
+- **Exit code 1:** setup needs attention.
 
-Preparation/decryption is local. Any message page the agent reads goes to that
-agent's configured model provider. The corpus and derived memory are private
-artifacts; installation does not copy them into the skill package.
+The check only reads; it never captures keys or prints command output. Passing
+it doesn't prove every message is readable. If the key is missing, follow the
+[key setup guide](PASSPHRASE_ACQUISITION.md). Capturing the key may require
+restarting WeChat, logging in again, and re-signing it.
 
-## Incremental updates and limits
+## Privacy
 
-An update opens the same project, re-queries the live database, and revises
-the articles. Late-imported historical messages or old-timestamp edits can
-be missed by a window that starts at the previous end date. When that
-matters, page the selected chats again across the original window. A search
-that does not mention a fact is not evidence that the fact was deleted.
+GreenBubbles decrypts and reads your data on your Mac. But every message page
+your agent reads is sent to the agent's model provider, if it uses a cloud
+model. Your notes are private files; installing the skills never copies them
+anywhere. Never paste your database key or recovery phrase into a prompt. See
+[PRIVACY.md](../PRIVACY.md).
 
-Use one writer per domain project. A git commit lock does not prevent two agents
-from overwriting each other's domain edits. No scheduler is installed by the
-skills. The optional driver remains available from the repository/CLI release;
-use `--agent codex --format markdown --shards 1 --parallel 1`, or choose Claude
-or Gemini. The driver currently has built-in launchers for Pi, Claude, Codex,
-and Gemini, plus `--agent command` for a custom launcher. The discovery targets
-above do not imply identically named driver launchers: use OpenCode, Kimi Code,
-and Grok Build in their current sessions with the skills.
-An incomplete driver tick now exits nonzero, preserves its checkpoint, and resumes
-its saved plan and shard states when rerun with the same corpus and scope options.
-It advances the time checkpoint only after every planned shard completes.
+## Updating notes later, and limits
 
-## Distribute without the checkout
+An update opens the same notes folder, reads recent messages, and revises the
+articles.
+
+- **Old messages can be missed.** An update usually starts from the last date it
+  covered. Messages imported late with older dates, or old messages edited
+  later, fall before that date. If that matters, ask the agent to re-read the
+  chosen chats over the whole original date range.
+- **Missing isn't deleted.** If a search doesn't find a fact, that doesn't mean
+  the fact was removed.
+- **One agent at a time.** Two agents editing the same notes can overwrite each
+  other's changes, even with Git.
+- **No schedule is set up.** The skills don't run on their own.
+
+For scripted or scheduled runs, the batch script `personal-memory-parallel.py`
+is in the repository and the CLI ZIP. It has built-in support for Pi, Claude,
+Codex, and Gemini, plus `--agent command` for anything else. For example:
+`--agent codex --format markdown --shards 1 --parallel 1`. Use OpenCode, Kimi
+Code, and Grok Build interactively with the skills instead. If a run stops
+partway, it exits with an error and keeps its progress; run the same command
+again to continue. See [Personal memory](PERSONAL_MEMORY.md#batch-script-and-evidence-archive-advanced)
+for details.
+
+## Copy the skills to another Mac
 
 ```sh
 python3 scripts/install-skills.py --bundle /tmp/greenbubbles-skills
 ```
 
-This creates a standalone directory with the three skills, installer, license,
-and usage instructions. Copy or zip it for another machine, then point an agent
-at its `SKILL.md` files or optionally run `scripts/install-skills.py`. The GreenBubbles binary is a separate prerequisite;
-the bundle carries no binaries, credentials, chat data, or personal configuration.
+This makes a standalone folder with the three skills, the installer, the
+license, and instructions. Copy or zip it to another Mac, then point an agent at
+a `SKILL.md` or run its `scripts/install-skills.py`. You still need to install
+GreenBubbles itself there. The folder contains no programs, keys, chat data, or
+personal settings.

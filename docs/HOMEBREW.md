@@ -1,115 +1,150 @@
 # CLI releases and Homebrew
 
-## Published release
+This page covers installing the GreenBubbles command-line tool with Homebrew,
+checking a downloaded file, and upgrading. The last section is for maintainers.
 
-[v0.4.0](https://github.com/bojieli/greenbubbles/releases/tag/v0.4.0) is available
-as a research-alpha prerelease for Apple silicon and macOS 14+. Its assets include
-the signed/notarized CLI ZIP, app DMG, checksums, SBOM, and notarization logs.
-The CLI ZIP also includes the portable skills, optional installer, and memory driver.
+You need a Mac with Apple silicon and macOS 14 or later.
 
-The formula in [`Formula/greenbubbles.rb`](../Formula/greenbubbles.rb) pins the
-published CLI ZIP by SHA-256. Compare its hash with the release's `SHA256SUMS`
-asset or [GitHub's release asset listing](https://github.com/bojieli/greenbubbles/releases/expanded_assets/v0.4.0).
+## Install with Homebrew
 
-## Verify a download
+1. Add the GreenBubbles tap and install:
 
-Download the desired archive and `SHA256SUMS-0.4.0.txt` from the same release.
-For the app DMG:
+   ```sh
+   brew tap bojieli/greenbubbles https://github.com/bojieli/greenbubbles.git
+   brew install bojieli/greenbubbles/greenbubbles
+   ```
 
-```sh
-grep ' GreenBubbles-0.4.0-macos-arm64.dmg$' SHA256SUMS-0.4.0.txt | \
-  shasum -a 256 -c -
-xcrun stapler validate GreenBubbles-0.4.0-macos-arm64.dmg
-```
+2. If Homebrew says the formula is untrusted, trust it and run the two commands
+   above again. Older Homebrew versions don't have `brew trust` and don't need
+   this step.
 
-For the standalone CLI ZIP:
+   ```sh
+   brew trust --formula bojieli/greenbubbles/greenbubbles
+   ```
 
-```sh
-grep ' greenbubbles-0.4.0-macos-arm64.zip$' SHA256SUMS-0.4.0.txt | \
-  shasum -a 256 -c -
-```
+The tap command needs the full GitHub URL because this repository is named
+`greenbubbles`, not `homebrew-greenbubbles`. GreenBubbles is not in Homebrew's
+main `homebrew/core` list; the formula lives in this repository's `Formula/`
+folder.
 
-## Tap setup
+### What Homebrew installs
 
-This repository doubles as an upstream tap through its top-level `Formula/`
-directory. No separate repository or cross-repository token is needed.
-This is an upstream tap, not a listing in `homebrew/core`.
+Homebrew installs the prebuilt, signed command-line tools. It does **not**:
 
-Install from the published tap:
+- install the Mac app (download the DMG from
+  [Releases](https://github.com/bojieli/greenbubbles/releases) instead);
+- capture your database key or change WeChat (see the
+  [key setup guide](PASSPHRASE_ACQUISITION.md));
+- register skills with your coding agent.
 
-```sh
-brew tap bojieli/greenbubbles https://github.com/bojieli/greenbubbles.git
-brew install bojieli/greenbubbles/greenbubbles
-```
-
-If Homebrew reports an untrusted formula, explicitly trust this formula and retry
-the tap/install commands:
+The docs and agent skills that come with the release are in
+`$(brew --prefix greenbubbles)/libexec`. You can point your agent at those files
+directly. If you want your agent to find the skills on its own in future
+sessions, you can optionally copy them into its skills folder:
 
 ```sh
-brew trust --formula bojieli/greenbubbles/greenbubbles
-```
-
-Older Homebrew versions without `brew trust` do not need this step.
-
-The explicit remote matters because this repository is named `greenbubbles`,
-not `homebrew-greenbubbles`. Requirements are Apple silicon and macOS 14+.
-The formula installs the prebuilt CLI/tool set and preserves its code signatures.
-It does not install the native app, capture keys, modify WeChat, or register skills.
-Docs and skills included by the selected release are under
-`$(brew --prefix greenbubbles)/libexec`. Point your agent at those files directly.
-If that release contains `scripts/install-skills.py`, automatic discovery remains
-optional:
-
-```sh
+# Replace opencode with codex, claude, kimi, gemini, or grok.
 python3 "$(brew --prefix greenbubbles)/libexec/scripts/install-skills.py" --agent opencode
 ```
 
-After a newer formula is published, use `brew update` and
-`brew upgrade bojieli/greenbubbles/greenbubbles`.
+## Upgrade
 
-## Release automation
-
-The signed release workflow still builds and notarizes the binaries. It now also:
-
-1. Generates `greenbubbles.rb` from the final signed CLI ZIP's SHA-256.
-2. Publishes the formula with the other release assets and includes it in checksums.
-3. Calls the `Update Homebrew` workflow after publishing the release.
-
-The Homebrew job fetches the exact tag's published release, downloads the CLI ZIP
-and checksums, verifies the checksum and GitHub asset digest when supplied, and
-updates only `Formula/greenbubbles.rb` on the default branch through GitHub's
-contents API. An already-current formula is a no-op, older releases cannot
-roll it back, and a changed checksum for the same version is rejected.
-It uses the normal repository `GITHUB_TOKEN` with `contents: write`. If branch
-protection blocks the update, the job fails visibly; it does not bypass protection.
-Maintainers can apply the generated formula through their normal review process.
-
-For an existing published numeric tag, retry just the Homebrew step after these
-files are on the default branch:
+When a new version is published:
 
 ```sh
-gh workflow run homebrew.yml --repo bojieli/greenbubbles -f tag=v0.4.0
+brew update
+brew upgrade bojieli/greenbubbles/greenbubbles
 ```
 
-Or generate a formula locally from a signed archive:
+## Download without Homebrew
+
+Each [GitHub release](https://github.com/bojieli/greenbubbles/releases) is a
+research-alpha prerelease. It includes:
+
+- `GreenBubbles-<version>-macos-arm64.dmg`: the Mac app, signed and notarized
+  by Apple;
+- `greenbubbles-<version>-macos-arm64.zip`: the command-line tools, plus the
+  agent skills, the optional skill installer, and the memory helper;
+- `SHA256SUMS-<version>.txt`: checksums for every file;
+- a software bill of materials (SBOM) and Apple notarization records.
+
+## Check a download
+
+Download the file you want and the `SHA256SUMS` file from the same release. The
+examples below use version 0.6.0; replace it with the version you downloaded.
+
+For the app DMG, check the checksum, then check Apple's notarization:
 
 ```sh
-python3 scripts/homebrew-release.py --version 0.4.0 \
-  --archive /private/path/greenbubbles-0.4.0-macos-arm64.zip \
+grep ' GreenBubbles-0.6.0-macos-arm64.dmg$' SHA256SUMS-0.6.0.txt | \
+  shasum -a 256 -c -
+xcrun stapler validate GreenBubbles-0.6.0-macos-arm64.dmg
+```
+
+For the command-line ZIP:
+
+```sh
+grep ' greenbubbles-0.6.0-macos-arm64.zip$' SHA256SUMS-0.6.0.txt | \
+  shasum -a 256 -c -
+```
+
+`shasum` prints `OK` when the file matches.
+
+The Homebrew formula, [`Formula/greenbubbles.rb`](../Formula/greenbubbles.rb),
+also records the ZIP's SHA-256. You can compare it with the release's
+`SHA256SUMS` file.
+
+## For maintainers: publishing a release
+
+The signed release workflow builds, signs, and notarizes the binaries. Then it:
+
+1. Writes `greenbubbles.rb` using the SHA-256 of the final signed CLI ZIP.
+2. Publishes that formula with the other release files and includes it in the
+   checksums.
+3. Runs the `Update Homebrew` workflow.
+
+The `Update Homebrew` job downloads the release's CLI ZIP and checksums for
+that exact tag, checks them (and GitHub's asset digest when available), and
+updates only `Formula/greenbubbles.rb` on the default branch through GitHub's
+contents API. It uses the repository's normal `GITHUB_TOKEN` with
+`contents: write`. It is safe to rerun:
+
+- If the formula is already current, it does nothing.
+- It never rolls the formula back to an older release.
+- It rejects a different checksum for a version already published.
+- If branch protection blocks the update, the job fails visibly instead of
+  getting around it. Maintainers can then apply the generated formula through
+  normal review.
+
+To rerun only the Homebrew step for an existing tag:
+
+```sh
+gh workflow run homebrew.yml --repo bojieli/greenbubbles -f tag=v0.6.0
+```
+
+To generate a formula on your own machine from a signed archive:
+
+```sh
+python3 scripts/homebrew-release.py --version 0.6.0 \
+  --archive /private/path/greenbubbles-0.6.0-macos-arm64.zip \
   --output /tmp/greenbubbles.rb
 ```
 
-The publisher uses explicit release tags because GitHub's `releases/latest`
-endpoint omits prereleases. It does not move tags or recreate binary releases.
-To publish a new CLI version, use the existing signed release workflow after CI
-passes and the annotated version tag points to the intended source commit.
+The workflow uses explicit tags because GitHub's `releases/latest` ignores
+prereleases. It never moves tags or rebuilds a published release. To publish a
+new version, wait for CI to pass, point an annotated version tag at the right
+commit, and run the signed release workflow.
 
-## Validation
+### Checks before publishing
 
-Run `python3 -m unittest discover -s scripts -p 'test_*.py'`,
-`ruby -c Formula/greenbubbles.rb`, and `actionlint` before publication.
-A network-enabled Mac can then install from the tap and run
-`brew test bojieli/greenbubbles/greenbubbles`. Formula syntax and checksum tests
-alone do not prove a successful download, Gatekeeper assessment, or installation.
+```sh
+python3 -m unittest discover -s scripts -p 'test_*.py'
+ruby -c Formula/greenbubbles.rb
+actionlint
+```
+
+Then, on a Mac with network access, install from the tap and run
+`brew test bojieli/greenbubbles/greenbubbles`. Passing syntax and checksum
+tests doesn't prove that downloading, Gatekeeper, and installation work.
 
 See [Homebrew's tap documentation](https://docs.brew.sh/How-to-Create-and-Maintain-a-Tap).

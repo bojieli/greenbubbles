@@ -1,110 +1,105 @@
 # GreenBubbles documentation
 
-GreenBubbles reads your own WeChat history on your own Mac and releases bounded,
-cited slices of it to tools you approve. The [repository
-README](../README.md) is the introduction; this page is how you find the right
-document next.
+GreenBubbles reads your own WeChat history on your Mac and lets you choose
+which parts, if any, an AI gets to see. Start with the
+[repository README](../README.md). Use this page to find the right guide next.
 
 ## Start here
 
-| If you want to… | Read |
+| I want to… | Read |
 | --- | --- |
-| Install the CLI or verify a download | [CLI releases and Homebrew](HOMEBREW.md) |
-| Use an existing coding agent to maintain Markdown memory | [Portable agent skills](AGENT_SKILLS.md) |
-| Install it and browse your history | [User guide](USER_GUIDE.md) |
-| Understand what it will and will not do before installing | [Known limitations](KNOWN_LIMITATIONS.md) and [threat model](THREAT_MODEL.md) |
-| Fix something that is not working | [FAQ](FAQ.md) |
-| Give an AI access to some of your history | [AI context CLI](AI_CONTEXT_CLI.md), then [AI tool boundary](AI_TOOL_BOUNDARY.md) |
-| Build a knowledge base from live WeChat history | [Personal memory](PERSONAL_MEMORY.md) |
-| Keep a backup that survives losing WeChat | [Recoverable snapshots](RECOVERABLE_SNAPSHOTS.md) |
-| Decide whether to acquire the database key | [Passphrase acquisition](PASSPHRASE_ACQUISITION.md) |
-| Understand the design | [Architecture](ARCHITECTURE.md), then [storage format](STORAGE_FORMAT.md) |
-| Check a claim before believing it | [Measurements](MEASUREMENTS.md) |
-| Compare it with an exporter | [Comparison](COMPARISON.md) |
+| Install the command-line tool or check a download | [CLI releases and Homebrew](HOMEBREW.md) |
+| Set up the key GreenBubbles needs | [Key setup guide](PASSPHRASE_ACQUISITION.md) |
+| Install and browse my history | [User guide](USER_GUIDE.md) |
+| Have my coding agent write notes from my chats | [Agent skills](AGENT_SKILLS.md) |
+| Understand how those notes are organized | [Personal memory](PERSONAL_MEMORY.md) |
+| Give an AI access to only some chats | [AI context CLI](AI_CONTEXT_CLI.md), then [AI tool boundary](AI_TOOL_BOUNDARY.md) |
+| Keep a backup that works without WeChat | [Recoverable snapshots](RECOVERABLE_SNAPSHOTS.md) |
+| Fix something that isn't working | [FAQ](FAQ.md) |
+| Know what it can't do before installing | [Known limitations](KNOWN_LIMITATIONS.md) and [threat model](THREAT_MODEL.md) |
+| Understand how it works | [Architecture](ARCHITECTURE.md), then [storage format](STORAGE_FORMAT.md) |
+| Check a performance claim | [Measurements](MEASUREMENTS.md) |
+| Compare it with WeChat export tools | [Comparison](COMPARISON.md) |
 | Contribute | [Contributing](../CONTRIBUTING.md) |
 
-## Use it
+## Everyday use
 
-- [User guide](USER_GUIDE.md) — first run, choosing a source, browsing live
-  history, creating and reopening snapshots, and what to do when a database
-  will not open.
-- [FAQ](FAQ.md) — the questions people actually ask, including the ones whose
-  answer is "that is a real limitation."
-- [Command-line reference](CLI_REFERENCE.md) — every command family, the access
-  modes, and how secrets reach a process.
-- [Query profiles](QUERY_PROFILES.md) — running repeated queries without
-  retyping a source path or re-entering a key.
-- [History browser](HISTORY_BROWSER.md) — the native macOS app: what it shows,
-  what it stores, and what it deliberately cannot do.
-- [Recoverable snapshots](RECOVERABLE_SNAPSHOTS.md) — the key hierarchy, the 24
-  recovery words, protector rotation, retention, and the recovery drill.
-- [Acquiring your database key](PASSPHRASE_ACQUISITION.md) — capturing the key
-  from your own running client, verifying it, and the failure modes.
+- [User guide](USER_GUIDE.md): first run, finding your WeChat data, browsing,
+  and making and opening backups.
+- [FAQ](FAQ.md): common questions, including the ones where the answer is
+  "that's a real limitation."
+- [Command-line reference](CLI_REFERENCE.md): every command, and how keys are
+  passed to it safely.
+- [Query profiles](QUERY_PROFILES.md): saved settings for reading a second
+  account or a backup without retyping paths and keys.
+- [History browser](HISTORY_BROWSER.md): the Mac app, what it shows and stores,
+  and what it deliberately can't do.
+- [Recoverable snapshots](RECOVERABLE_SNAPSHOTS.md): encrypted backups, the 24
+  recovery words, changing how a backup is unlocked, and testing recovery.
+- [Key setup guide](PASSPHRASE_ACQUISITION.md): copying the database key from
+  your own WeChat app, checking it, and fixing problems.
 
-## Give an AI access
+## Using GreenBubbles with AI
 
-- [Portable agent skills](AGENT_SKILLS.md) — direct use with your current agent,
-  optional discovery, diagnostics, and incremental updates.
+- [Agent skills](AGENT_SKILLS.md): use GreenBubbles from the coding agent you
+  already have (Claude Code, Codex, and others), including keeping notes up to
+  date.
+- [Personal memory](PERSONAL_MEMORY.md): how the agent turns your chats into a
+  set of notes, one article per area of your life.
+- [AI context CLI](AI_CONTEXT_CLI.md): answering one AI request at a time,
+  giving an AI access limited to chats you choose, and the built-in Gemini
+  summarizer.
+- [AI tool boundary](AI_TOOL_BOUNDARY.md): what an AI tool may ask for, and
+  what it can never reach.
+- [AI memory integration](AI_MEMORY_INTEGRATION.md): feeding cited messages into
+  local memory and search systems.
+- [Connector API](CONNECTOR_API.md): the request and response format for
+  programs that integrate with GreenBubbles.
 
-- [AI context CLI](AI_CONTEXT_CLI.md) — the one-shot query surface, the
-  policy-scoped connector, and the static export bundle.
-- [AI tool boundary](AI_TOOL_BOUNDARY.md) — what a tool is permitted to ask
-  for, and what it can never reach.
-- [AI memory integration](AI_MEMORY_INTEGRATION.md) — citation-preserving
-  projections into local memory and retrieval systems.
-- [Personal memory](PERSONAL_MEMORY.md) — a Wikipedia-style knowledge base
-  written from live `messages list` and `messages search` queries.
-- [Connector API](CONNECTOR_API.md) — the versioned local request/response
-  contract, the source connector requirements, and the resumable change
-  consumer.
+## How it works
 
-## Understand the design
+- [Architecture](ARCHITECTURE.md): why GreenBubbles reads WeChat's data in
+  place instead of exporting all of it, with the measurements behind that
+  choice.
+- [Storage format](STORAGE_FORMAT.md): what WeChat 4.1 writes to disk, how much
+  of it GreenBubbles understands, and how gaps are reported.
+- [Restoration specification](RESTORATION_SPEC.md): the full, lossless export
+  format.
+- [Replica specification](REPLICA_SPEC.md) and
+  [replica operations](REPLICA_OPERATIONS.md): an optional encrypted local copy
+  of your history that stays in sync with WeChat.
 
-- [Architecture](ARCHITECTURE.md) — why bounded live queries replaced full
-  restoration, with the measurements that forced the decision.
-- [Storage format](STORAGE_FORMAT.md) — what WeChat 4.1 actually writes to
-  disk, how much of it is understood, and how gaps are reported.
-- [Restoration specification](RESTORATION_SPEC.md) — the lossless archive
-  format and the offline publication pipeline.
-- [Replica specification](REPLICA_SPEC.md) — the encrypted canonical serving
-  replica and its schema history.
-- [Replica operations](REPLICA_OPERATIONS.md) — following a source, and
-  preparing a recovery candidate without cutting over.
-- [Public article fetch](PUBLIC_ARTICLE_FETCH.md) — the narrow boundary around
-  fetching a publicly linked article.
+## Checking and operating
 
-## Verify and operate
+- [Measurements](MEASUREMENTS.md): every performance number, with the machine,
+  date, and method, and what it doesn't prove.
+- [Auditing](AUDITING.md): independently checking exports, replicas, backups,
+  key captures, and the AI access log.
+- [Known limitations](KNOWN_LIMITATIONS.md): everything GreenBubbles doesn't
+  support or hasn't proven yet, in one place.
+- [Operational response plan](OPERATIONAL_RESPONSE_PLAN.md): what to do if a
+  key, a backup, or a Mac is compromised.
+- [Distribution inventory](DISTRIBUTION_INVENTORY.md) and
+  [public release checklist](PUBLIC_RELEASE_CHECKLIST.md): third-party
+  licenses and the checks every release must pass.
 
-- [Measurements](MEASUREMENTS.md) — every performance number in this project,
-  with the machine, the date, the protocol, and what it does not establish.
-- [Auditing](AUDITING.md) — independently verifying an archive, a serving
-  replica, a pre-migration backup, an acquisition chain, and the connector's
-  audit journal.
-- [Known limitations](KNOWN_LIMITATIONS.md) — scope, platform, format,
-  performance and evidence limits, in one place.
-- [Operational response plan](OPERATIONAL_RESPONSE_PLAN.md) — what to do when a
-  key, a snapshot, or a machine is compromised.
-- [Distribution inventory](DISTRIBUTION_INVENTORY.md) · [public release
-  checklist](PUBLIC_RELEASE_CHECKLIST.md) — dependency and licence accounting,
-  and the gates a release has to pass.
+## Safety boundaries
 
-## Boundaries
+- [Threat model](THREAT_MODEL.md): what GreenBubbles protects, from whom, and
+  what it doesn't try to do.
+- [Action safety contract](ACTION_SAFETY_CONTRACT.md): the rules any action
+  visible to other people would have to follow.
+- [Send adapter](SEND_ADAPTER.md): the experimental message-sending code, and
+  why public builds can't send.
 
-- [Threat model](THREAT_MODEL.md) — assets, adversaries, trust boundaries, and
-  explicit non-goals.
-- [Action safety contract](ACTION_SAFETY_CONTRACT.md) — the rules any
-  outward-visible action would have to satisfy.
-- [Send adapter](SEND_ADAPTER.md) — the experimental send path, and why public
-  builds cannot leave dry-run mode.
+## Where it's going
 
-## Where this is going
+- [Roadmap](ROADMAP.md): what's next, and what each step must prove first.
+- [Comparison](COMPARISON.md): how GreenBubbles differs from WeChat export and
+  forensic tools, including when those are the better choice.
 
-- [Roadmap](ROADMAP.md) — what is next and the gate each step must pass.
-- [Comparison](COMPARISON.md) — how GreenBubbles differs from WeChat exporters
-  and forensic tools, including where they are the better choice.
+## Old documents
 
-## Historical record
-
-[`archive/`](archive/) holds superseded plans, feasibility studies and
-development evidence. It is kept for provenance, not as a second documentation
-set — see [its own README](archive/README.md) before citing anything in it.
+[`archive/`](archive/) keeps old plans, feasibility studies, and development
+notes for the record. They may be out of date; read
+[its README](archive/README.md) before relying on anything there.

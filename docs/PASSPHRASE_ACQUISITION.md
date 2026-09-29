@@ -1,219 +1,189 @@
-# Acquiring your database key
+# Getting your database key
 
-WeChat keeps messages, contacts, and session information in local SQLite database
-files. SQLCipher encrypts those files, so filesystem access alone is not enough
-to read them. On the tested clients, one 32-byte account secret (called the
-account key or account passphrase here) supplies the key derivation for the
-account's databases.
+WeChat encrypts the chat databases it keeps on your Mac. To read them,
+GreenBubbles needs your account's key. This page shows how to copy that key
+out of your own running WeChat app. You only do this once.
 
-Each database file has its own salt. Combining that salt with the account secret
-produces a distinct encryption key for the file, covering the tables inside it.
-An account may have dozens of database files and thousands of tables: there is
-not a separate encryption key for each table. See the
-[SQLCipher design](https://www.zetetic.net/sqlcipher/design/) for the underlying
-per-file derivation and page-encryption model.
-
-The helper captures the account secret, derives and verifies the database keys
-locally, and persists only the account secret in a private credential file.
-Queries can then unlock the original encrypted databases without first exporting
-or copying the chat history. This page explains the capture commands, their
-prerequisites, and failure modes.
-
-The [README](../README.md#getting-your-database-key) has the short version if
-you just want to run it.
-
-A few practical notes before you start:
-
-- You need **root** for the capture step, and you will re-sign your own copy of
-  WeChat, which replaces WeChat's original signature until you reinstall it or it
-  auto-updates. Repeat that step after an update.
-- The account key has remained stable on the tested clients. Reuse it while
-  `verify` authenticates the databases you need; do not assume this will hold
-  across every account change or future WeChat release.
-- It is also **long-lived and not rotatable by you** — it decrypts every local
-  database copy you have, including old snapshots. Keep it in an owner-only
-  file, which is what the tool writes by default.
-
-The passive pipeline — discovery, snapshot, restore, replica, connector — never
-uses this mechanism, so nothing about the rest of GreenBubbles changes whether
-or not you run it.
+The [README](../README.md#getting-your-database-key) has the short version.
 
 ![Account key capture and per-database key derivation](../assets/key-flow.svg)
 
-## What actually happens
+## Before you start
 
-WeChat's macOS client derives each database key from a stable 32-byte account
-passphrase **at login**, by calling the exported CommonCrypto symbol
-`CCKeyDerivationPBKDF`. Because the breakpoint targets a *system library*
-symbol rather than anything in the client binary, the mechanism is
-not tied to a fixed client address. `greenbubbles-acquire` does no version, hash
-or signature gating and has been validated on 4.1.12 and 4.1.13. That is not a
-guarantee of compatibility with future clients.
+- **You need administrator access.** The capture step runs with `sudo`.
+- **You will re-sign your copy of WeChat.** This replaces Apple's security
+  signature on WeChat with a local one, so the capture tool is allowed to
+  attach to it. WeChat keeps working normally. When WeChat updates, it gets its
+  original signature back, and you re-sign it again only if you need to capture
+  the key again.
+- **You will log out of WeChat and log back in** during the capture.
+- **The key cannot be changed.** It opens every copy of your WeChat data,
+  including old backups. The tool saves it in a file only your account can
+  read. Keep it that way, and never paste it into an AI prompt, an issue, or a
+  chat.
 
-`greenbubbles-acquire capture`:
+## Steps
 
-1. Attaches `lldb` to the running WeChat process and sets a breakpoint on
-   `CCKeyDerivationPBKDF`, conditioned on the password-length argument being
-   exactly 32.
-2. When you log out and back in, WeChat calls that symbol with the passphrase
-   in argument registers. The breakpoint reads the 32 bytes from the
-   password-pointer argument (`x1` on arm64, `rsi` on x86-64; the length is
-   `x2`/`rdx` and must equal 32), prints a hexdump, and detaches. One
-   register-pointed value is read once. Nothing else in the process is
-   inspected or modified.
-3. For every database in the salt inventory, it derives that database's key
-   locally with PBKDF2-HMAC-SHA512, 256,000 rounds, using the database's own
-   16-byte salt — the first 16 bytes of page 1, read read-only.
-4. Correctness is **proven, not assumed**: each derived key is checked against
-   the SQLCipher4 page-1 HMAC-SHA512 (mac key = PBKDF2 of the derived key over
-   the salt XOR `0x3A`, 2 rounds; HMAC over page-1 bytes 16…4032 plus the
-   little-endian page number). A passphrase that fails page-1 verification is
-   never reported as captured.
+1. **Start WeChat and log in.**
 
-### Why you have to log out and back in
+2. **Check that everything is ready:**
 
-WeChat 4.1+ keeps only the 32-byte account passphrase. The per-database keys
-are derived from it *only while the account's databases are being opened*,
-which happens at login. Afterwards the passphrase may still exist somewhere in
-the process, but it never again crosses the exported symbol — and that crossing
-is the one moment a breakpoint on a system function can observe.
+   ```sh
+   greenbubbles-acquire preflight
+   ```
 
-So the capture stages itself around a fresh derivation: log in first (so a
-process exists to attach to and something to verify against), arm the
-breakpoint, then log out and back in. The passphrase crosses exactly once, the
-debugger reads it and immediately detaches. Nothing is injected or persistently
-hooked.
+   It prints a checklist and says `Ready to capture.` when nothing is missing.
+   If something is wrong, it prints how to fix it. Common fixes:
 
-On 4.1.13, logging out makes the main process exit and logging back in starts a
-*new* process with a new PID. `capture` detects the target exit and re-arms on
-the new process automatically, so a logout that used to stall the capture now
-succeeds.
+   - `lldb is not available`: install Apple's developer tools with
+     `xcode-select --install`.
+   - `Hardened Runtime is still active`: re-sign WeChat (next step).
+   - `not running as root`: expected for this check. The capture itself runs
+     with `sudo`.
 
-## Commands
+3. **Re-sign WeChat, then quit and restart it.** Run this yourself;
+   GreenBubbles never runs it for you:
 
-```sh
-greenbubbles-acquire preflight
-greenbubbles-acquire capture [--output <path>] [--timeout-seconds 300] \
-  [--db-root <path>] [--overwrite]
-greenbubbles-acquire verify --passphrase-stdin [--db-root <path>]
-```
+   ```sh
+   sudo codesign --force --deep --sign - /Applications/WeChat.app
+   ```
 
-**`preflight`** prints a checklist (`--json` for machine output) and exits
-non-zero when blocked: WeChat process presence, hardening status, `lldb`
-availability, root privileges, and the discovered salt count. The active
-account's database root is discovered automatically — the account whose
-databases were most recently written — and `--db-root` overrides it. Client
-version and signing state are reported for information only and never gate the
-capture. When the client still needs re-signing, the report prints the exact
-command *for you to run*; the tool never runs it.
+4. **Start the capture:**
 
-**`capture`** re-runs preflight, fails closed, then waits for your logout and
-re-login up to the timeout (default 300 seconds). It derives and HMAC-verifies
-before writing anything. With no options it writes to
-`~/.greenbubbles-acquire/passphrase.txt`.
+   ```sh
+   sudo greenbubbles-acquire capture
+   ```
 
-**`verify`** re-derives and re-verifies a stored passphrase from standard
-input, with no process attachment at all. Databases WeChat creates *after* the
-capture are covered by this re-derivation — the account passphrase is stable,
-so a new capture is not needed for them.
+5. **In WeChat, log out of your account (don't just quit the app), then log
+   back in.** You have 5 minutes by default.
 
-### Where the key goes
-
-The persisted credential is the account secret, not a collection of derived
-keys. The capture verifier derives each database encryption key in memory and
-zeroizes it after verification. The account secret is written only to the
-`--output` file, as 64 lowercase hex characters plus a newline,
-mode `0600` in a mode-`0700` parent, with no silent overwrite (`--overwrite`
-is required to replace one). It never appears on a command line, in a JSON
-report, or in a log.
-
-This is a plaintext secret file protected by filesystem permissions; it is not
-itself encrypted. Ordinary live commands read this default file directly, so
-no query profile is required:
+When the login finishes, the tool checks the key against your databases and
+saves it to `~/.greenbubbles-acquire/passphrase.txt`. Now you can run ordinary
+commands with no extra setup:
 
 ```sh
 greenbubbles chats --limit 20
 ```
 
-A [query profile](QUERY_PROFILES.md) can reference another credential file for
-a second account or a snapshot. Explicit access still accepts the key through
-standard input:
+## Command options
+
+```sh
+greenbubbles-acquire preflight [--json] [--db-root <path>]
+greenbubbles-acquire capture [--output <path>] [--timeout-seconds 300] \
+  [--db-root <path>] [--overwrite]
+greenbubbles-acquire verify --passphrase-stdin [--db-root <path>]
+```
+
+- **`preflight`** checks that WeChat is installed and running, whether it has
+  been re-signed, whether `lldb` is available, whether you are root, and how
+  many databases it found. It exits with an error if anything blocks the
+  capture. `--json` prints the report as JSON.
+- **`capture`** runs the same checks, then waits for you to log out and back
+  in. `--timeout-seconds` changes the 300-second wait. `--output` saves the key
+  somewhere other than `~/.greenbubbles-acquire/passphrase.txt`. It never
+  replaces an existing key file unless you add `--overwrite`.
+- **`verify`** checks a saved key against your databases without touching
+  WeChat. Pipe the key file into it. Use it after WeChat creates new database
+  files; the same key opens them, so you don't need to capture again.
+- **`--db-root`** points at a specific WeChat data folder. Normally the tool
+  picks the account whose data was written most recently.
+
+The WeChat version is shown for information only. The tool does not refuse a
+version it hasn't seen, but it has only been tested on WeChat 4.1.12 and 4.1.13.
+
+## If something goes wrong
+
+The capture never saves a key it could not verify. If anything fails, you are
+left with no key file rather than a wrong one.
+
+- **"Hardened Runtime is still active":** you haven't re-signed WeChat, or you
+  didn't restart it after re-signing. macOS blocks the attach.
+- **Timed out:** you didn't log out and back in within the time limit. Run
+  `capture` again. An idle, logged-in WeChat never reveals the key.
+- **Verification failed:** the captured value didn't open your databases, so
+  nothing was saved. Check that you logged back into the same account.
+- **WeChat updated:** re-sign it and restart it before capturing again. A key
+  you already saved keeps working as long as `verify` succeeds.
+
+## Where the key is saved
+
+The key is saved as 64 hexadecimal characters in
+`~/.greenbubbles-acquire/passphrase.txt`. The file can be read only by your
+account (mode `0600`, in a `0700` folder). It is not encrypted; those file
+permissions are what protect it. The key never appears on the command line, in
+a report, or in a log.
+
+To use a key saved somewhere else, or to read a second account or a backup,
+create a [query profile](QUERY_PROFILES.md). You can also pipe a key directly
+into a command:
 
 ```sh
 cat <passphrase-file> | greenbubbles conversations list \
   <db_storage-directory> --passphrase-stdin --limit 20
 ```
 
-## What you have to do yourself
+If you think the key has leaked, see
+[OPERATIONAL_RESPONSE_PLAN.md](OPERATIONAL_RESPONSE_PLAN.md). Because the key
+can't be changed, the response is about finding and removing copies.
 
-**Root, for the capture step.** Attaching with `lldb` needs `task_for_pid`,
-which the sandbox denies to non-root callers.
+## How it works
 
-**A one-time ad-hoc re-sign of the client, in your own sudo session:**
+You don't need this section to use GreenBubbles.
 
-```sh
-sudo codesign --force --deep --sign - /Applications/WeChat.app
-```
+WeChat uses SQLCipher to encrypt each database file. Your account has one
+32-byte key. For each file, WeChat combines that key with a random value stored
+at the start of the file (the salt) to make the file's own encryption key. So
+there is one account key, not one key per file or table. See the
+[SQLCipher design](https://www.zetetic.net/sqlcipher/design/).
 
-then restart WeChat. This strips the Hardened Runtime flag that would otherwise
-cause the attach to be refused. `greenbubbles-acquire` never automates
-`codesign` and never invokes sudo itself — modifying your client's security
-controls stays an explicit, visible action you take.
+WeChat makes those per-file keys only while it opens its databases, which
+happens when you log in. It does this by calling a macOS system function,
+`CCKeyDerivationPBKDF`. That is the one moment the account key can be seen, and
+it is why you have to log out and back in.
 
-**A logout and re-login inside the capture window.** An idle logged-in client
-never exposes the passphrase.
+`greenbubbles-acquire capture` does this:
 
-## Failure modes
+1. Attaches Apple's `lldb` debugger to WeChat and pauses on
+   `CCKeyDerivationPBKDF` only when the password passed to it is exactly 32
+   bytes long.
+2. When you log back in, it reads those 32 bytes once (from register `x1` on
+   Apple silicon, `rsi` on Intel), then detaches. It reads nothing else and
+   changes nothing in WeChat. Because it pauses on a macOS function rather than
+   on WeChat's own code, it does not depend on a particular WeChat version.
+3. On WeChat 4.1.13, logging out ends the WeChat process and logging in starts
+   a new one. The tool notices and follows the new process.
+4. For each database file, it computes the file's key on your Mac
+   (PBKDF2-HMAC-SHA512, 256,000 rounds, with that file's 16-byte salt).
+5. It proves each computed key is correct by checking SQLCipher 4's
+   authentication code on the file's first page. A key that fails this check is
+   never saved.
 
-All fail closed, and all leave you with nothing rather than something
-unverified:
+Only the account key is saved. The per-file keys exist in memory only during
+the check and are then erased.
 
-- An unknown or unpinned client build refuses before any attach.
-- If the Hardened Runtime flag is still present — you have not re-signed — the
-  kernel refuses the attach and no capture is attempted.
-- If the timeout expires with no logout and re-login, nothing is captured and
-  no output file is written.
-- If page-1 HMAC verification fails, the value is not written as valid.
+GreenBubbles features that don't read live WeChat data, such as opening an
+existing backup, never use this capture.
 
-## Keeping it out of everything
+## What has been tested
 
-The captured passphrase decrypts every local database copy you have, forever.
-The `0600`/`0700` boundary, the no-logging rule, and the secret-hygiene checks
-(`scripts/check-secret-hygiene.swift`, the `scripts/git-hooks` pre-commit hook,
-and the CI step) exist to keep it out of the repository and out of transcripts.
+- **2026-08-27, WeChat 4.1.12:** a test with made-up data reproduced the read
+  and key computation exactly. Then a real capture on the author's own Mac and
+  account verified all 25 databases. A database WeChat created later was
+  verified with `verify` using the same key, without a second capture.
+- **2026-08-28, WeChat 4.1.13:** after WeChat auto-updated and was re-signed, a
+  capture verified all 26 databases in 45 seconds. Logging out ended the WeChat
+  process and logging in started a new one; the capture followed it.
 
-Never paste it into a model prompt, an issue, a commit or a chat. If you think
-it may have leaked, see
-[OPERATIONAL_RESPONSE_PLAN.md](OPERATIONAL_RESPONSE_PLAN.md) — and note that
-you cannot rotate it, which is why the response is about containing copies.
+That is two successful runs on one Mac and one account. It is not a promise
+that it will work on your Mac, your WeChat version, or your account.
 
-## What has actually been run
+## Credits
 
-**2026-08-27.** A synthetic CommonCrypto test reproduced the register read and
-PBKDF2 derivation byte-exactly before any live use. A live capture on the
-author's own machine and account, on the pinned 4.1.12 build, verified 25 of 25
-databases present at capture time by SQLCipher4 page-1 HMAC. One database
-created later (`third_app_icon.db`) was covered by re-derivation with the same
-passphrase via `verify`, bringing it to 26 of 26 without a second capture.
-
-**2026-08-28.** A live capture on 4.1.13 — the client had auto-updated and been
-re-signed — verified 26 of 26 databases in 45 seconds. This run observed the
-logout terminating the main process (PID 64330 exiting) and the login spawning
-a replacement (PID 65614); target-exit detection carried the capture through to
-the new process.
-
-Two successful runs on one machine and one account. That is what the evidence
-is, and it is not a claim that this works on your build, your hardware, or your
-account.
-
-## Where this came from
-
-The capture and derivation mechanism is ported from the MIT-licensed
+The capture method is ported from the MIT-licensed
 [`TANGandXUE/wcdb-key-tool`](https://github.com/TANGandXUE/wcdb-key-tool),
-which itself credits kkocdko, wxchat-export and ylytdeng/wechat-decrypt. See
-[NOTICE.md](../NOTICE.md). GreenBubbles does not download, run or automate that
-tool; only the mechanism is reimplemented as the gated path above.
+which credits kkocdko, wxchat-export, and ylytdeng/wechat-decrypt. See
+[NOTICE.md](../NOTICE.md). GreenBubbles does not download or run that tool; it
+reimplements the method.
 
-The survey of how comparable projects obtain the same key, and why this route
-was chosen, is archived in
+How other projects get the same key, and why this method was chosen, is in
 [`archive/ACQUISITION_FEASIBILITY.md`](archive/ACQUISITION_FEASIBILITY.md).

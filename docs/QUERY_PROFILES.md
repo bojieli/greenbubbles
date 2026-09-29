@@ -1,18 +1,26 @@
 # Query profiles
 
-Ordinary live queries do not need a profile. With no profile file, no source
-path, and no access flag, GreenBubbles opens the newest installed WeChat
-`db_storage` directory and reads the account key from
-`~/.greenbubbles-acquire/passphrase.txt`, the file
-`greenbubbles-acquire capture` already writes.
+**Most people don't need this page.** After you
+[capture your key](PASSPHRASE_ACQUISITION.md), commands work with no setup:
+they find your WeChat data on their own and read the key from
+`~/.greenbubbles-acquire/passphrase.txt`.
 
 ```sh
 greenbubbles chats
 greenbubbles messages list --conversation <id>
 ```
 
-A different database or passphrase file goes in `~/.greenbubbles/config.toml`,
-the same kind of settings file a coding agent uses. It stores paths only:
+Read on if you want to:
+
+- use a key file saved somewhere else, or pick which WeChat account to read
+  ([change the defaults](#change-the-defaults));
+- read a second WeChat account or a backup by name
+  ([named profiles](#named-profiles)).
+
+## Change the defaults
+
+Put simple settings in `~/.greenbubbles/config.toml`. It holds file paths only,
+never a key:
 
 ```toml
 [source]
@@ -23,89 +31,85 @@ passphrase_file = "/absolute/path/to/passphrase.txt"
 format = "brief"
 ```
 
-`root` overrides the newest installed WeChat database. `passphrase_file`
-overrides `~/.greenbubbles-acquire/passphrase.txt`. Leave either line out to
-keep that default. `output.format` is `brief` or `json`. Brief is the default
-reading page for `messages list`, `messages search`, and `chats rank`. `json`
-is the full envelope. `--json` and `--brief` override the file for one command. To use a
-saved snapshot by default, set `profile.default = "archive"` and leave
-`[source]` empty.
+- **`root`**: which WeChat data folder to read. Leave it out to use the account
+  WeChat wrote to most recently. If two accounts were both used in the last 14
+  days, GreenBubbles won't guess; it asks you to set `root`.
+- **`passphrase_file`**: where your key is. Leave it out to use
+  `~/.greenbubbles-acquire/passphrase.txt`.
+- **`format`**: `brief` (the default, one line per message) or `json` (full
+  details). `--brief` or `--json` on a command overrides it for that command.
 
-A profile is for a second account or a snapshot. It stores which source and
-which credential file unlock it, so those commands stay short too:
+To make a named profile (below) the default instead, leave `[source]` out and
+add:
+
+```toml
+[profile]
+default = "archive"
+```
+
+## Named profiles
+
+A named profile remembers a data folder and the file that unlocks it, so you
+can read a second account or a backup without typing paths each time:
 
 ```sh
-greenbubbles source status
-greenbubbles conversations list
-greenbubbles messages list --conversation <id>
-greenbubbles messages search --query-stdin
 greenbubbles conversations list --profile archive
 ```
 
-The explicit form still works, for scripts and one-off sources:
+Profiles live in `~/.greenbubbles/query-profiles.json`. Run
+`greenbubbles profile path` to print the exact location. (You can point the
+`GREENBUBBLES_QUERY_PROFILES_FILE` environment variable at another absolute
+path; the same permission checks apply.)
 
-```sh
-greenbubbles conversations list <source-root> --decrypted
-cat <private-key-file> | greenbubbles conversations list \
-  <source-root> --passphrase-stdin
-```
+**Once `query-profiles.json` exists, commands without `--profile` use its
+`defaultProfile`,** and the `[source]` settings in `config.toml` are ignored.
 
-Profiles affect only the bounded query commands — `source status`,
-`conversations list`, `messages list`, `messages search` and `message get`.
-They change nothing about restoration, snapshot creation, or anything that
-writes.
+The profile file stores paths to credential files, never a key, passphrase, or
+recovery phrase itself. So you can open and read it safely, and you can replace
+a credential file without editing it.
 
-## Settings and secrets stay separate
+### Set one up
 
-The default file is `~/.greenbubbles/query-profiles.json`
-(`greenbubbles profile path` prints the effective location; an advanced
-installation can point `GREENBUBBLES_QUERY_PROFILES_FILE` at another absolute
-path, still subject to every ownership and permission check).
+1. Create private folders:
 
-**The configuration stores paths and credential-file references. It never
-stores a raw WeChat key, a raw snapshot key, a passphrase, or recovery words.**
-That split is what lets you inspect the configuration freely and rotate a
-credential without touching it.
+   ```sh
+   install -d -m 700 "$HOME/.greenbubbles"
+   install -d -m 700 "$HOME/.greenbubbles/credentials"
+   ```
 
-## Set it up
+2. Write a starting template and open it in your editor. **This overwrites the
+   file**, so skip it if you already have one you want to keep.
 
-Owner-only directories first:
+   ```sh
+   umask 077
+   greenbubbles profile template > "$HOME/.greenbubbles/query-profiles.json"
+   chmod 600 "$HOME/.greenbubbles/query-profiles.json"
+   ${EDITOR:-vi} "$HOME/.greenbubbles/query-profiles.json"
+   ```
 
-```sh
-install -d -m 700 "$HOME/.greenbubbles"
-install -d -m 700 "$HOME/.greenbubbles/credentials"
-```
+3. If the profile needs a key or passphrase you typed yourself, create an
+   empty private file and type it in with your editor. That way the secret
+   never appears on the command line or in your shell history.
 
-Emit the strict template under a private umask, then edit only the placeholders
-you need:
+   ```sh
+   install -m 600 /dev/null "$HOME/.greenbubbles/credentials/wechat-database-key"
+   ${EDITOR:-vi} "$HOME/.greenbubbles/credentials/wechat-database-key"
+   ```
 
-```sh
-umask 077
-greenbubbles profile template > "$HOME/.greenbubbles/query-profiles.json"
-chmod 600 "$HOME/.greenbubbles/query-profiles.json"
-${EDITOR:-vi} "$HOME/.greenbubbles/query-profiles.json"
-```
+   A WeChat key file holds one 64-character hex value (or exactly 32 raw
+   bytes). A passphrase file holds one line of 12 to 1,024 bytes. Recovery-kit
+   and local-credential files are created by the backup commands; don't write
+   those by hand.
 
-Do not run that redirection over a configuration you want to keep — use
-`profile show`, `profile list`, or your editor on an existing file.
+4. Check that it works:
 
-For a live key or a snapshot passphrase, create an empty private file and type
-the value into it with an editor. This is the point: the value never becomes a
-process argument or a shell-history line.
+   ```sh
+   greenbubbles profile validate
+   ```
 
-```sh
-install -m 600 /dev/null "$HOME/.greenbubbles/credentials/wechat-database-key"
-${EDITOR:-vi} "$HOME/.greenbubbles/credentials/wechat-database-key"
-```
+### Example file
 
-A live-key file holds one 64-character hex value or exactly 32 raw bytes, with
-an optional trailing newline. A passphrase file holds one UTF-8 line of
-12–1,024 bytes. Recovery-kit and local-credential files are created by the
-snapshot commands — do not hand-write their formats.
-
-## The file
-
-Live WeChat as the default, plus a snapshot named `archive`:
+Live WeChat as the default, plus a backup named `archive`:
 
 ```json
 {
@@ -131,44 +135,44 @@ Live WeChat as the default, plus a snapshot named `archive`:
 }
 ```
 
-Every `sourceRoot` and `credentialFile` must be absolute. Profile names are up
-to 64 ASCII letters, digits, periods, underscores or hyphens. Unknown JSON
-fields and unsupported schema versions are rejected rather than ignored.
+- `sourceRoot` and `credentialFile` must be full paths starting with `/`.
+- Profile names can be up to 64 characters: letters, digits, `.`, `_`, `-`.
+- Unknown fields are rejected, so a typo produces an error instead of being
+  silently ignored.
 
-| `mode` | Credential | For |
+`mode` says what kind of data the profile opens and what unlocks it:
+
+| `mode` | Unlocked by | Use it for |
 | --- | --- | --- |
-| `liveWeChatKeyFile` | file holding the 32-byte WeChat key | live encrypted `db_storage` |
-| `snapshotLocalCredential` | local-credential file | a snapshot on this installation |
-| `snapshotRecoveryKit` | 24-word recovery-kit file | portable recovery, or a drill |
-| `snapshotPassphraseFile` | one-line passphrase file | a snapshot with an Argon2id protector |
-| `snapshotRawKeyFile` | 32-byte key file | legacy format-1 snapshots only |
-| `decrypted` | none | an explicitly plaintext source |
+| `liveWeChatKeyFile` | a file holding your WeChat key | live WeChat data |
+| `snapshotLocalCredential` | the local credential file made with the backup | a backup, on the Mac that made it |
+| `snapshotRecoveryKit` | the 24-word recovery-kit file | a backup on another Mac, or a restore test |
+| `snapshotPassphraseFile` | a file holding the backup's passphrase | a backup you protected with a passphrase |
+| `snapshotRawKeyFile` | a 32-byte key file | old format-1 backups only |
+| `decrypted` | nothing | data that is already unencrypted |
 
-For routine snapshot access use `snapshotLocalCredential`, and keep the
-portable recovery kit somewhere else — losing this Mac should not cost you the
-backup.
+For everyday access to a backup, use `snapshotLocalCredential`, and keep the
+recovery kit somewhere else. If you lose this Mac, you shouldn't lose the
+backup too.
 
-## Inspect and validate
+### Manage profiles
 
-None of these print credential contents:
+None of these commands print the contents of a credential file:
 
 ```sh
-greenbubbles profile list
-greenbubbles profile show live
-greenbubbles profile validate
-greenbubbles profile validate archive
-greenbubbles profile set-default archive
+greenbubbles profile list                 # list profiles
+greenbubbles profile show live            # show one profile's settings
+greenbubbles profile validate             # test the default profile
+greenbubbles profile validate archive     # test a named profile
+greenbubbles profile set-default archive  # change the default
 ```
 
-`profile validate` actually loads the credential, opens the required databases
-read-only, and returns content-free counts and byte totals — so it tells you
-the profile works, not merely that it parses. `set-default` atomically rewrites
-the configuration with mode `0600` and touches no source or credential file.
+`profile validate` really unlocks and opens the data (read-only) and reports
+counts, so a pass means the profile works, not just that the file is valid.
 
-## Query with one
+### Use a profile
 
-Omit source and access arguments to use `defaultProfile`, or name another with
-`--profile`:
+Leave out `--profile` to use the default, or name one:
 
 ```sh
 greenbubbles conversations list --limit 100
@@ -176,31 +180,43 @@ greenbubbles messages list --conversation <conversation-id> --limit 100
 greenbubbles source status --profile archive
 ```
 
-For search, stdin carries only the query text, because the credential comes
-from its own file:
+For search, type or pipe only the search text; the key comes from the profile:
 
 ```sh
 greenbubbles messages search --profile archive --query-stdin --limit 50 \
   < <owner-only-query-file>
 ```
 
-**Ambiguous combinations are rejected on purpose.** `--profile` cannot be
-combined with a positional source root, and explicit access flags cannot be
-used without an explicit source root. One typo should not query the wrong live
-or archived database.
+Profiles apply only to reading commands: `source status`, `conversations list`,
+`messages list`, `messages search`, and `message get`. They don't affect
+creating or restoring backups, or anything else that writes.
 
-## Permissions
+## Without a profile
 
-The configuration and every credential file must be owned by you, a regular
-file with exactly one hard link, inaccessible to group and other (normally
-`0600`), inside a current-user-owned directory that is also inaccessible to
-group and other (normally `0700`), a real path rather than a symlink, and
-within its fixed size limit.
+For scripts or a one-off folder, give the path and access method directly:
 
-A failure returns a stable `invalidProfile` JSON error that prints no source
-path, key, passphrase or credential content. Management commands may show
-configured **paths**, but never read a secret into their output.
+```sh
+greenbubbles conversations list <source-root> --decrypted
+cat <private-key-file> | greenbubbles conversations list \
+  <source-root> --passphrase-stdin
+```
 
-Treat `query-profiles.json` as private even though it holds no secret: its
-paths say where your personal history and your unlock material live. Do not
-commit it, or any credential file, to version control.
+GreenBubbles refuses mixtures that could read the wrong data by mistake:
+`--profile` can't be combined with a folder path, and access options like
+`--passphrase-stdin` need a folder path.
+
+## File permissions
+
+The profile file and every credential file must:
+
+- be owned by you and be a regular file (not a symbolic link, one hard link);
+- be readable only by you (normally mode `0600`);
+- sit in a folder owned by you that only you can open (normally `0700`);
+- stay under a size limit.
+
+If a check fails, the command returns an `invalidProfile` error that never
+includes a path, key, or credential contents.
+
+Keep `query-profiles.json` private even though it holds no secret: its paths
+show where your history and your keys are. Never commit it, or any credential
+file, to version control.

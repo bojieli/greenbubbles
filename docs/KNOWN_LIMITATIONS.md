@@ -1,184 +1,156 @@
 # Known limitations
 
-Everything on this page is a real constraint, not a caveat added for form. Read
-it before deciding this belongs on your machine. Where a limitation has a
-number attached, the number is in [MEASUREMENTS.md](MEASUREMENTS.md).
+Everything here is a real limit. Read it before deciding whether GreenBubbles
+belongs on your Mac. Where a limit has a number, the measurement is in
+[MEASUREMENTS.md](MEASUREMENTS.md).
 
-## The ones that decide whether this is for you
+## Check these before you install
 
-**Getting the database key needs root and re-signing your own WeChat.**
-GreenBubbles cannot open encrypted history without the matching 32-byte key,
-and it contains no decryption bypass. The bundled helper captures it from your
-own running client, which requires root for the debugger attach and an ad-hoc
-re-sign that replaces WeChat's original signature until you reinstall or it
-auto-updates. Its prerequisites and compatibility limits are documented in
-[PASSPHRASE_ACQUISITION.md](PASSPHRASE_ACQUISITION.md) — but if you cannot run
-as root on this machine, you cannot complete setup.
+**You need administrator access, and you must re-sign WeChat.** GreenBubbles
+can't read your chats without your account's key, and it has no way around the
+encryption. It copies the key from your own running WeChat, which needs `sudo`
+and a local re-signing of the WeChat app. If you can't use `sudo` on this Mac,
+you can't finish setup. See the [key setup guide](PASSPHRASE_ACQUISITION.md).
 
-**macOS only, Apple silicon only in released form.** macOS 14 or later. The
-published binaries are arm64; Intel is unbuilt and unverified. There is no
-Windows, Linux, Android or iOS support and none is planned.
+**macOS 14 or later, on Apple silicon.** Released builds are Apple silicon only;
+Intel Macs aren't built or tested. There's no Windows, Linux, Android, or iOS
+version, and none is planned.
 
-**WeChat 4.1+ only, and the format is closed.** The compatibility profile
-tracks a signed, current client. An update can change decoding at any time.
-Unknown or partially readable data is reported as a limitation and the
-completion verdict stays false — but "reported as a gap" still means you did
-not get that message.
+**WeChat 4.1 or later only, and its format is private.** A WeChat update can
+change how data is stored at any time. When GreenBubbles meets data it can't
+read, it tells you and marks the results incomplete, but you still don't get
+that message.
 
-**This is a research alpha.** It is for technical users who can read a JSON
-envelope and decide whether its coverage claims are good enough for what they
-are doing.
+**This is a research alpha.** It's for technical users who are comfortable
+reading JSON output and judging whether "complete" and "incomplete" markers
+are good enough for what they need.
 
-## Evidence that does not exist
+## Everyday limits
 
-**The 60-second latency objective has never been measured.** The goal — text
-newly persisted by WeChat becomes searchable within 60 seconds at p95, on a
-real account — has no supporting run. The tooling deliberately refuses to
-assemble one from the partial evidence it can produce: every latency sample
-sets `fullEndToEndObjectiveProven` to `false`, and accumulating samples cannot
-change it.
+**Search can be slow.** When WeChat's own search index can't be used,
+GreenBubbles searches the most recent 500 messages directly: about a quarter of
+a second for one chat, about a third of a second across 16. That's the price of
+not keeping a second copy of your messages on disk.
 
-**No performance number comes from a live account under load.** Every timing is
-a synthetic benchmark or a bounded local sample on one M2 Max. Static corpus
-sizes are real; nothing that moves has been measured against a real client
-writing to the databases concurrently.
+**Results from several databases aren't taken at one instant.** WeChat splits
+your history across several database files, and GreenBubbles reads them one
+after another. The output says `crossDatabaseAtomic: false` to be honest about
+this. For a view that never changes between pages, read a
+[backup](RECOVERABLE_SNAPSHOTS.md) instead of live data.
 
-**Restoration completeness is proven per archive, not in general.** The auditor
-proves an archive is internally consistent and its recorded media files still
-exist. It cannot prove an undiscovered WeChat table was absent, that a private
-field's semantics were interpreted correctly, or that synthetic nested-tag
-fixtures cover every real merged-message or Finder variant. Closing that needs
-one real compatible-version corpus with zero unhandled tables and an explicit
-state for every media reference, which does not exist yet.
+**Some names may not show.** GreenBubbles looks up up to 500 contact names per
+command. If it can't find a name, it shows the raw ID (like `wxid_…`) and says
+`contactDisplayNameUnresolved` or `contactEnrichmentUnavailable`. The messages
+still appear.
 
-**The snapshot protector has not had an external cryptographic review.** The
-construction uses standard maintained primitives — BIP-39 entropy, HKDF-SHA-256,
-Argon2id, XChaCha20-Poly1305 — and invents nothing. It has still not been
-reviewed by anyone outside this project.
+**Finding videos and documents is best-effort.** GreenBubbles checks WeChat's
+file index first, then searches the chat's folders by file fingerprint (and,
+for documents, by file name). A file you renamed or moved may not be found.
 
-## Things that work, with edges
+**A backup doesn't include photos, videos, or documents.** It holds WeChat's
+databases, including voice messages stored inside them, but not image, video,
+or document files stored separately.
 
-**Search is slow when WeChat's own index cannot be used.** The zero-write
-fallback decrypts a fixed 500-message window: ~246 ms p95 for one conversation,
-~352 ms p95 across 16. That is the deliberate trade against writing a second
-encrypted copy of your messages to disk.
+**Old backups are never deleted automatically, so they keep using disk space.**
+When you retire a backup, it's moved to a quarantine folder. Deleting it for
+good is a separate step you take yourself, and it can't be undone.
 
-**A page across shards is not one atomic instant.** WeChat splits history
-across databases, so a message page touching four of them is four statements.
-Responses report `crossDatabaseAtomic: false` rather than pretending otherwise.
-If you need a stable multi-page or cross-database view, query a snapshot
-generation instead of the live source.
+## Limits of AI-written notes
 
-**Contact names can fail to resolve.** Enrichment reads at most 500 unique IDs
-per request from `contact.db`. Missing rows or an incompatible contact schema
-emit `contactDisplayNameUnresolved` or `contactEnrichmentUnavailable`, keep the
-raw identifier, and mark enrichment incomplete. They never fail the message
-read.
+**AI summaries can be wrong.** The built-in summarizer
+(`ai-summarize-direct`) checks that each summary cites real messages from
+allowed chats, but a correct citation doesn't prove the sentence is a faithful
+reading. Gemini can give different results on different runs, so review what
+it writes. Each run writes a new, separate summary; merging runs or resolving
+conflicts between them isn't built.
 
-**Video and document lookup is heuristic.** It consults `hardlink.db` first,
-then falls back to a fixed-depth conversation-scoped filesystem scan using the
-decoded MD5 and, for documents, a title basename. A renamed or moved file may
-not be found.
+**Personal-memory notes are also the agent's interpretation.** The personal
+memory workflow can give the agent every message in your history, but that
+proves only that the agent read them all, not that its notes captured
+everything correctly. Things to know:
 
-**A database-only snapshot does not contain your media.** It can resolve
-database-resident voice payloads. It does not claim to hold external image,
-video or document files unless a future snapshot format inventories them
-explicitly.
+- Long messages are cut at a size limit and marked `tr=true`. Attachments are
+  shown as short descriptions, not their full contents.
+- Some message tables can't be matched to a chat. The coverage report then
+  says `rowCoverageComplete: true` but `sourceCoverageComplete: false`, and
+  lists `unmatchedMessageTable`.
+- Messages GreenBubbles can't decode are listed as coverage failures.
+- Collections prepared with the older version 1 format include only chats where
+  you were active, so they can't show that your whole history was reviewed.
 
-**Audit chains are tamper-evident, not signed.** The connector journal hashes
-each event with its predecessor's digest. That detects editing, reordering,
-insertion and removal when a retained successor remains. It cannot detect a
-cleanly removed final suffix without an external anchor, or defeat an owner who
-rewrites the whole journal and recomputes every unkeyed hash. Real action
-accountability would need independent signing or anchoring, which is not built.
+Always review the notes and the coverage report.
 
-**Generated memory is an inference, not a canonical record.**
-`ai-summarize-direct` validates account attribution, citation aliases,
-conversation scope, response structure and bounded coverage, but a supported
-citation does not mechanically prove that every nuance of a model-written
-sentence is faithful. Gemini output can vary across runs and still needs human
-review. Each run creates a new immutable generation; automatic semantic merge,
-conflict resolution and promotion of an older inferred wiki are not built.
+**The agent updates notes one step at a time, and nothing checks its
+judgment.** Each run asks the agent to compare new facts with your existing
+notes and edit them. Nothing proves it filed a fact in the right place, noticed
+a contradiction, or avoided writing the same fact twice in different words.
+`git diff` and the format's tests help you review, but they aren't proof.
+Python rules run reliably, but only on what the agent chose to record. The
+Markdown format has no runnable rules; its alerts are just notes. Only one
+agent works on a notes project at a time (`tick` limits `--parallel` to 1),
+because agents running together overwrote each other's edits.
 
-**A canonical personal-memory corpus can cover every eligible message, but what
-the agent writes from it is still an inference.** A v2 `allMessages` preparation
-no longer omits inactive months or silent sessions. It scans every inventoried
-hashed message table, including tables whose conversation identity cannot be
-reversed; `rowCoverageComplete` can therefore be true while
-`sourceCoverageComplete` is false and `unmatchedMessageTable` remains reported.
-Rows with undecodable metadata or content remain explicit coverage failures.
-Per-message text still obeys `maximumMessageTextBytes`, attachments and
-unsupported payloads are represented by compact summaries rather than every
-source byte, and `tr=true` marks text that reached that bound. A completed
-unfiltered scope proves that the agent reviewed every hydrated corpus message,
-not that the wiki or the UserAsCode project it wrote captured every nuance.
-Citation checks cannot prove semantic faithfulness, so human review and the
-coverage report remain required. Legacy v1 corpora keep the old selective
-account-holder-active behavior and cannot establish whole-database review.
+**Preparing messages can't pause and resume.** If `memory prepare` is
+interrupted, nothing half-finished is saved; run it again from the start. After
+preparation, reading pages is crash-safe: an unfinished page is shown again
+exactly. To add new messages later, use `memory prepare --extend`, which only
+loads what's new and is safe to interrupt and rerun. Your notes are updated
+batch by batch, with no need to start over.
 
-**The UserAsCode knowledge project is agent-written, and one tick at a time.**
-Each `tick` asks an agent to diff new facts against existing domain state and
-patch in place. Nothing mechanically proves it classified a fact into the right
-domain, noticed that an incoming fact contradicts a stored one, or avoided
-writing a duplicate in different words; `git diff` and the format's own tests
-are review aids, not proofs. Python constraints execute deterministically, but
-only over state the agent chose to record, and only once the agent has written
-the constraint. Shards do not run concurrently over one project — `tick` caps
-`--parallel` at 1 because concurrent agents raced on shared domain files — so
-extraction throughput is one agent, however many shards are requested. The
-Markdown format has no executable constraints at all; its alerts are notes.
+**Prepared messages are a snapshot in time.** A later preparation can include
+messages that arrived since, so don't add up counts from different
+preparations. Prepare again when you want newer history.
 
-**Preparation is atomic but not resumable mid-scan.** An interrupted
-`memory prepare` leaves no published partial corpus and must restart. Once the
-corpus exists, `memory next/page/acknowledge/commit` is crash-safe and repeats
-an unacknowledged page exactly. A future preparation checkpoint format would
-need to bind live source mutation across restarts before it could safely
-resume. For incremental extraction after new messages arrive, use
-`memory prepare --extend` — it re-scans metadata fully but hydrates only new
-rows, so interrupting it is safe (re-run and it starts fresh). The UserAsCode
-knowledge project is updated incrementally per batch; no full re-extraction is
-required.
+## Not yet proven
 
-**A prepared corpus is a point-in-time live generation, not a database lock.**
-GreenBubbles verifies row identity between metadata selection and hydration and
-publishes one internally bound immutable generation. Messages arriving before
-a later preparation may make that later corpus larger; counts from separate
-preparations must not be combined. Prepare a new corpus when a refreshed
-history is required, then review or promote it explicitly.
+**Search freshness hasn't been measured.** The goal is for a new WeChat
+message to be searchable within 60 seconds, 95% of the time, on a real
+account. No test has shown this yet, and the tools refuse to claim it from
+partial evidence: every sample reports `fullEndToEndObjectiveProven: false`.
 
-**Retention never deletes, which means it never reclaims space either.**
-Retired archives are quarantined by atomic same-filesystem rename. Permanent
-deletion is a separate manual decision, and once taken that generation cannot
-be restored.
+**No timing comes from a real account in active use.** Every timing is a
+synthetic benchmark or a small local sample on one M2 Max Mac. Data sizes are
+real, but nothing was measured while WeChat was writing at the same time.
 
-## Deliberately absent
+**A full restore is checked only against itself.** The checker proves a
+restored archive is internally consistent and its media files exist. It can't
+prove there wasn't a WeChat table GreenBubbles doesn't know about, or that
+every private field was understood correctly. That would need a real,
+compatible history with no unhandled tables, which doesn't exist yet.
 
-**Sending.** Experimental code exists. A default build carries no pinned
-release verification key, so no rollout stage above `dryRun` can open, and the
-guard denies while any gate-evidence flag is false. Two things are outstanding
-by design: a qualified mechanism, legal and account-safety decision for an
-exact client build, and a provisioned release signing key. Sending is not a
-supported public feature and is never reachable from an AI tool call. See
-[SEND_ADAPTER.md](SEND_ADAPTER.md).
+**Backup encryption hasn't had an outside review.** It uses standard,
+maintained building blocks (BIP-39, HKDF-SHA-256, Argon2id,
+XChaCha20-Poly1305) and invents nothing new, but nobody outside the project has
+reviewed it.
 
-**Anything that touches WeChat's servers.** No network calls, no private API
-use, no bot account, no active reads. The read path does not inject code into
-WeChat.
+**Audit logs can show tampering, but they aren't signed.** Each entry includes a
+fingerprint of the one before it, so editing, reordering, adding, or removing an
+entry in the middle is detected. Removing the newest entries cleanly isn't
+detected, and someone who controls your Mac could rewrite the whole log. Fixing
+that would need independent signing, which isn't built.
 
-**Notification subscription.** macOS provides no supported way to subscribe to
-another application's notification bodies. Filesystem events can wake the
-reconciler as a *hint*; consistent snapshots and canonical-ID reconciliation
-remain the only authority, and periodic reconciliation recovers missed hints.
-`greenbubbles-discover notification-hints` reports whether Accessibility trust
-exists and always reports completeness as false.
+## Left out on purpose
 
-**Moments are cached, not live.** The cached-Moments scope is passive
-observation with its own policy dimension. It grants no active read.
+**Sending messages.** Experimental code exists, but public builds lock it to
+dry runs only. Unlocking it needs a legal and account-safety decision for a
+specific WeChat version, plus a release signing key, and neither exists. No AI
+tool can reach it. See [SEND_ADAPTER.md](SEND_ADAPTER.md).
 
-## Reporting one
+**Anything that contacts WeChat's servers.** No network calls to WeChat, no
+private interfaces, no bot accounts, and no injecting code into WeChat.
 
-If you find a message type, table or relationship GreenBubbles reads
-incompletely, that is the most useful bug report this project can receive.
-Describe it structurally — type codes, table shapes, counts — and attach no
-message content, no identifiers, and no paths. See
+**Live notifications.** macOS doesn't let one app read another app's
+notifications. GreenBubbles can use file changes as a hint that something new
+arrived, but it always confirms by rereading the databases.
+`greenbubbles-discover notification-hints` shows whether Accessibility access is
+granted, and always reports the hints as incomplete.
+
+**Live Moments.** GreenBubbles can read Moments that WeChat has already saved on
+your Mac, under its own policy setting. It can't fetch new ones.
+
+## Found a gap?
+
+If GreenBubbles reads some message type, table, or relationship incompletely,
+that's the most useful bug report you can send. Describe it by its structure
+(type codes, table layout, counts), with no message content, IDs, or paths. See
 [CONTRIBUTING.md](../CONTRIBUTING.md).

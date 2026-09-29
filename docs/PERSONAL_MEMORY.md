@@ -1,89 +1,123 @@
-# Personal memory: a Wikipedia-style knowledge base
+# Personal memory: notes about your life from your chats
 
-For use in your current Codex, Claude Code, OpenCode, Kimi Code, Gemini CLI, or Grok Build session, start with the
-[portable agent skills guide](AGENT_SKILLS.md). It uses your existing agent
-configuration and needs no embedded-model API key.
+GreenBubbles can help your coding agent turn your WeChat history into a small,
+private, Wikipedia-style set of notes about your life. To set that up, start
+with the [agent skills guide](AGENT_SKILLS.md). It uses your agent's existing
+setup and needs no extra API key.
 
-The knowledge base is a private git project of articles:
+This page explains what the notes look like and which commands the agent uses.
+The second half covers an older, advanced batch workflow that most people don't
+need.
 
-- `index.md` is the front page.
-- `domains/*.md` are the articles, one life area each, written in prose.
-- `manifest.md` records the time window and what has actually been read.
+## What the notes look like
 
-The agent reads the live database with `messages list` and `messages search`,
-then revises those files. Rank chats first with `chats rank`. A later pass
-opens the same project and edits the articles. It does not prepare a corpus,
-and it does not start a second project.
+The notes are a private folder tracked with Git:
 
-The project skill is
-[`skills/greenbubbles-personal-memory`](../skills/greenbubbles-personal-memory/SKILL.md).
+- `index.md` is the front page, with links to the articles.
+- `domains/*.md` are the articles, one per life area (work, family, travel, and
+  so on), written as prose with a list of sources.
+- `manifest.md` records the time range covered and which chats were actually
+  read.
 
-## Quick start
+The agent writes everything in the language you usually use in WeChat. If you
+mostly write Chinese, the notes are in Chinese. Keep the folder private: it
+contains personal details about you and the people you talk to.
+
+## How the agent builds them
+
+1. It asks what time range to cover and whether notes already exist.
+2. It ranks your chats with `chats rank` to decide which ones matter.
+3. It reads them with `messages list` and `messages search`.
+4. It writes or revises the articles, adding a source line for each fact.
+
+A later update opens the same folder and revises the same articles. It doesn't
+start a second set of notes. The full instructions the agent follows are in the
+[personal-memory skill](../skills/greenbubbles-personal-memory/SKILL.md).
+
+## Commands the agent uses
+
+You can run these yourself too:
 
 ```sh
+# Check which WeChat data GreenBubbles will read.
 greenbubbles source status
+
+# List chats where you sent at least 10 messages.
 greenbubbles chats rank --minimum-self-messages 10 --limit 2000
+
+# Read one chat between two times (Unix timestamps).
 greenbubbles messages list --conversation ID --since <unix> --until <unix> --limit 80
-```
 
-`messages list` and `messages search` print a compact reading page. Every line
-has `from` and `self`. `at` is local time. An image or file line may include
-`file`, a local path to open; do not copy that path into an article. Voice
-without a transcript stays `[voice]`. Phone numbers, email addresses,
-identity numbers, and links stay on the page. Do not pass `--redact` when
-the article is the private knowledge base. `chats rank` uses the same kind of page:
-`from`, `selfCount`, and `last`. Follow `nextCursor`, or pass `--limit 2000`.
-`--json` prints the full envelope. `[output] format` in
-`~/.greenbubbles/config.toml` selects the default.
-
-Search text goes through standard input:
-
-```sh
+# Search. The search text is read from standard input.
 printf '%s\n' 'query' | greenbubbles messages search --query-stdin --limit 25
 ```
 
-Ask for the time scope, and for the path of any knowledge base that already
-exists, before reading. Write every Markdown file in the language the
-account holder usually writes. Someone who writes Chinese gets a Chinese
-knowledge base. Keep the project private.
+How to read the output:
 
-## Older evidence-archive commands
+- Each message line has `from` (the sender), `self` (whether it was you), and
+  `at` (local time).
+- A photo or file line may include `file`, its path on your Mac. The agent
+  opens it there but doesn't copy the path into the notes.
+- A voice message without a transcript shows as `[voice]`.
+- Phone numbers, email addresses, ID numbers, and links are shown. Don't add
+  `--redact` when building your private notes; it would hide details the notes
+  need.
+- `chats rank` shows each chat's `from`, `selfCount` (messages you sent), and
+  `last` (latest message time).
+- For more results, pass `--cursor` with the `nextCursor` value from the
+  output, or use a larger `--limit`.
+- `--json` prints every field. To make JSON the default, set `[output] format`
+  in `~/.greenbubbles/config.toml`.
 
-`memory prepare` copies the history into a local evidence archive before any
-article is written. The knowledge base above does not use that archive, including
-for an incremental update. The commands remain in the CLI. The notes below
-describe that archive for anyone operating it directly. They are not a step
-in building or refreshing the articles.
+## Batch script and evidence archive (advanced)
 
-## Corpus preparation
+Everything below describes an older workflow. **The agent-skill workflow above
+does not use it**, for first builds or for updates. The commands are still in
+GreenBubbles for people who want scripted, scheduled runs.
 
-### Initial preparation
+The older workflow has two parts:
 
-```sh
-cp skills/greenbubbles-personal-memory/references/selection-policy.json \
-  /private/path/selection-policy.json
-chmod 600 /private/path/selection-policy.json
+- **An evidence archive** (called a *corpus* in the commands): a read-only,
+  private copy of the chosen messages, made by `memory prepare`. It is a
+  snapshot; messages that arrive later aren't in it until you extend it.
+- **A batch script**, `scripts/personal-memory-parallel.py`, that launches a
+  coding agent over the archive and writes a notes folder (called the *user
+  project*).
 
-greenbubbles memory prepare /private/path/corpus \
-  --selection-policy /private/path/selection-policy.json \
-  --profile live-account
-```
+### Create the evidence archive
 
-With an explicit live source, redirect its owner-only key file to
-`--passphrase-stdin`. The corpus is private and read-only once published. A
-failure leaves no partial corpus — rerun with the same inputs after removing
-the incomplete output path.
+1. Copy the example selection policy, which decides which chats are included,
+   and make it private:
 
-Progress on standard error contains only phase names and aggregate counts.
-The corpus is a point-in-time generation: messages arriving after preparation
-are not included until the next prepare or extend run.
+   ```sh
+   cp skills/greenbubbles-personal-memory/references/selection-policy.json \
+     /private/path/selection-policy.json
+   chmod 600 /private/path/selection-policy.json
+   ```
 
-### Incremental preparation (`--extend`)
+2. Build the archive:
 
-When new messages have arrived and you want to update the corpus without a full
-re-scan, use `memory prepare --extend`. It re-scans metadata in full to pick
-up new messages, but hydrates only new rows and inherits the alias numbering
-(`C######`, `P######`) from the base corpus:
+   ```sh
+   greenbubbles memory prepare /private/path/corpus \
+     --selection-policy /private/path/selection-policy.json \
+     --profile live-account
+   ```
+
+If you name the live source explicitly instead of using a profile, send its key
+file on standard input with `--passphrase-stdin`.
+
+- The archive is private and becomes read-only once finished.
+- If preparation fails, it leaves no half-built archive. Delete the incomplete
+  output folder and run the same command again.
+- Progress messages show only step names and counts, never message text.
+
+The archive holds a copy of possibly every included message, so protect it like
+WeChat's own data.
+
+### Add new messages to the archive (`--extend`)
+
+To add new messages without rebuilding from scratch, create a new archive based
+on the old one:
 
 ```sh
 greenbubbles memory prepare /private/path/new-corpus \
@@ -92,124 +126,107 @@ greenbubbles memory prepare /private/path/new-corpus \
   --profile live-account
 ```
 
-The extended corpus carries a `extends` manifest field linking it to the base,
-and new unit files are appended after the base units. Interrupting an extend
-run is safe — re-run and it starts fresh from the new-corpus path.
+It checks every message's details again to find new ones, but only reads the
+full text of new messages. It keeps the old archive's short stand-in names for
+chats and people (`C######`, `P######`), records which archive it extends, and
+adds the new messages after the old ones. If it's interrupted, run it again; it
+starts fresh in the new folder.
 
-Cost note: preparation itself is local and free; it is the corpus that agents
-later read at a metered cost. Extending costs proportionally less than a full
-re-prepare because fewer messages are hydrated.
+Building an archive runs on your Mac and costs nothing. The cost comes later,
+when an agent reads the archive. Extending costs less than rebuilding because
+fewer messages are read in full.
 
-## Extraction formats
+### Choose a notes format
 
-Choose one format when you first run `tick --format`. The format is recorded in
-the user project and is immutable for the life of that project (changing format
-requires a new project directory).
+Pick a format the first time you run `tick --format`. You can't change it later
+without starting a new notes folder. The default is `python`.
 
-| Capability | Python (`--format python`) | Markdown (`--format markdown`) |
+| | Python (`--format python`) | Markdown (`--format markdown`) |
 |---|---|---|
-| Executable constraints | Yes — `constraints/*.py` with `check()` functions | No — alerts are manual notes in manifest.md |
-| `git diff` self-check | Yes — typed instances, minimal diffs | Yes — structured sections, minimal diffs |
-| pytest integration | Yes — `tests/test_*.py` | No |
-| Python dependency | Yes — Python 3.10+ to run runner.py and tests | No |
-| Human-editable | Readable but structured | Directly editable in any text editor |
-| Ad-hoc generation | Best — LLM writes executable checks naturally | Good — LLM writes structured Markdown naturally |
-| Recommended for | Power users, proactive alerts, CI integration | Simpler setup, Python-free environments |
+| Automatic checks | Yes: `constraints/*.py` files with `check()` functions | No: alerts are written by hand in `manifest.md` |
+| Small, reviewable Git diffs | Yes | Yes |
+| Tests with pytest | Yes: `tests/test_*.py` | No |
+| Needs Python | Yes, 3.10 or later | No |
+| Edit by hand | Possible, but structured | Easy, in any text editor |
+| Best for | Proactive alerts and automation | Simpler setup without Python |
 
-The UserAsCode paper (format ablation, Section 4.5) shows that Python and
-Markdown are close in read-path performance but Python wins on ad-hoc
-constraint generation (100% vs 92.5% alert rate when the LLM must generate
-checks without pre-computed alerts).
+In the UserAsCode paper's comparison of formats (Section 4.5), Python and
+Markdown answered questions about equally well. Python did better when the AI
+had to write its own checks without help (100% versus 92.5% of alerts raised).
 
-## Domain ontology
+### Life areas
 
-Facts are classified into standard life domains. The agent creates new domains
-as needed — the taxonomy is a starting point, not a closed set.
+Facts are sorted into these standard life areas. The agent can add a new one
+when facts truly don't fit.
 
-Domain updates write to shared files, so use one writer and consistent names.
-The driver prompt specifies these canonical names:
+Use exactly these names. Several batches write to the same files, so a synonym
+(`household` instead of `home`, `career` instead of `work`) would split facts
+across two files.
 
-| Domain | What it covers |
+| Area | What it covers |
 |---|---|
 | `identity` | Full name, nicknames, date of birth, nationality, passport and ID numbers, email, phone, home address |
-| `work` | Employer, role, projects, schedule, colleagues, career events, job-search, offers, professional goals |
-| `family` | **People only**: spouse, parents, siblings, relatives — relationships, ages, schools, health concerns, milestones. Does NOT include household purchases, equipment, or home logistics. |
+| `work` | Employer, role, projects, schedule, colleagues, career events, job search, offers, professional goals |
+| `family` | **People only**: spouse, parents, siblings, relatives — relationships, ages, schools, health concerns, milestones. Not household purchases, equipment, or home logistics. |
 | `social` | Close friends, acquaintances, social activities, clubs, recurring plans, communication preferences |
 | `health` | Medical conditions, allergies, current medications, prescriptions, fitness habits, appointments |
 | `finance` | Bank accounts, income, expenses, investments, transfers, debts, insurance, financial goals, taxes |
 | `travel` | Past and upcoming trips, flights, hotels, passports, visas, travel preferences, itineraries |
 | `home` | Housing, household appliances and purchases, renovation, real estate, home logistics |
 | `vehicles` | Cars, bikes, registration, insurance, service history, upcoming maintenance |
-| `education` | Academic history, degrees, courses, research, academic service (e.g. conference PC membership) |
+| `education` | Academic history, degrees, courses, research, academic service (for example, conference program committees) |
 | `entertainment` | Media preferences, games, hobbies, subscriptions, memberships |
-| `legal` | Contracts, agreements, disputes, compliance, IP |
+| `legal` | Contracts, agreements, disputes, compliance, intellectual property |
 
-Create a new domain with a new name only when facts genuinely belong to a life
-area not covered above. Never use synonyms (`household` instead of `home`,
-`career` instead of `work`) — exact canonical names ensure all shards write to
-the same file.
+### How facts are added and corrected
 
-## Deduplication and correct-in-place
+The agent reads a file before writing to it. For each new fact:
 
-The agent reads before writing. For every incoming fact, it checks whether the
-fact already appears in the domain state:
-
-- **Unchanged**: skip entirely — no write, no duplicate.
-- **Changed**: update the value in place (Python: edit the assignment; Markdown:
-  edit the `## State` line). The source comment is updated to the current
-  session. A History entry is appended (Markdown format).
-- **New**: append the fact with a source comment (`# source: session_N,
+- **Already there and unchanged:** nothing is written.
+- **Changed:** the value is updated in place (Python: edit the assignment;
+  Markdown: edit the `## State` line) and its source note points to the current
+  session. In Markdown, a line is also added to `## History`.
+- **New:** the fact is added with a source note (`# source: session_N,
   YYYY-MM-DD` in Python; `*(source: session_N, YYYY-MM-DD)*` in Markdown).
 
-The `## History` section in Markdown format is **append-only**. History lines
-are never edited or deleted — they are the immutable audit trail of what changed
-and when.
+In Markdown, `## History` is only ever added to, never edited, so it is a
+permanent record of what changed and when.
 
-After patching, the agent runs `git diff HEAD` in the user project to self-check
-that only expected changes appear. If unexpected rewrites or duplications are
-visible in the diff, the agent corrects them before committing.
+After editing, the agent runs `git diff HEAD` to check that only the expected
+lines changed, and fixes any accidental rewrites or duplicates before
+committing.
 
-## Constraint lifecycle (Python format only)
+### Automatic checks (Python format only)
 
-Constraints are executable cross-domain checks that the agent generates
-autonomously and promotes to persistent background monitors.
+A *constraint* is a small Python check across life areas, such as "my passport
+expires before my upcoming trip" or "a new medication conflicts with an
+allergy."
 
-**Generate:** When the agent notices a cross-domain implication during
-extraction — a passport expiry date alongside an upcoming international trip, an
-allergy alongside a new medication, conflicting instructions from different
-sources — it writes a Python check inline and executes it immediately.
+1. **Write:** when the agent notices a link like that, it writes a check and
+   runs it right away.
+2. **Run:** Python computes the answer exactly (dates, thresholds, lists), with
+   no guessing by the AI.
+3. **Keep:** if the check will stay useful as things change, the agent saves it
+   as `constraints/<name>.py`, with a `def check(project) -> list[Alert]`
+   function.
+4. **Collect:** `runner.py` runs every saved check and writes their alerts to
+   `manifest.py:ACTIVE_ALERTS`.
+5. **Show:** the agent reads `ACTIVE_ALERTS` at the start of every session, so
+   you see warnings before you ask.
+6. **Clean up:** during a revision pass, checks about past events are removed
+   or updated.
 
-**Verify:** The Python interpreter runs the check deterministically. Date
-arithmetic, threshold comparisons, and set membership are computed exactly —
-no LLM estimation involved.
-
-**Review:** The agent reviews the result. If the check is generally useful (the
-condition is time-dependent or the underlying state could change), the agent
-promotes it to `constraints/<name>.py` as a `def check(project) -> list[Alert]`
-function.
-
-**Promote:** `runner.py` at the project root discovers all `constraints/*.py`
-modules automatically, runs each `check()` function, and aggregates their
-alerts. The output populates `manifest.py:ACTIVE_ALERTS`.
-
-**Surface:** The driver instructs the agent to read `ACTIVE_ALERTS` at the
-start of every session. An alert that appears there is visible before the user
-asks any question, enabling proactive warnings.
-
-**Prune:** During a revise pass, outdated constraints (for events that have
-passed or conditions no longer relevant) are removed or updated.
-
-To refresh alerts without running a full extraction pass:
+To refresh alerts without processing new messages:
 
 ```sh
 python3 scripts/personal-memory-parallel.py manifest-refresh \
   --user-project ~/memory/me
 ```
 
-## Git version control
+### Git history
 
-The user project is a git repository from its first `tick` run. Every
-successful extraction batch produces a commit:
+The notes folder becomes a Git repository on the first `tick`. Every successful
+batch makes a commit like this:
 
 ```
 memory update: 2026-01-20T14:30:00Z
@@ -219,40 +236,32 @@ memory update: 2026-01-20T14:30:00Z
 - corpus: corpus-v2
 ```
 
-The driver checks for public-looking remotes before and after each commit and
-prints a prominent warning if any are found. The project contains personal
-information — only push to a private remote, and only when you have made an
-explicit decision to do so.
+The script warns loudly if the repository has a remote that looks public,
+before and after each commit. The notes contain personal information: push them
+only to a private remote, and only if you have decided to.
 
-`git diff HEAD` is in the agent prompt as the deduplication self-check. After
-patching state files, the agent reviews the diff to verify that only expected
-changes appear.
-
-A periodic revision pass can be committed separately:
+A revision pass can be committed separately:
 
 ```sh
 python3 scripts/personal-memory-parallel.py revise \
   --user-project ~/memory/me --format python --agent claude
 ```
 
-## Cadence and cost
+### How often to run, and cost
 
-The driver provides the primitives; cadence is entirely the user's choice and
-depends on their token budget and how fresh they need the project to be.
+How often you run it is up to you, depending on your budget and how current you
+want the notes. Start with a small test run and see how much it uses; daily or
+weekly is a reasonable start. Retries, model reasoning, prompt size, and message
+volume all change the cost, and subscriptions and API billing work differently,
+so there is no fixed daily price.
 
-Choose a cadence based on how quickly the memory needs to reflect new messages,
-then measure a small representative run. Daily or weekly runs are reasonable
-starting points; retries, model reasoning, prompt size, and message volume all
-affect usage. Subscription allowances and API billing are different, so a fixed
-per-day dollar estimate would be misleading.
+Extend the archive before each scheduled run; running again on the same archive
+finds no new messages. If a run is unfinished, finish it on its original archive
+before switching to a newer one.
 
-Extend the corpus before a scheduled tick. Reusing an unchanged corpus does not
-fetch new WeChat messages. Resume a pending run with its original corpus before
-switching to a newly prepared generation.
-
-Wire the driver into cron or launchd at the chosen interval. The sketch below
-shows only the tick step; schedule corpus extension separately. launchd does not
-expand `~`, so use absolute paths:
+To schedule it, use cron or launchd. launchd doesn't expand `~`, so use full
+paths. This example shows only the `tick` step; schedule the archive extension
+separately:
 
 ```sh
 # Example launchd plist (~/Library/LaunchAgents/me.greenbubbles.tick.plist):
@@ -267,12 +276,11 @@ expand `~`, so use absolute paths:
 # StartCalendarInterval: { Hour: 2; Minute: 0 }
 ```
 
-## Driver commands
+### Script commands
 
-### `tick`
+#### `tick`
 
-One incremental extraction pass. Processes message units that arrived since the
-last tick into the user project.
+Processes messages that arrived since the last run and adds them to the notes.
 
 ```sh
 python3 scripts/personal-memory-parallel.py tick \
@@ -282,36 +290,32 @@ python3 scripts/personal-memory-parallel.py tick \
   --agent claude
 ```
 
-On the first run, creates the user project directory, initializes a git repo,
-and writes `.gitignore`. Stores `lastTickTime` in
-`<user_project>/.greenbubbles-tick-state.json`. On subsequent runs, processes
-only messages since `lastTickTime`.
+- The first run creates the notes folder, starts a Git repository, and writes
+  `.gitignore`.
+- It saves the time of the last run as `lastTickTime` in
+  `<user_project>/.greenbubbles-tick-state.json`, and later runs start from
+  there.
+- If there's nothing new, it prints `tick: no new activity since <timestamp>`
+  and exits with code 0.
+- `--shards N` splits the work into N smaller batches. See
+  [Running shards](#running-shards).
 
-If no new activity is found, prints `tick: no new activity since <timestamp>`
-and exits 0.
+#### `manifest-refresh`
 
-To divide the corpus into smaller batches, add `--shards N` (N agent
-processes, run one at a time to avoid concurrent writes to shared domain
-files). See [Running shards](#running-shards) below.
-
-### `manifest-refresh`
-
-Python format only. Re-runs all `constraints/*.py` check functions and updates
-`manifest.py:ACTIVE_ALERTS` from their output. Commits the updated manifest.
+Python format only. Runs every saved check again, updates
+`manifest.py:ACTIVE_ALERTS`, and commits. Use it when time has passed and an
+alert might now apply, without processing new messages.
 
 ```sh
 python3 scripts/personal-memory-parallel.py manifest-refresh \
   --user-project ~/memory/me
 ```
 
-Use this when you want to refresh alerts without processing new messages — for
-example, after the current date has advanced past a constraint threshold.
+#### `revise`
 
-### `revise`
-
-Holistic revision pass. Launches one agent batch over the full user project
-asking it to: evolve schemas, split or merge domains, archive stale state,
-prune outdated constraints, and audit cross-domain references.
+A big-picture cleanup. The agent reviews the whole notes folder: it reorganizes
+structure, splits or merges life areas, archives out-of-date facts, removes old
+checks, and checks links between areas.
 
 ```sh
 python3 scripts/personal-memory-parallel.py revise \
@@ -320,70 +324,24 @@ python3 scripts/personal-memory-parallel.py revise \
   --agent claude
 ```
 
-Commits with a message summarizing the changes. Run periodically — monthly or
-quarterly — rather than after every tick.
+It commits with a summary of the changes. Run it every month or quarter, not
+after every `tick`.
 
-## Testing the driver
+### If a run stops partway
 
-The driver's decision logic and project setup have unit tests that need no
-corpus, no agent and no network:
+`tick` keeps its progress in `<user_project>/.greenbubbles-runs/tick-<timestamp>/`,
+with each shard's progress in `shards/NNN/progress.json`.
 
-```sh
-python3 -m unittest discover -s scripts -p 'test_*.py' -v
-```
+If a run doesn't finish, it exits with an error and leaves `lastTickTime`
+unchanged, even if some messages were already committed. Run it again with the
+same archive, format, and chat-selection options to continue where it stopped.
+You may change model and retry settings, for example after a usage limit
+resets. `lastTickTime` moves forward only when every batch in the run has
+finished. Finish a pending run before extending to a new archive.
 
-CI runs the same command. An end-to-end extraction pass is not covered — that
-needs a real corpus and a real agent — so changes to the tick loop still want a
-manual run against a small `--max-conversations` corpus before release.
+### Running shards
 
-## Run-state and continuation
-
-The `tick` command stores its internal run state in
-`<user_project>/.greenbubbles-runs/tick-<timestamp>/`. Each shard tracks its
-scope progress in `shards/NNN/progress.json`, so an interrupted tick can be
-re-run and will continue from where it left off.
-
-The format (`--format`) is immutable once a user project is created. To change
-format, create a new user project directory and run `tick` with the new format.
-
-For the underlying GreenBubbles corpus protocol (scopes, page protocol,
-coverage reporting), see the detailed workflow earlier in this document and in
-the [CLI reference](CLI_REFERENCE.md).
-
-## Canonical corpus and scoped views
-
-The v2 two-pass algorithm:
-
-1. Inventory identifiers from the authorized session, contact, and chat-room
-   tables and map them to hashed message tables.
-2. Retain an unresolved conversation for each hashed table whose identifier
-   cannot be reversed. This preserves row coverage without guessing identity;
-   `unmatchedMessageTable` remains an explicit limitation.
-3. Scan metadata — source row identity, order, sender, type, and time — in
-   10,000-row SQL pages while numbered SQLCipher shards remain read-only.
-4. Hydrate and decode every eligible row. Reject any row whose complete
-   metadata identity changed between passes.
-5. Split evidence into immutable, internally chronological units and assign
-   stable `C######`, `P######`, and `E#########` aliases once.
-6. Schedule those units deterministically before atomic publication.
-
-`deliveryOrder: accountHolderRelevance` uses only structural signals — self
-message volume, active-month breadth, recency, and conversation kind — to cover
-a broad personal frontier early. It still schedules every canonical unit once.
-`chronological` is an explicit alternative.
-
-## Interrupted driver ticks
-
-A partial tick exits nonzero and keeps `lastTickTime` unchanged, even if some
-messages were committed. Re-run with the same corpus, format, and scope options
-to resume its saved plan and shard state. Model/retry settings may change (for
-example after a quota reset). Complete the pending run before extending to a new
-corpus. The checkpoint advances to the run's fixed upper time bound only after
-all planned shards complete.
-
-## Running shards
-
-For large corpora, `tick` can divide the work into several shards:
+For large archives, `tick` can split the work into shards (smaller batches):
 
 ```sh
 python3 scripts/personal-memory-parallel.py tick \
@@ -394,33 +352,69 @@ python3 scripts/personal-memory-parallel.py tick \
   --agent claude
 ```
 
-Every shard writes to the same user project directory, so `tick` runs them **one
-at a time**. `--parallel` above 1 is refused for `tick`: it is capped to 1 and
-the driver logs why. Concurrent agents over one project caused last-writer-wins
-races on domain files that silently dropped extracted facts, and neither the
-per-shard git commit nor the per-project commit lock prevents that — they
-serialize the commits, not the agents' edits.
+All shards write to the same notes folder, so `tick` runs them **one at a
+time**. `--parallel` above 1 is lowered to 1, and the script logs why. When
+agents ran at the same time, they overwrote each other's edits and silently lost
+facts. Git commits and the commit lock don't prevent this: they order the
+commits, not the edits.
 
-Sharding still helps without concurrency: each shard gets a shorter corpus
-batch, so an interrupted run loses less work and each agent context stays
-smaller. Wall-clock time is not reduced.
+Shards still help: each batch is smaller, so an interrupted run loses less work
+and each agent has less to keep in mind. They don't make the run faster.
 
-The `run` subcommand, which builds a derived wiki rather than a UserAsCode
-project, gives each shard its own output and does run agents concurrently —
-`--parallel` there defaults to 8.
+The separate `run` command builds a different kind of output (a separate wiki
+per shard, merged afterwards), so it does run agents at the same time.
+`--parallel` defaults to 8 there.
 
-## Coverage means what the agent actually saw
+### Testing the script
 
-`complete: true` describes the current state scope. It proves review of every
-hydrated corpus message only when the corpus is canonical and
-`scope.allMessages: true`.
+The script's logic has unit tests that need no archive, agent, or network:
 
-`rowCoverageComplete: true` means every inventoried hashed message table
-contributed readable metadata, including unresolved tables.
-`sourceCoverageComplete: false` can still report lost conversation identity.
-`contentComplete: false` means at least one eligible body could not be hydrated
-or decoded.
+```sh
+python3 -m unittest discover -s scripts -p 'test_*.py' -v
+```
 
-None of these states permits inference about missing content. A completed
-unfiltered scope proves that the agent processed every hydrated corpus message;
-it does not prove that the knowledge project captured every nuance.
+CI runs the same command. A full run needs a real archive and agent, so it isn't
+tested automatically. Before a release, test changes to `tick` by hand on a
+small archive made with `--max-conversations`.
+
+### How the archive is built
+
+For those who want the details, `memory prepare` works in two passes:
+
+1. List chats and contacts from WeChat's session, contact, and group tables, and
+   match each to its message table (WeChat names these by hash).
+2. Keep a chat even when its hashed table can't be matched to a name, so no
+   messages are dropped. Those chats are reported as `unmatchedMessageTable`
+   instead of being guessed.
+3. Read each message's basic details (position, order, sender, type, time) in
+   pages of 10,000 rows, read-only.
+4. Read and decode the full text of every included message. If any message's
+   details changed between the two passes, it is rejected.
+5. Split messages into fixed batches, each in time order, and give chats,
+   people, and messages short stand-in names (`C######`, `P######`,
+   `E#########`) that never change.
+6. Order the batches in a repeatable way, then publish the archive all at once.
+
+With `deliveryOrder: accountHolderRelevance`, chats you're most active in come
+first, judged only by how many messages you sent, over how many months, how
+recently, and the kind of chat. Every batch is still delivered exactly once.
+`chronological` delivers them in time order instead.
+
+### What "complete" means
+
+These flags describe what the agent actually saw:
+
+- `complete: true` means the current selection was fully read. It means every
+  message in the archive was read only if the archive uses the current (v2)
+  format and the selection was `scope.allMessages: true`. Older v1 archives
+  never prove that.
+- `rowCoverageComplete: true` means every message table was read, including
+  ones that couldn't be matched to a chat name.
+- `sourceCoverageComplete: false` means some messages couldn't be tied to a
+  chat.
+- `contentComplete: false` means at least one message's text couldn't be read
+  or decoded.
+
+None of these lets you assume anything about content that wasn't read. Even a
+fully read archive shows only that the agent saw every message, not that the
+notes captured every detail.
