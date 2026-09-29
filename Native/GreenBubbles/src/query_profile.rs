@@ -288,9 +288,8 @@ pub fn default_live_credential_path() -> Result<PathBuf, QueryProfileError> {
 pub fn discover_default_live_source_root() -> Result<PathBuf, QueryProfileError> {
     let home = current_user_home()?;
     let mut candidates = Vec::new();
-    candidates.push(
-        home.join("Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"),
-    );
+    candidates
+        .push(home.join("Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"));
     let groups = home.join("Library/Group Containers");
     if let Ok(entries) = fs::read_dir(&groups) {
         for entry in entries.flatten() {
@@ -462,7 +461,8 @@ fn parse_query_settings(bytes: &[u8]) -> Result<QuerySettings, QueryProfileError
             settings.source_root = Some(path);
         }
         if let Some(passphrase_file) = source.get("passphrase_file") {
-            let passphrase_file = required_settings_string(passphrase_file, "source.passphrase_file")?;
+            let passphrase_file =
+                required_settings_string(passphrase_file, "source.passphrase_file")?;
             let path = PathBuf::from(passphrase_file);
             validate_absolute_non_root_path(&path, "source.passphrase_file")?;
             settings.passphrase_file = Some(path);
@@ -488,9 +488,10 @@ fn required_settings_string<'a>(
     value: &'a toml::Value,
     field: &str,
 ) -> Result<&'a str, QueryProfileError> {
-    value.as_str().filter(|text| !text.is_empty()).ok_or_else(|| {
-        invalid_configuration(&format!("{field} must be a non-empty string"))
-    })
+    value
+        .as_str()
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| invalid_configuration(&format!("{field} must be a non-empty string")))
 }
 
 pub fn default_query_profile_path() -> Result<PathBuf, QueryProfileError> {
@@ -783,7 +784,8 @@ mod tests {
             }
         }
         fs::create_dir_all(incomplete.join("contact")).unwrap();
-        let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 24 * 60 * 60);
+        let stale =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 24 * 60 * 60);
         for component in ["contact", "session", "message"] {
             let file = older.join(component).join("stale.db");
             fs::write(&file, b"old").unwrap();

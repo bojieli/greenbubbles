@@ -2678,7 +2678,9 @@ pub fn rank_conversations(
                     ))
                 })
                 .map_err(|error| database_error(&error.to_string()))?;
-            let entry = counts.entry(digest.to_ascii_lowercase()).or_insert((0, 0, None, None));
+            let entry = counts
+                .entry(digest.to_ascii_lowercase())
+                .or_insert((0, 0, None, None));
             entry.0 += u64::try_from(row.0).unwrap_or(0);
             entry.1 += u64::try_from(row.1).unwrap_or(0);
             entry.2 = entry.2.max(row.2);
@@ -2701,7 +2703,8 @@ pub fn rank_conversations(
     let mut ranked = Vec::new();
     for username in usernames {
         let digest = format!("{:x}", md5::compute(username.as_bytes()));
-        let Some(&(message_count, self_count, last_message, last_self)) = counts.get(&digest) else {
+        let Some(&(message_count, self_count, last_message, last_self)) = counts.get(&digest)
+        else {
             continue;
         };
         let kind = if wx_db::is_group_chat(&username) {
@@ -2727,7 +2730,11 @@ pub fn rank_conversations(
         right_direct
             .cmp(&left_direct)
             .then(right.self_message_count.cmp(&left.self_message_count))
-            .then(right.last_self_message_unix.cmp(&left.last_self_message_unix))
+            .then(
+                right
+                    .last_self_message_unix
+                    .cmp(&left.last_self_message_unix),
+            )
             .then(left.id.cmp(&right.id))
     });
     let qualifying_conversation_count = ranked.len();

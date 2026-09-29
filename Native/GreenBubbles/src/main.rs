@@ -45,11 +45,11 @@ use greenbubbles::{
         find_conversations as find_live_conversations, get_message as get_live_message,
         get_search_result_message as get_live_search_result_message,
         list_contacts as list_live_contacts, list_conversations as list_live_conversations,
-        rank_conversations as rank_live_conversations,
-        list_messages as list_live_messages, search_messages as search_live_messages,
-        serialize_query_error, serialize_query_response, source_status as live_source_status,
-        ContactKind, LiveQueryError, LiveQuerySource, QueryDatabaseAccess, DEFAULT_PAGE_LIMIT,
-        DEFAULT_SEARCH_LIMIT, MAX_PAGE_LIMIT, MAX_SEARCH_QUERY_BYTES,
+        list_messages as list_live_messages, rank_conversations as rank_live_conversations,
+        search_messages as search_live_messages, serialize_query_error, serialize_query_response,
+        source_status as live_source_status, ContactKind, LiveQueryError, LiveQuerySource,
+        QueryDatabaseAccess, DEFAULT_PAGE_LIMIT, DEFAULT_SEARCH_LIMIT, MAX_PAGE_LIMIT,
+        MAX_SEARCH_QUERY_BYTES,
     },
     merge::merge_incremental_archive,
     model::{ArtifactKind, ArtifactRole},
@@ -69,10 +69,9 @@ use greenbubbles::{
     query_profile::{
         default_live_credential_path, default_query_profile_path,
         discover_default_live_source_root, load_query_settings, profile_uses_placeholder_source,
-        read_private_32_byte_credential,
-        read_private_snapshot_passphrase, QueryProfile, QueryProfileAccess, QueryProfileError,
-        QueryProfileStore, DEFAULT_LIVE_PROFILE_NAME, QUERY_PROFILE_FORMAT_VERSION,
-        QUERY_PROFILE_SCHEMA,
+        read_private_32_byte_credential, read_private_snapshot_passphrase, QueryProfile,
+        QueryProfileAccess, QueryProfileError, QueryProfileStore, DEFAULT_LIVE_PROFILE_NAME,
+        QUERY_PROFILE_FORMAT_VERSION, QUERY_PROFILE_SCHEMA,
     },
     reconcile::reconcile_archives,
     recoverable_snapshot::{
@@ -528,9 +527,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             run_query_profile_command(arguments.collect::<Vec<_>>())?;
         }
         "source" => {
-            let subcommand = arguments
-                .next()
-                .unwrap_or_else(|| "status".to_string());
+            let subcommand = arguments.next().unwrap_or_else(|| "status".to_string());
             if subcommand != "status" {
                 return Err(format!(
                     "'{subcommand}' is not a source command. Use 'greenbubbles source status'."
@@ -570,9 +567,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", serialize_query_response(&response)?);
         }
         "chats" | "conversations" => {
-            let subcommand = arguments
-                .next()
-                .unwrap_or_else(|| "list".to_string());
+            let subcommand = arguments.next().unwrap_or_else(|| "list".to_string());
             if subcommand != "list" && subcommand != "rank" {
                 return Err(format!(
                     "'{subcommand}' is not a conversations command. Use 'greenbubbles chats' or 'greenbubbles chats rank'."
@@ -624,9 +619,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         "contacts" => {
-            let subcommand = arguments
-                .next()
-                .unwrap_or_else(|| "list".to_string());
+            let subcommand = arguments.next().unwrap_or_else(|| "list".to_string());
             if subcommand != "list" {
                 return Err(format!(
                     "'{subcommand}' is not a contacts command. Use 'greenbubbles contacts list'."
@@ -938,9 +931,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         "messages" => {
-            let subcommand = arguments
-                .next()
-                .unwrap_or_else(|| "list".to_string());
+            let subcommand = arguments.next().unwrap_or_else(|| "list".to_string());
             if matches!(arguments.peek().map(String::as_str), Some("--help" | "-h")) {
                 println!("{}", messages_subcommand_help(&subcommand)?);
                 return Ok(());
@@ -1032,9 +1023,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         "message" => {
-            let subcommand = arguments
-                .next()
-                .unwrap_or_else(|| "get".to_string());
+            let subcommand = arguments.next().unwrap_or_else(|| "get".to_string());
             if subcommand != "get" {
                 return Err(format!(
                     "'{subcommand}' is not a message command. Use 'greenbubbles message get'."

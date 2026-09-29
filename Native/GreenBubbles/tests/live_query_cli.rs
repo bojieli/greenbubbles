@@ -740,7 +740,11 @@ fn missing_profile_opens_the_newest_live_database_with_the_captured_key() {
     );
     copy_directory(&fixture.root, &database_root);
 
-    let output = run_with_home(home.path(), &["conversations", "list", "--limit", "1"], None);
+    let output = run_with_home(
+        home.path(),
+        &["conversations", "list", "--limit", "1"],
+        None,
+    );
     assert_success(&output);
     let response: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(response["source"]["mode"], "liveEncrypted");
@@ -765,12 +769,19 @@ fn missing_profile_opens_the_newest_live_database_with_the_captured_key() {
     fs::create_dir_all(&settings_directory).unwrap();
     fs::set_permissions(&settings_directory, fs::Permissions::from_mode(0o700)).unwrap();
     let alternate = home.path().join("alternate-passphrase.txt");
-    write_private_file(&alternate, format!("{}\n", hex::encode([0x11; 32])).as_bytes());
+    write_private_file(
+        &alternate,
+        format!("{}\n", hex::encode([0x11; 32])).as_bytes(),
+    );
     write_private_file(
         &settings_directory.join("config.toml"),
         format!("[source]\npassphrase_file = \"{}\"\n", alternate.display()).as_bytes(),
     );
-    let overridden = run_with_home(home.path(), &["conversations", "list", "--limit", "1"], None);
+    let overridden = run_with_home(
+        home.path(),
+        &["conversations", "list", "--limit", "1"],
+        None,
+    );
     assert!(!overridden.status.success());
     let response: Value = serde_json::from_slice(&overridden.stdout).unwrap();
     assert_eq!(response["error"]["code"], "databaseUnavailable");

@@ -302,7 +302,9 @@ repository-level license checksum.
 - `tinyvec_macros 0.1.1` — `MIT OR Apache-2.0 OR Zlib` — https://github.com/Soveu/tinyvec_macros
 - `tokio 1.53.1` — `MIT` — https://github.com/tokio-rs/tokio
 - `tokio-macros 2.7.2` — `MIT` — https://github.com/tokio-rs/tokio
+- `toml 0.9.12+spec-1.1.0` — `MIT OR Apache-2.0` — https://github.com/toml-rs/toml
 - `toml 1.1.4+spec-1.1.0` — `MIT OR Apache-2.0` — https://github.com/toml-rs/toml
+- `toml_datetime 0.7.5+spec-1.1.0` — `MIT OR Apache-2.0` — https://github.com/toml-rs/toml
 - `toml_datetime 1.1.1+spec-1.1.0` — `MIT OR Apache-2.0` — https://github.com/toml-rs/toml
 - `toml_parser 1.1.3+spec-1.1.0` — `MIT OR Apache-2.0` — https://github.com/toml-rs/toml
 - `toml_writer 1.1.2+spec-1.1.0` — `MIT OR Apache-2.0` — https://github.com/toml-rs/toml
@@ -317,6 +319,7 @@ repository-level license checksum.
 - `walkdir 2.5.0` — `Unlicense OR MIT` — https://github.com/BurntSushi/walkdir
 - `webpki-roots 0.26.11` — `CDLA-Permissive-2.0` — https://github.com/rustls/webpki-roots
 - `webpki-roots 1.0.9` — `CDLA-Permissive-2.0` — https://github.com/rustls/webpki-roots
+- `winnow 0.7.15` — `MIT` — https://github.com/winnow-rs/winnow
 - `winnow 1.0.4` — `MIT` — https://github.com/winnow-rs/winnow
 - `writeable 0.6.4` — `Unicode-3.0` — https://github.com/unicode-org/icu4x
 - `wx-context 0.7.4` — `MIT`
@@ -3945,7 +3948,9 @@ DEALINGS IN THE SOFTWARE.
 Used by:
 
 - `serde_spanned 1.1.1`
+- `toml 0.9.12+spec-1.1.0`
 - `toml 1.1.4+spec-1.1.0`
+- `toml_datetime 0.7.5+spec-1.1.0`
 - `toml_datetime 1.1.1+spec-1.1.0`
 - `toml_parser 1.1.3+spec-1.1.0`
 - `toml_writer 1.1.2+spec-1.1.0`
@@ -4669,6 +4674,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
+- `winnow 0.7.15`
 - `winnow 1.0.4`
 
 ```text
