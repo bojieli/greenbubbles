@@ -236,10 +236,16 @@ processing a large history.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Useful bug reports describe unsupported
-message types or failing operations without including real messages, databases,
-keys, or account paths. Report security issues through [SECURITY.md](SECURITY.md).
-Tests use synthetic data.
+Contributions are welcome, especially:
+
+- Improve skills and prompts for accurate summaries, citations, and memory updates.
+- Fix CLI bugs and make commands easier for people and agents to use.
+- Report key-capture failures and compatibility problems with WeChat updates.
+- Add CLI options and features that help agents understand message history.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) to get started. Use synthetic examples in
+reports and tests; leave out real messages, databases, keys, and account paths.
+Report security issues through [SECURITY.md](SECURITY.md).
 
 ## License
 
