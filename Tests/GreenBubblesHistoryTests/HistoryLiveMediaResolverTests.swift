@@ -159,6 +159,17 @@ private struct LiveMediaFixture {
     guard chmod(executable.path, 0o700) == 0 else {
       throw CocoaError(.fileWriteUnknown)
     }
+    // The first exec of a freshly written script can wait on macOS's security
+    // assessment, which a busy CI runner once took over a minute to answer.
+    // Run it once here, with no key so it exits at once, so that wait falls
+    // outside the resolver's 60-second deadline.
+    let warmUp = Process()
+    warmUp.executableURL = executable
+    warmUp.standardInput = FileHandle.nullDevice
+    warmUp.standardOutput = FileHandle.nullDevice
+    warmUp.standardError = FileHandle.nullDevice
+    try warmUp.run()
+    warmUp.waitUntilExit()
     configuration = HistoryLiveMediaConfiguration(
       executableURL: executable,
       replicaURL: rootURL.appending(path: "replica.db"),
