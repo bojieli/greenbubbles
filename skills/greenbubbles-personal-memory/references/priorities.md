@@ -10,7 +10,9 @@ in the language the account holder usually writes. The language rule is in
 [format-markdown.md](format-markdown.md). Keep
 durable facts about the account holder and about the people, projects, and
 decisions in the reviewed chats. Attribute other people's claims to them.
-Do not keep a transcript, and do not stop at a bullet list of facts.
+Do not keep a transcript, and do not stop at a dump of extracted lines.
+A nested list of short sentences is how a complicated episode stays
+readable. Do not keep feeding one paragraph until it becomes a wall.
 
 ## Measure the database first
 
@@ -127,7 +129,10 @@ Order:
 5. Revise the articles once for the slice. Follow
    [format-markdown.md](format-markdown.md): one episode, in `at` order,
    inside the life-area article. A person stays a short entry in `family`
-   or `social` and is not given a second copy of the episode.
+   or `social` and is not given a second copy of the episode. Break a
+   paragraph that is already long before you add to it. Write the new
+   dates as short sentences or a nested list. Leave out any sentence that
+   only denies an inference or announces an omission.
 6. Continue until the window is covered or the user sets a smaller bound.
    Record chats not yet paged as remaining scope in `manifest.md`. Do not
    describe a partial pass as the two-year or lifetime record.
@@ -207,7 +212,15 @@ A few readings keep getting mis-filed:
   on a form, can still be filed.
 - `[image]`, `[quote]`, `[file]`, and `[unknown]` with no words beside
   them are not a document. Do not describe the picture, and do not open
-  the file into the article.
+  the file into the article. A `[quote]` line is not his statement unless
+  the words beside it are his. Do not expand the placeholder.
+- A scratch digest that cuts a line short is not the message. If the
+  sentence you would file ends in an ellipsis, re-read that line in the
+  coverage jsonl before writing it. The page header's `conversationId` is
+  not the display name. The name is `from` on the message line.
+- The same refusal, told to several people in one week and naming the same
+  person, is one episode. A similar refusal that does not name that person
+  stays a separate note. Do not merge them because the wording rhymes.
 - "I will only consider this kind of company" is that day's filter. The
   other person's employer in the display name is not a company he named,
   and it is not his.

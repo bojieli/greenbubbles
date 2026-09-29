@@ -38,8 +38,11 @@ are in [priorities.md](priorities.md).
 A time slice is one `messages list` with the same `--since` and `--until`
 repeated on several `--conversation` flags, at most 24. The database opens
 once. Each chat is its own page, and that header includes `conversationId`.
-Line the chats up on `at`. Follow one chat's `nextCursor` with a single
-`--conversation` and `--cursor`, and repeat the same `--since` and `--until`.
+That id is not the person's name. The name is `from` on each message line.
+Line the chats up on `at`. A line you shortened in a scratch note is not
+the message; re-read the jsonl before filing a sentence that was cut off.
+Follow one chat's `nextCursor` with a single `--conversation` and
+`--cursor`, and repeat the same `--since` and `--until`.
 Do not pass `--cursor` together with several conversations.
 
 `messages list` and `messages search` print JSON Lines. The first line is a

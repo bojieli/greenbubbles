@@ -1,8 +1,9 @@
 # Article format
 
 The knowledge base is a private wiki. `index.md` is the front page. Each
-file in `domains/` is one Wikipedia-style article. Write prose. A page that
-is only a bullet list of facts is not finished.
+file in `domains/` is one article a person could read aloud. A page that is
+only a dump of extracted lines is not finished. A page that keeps growing
+one paragraph is not finished either.
 
 ## Layout
 
@@ -145,12 +146,16 @@ rest of the lead summarizes the article without depending on other pages.
 
 ## School
 
-Prose. Dates and names appear in sentences. A later correction replaces the
-sentence and leaves the old dated claim visible when the two disagree.
+A short paragraph, then a list when the dates would otherwise pile into
+one block.
+
+- 2019 年，联合培养博士。学校和研究院写在同一句里。
+- 后来的更正跟在下一则，日期写在句子里。两句都留着。
 
 ## Teaching
 
-More prose.
+Another short paragraph. A run of dates becomes its own list, not a longer
+paragraph.
 
 ## See also
 
@@ -175,10 +180,26 @@ Rules:
   can link to them.
 - The lead comes before any section. A reader who stops there should know
   the shape of the subject.
-- Prefer paragraphs. Use a list only for a real enumeration, such as a
-  series of books or the references.
-- One topic has one section. Merge a new fact into that section. Do not
-  append a second paragraph that repeats the first.
+- Write the way a person would tell it. Name the date, who heard it, and
+  what was said. Then stop. The sentence should sound like the account
+  holder's language, not like a system defending a draft.
+- Do not add a sentence whose only job is to deny a reading, apologize, or
+  announce an omission. That includes 不收成、不写成、不另写、不是已经、
+  这里不记、金额不记、电话不记、做法不记, and any cousin of those. If a
+  number, a phone, or a procedure stays out, it stays out silently. If two
+  dates disagree, write both dates and stop. If two people are different,
+  say who each one is. Do not spend a sentence on the merge you did not make.
+- A paragraph is a few sentences, short enough to read without scrolling
+  inside it. Before you add a fact, look at the paragraph you would extend.
+  If it is already long, do not append. Open a new paragraph, a `###`
+  heading, or a bullet.
+- A run of dates, a cast of people, or a sequence of offers is a list.
+  Each bullet is one or two sentences, in time order. Nest a bullet when
+  one date has several parts. The list is still prose. It is not a
+  transcript and not a column of raw message lines.
+- One topic has one section. A new fact joins that section. It does not
+  get a second copy, and it does not get glued onto a paragraph that is
+  already hard to read.
 - Say who is speaking. "He told Tracy" is his statement. "Tracy said" is hers.
 - When one episode is told in several chats, including a group and a direct
   chat, write it once, in order of `at`. Name each chat. Do not retell it

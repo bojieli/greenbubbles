@@ -1,6 +1,6 @@
 ---
 name: greenbubbles-personal-memory
-description: Build and revise a private Wikipedia-style knowledge base from the live WeChat database with GreenBubbles. Use for personal knowledge organization, summarization, and incremental updates in the current agent session. Query with messages list and messages search, then edit the articles in the language the user usually writes. Do not prepare a corpus.
+description: Build and revise a private wiki-style knowledge base from the live WeChat database with GreenBubbles. Use for personal knowledge organization, summarization, and incremental updates in the current agent session. Query with messages list and messages search, then edit the articles in the language the user usually writes. Do not prepare a corpus.
 ---
 
 # GreenBubbles personal memory
@@ -12,8 +12,9 @@ coding agent or require a model API key.
 The knowledge base is a small private wiki:
 
 - `index.md` is the front page: a lead, then links into the articles.
-- `domains/<name>.md` are the articles. Each one reads like a Wikipedia
-  article, with a lead, sections, and a references list.
+- `domains/<name>.md` are the articles. Each one has a short lead, then
+  sections a person can read. A long episode is several short paragraphs
+  or a nested list, not one paragraph that grows every pass.
 - `manifest.md` records scope, coverage, and alerts. It is not the article index.
 
 Write `index.md`, `manifest.md`, and every article in the language the
@@ -76,9 +77,13 @@ unread. Do not imply that an unread chat was reviewed.
   Attribute other people's claims to them. Do not invent a missing name,
   degree, employer, or decision.
 - Revise the article prose in place. Fold a new fact into the section it
-  belongs to. Keep a dated contradiction in the prose. Add a references
-  line naming the chat and the message date. Update `index.md` when an
-  article or a notable topic is added. Update the manifest row and coverage.
+  belongs to. If that paragraph is already long, break it into short
+  paragraphs or a dated list before adding the fact. Keep both dates when
+  they disagree, and say them in ordinary sentences. Do not add a disclaimer,
+  a self-correction, or a sentence that only says what you refused to infer.
+  Add a references line naming the chat and the message date. Update
+  `index.md` when an article or a notable topic is added. Update the
+  manifest row and coverage.
 - Keep the project private, mode `0700` for directories and `0600` for
   files. Git-commit it locally when it changes. Do not push it unless the
   user asks. One writer at a time.
