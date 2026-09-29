@@ -35,6 +35,15 @@ brew tap bojieli/greenbubbles https://github.com/bojieli/greenbubbles.git
 brew install bojieli/greenbubbles/greenbubbles
 ```
 
+If Homebrew reports an untrusted formula, explicitly trust this formula and retry
+the tap/install commands:
+
+```sh
+brew trust --formula bojieli/greenbubbles/greenbubbles
+```
+
+Older Homebrew versions without `brew trust` do not need this step.
+
 The explicit remote matters because this repository is named `greenbubbles`,
 not `homebrew-greenbubbles`. Requirements are Apple silicon and macOS 14+.
 The formula installs the prebuilt CLI/tool set and preserves its code signatures.

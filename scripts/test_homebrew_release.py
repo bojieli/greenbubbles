@@ -21,9 +21,17 @@ class HomebrewRelease(unittest.TestCase):
 
     def test_checked_in_formula_matches_generator(self):
         formula = (ROOT / "Formula/greenbubbles.rb").read_text()
-        version = re.search(r'^  version "([^"]+)"$', formula, re.MULTILINE)[1]
+        version = release.formula_version(formula)
         digest = re.search(r'^  sha256 "([^"]+)"$', formula, re.MULTILINE)[1]
         self.assertEqual(formula, release.render(version, digest, "bojieli/greenbubbles"))
+
+    def test_legacy_explicit_version_must_agree_with_download(self):
+        formula = release.render("0.3.0", "a" * 64, "bojieli/greenbubbles")
+        legacy = formula + '  version "0.3.0"\n'
+        self.assertEqual(release.formula_version(legacy), "0.3.0")
+        self.assertIsNotNone(release.publication_payload(self.existing(legacy), formula, "0.3.0", "main"))
+        with self.assertRaisesRegex(ValueError, "consistent release version"):
+            release.formula_version(formula + '  version "0.2.0"\n')
 
     def test_publisher_verifies_downloads_before_updating_only_formula(self):
         archive_name = "greenbubbles-0.3.1-macos-arm64.zip"

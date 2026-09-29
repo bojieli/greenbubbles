@@ -101,13 +101,24 @@ if ! grep -Fq "selected MIT and explicitly authorized" docs/DISTRIBUTION_INVENTO
   fail "distribution inventory does not record the owner's MIT decision"
 fi
 
+cargo_version=$(awk -F '"' '/^version[[:space:]]*=/ { print $2; exit }' Native/GreenBubbles/Cargo.toml)
+if ! python3 - "$cargo_version" <<'PYTHON'
+import json
+import sys
+from pathlib import Path
+inventory = json.loads(Path("docs/distribution-dependencies.json").read_text())
+sys.exit(0 if inventory["rust"]["package"]["version"] == sys.argv[1] else 1)
+PYTHON
+then
+  fail "distribution inventory package version does not match Cargo; regenerate and review it"
+fi
+
 release_tag=
 if (( $# > 0 )); then
   release_tag=$1
 fi
 
 if [[ -n "$release_tag" ]]; then
-  cargo_version=$(awk -F '"' '/^version[[:space:]]*=/ { print $2; exit }' Native/GreenBubbles/Cargo.toml)
   if [[ "$release_tag" != "v$cargo_version" ]]; then
     fail "release tag $release_tag does not match Cargo version v$cargo_version"
   fi

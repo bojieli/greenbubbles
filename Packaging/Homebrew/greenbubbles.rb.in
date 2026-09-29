@@ -3,7 +3,6 @@ class Greenbubbles < Formula
   desc "Read your own WeChat history locally and provide bounded context to agents"
   homepage "https://github.com/@REPOSITORY@"
   url "https://github.com/@REPOSITORY@/releases/download/v@VERSION@/greenbubbles-@VERSION@-macos-arm64.zip"
-  version "@VERSION@"
   sha256 "@SHA256@"
   license "MIT"
 

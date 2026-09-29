@@ -270,7 +270,7 @@ repository-level license checksum.
 - `rusqlite 0.40.2` — `MIT` — https://github.com/rusqlite/rusqlite
 - `rust-stemmers 1.2.0` — `MIT OR BSD-3-Clause` — https://github.com/CurrySoftware/rust-stemmers
 - `rustix 1.1.4` — `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` — https://github.com/bytecodealliance/rustix
-- `rustls 0.23.43` — `Apache-2.0 OR ISC OR MIT` — https://github.com/rustls/rustls
+- `rustls 0.23.45` — `Apache-2.0 OR ISC OR MIT` — https://github.com/rustls/rustls
 - `rustls-pki-types 1.15.1` — `MIT OR Apache-2.0` — https://github.com/rustls/pki-types
 - `rustls-webpki 0.103.15` — `ISC` — https://github.com/rustls/webpki
 - `same-file 1.0.6` — `Unlicense OR MIT` — https://github.com/BurntSushi/same-file
@@ -2609,7 +2609,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- `rustls 0.23.43`
+- `rustls 0.23.45`
 
 ```text
 Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>

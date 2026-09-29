@@ -20,6 +20,8 @@ Notable changes to GreenBubbles are documented here. The project follows
 
 ### Fixed
 
+- Updated Rustls to 0.23.45 to address RUSTSEC-2026-0285.
+- Release preflight catches a stale package version in the dependency inventory.
 - Incremental memory runs retain their pending corpus and fixed time window on
   failure; checkpoints advance only after all planned shards complete.
 - Domain-memory prompts and skill references follow the actual page,

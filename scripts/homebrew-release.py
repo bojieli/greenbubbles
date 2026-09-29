@@ -63,13 +63,21 @@ def gh(*args, payload=None):
     return result.stdout
 
 
+def formula_version(content):
+    # Homebrew infers the version from this URL; an explicit version is redundant.
+    url = re.search(
+        r'^  url "https://github.com/[^/]+/[^/]+/releases/download/v([0-9]+\.[0-9]+\.[0-9]+)/greenbubbles-\1-macos-arm64\.zip"$',
+        content, re.MULTILINE)
+    declared = re.search(r'^  version "([^"]+)"$', content, re.MULTILINE)
+    if not url or (declared and declared[1] != url[1]):
+        raise ValueError("existing formula has no consistent release version; refusing to replace it")
+    return url[1]
+
+
 def publication_payload(existing, formula, version, branch):
     """Never roll a tap back or silently replace a same-version release hash."""
     content = base64.b64decode(existing["content"]).decode()
-    old_version = re.search(r'^  version "([^"]+)"$', content, re.MULTILINE)
-    if not old_version:
-        raise ValueError("existing formula has no recognized version; refusing to replace it")
-    previous = version_tuple(old_version[1])
+    previous = version_tuple(formula_version(content))
     desired = version_tuple(version)
     if previous > desired:
         return None
