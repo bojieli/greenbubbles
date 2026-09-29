@@ -771,6 +771,8 @@ pub struct BriefPage {
     pub timezone: String,
     pub order: &'static str,
     pub items: Vec<BriefLine>,
+    /// Set when one command prints several chats. Single-chat pages omit it.
+    pub conversation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4462,7 +4464,7 @@ fn decode_cursor_kind(value: &str) -> Result<String, LiveQueryError> {
 }
 
 pub fn brief_message_text(content: &Value) -> String {
-    brief_message_body(content).0
+    brief_message_body(content, false).0
 }
 
 struct MediaSeed {
@@ -4471,7 +4473,7 @@ struct MediaSeed {
     title: Option<String>,
 }
 
-fn brief_message_body(content: &Value) -> (String, Option<MediaSeed>) {
+fn brief_message_body(content: &Value, redact: bool) -> (String, Option<MediaSeed>) {
     if let Some(kind) = content.as_str() {
         return (kind_placeholder(kind), None);
     }
@@ -4486,10 +4488,19 @@ fn brief_message_body(content: &Value) -> (String, Option<MediaSeed>) {
     };
     match kind.as_str() {
         "Text" | "System" | "Revoke" => (
-            readable_text(value).unwrap_or_else(|| kind_placeholder(kind)),
+            value
+                .as_str()
+                .map(|text| {
+                    if is_recall_notice(text) {
+                        kind_placeholder("Revoke")
+                    } else {
+                        present_reading_text(text, kind, redact)
+                    }
+                })
+                .unwrap_or_else(|| kind_placeholder(kind)),
             None,
         ),
-        "Quote" => (quote_text(value), None),
+        "Quote" => (quote_text(value, redact), None),
         "Image" | "Video" => {
             let seed = media_seed(if kind == "Image" { "image" } else { "video" }, value);
             (kind_placeholder(kind), seed)
@@ -4498,14 +4509,15 @@ fn brief_message_body(content: &Value) -> (String, Option<MediaSeed>) {
             let seed = media_seed("file", value);
             let text = seed
                 .as_ref()
-                .and_then(|seed| seed.title.clone())
+                .and_then(|seed| seed.title.as_deref())
+                .and_then(|title| readable_fragment(title, redact))
                 .unwrap_or_else(|| kind_placeholder(kind));
             (text, seed)
         }
         "Link" | "MiniProgram" | "MergedMessages" | "ChannelVideo" | "AppGeneric"
-        | "RedEnvelope" => (titled_text(kind, value), None),
-        "Transfer" => (transfer_text(value), None),
-        "Unknown" => (unknown_text(value), None),
+        | "RedEnvelope" => (titled_text(kind, value, redact), None),
+        "Transfer" => (transfer_text(value, redact), None),
+        "Unknown" => (unknown_text(value, redact), None),
         "Voice" => (kind_placeholder(kind), None),
         other => (kind_placeholder(other), None),
     }
@@ -4526,6 +4538,7 @@ fn media_seed(kind: &'static str, value: &Value) -> Option<MediaSeed> {
 pub fn brief_messages(
     source: &LiveQuerySource<'_>,
     envelope: &QueryEnvelope<MessageItem>,
+    redact: bool,
 ) -> BriefPage {
     let account_holder = source
         .account_holder_source_id()
@@ -4541,7 +4554,7 @@ pub fn brief_messages(
         .items
         .iter()
         .map(|item| {
-            let (text, seed) = brief_message_body(&item.content);
+            let (text, seed) = brief_message_body(&item.content, redact);
             let room_name = room_names
                 .get(&item.conversation_id)
                 .and_then(|members| members.get(&item.sender))
@@ -4551,6 +4564,7 @@ pub fn brief_messages(
                     item.sender_display_name.as_deref(),
                     room_name,
                     &item.sender,
+                    redact,
                 ),
                 is_self: account_holder.is_some_and(|holder| item.sender == holder),
                 at: brief_local_stamp(item.created_at_unix),
@@ -4574,6 +4588,7 @@ pub fn brief_messages(
 pub fn brief_search(
     source: &LiveQuerySource<'_>,
     envelope: &QueryEnvelope<SearchItem>,
+    redact: bool,
 ) -> BriefPage {
     let account_holder = source
         .account_holder_source_id()
@@ -4600,7 +4615,7 @@ pub fn brief_search(
         .map(|item| {
             let chat = names
                 .get(&item.conversation_id)
-                .and_then(|name| present_name(Some(name.as_str())));
+                .and_then(|name| present_name(Some(name.as_str()), redact));
             let room_name = room_names
                 .get(&item.conversation_id)
                 .and_then(|members| members.get(&item.sender))
@@ -4610,10 +4625,11 @@ pub fn brief_search(
                     item.sender_display_name.as_deref(),
                     room_name,
                     &item.sender,
+                    redact,
                 ),
                 is_self: account_holder.is_some_and(|holder| item.sender == holder),
                 at: brief_local_stamp(item.created_at_unix),
-                text: brief_snippet(item.message_type_label, &item.snippet),
+                text: brief_snippet(item.message_type_label, &item.snippet, redact),
                 file: None,
                 conversation_id: chat.is_none().then(|| item.conversation_id.clone()),
                 chat,
@@ -4643,6 +4659,9 @@ pub fn serialize_brief_page(page: &BriefPage) -> Result<String, LiveQueryError> 
     }
     if !page.account_holder_known {
         header.insert("accountHolderKnown".to_string(), json!(false));
+    }
+    if let Some(conversation_id) = &page.conversation_id {
+        header.insert("conversationId".to_string(), json!(conversation_id));
     }
     let mut bytes = serde_json::to_vec(&Value::Object(header))
         .map_err(|_| LiveQueryError::Database("JSON response serialization failed".into()))?;
@@ -4679,11 +4698,12 @@ fn brief_page(
         timezone: brief_timezone_label(),
         order: "newest",
         items,
+        conversation_id: None,
     }
 }
 
-fn sender_label(display: Option<&str>, sender: &str) -> String {
-    present_name(display).unwrap_or_else(|| {
+fn sender_label(display: Option<&str>, sender: &str, redact: bool) -> String {
+    present_name(display, redact).unwrap_or_else(|| {
         let sender = sender.trim();
         if sender.is_empty() {
             "unknown".to_string()
@@ -4699,14 +4719,15 @@ fn reading_sender_name(
     contact_name: Option<&str>,
     room_name: Option<&str>,
     sender: &str,
+    redact: bool,
 ) -> String {
-    if let Some(name) = present_name(contact_name) {
+    if let Some(name) = present_name(contact_name, redact) {
         return name;
     }
-    if let Some(name) = present_name(room_name) {
+    if let Some(name) = present_name(room_name, redact) {
         return name;
     }
-    sender_label(None, sender)
+    sender_label(None, sender, redact)
 }
 
 #[derive(prost::Message)]
@@ -4812,7 +4833,7 @@ fn decode_room_display_names(blob: &[u8]) -> BTreeMap<String, String> {
     };
     let mut names = BTreeMap::new();
     for user in proto.users.into_iter().take(5_000) {
-        let Some(display) = present_name(user.display_name.as_deref()) else {
+        let Some(display) = present_name(user.display_name.as_deref(), false) else {
             continue;
         };
         if user.user_name.is_empty() || user.user_name.len() > MAX_CONVERSATION_ID_BYTES {
@@ -4905,7 +4926,7 @@ pub fn serialize_brief_rank(report: &ConversationRankReport) -> Result<String, L
         let mut line = serde_json::Map::new();
         line.insert(
             "from".to_string(),
-            json!(sender_label(item.display_name.as_deref(), &item.id)),
+            json!(sender_label(item.display_name.as_deref(), &item.id, false)),
         );
         line.insert("id".to_string(), json!(item.id));
         line.insert("kind".to_string(), json!(item.kind));
@@ -4947,6 +4968,7 @@ fn kind_placeholder(kind: &str) -> String {
         "RedEnvelope" => "red envelope",
         "Transfer" => "transfer",
         "System" => "system",
+        "Meeting" => "meeting",
         "Revoke" => "revoked",
         "Quote" => "quote",
         "Text" => "text",
@@ -4961,15 +4983,6 @@ fn is_markup(value: &str) -> bool {
     trimmed.contains('<') && trimmed.contains('>')
 }
 
-fn readable_text(value: &Value) -> Option<String> {
-    let text = value.as_str()?.trim();
-    if text.is_empty() || is_markup(text) {
-        None
-    } else {
-        Some(text.to_string())
-    }
-}
-
 fn field_text<'a>(object: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a str> {
     let text = object.get(key)?.as_str()?.trim();
     if text.is_empty() || is_markup(text) {
@@ -4979,12 +4992,12 @@ fn field_text<'a>(object: &'a serde_json::Map<String, Value>, key: &str) -> Opti
     }
 }
 
-fn quote_text(value: &Value) -> String {
+fn quote_text(value: &Value, redact: bool) -> String {
     let Some(fields) = value.as_object() else {
         return kind_placeholder("Quote");
     };
-    let reply = field_text(fields, "reply_text");
-    let refer = field_text(fields, "refer_content").map(|text| {
+    let reply = field_text(fields, "reply_text").and_then(|text| readable_fragment(text, redact));
+    let refer = field_text(fields, "refer_content").and_then(|text| {
         let mut short = text.to_string();
         if short.len() > 240 {
             let mut boundary = 240;
@@ -4993,7 +5006,7 @@ fn quote_text(value: &Value) -> String {
             }
             short.truncate(boundary);
         }
-        short
+        readable_fragment(&short, redact)
     });
     match (reply, refer) {
         (Some(reply), Some(refer)) if refer != reply => format!("{reply} ← {refer}"),
@@ -5003,6 +5016,7 @@ fn quote_text(value: &Value) -> String {
             .get("raw_xml")
             .and_then(Value::as_str)
             .and_then(markup_plain_text)
+            .map(|plain| present_reading_text(&plain, "Quote", redact))
             .unwrap_or_else(|| kind_placeholder("Quote")),
     }
 }
@@ -5055,11 +5069,14 @@ fn stripped_plain(value: &str) -> Option<String> {
     Some(text)
 }
 
-fn titled_text(kind: &str, value: &Value) -> String {
+fn titled_text(kind: &str, value: &Value, redact: bool) -> String {
     let Some(fields) = value.as_object() else {
         return kind_placeholder(kind);
     };
-    match (field_text(fields, "title"), field_text(fields, "des")) {
+    match (
+        field_text(fields, "title").and_then(|text| readable_fragment(text, redact)),
+        field_text(fields, "des").and_then(|text| readable_fragment(text, redact)),
+    ) {
         (Some(title), Some(description)) if description != title => {
             format!("{title} — {description}")
         }
@@ -5069,45 +5086,423 @@ fn titled_text(kind: &str, value: &Value) -> String {
     }
 }
 
-fn transfer_text(value: &Value) -> String {
+fn transfer_text(value: &Value, redact: bool) -> String {
     value
         .as_object()
         .and_then(|fields| field_text(fields, "pay_memo"))
         .filter(|memo| memo.chars().any(char::is_alphabetic))
-        .map(str::to_string)
+        .and_then(|memo| readable_fragment(memo, redact))
         .unwrap_or_else(|| kind_placeholder("Transfer"))
 }
 
-fn unknown_text(value: &Value) -> String {
+fn unknown_text(value: &Value, redact: bool) -> String {
     value
         .as_object()
         .and_then(|fields| fields.get("raw"))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|text| !text.is_empty())
-        .and_then(|text| {
+        .map(|text| {
             if text.len() <= 500 && !is_markup(text) {
-                Some(text.to_string())
+                present_reading_text(text, "Unknown", redact)
             } else {
                 markup_plain_text(text)
+                    .map(|plain| present_reading_text(&plain, "Unknown", redact))
+                    .unwrap_or_else(|| kind_placeholder("Unknown"))
             }
         })
         .unwrap_or_else(|| kind_placeholder("Unknown"))
 }
 
-fn present_name(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
+fn is_meeting_card(value: &str) -> bool {
+    let invited = value.contains("邀请你加入飞书视频会议")
+        || value.contains("邀请你加入腾讯会议")
+        || value.contains("邀请你加入视频会议");
+    invited
+        && (value.contains("会议 ID")
+            || value.contains("会议号")
+            || value.contains("会议链接")
+            || value.contains("入会"))
 }
 
-fn brief_snippet(label: &str, snippet: &str) -> String {
+fn mainland_mobile_span(chars: &[char]) -> Option<usize> {
+    let mut index = 0;
+    if chars.first() == Some(&'+') {
+        index += 1;
+    }
+    if chars.len() >= index + 2 && chars[index] == '8' && chars[index + 1] == '6' {
+        let mut after_country = index + 2;
+        if matches!(chars.get(after_country), Some('-') | Some(' ')) {
+            after_country += 1;
+        }
+        if mobile_digit_len(chars, after_country).is_some() {
+            index = after_country;
+        } else if chars.first() == Some(&'+') {
+            return None;
+        } else {
+            index = 0;
+        }
+    } else if chars.first() == Some(&'+') {
+        return None;
+    }
+    mobile_digit_len(chars, index).map(|digits| index + digits)
+}
+
+fn mobile_digit_len(chars: &[char], start: usize) -> Option<usize> {
+    if chars.len() < start + 11 {
+        return None;
+    }
+    let digits = &chars[start..start + 11];
+    if digits[0] != '1' || !('3'..='9').contains(&digits[1]) {
+        return None;
+    }
+    if !digits.iter().all(|character| character.is_ascii_digit()) {
+        return None;
+    }
+    if chars
+        .get(start + 11)
+        .is_some_and(|character| character.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(11)
+}
+
+fn strip_resident_ids(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if resident_id_at(&chars, index) {
+            index += 18;
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn resident_id_at(chars: &[char], index: usize) -> bool {
+    if index > 0 && chars[index - 1].is_ascii_digit() {
+        return false;
+    }
+    if chars.len() < index + 18 {
+        return false;
+    }
+    if chars
+        .get(index + 18)
+        .is_some_and(|character| character.is_ascii_digit())
+    {
+        return false;
+    }
+    let head = &chars[index..index + 18];
+    if !head[..17]
+        .iter()
+        .all(|character| character.is_ascii_digit())
+    {
+        return false;
+    }
+    if !(head[17].is_ascii_digit() || head[17] == 'X' || head[17] == 'x') {
+        return false;
+    }
+    if head[0] == '0' {
+        return false;
+    }
+    let year_ok = (head[6] == '1' && head[7] == '9') || (head[6] == '2' && head[7] == '0');
+    if !year_ok {
+        return false;
+    }
+    let month = (head[10] as u8 - b'0') * 10 + (head[11] as u8 - b'0');
+    let day = (head[12] as u8 - b'0') * 10 + (head[13] as u8 - b'0');
+    (1..=12).contains(&month) && (1..=31).contains(&day)
+}
+
+fn strip_reading_secrets(value: &str) -> String {
+    strip_http_urls(&strip_emails(&strip_embedded_mobiles(&strip_resident_ids(
+        value,
+    ))))
+}
+
+fn strip_emails(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if let Some(end) = email_span_end(&chars, index) {
+            index = end;
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn email_local_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '%' | '+' | '-')
+}
+
+fn email_span_end(chars: &[char], index: usize) -> Option<usize> {
+    if !email_local_char(chars[index]) {
+        return None;
+    }
+    if index > 0 && email_local_char(chars[index - 1]) {
+        return None;
+    }
+    let mut at = index;
+    while at < chars.len() && email_local_char(chars[at]) {
+        at += 1;
+    }
+    if at == index || at - index > 64 || chars.get(at) != Some(&'@') {
+        return None;
+    }
+    let domain_start = at + 1;
+    if !chars
+        .get(domain_start)
+        .is_some_and(|character| character.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    let mut end = domain_start;
+    let mut dot = None;
+    while end < chars.len()
+        && (chars[end].is_ascii_alphanumeric() || chars[end] == '.' || chars[end] == '-')
+    {
+        if chars[end] == '.' {
+            dot = Some(end);
+        }
+        end += 1;
+    }
+    let dot = dot?;
+    let tld_len = end.saturating_sub(dot + 1);
+    if !(2..=24).contains(&tld_len) {
+        return None;
+    }
+    if !chars[dot + 1..end]
+        .iter()
+        .all(|character| character.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    Some(end)
+}
+
+fn strip_http_urls(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if let Some(end) = http_url_end(&chars, index) {
+            index = end;
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn http_url_end(chars: &[char], index: usize) -> Option<usize> {
+    if index > 0 && url_char(chars[index - 1]) {
+        return None;
+    }
+    let prefix_len = if has_ascii_prefix(&chars[index..], "https://") {
+        8
+    } else if has_ascii_prefix(&chars[index..], "http://") {
+        7
+    } else {
+        return None;
+    };
+    let mut end = index + prefix_len;
+    if end >= chars.len() || !url_char(chars[end]) {
+        return None;
+    }
+    while end < chars.len() && url_char(chars[end]) {
+        end += 1;
+    }
+    while end > index + prefix_len
+        && matches!(
+            chars[end - 1],
+            '.' | ',' | ';' | ':' | ')' | ']' | '!' | '?'
+        )
+    {
+        end -= 1;
+    }
+    if end <= index + prefix_len {
+        return None;
+    }
+    Some(end)
+}
+
+fn has_ascii_prefix(chars: &[char], prefix: &str) -> bool {
+    let prefix: Vec<char> = prefix.chars().collect();
+    chars.len() >= prefix.len()
+        && chars
+            .iter()
+            .zip(prefix.iter())
+            .all(|(character, expected)| character.eq_ignore_ascii_case(expected))
+}
+
+fn url_char(character: char) -> bool {
+    character.is_ascii()
+        && !character.is_ascii_whitespace()
+        && !matches!(character, '<' | '>' | '"' | '\'')
+}
+
+fn strip_embedded_mobiles(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if let Some(span) = mainland_mobile_span(&chars[index..]) {
+            index += span;
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn is_recall_notice(value: &str) -> bool {
+    let trimmed = value.trim();
+    let compact = trimmed
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .count();
+    if compact <= 24 && trimmed.contains("撤回了一条消息") {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    lower.len() <= 80
+        && (lower == "you recalled a message"
+            || lower == "recalled a message"
+            || lower.ends_with("recalled a message"))
+}
+
+fn is_packed_identifier_row(value: &str) -> bool {
+    let tokens: Vec<&str> = value.split_whitespace().collect();
+    if tokens.len() < 6 {
+        return false;
+    }
+    let mut long_id = false;
+    for token in tokens {
+        if token == "true" || token == "false" {
+            continue;
+        }
+        if !token.is_empty() && token.bytes().all(|byte| byte.is_ascii_digit()) {
+            if token.len() >= 12 {
+                long_id = true;
+            }
+            continue;
+        }
+        return false;
+    }
+    long_id
+}
+
+fn strip_ascii_bracket_tokens(value: &str) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index] == '[' {
+            let mut end = index + 1;
+            while end < chars.len() && chars[end] != ']' {
+                end += 1;
+            }
+            if end < chars.len() {
+                let inner = &chars[index + 1..end];
+                let ascii_emoji = !inner.is_empty()
+                    && inner[0].is_ascii_alphabetic()
+                    && inner
+                        .iter()
+                        .all(|character| character.is_ascii_alphanumeric());
+                let cjk_emoji = (1..=4).contains(&inner.len())
+                    && inner
+                        .iter()
+                        .all(|character| !character.is_ascii() && character.is_alphabetic());
+                if ascii_emoji || cjk_emoji {
+                    index = end + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn present_reading_text(text: &str, empty_label: &str, redact: bool) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || is_markup(trimmed) {
+        return kind_placeholder(empty_label);
+    }
+    if redact && is_meeting_card(trimmed) {
+        return kind_placeholder("Meeting");
+    }
+    if is_packed_identifier_row(trimmed) {
+        return kind_placeholder("Unknown");
+    }
+    let prepared = if redact {
+        strip_reading_secrets(trimmed)
+    } else {
+        trimmed.to_string()
+    };
+    if prepared.trim().is_empty() {
+        return kind_placeholder("Unknown");
+    }
+    let cleaned = strip_ascii_bracket_tokens(prepared.trim());
+    if cleaned.is_empty() {
+        return kind_placeholder("Emoji");
+    }
+    cleaned
+}
+
+fn readable_fragment(value: &str, redact: bool) -> Option<String> {
+    let prepared = if redact {
+        strip_reading_secrets(value)
+    } else {
+        value.to_string()
+    };
+    if prepared.trim().is_empty() {
+        return None;
+    }
+    let cleaned = strip_ascii_bracket_tokens(prepared.trim());
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+fn present_name(value: Option<&str>, redact: bool) -> Option<String> {
+    let Some(trimmed) = value.map(str::trim).filter(|name| !name.is_empty()) else {
+        return None;
+    };
+    if !redact {
+        return Some(trimmed.to_string());
+    }
+    let collapsed = strip_embedded_mobiles(trimmed)
+        .split_whitespace()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.is_empty() {
+        None
+    } else {
+        Some(collapsed)
+    }
+}
+
+fn brief_snippet(label: &str, snippet: &str, redact: bool) -> String {
     let trimmed = snippet.trim();
     if trimmed.is_empty() || is_markup(trimmed) {
         format!("[{label}]")
     } else {
-        trimmed.to_string()
+        present_reading_text(trimmed, label, redact)
     }
 }
 
@@ -5885,6 +6280,233 @@ mod tests {
             brief_message_text(&json!({"unavailable": "decodeFailed"})),
             "[unavailable]"
         );
+        assert_eq!(
+            brief_message_text(&json!({"Text": "[Grin][Grin][Grin]"})),
+            "[emoji]"
+        );
+        assert_eq!(
+            brief_message_text(&json!({"Text": "[Laugh]3年了"})),
+            "3年了"
+        );
+        assert_eq!(
+            brief_message_text(&json!({
+                "Text": "1 false 269606860842023475 0 1783415790 100 1783416537744 0 1783415790 1 0 1"
+            })),
+            "[unknown]"
+        );
+        assert_eq!(
+            brief_message_text(&json!({"Text": "我们招的是全明星团队"})),
+            "我们招的是全明星团队"
+        );
+        assert_eq!(
+            brief_message_text(&json!({"System": "You recalled a message"})),
+            "[revoked]"
+        );
+        assert_eq!(
+            brief_message_text(&json!({"Text": "对方撤回了一条消息"})),
+            "[revoked]"
+        );
+        assert_eq!(
+            brief_message_text(&json!({"Text": "\"宋小刚\" recalled a message"})),
+            "[revoked]"
+        );
+        assert_eq!(
+            brief_message_text(&json!({"Text": "[偷笑][玫瑰][玫瑰]"})),
+            "[emoji]"
+        );
+        assert_eq!(
+            brief_message_text(&json!({"Text": "我们正在处理升级[破涕为笑]"})),
+            "我们正在处理升级"
+        );
+        assert_eq!(
+            brief_message_text(&json!({
+                "Text": "我们后来又讨论了对方撤回了一条消息这件事，然后继续把这一章写完，不能停在这里。"
+            })),
+            "我们后来又讨论了对方撤回了一条消息这件事，然后继续把这一章写完，不能停在这里。"
+        );
+        let meeting = "甲邀请你加入飞书视频会议 会议主题：讨论 会议 ID：100000001 会议链接：https://example.invalid/join 入会";
+        assert_eq!(brief_message_text(&json!({ "Text": meeting })), meeting);
+        assert_eq!(
+            brief_message_text(&json!({"Text": "明天下午他邀请你加入飞书视频会议"})),
+            "明天下午他邀请你加入飞书视频会议"
+        );
+        assert_eq!(
+            present_name(Some("Friend 13800138000"), false).as_deref(),
+            Some("Friend 13800138000")
+        );
+        assert_eq!(
+            present_name(Some("+86 13800138000"), false).as_deref(),
+            Some("+86 13800138000")
+        );
+        assert_eq!(
+            present_name(Some("北醒 郑 13800138000999"), false).as_deref(),
+            Some("北醒 郑 13800138000999")
+        );
+        let form = "单位：Pine AI 身份证号：110101199001011234 手机号：13800138000";
+        assert_eq!(brief_message_text(&json!({ "Text": form })), form);
+        assert_eq!(
+            brief_message_text(&json!({"Text": "110101199001011234"})),
+            "110101199001011234"
+        );
+        assert_eq!(
+            brief_message_text(&json!({"Text": "13800138000"})),
+            "13800138000"
+        );
+        assert_eq!(
+            brief_message_text(&json!({"Text": "证 11010119900101123X 完"})),
+            "证 11010119900101123X 完"
+        );
+        assert_eq!(
+            brief_message_text(&json!({"Text": "编号 1101011990010112345 保留"})),
+            "编号 1101011990010112345 保留"
+        );
+        assert_eq!(
+            brief_message_text(&json!({"Text": "编号 110101199013011234 保留"})),
+            "编号 110101199013011234 保留"
+        );
+        assert_eq!(
+            brief_message_text(&json!({"Text": "2026 年仍在"})),
+            "2026 年仍在"
+        );
+        assert_eq!(
+            brief_message_text(&json!({"Text": "打 +86-13800138000 吧"})),
+            "打 +86-13800138000 吧"
+        );
+        assert_eq!(
+            brief_message_text(&json!({"Text": "只发 ada@example.com 吧"})),
+            "只发 ada@example.com 吧"
+        );
+        assert_eq!(
+            brief_message_text(&json!({"Text": "ada@example.com"})),
+            "ada@example.com"
+        );
+        assert_eq!(
+            brief_message_text(&json!({"Text": "看 https://example.com/a 就行"})),
+            "看 https://example.com/a 就行"
+        );
+        assert_eq!(
+            brief_message_text(&json!({"Text": "https://example.com/only"})),
+            "https://example.com/only"
+        );
+        assert_eq!(
+            brief_message_text(&json!({"Text": "主页 19pine.ai 还在"})),
+            "主页 19pine.ai 还在"
+        );
+        assert_eq!(
+            brief_message_text(&json!({
+                "Quote": {
+                    "reply_text": "同意",
+                    "refer_content": "打 13800138000",
+                    "raw_xml": "<appmsg/>"
+                }
+            })),
+            "同意 ← 打 13800138000"
+        );
+        assert_eq!(
+            brief_message_text(&json!({
+                "Quote": {
+                    "reply_text": "ada@example.com",
+                    "raw_xml": "<appmsg/>"
+                }
+            })),
+            "ada@example.com"
+        );
+        let link_with_email = brief_message_text(&json!({
+            "Link": {
+                "title": "QCon ada@example.com",
+                "des": "opening remarks",
+                "url": "https://example.invalid/secret"
+            }
+        }));
+        assert_eq!(link_with_email, "QCon ada@example.com — opening remarks");
+        assert!(!link_with_email.contains("example.invalid"));
+    }
+
+    #[test]
+    fn brief_text_redacts_identifiers_only_when_asked() {
+        let redact = |content: Value| brief_message_body(&content, true).0;
+        let meeting = "甲邀请你加入飞书视频会议 会议主题：讨论 会议 ID：100000001 会议链接：https://example.invalid/join 入会";
+        let rendered = redact(json!({ "Text": meeting }));
+        assert_eq!(rendered, "[meeting]");
+        assert!(!rendered.contains("100000001"));
+        assert!(!rendered.contains("example.invalid"));
+        assert_eq!(
+            redact(json!({"Text": "明天下午他邀请你加入飞书视频会议"})),
+            "明天下午他邀请你加入飞书视频会议"
+        );
+        assert_eq!(
+            present_name(Some("Friend 13800138000"), true).as_deref(),
+            Some("Friend")
+        );
+        assert_eq!(present_name(Some("+86 13800138000"), true).as_deref(), None);
+        assert_eq!(
+            present_name(Some("北醒 郑 13800138000999"), true).as_deref(),
+            Some("北醒 郑 13800138000999")
+        );
+        let form = redact(json!({
+            "Text": "单位：Pine AI 身份证号：110101199001011234 手机号：13800138000"
+        }));
+        assert_eq!(form, "单位：Pine AI 身份证号： 手机号：");
+        assert!(!form.contains("110101199001011234"));
+        assert!(!form.contains("13800138000"));
+        assert_eq!(redact(json!({"Text": "110101199001011234"})), "[unknown]");
+        assert_eq!(redact(json!({"Text": "13800138000"})), "[unknown]");
+        assert_eq!(redact(json!({"Text": "证 11010119900101123X 完"})), "证 完");
+        assert_eq!(
+            redact(json!({"Text": "编号 1101011990010112345 保留"})),
+            "编号 1101011990010112345 保留"
+        );
+        assert_eq!(
+            redact(json!({"Text": "编号 110101199013011234 保留"})),
+            "编号 110101199013011234 保留"
+        );
+        assert_eq!(redact(json!({"Text": "2026 年仍在"})), "2026 年仍在");
+        assert_eq!(redact(json!({"Text": "打 +86-13800138000 吧"})), "打 吧");
+        assert_eq!(
+            redact(json!({"Text": "只发 ada@example.com 吧"})),
+            "只发 吧"
+        );
+        assert_eq!(redact(json!({"Text": "ada@example.com"})), "[unknown]");
+        assert_eq!(
+            redact(json!({"Text": "看 https://example.com/a 就行"})),
+            "看 就行"
+        );
+        assert_eq!(
+            redact(json!({"Text": "https://example.com/only"})),
+            "[unknown]"
+        );
+        assert_eq!(
+            redact(json!({"Text": "主页 19pine.ai 还在"})),
+            "主页 19pine.ai 还在"
+        );
+        assert_eq!(
+            redact(json!({
+                "Quote": {
+                    "reply_text": "同意",
+                    "refer_content": "打 13800138000",
+                    "raw_xml": "<appmsg/>"
+                }
+            })),
+            "同意 ← 打"
+        );
+        assert_eq!(
+            redact(json!({
+                "Quote": {
+                    "reply_text": "ada@example.com",
+                    "raw_xml": "<appmsg/>"
+                }
+            })),
+            "[quote]"
+        );
+        let link = redact(json!({
+            "Link": {
+                "title": "QCon ada@example.com",
+                "des": "opening remarks",
+                "url": "https://example.invalid/secret"
+            }
+        }));
+        assert_eq!(link, "QCon — opening remarks");
+        assert!(!link.contains("example"));
     }
 
     #[test]
@@ -5907,6 +6529,7 @@ mod tests {
                 conversation_id: None,
                 media: None,
             }],
+            conversation_id: None,
         };
         let encoded = serialize_brief_page(&page).unwrap();
         let mut lines = encoded.lines();
@@ -5921,6 +6544,7 @@ mod tests {
             .is_some_and(|value| !value.is_empty()));
         assert_eq!(header["nextCursor"], "cursor-token");
         assert!(header.get("accountHolderKnown").is_none());
+        assert!(header.get("conversationId").is_none());
         assert_eq!(item["from"], "boj");
         assert_eq!(item["self"], true);
         assert_eq!(item["at"], brief_local_stamp(1_727_539_200));
@@ -5930,6 +6554,18 @@ mod tests {
         assert!(item.get("sender").is_none());
         assert!(!encoded.contains("serverId"));
         assert!(!encoded.contains("schema"));
+
+        let mut joined = page.clone();
+        joined.conversation_id = Some("wxid_example".to_string());
+        let joined_header: Value = serde_json::from_str(
+            serialize_brief_page(&joined)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(joined_header["conversationId"], "wxid_example");
     }
 
     #[test]
@@ -5945,18 +6581,18 @@ mod tests {
 
     #[test]
     fn brief_sender_label_never_omits_the_name() {
-        assert_eq!(sender_label(Some(" 苏小姐 "), "wxid_a"), "苏小姐");
-        assert_eq!(sender_label(None, "wxid_a"), "wxid_a");
-        assert_eq!(sender_label(Some(" "), ""), "unknown");
+        assert_eq!(sender_label(Some(" 苏小姐 "), "wxid_a", false), "苏小姐");
+        assert_eq!(sender_label(None, "wxid_a", false), "wxid_a");
+        assert_eq!(sender_label(Some(" "), "", false), "unknown");
         assert_eq!(
-            reading_sender_name(Some("备注"), Some("群昵称"), "wxid_a"),
+            reading_sender_name(Some("备注"), Some("群昵称"), "wxid_a", false),
             "备注"
         );
         assert_eq!(
-            reading_sender_name(None, Some("群昵称"), "wxid_a"),
+            reading_sender_name(None, Some("群昵称"), "wxid_a", false),
             "群昵称"
         );
-        assert_eq!(reading_sender_name(None, None, "wxid_a"), "wxid_a");
+        assert_eq!(reading_sender_name(None, None, "wxid_a", false), "wxid_a");
     }
 
     #[test]

@@ -4,6 +4,26 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
+## 0.7.0 - 2026-09-29
+
+### Added
+
+- `messages list` and `messages search` accept `--redact`. It omits a resident
+  identity number, a mainland mobile, an email address, and an `http` or
+  `https` link from the reading page, including a quote, a link title, a file
+  name, a transfer note, and a display name. A video-meeting invitation that
+  includes a meeting id or a join link becomes `[meeting]`. Without the flag,
+  those values stay in the text. A bare hostname stays either way.
+
+### Changed
+
+- A text body that is only bracketed emoji names becomes `[emoji]`. Words
+  beside those names stay. A short recall notice becomes `[revoked]`. A longer
+  sentence that mentions a recall stays text.
+- `messages list` accepts up to 24 `--conversation` values in one database
+  open, so one time slice can be read across chats. Each chat keeps its own
+  page and cursor.
+
 ## 0.6.0 - 2026-09-29
 
 ### Changed

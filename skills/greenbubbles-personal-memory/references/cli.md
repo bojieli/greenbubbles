@@ -35,6 +35,13 @@ not the end. Pass `--limit 2000`, or follow `nextCursor` and repeat
 `--minimum-self-messages`. `--json` prints the full report. Ranking rules
 are in [priorities.md](priorities.md).
 
+A time slice is one `messages list` with the same `--since` and `--until`
+repeated on several `--conversation` flags, at most 24. The database opens
+once. Each chat is its own page, and that header includes `conversationId`.
+Line the chats up on `at`. Follow one chat's `nextCursor` with a single
+`--conversation` and `--cursor`, and repeat the same `--since` and `--until`.
+Do not pass `--cursor` together with several conversations.
+
 `messages list` and `messages search` print JSON Lines. The first line is a
 header. Each later line is one message:
 
@@ -49,14 +56,28 @@ then the name that person uses inside that group, then the wxid. `self` is
 always present: `true` when the account holder sent the line, `false`
 otherwise. Do not infer either fact from the display name. `at` is local
 time, `YYYY-MM-DD HH:MM`, in the header's `timezone`. Compare dates with
-`at`; do not convert a unix timestamp.
+`at`; do not convert a unix timestamp. `at` is also how a fact that spans
+a direct chat and a group is lined up. Read those chats over the same
+dates before writing the episode.
 
 An image, video, or document adds `file`, a local path. Open that path when
 the picture or document matters to the article. Do not copy the path, or the
 bytes' cache location, into the knowledge base. Voice with no transcript
-stays `[voice]` and has no `file`. Leave it as a placeholder. Other non-text
-lines keep a short label such as `[emoji]` unless the message also has
-readable words. Markup and raw identifiers are omitted.
+stays `[voice]` and has no `file`. Leave it as a placeholder. A text body
+that is only identifiers and `true` or `false` is `[unknown]`. A text body
+that is only bracketed emoji names, in English such as `[Grin]` or in
+Chinese such as `[偷笑]`, is `[emoji]`; words beside those names are kept.
+A short recall notice is `[revoked]`, including `You recalled a message`,
+a Chinese notice, and a line that only says someone recalled a message.
+Do not recover the withdrawn words, and do not treat the English word "You"
+or a name inside that notice as proof of `self`. A longer sentence that
+merely mentions a recall stays text. Phone numbers, email addresses,
+identity numbers, street addresses, links, and meeting invitations stay in
+the text, including a quote, a link title, a file name, a transfer note,
+and `from`. Do not pass `--redact` for this private knowledge base. That
+flag is only for a page that must leave those values out. Do not invent a
+birthday the message did not state. Markup and raw internal identifiers
+are omitted.
 
 Search lines add `chat` when the conversation has a display name, and
 `conversationId` when it does not. A search line has no `file`. Open the

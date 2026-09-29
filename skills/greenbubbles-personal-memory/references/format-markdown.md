@@ -180,12 +180,19 @@ Rules:
 - One topic has one section. Merge a new fact into that section. Do not
   append a second paragraph that repeats the first.
 - Say who is speaking. "He told Tracy" is his statement. "Tracy said" is hers.
+- When one episode is told in several chats, including a group and a direct
+  chat, write it once, in order of `at`. Name each chat. Do not retell it
+  under every person.
+- Message time joins the chats. When someone later describes an earlier
+  event, the sentence keeps the event's date, and the reference keeps the
+  date they said it.
 - When evidence conflicts, keep both dates in the prose. Do not silently
   replace the older claim.
 - References name the chat display name, the message date, and whether the
   line came from `messages list` or `messages search`. Do not cite a corpus
-  alias. Do not copy phone numbers, street addresses, meeting links, or
-  form links into the article or the references.
+  alias. A phone number, email address, identity number, street address,
+  or link stays in the article when the message states it. Do not put a
+  real one into a public repository or a skill example.
 - Revision notes are append-only and short. They record that the article
   changed. The prose above them is the current account. Git holds the
   older wording.

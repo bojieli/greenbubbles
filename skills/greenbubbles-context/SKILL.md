@@ -51,7 +51,10 @@ the same source, operation, conversation, and filter.
 
 On a reading page, use `from` and `self` for the speaker, `at` for the local
 time, and open `file` when the line is an image, video, or document. Do not
-copy that path into notes. Voice without a transcript stays `[voice]`. With
+copy that path into notes. Voice without a transcript stays `[voice]`.
+A packed identifier row is `[unknown]`, an emoji-only body is `[emoji]`, and
+a recall notice is `[revoked]`. Phone numbers, email addresses, identity
+numbers, and links stay in `text` unless `--redact` is passed. With
 `--json`, inspect `ok`, `consistency`, `warnings`, and `page`. Report
 incomplete shard coverage and unverified native-search freshness; do not treat
 absence as deletion when coverage is incomplete. Page through only

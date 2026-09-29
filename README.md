@@ -192,7 +192,9 @@ greenbubbles message get --conversation <conversation-id> --message <message-id>
 `messages list` and `messages search` print a compact reading page: one header,
 then one line per message. Each line names the sender, says whether it is the
 account holder, and gives the local time and the text. An image, video, or
-document also includes a local path. `chats rank` prints the same kind of page
+document also includes a local path. Phone numbers, email addresses,
+identity numbers, and links stay on the page. `--redact` leaves those out
+and turns a meeting invitation into `[meeting]`. `chats rank` prints the same kind of page
 for choosing which chats matter. Follow `nextCursor` until `hasMore` is false.
 `--json` prints the full page, which is what `message get` needs for an id.
 The reading rules are in the [CLI reference](docs/CLI_REFERENCE.md).

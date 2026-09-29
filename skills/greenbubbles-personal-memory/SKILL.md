@@ -40,11 +40,18 @@ already answers them:
 
 Measure with `source status`, then rank with `chats rank`. The default
 metric is the account holder's own messages: at least 10 self-sent messages,
-direct chats before groups, then recency. Inside the window, page each
-selected chat from the newest message backward with `messages list`, and use
-`messages search` for projects, organizations, and decisions already seen.
+direct chats before groups, then recency. That ranking chooses which chats
+are in scope. It is not the order in which a fact is written.
+
+A fact that shows up in several chats, including a group and a direct chat,
+is one episode. Join those messages on `at`, newest slice first, and write
+the episode once in that order. Do not finish one chat down to the window
+start before opening the others that speak in the same days. Page with
+`messages list`. When an episode has a name, use `messages search` to find
+the other chats in that slice, then confirm the hit in `messages list`.
 An incremental pass uses the same commands on the existing project. It does
-not start a second project, and it does not prepare a corpus.
+not start a second project, and it does not prepare a corpus. The schedule
+is in [references/priorities.md](references/priorities.md).
 
 A year, two-year, or lifetime request is a knowledge base. Open every
 qualifying chat in the window and page it to the window start. The dozen

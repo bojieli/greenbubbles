@@ -20,6 +20,17 @@ greenbubbles messages search --query-stdin
 has `from` (never empty), `self` (`true` or `false`), `at` (local
 `YYYY-MM-DD HH:MM`), and `text`. An image, video, or document adds `file`,
 a local path you can open. Voice without a transcript stays `[voice]`.
+A text body that is only identifiers becomes `[unknown]`. A text body that
+is only bracketed emoji names, in English or Chinese, becomes `[emoji]`.
+A short recall notice, including one that names who recalled it, becomes
+`[revoked]`; the withdrawn words are not on the page. Phone numbers, email
+addresses, identity numbers, links, and meeting invitations stay in the
+text. `--redact` leaves out a resident identity number, a mainland mobile,
+an email address, and an `http` or `https` link, including inside a quote,
+a link title, a file name, a transfer note, and `from`, and it collapses a
+video-meeting invitation to `[meeting]`. Words around a removed value stay.
+A body that is only one of those becomes `[unknown]`. A bare hostname stays
+either way.
 Search lines name the chat and do not include `file`. `chats rank` prints
 the same kind of page: `from`, `id`, `kind`, `selfCount`, and `last`.
 Pass `--json` when you need the typed envelope or a message id for

@@ -109,7 +109,20 @@ Follow `nextCursor` with `--cursor` and repeat `--minimum-self-messages`.
   `YYYY-MM-DD HH:MM`, in the header's timezone. An image, video, or document
   adds `file`, a local path. Encrypted images are decoded into
   `~/.greenbubbles/cache/media`. A path is omitted when the bytes cannot be
-  opened. Voice without a transcript stays `[voice]` and has no `file`. Search
+  opened. Voice without a transcript stays `[voice]` and has no `file`. A text
+  body that is only identifiers and `true` or `false` becomes `[unknown]`. A
+  text body that is only bracketed emoji names, in English such as `[Grin]` or
+  in Chinese such as `[偷笑]`, becomes `[emoji]`; words beside those names are
+  kept. A short recall notice becomes `[revoked]`, including a line that only
+  names who recalled a message. A longer sentence that mentions a recall stays
+  text. The withdrawn words are not recovered. Phone numbers, email
+  addresses, identity numbers, links, and meeting invitations stay in the
+  text. `--redact` leaves out a resident identity number, a mainland mobile,
+  an email address, and an `http` or `https` link, including inside a quote,
+  a link title, a file name, a transfer note, and `from`. The same flag
+  collapses a video-meeting invitation that includes a meeting id or a join
+  link to `[meeting]`. Words around a removed value stay. A body that is only
+  one of those becomes `[unknown]`. A bare hostname stays either way. Search
   lines name the chat with `chat`, or `conversationId` when it has no display
   name, and do not include `file`; open that conversation with `messages list`
   to read an image or file. Do not copy a `file` path into notes or a knowledge
@@ -117,7 +130,10 @@ Follow `nextCursor` with `--cursor` and repeat `--minimum-self-messages`.
   prints the full envelope, including the opaque id `message get` requires.
   The default can also be set with `[output] format` in
   `~/.greenbubbles/config.toml`. `--since` and `--until` are inclusive unix
-  seconds and must be repeated with the cursor.
+  seconds and must be repeated with the cursor. Repeat `--conversation` up to
+  24 times to read one time slice in a single database open. Each chat is its
+  own page, and that header includes `conversationId`. Follow `nextCursor`
+  with one `--conversation`. A cursor with several conversations is rejected.
 - Conversation and message lists default to 100 items, hard maximum 500.
 - Contact pages use the same 1..500 bound and source/filter-bound cursors.
 - Search has a hard maximum of 200 results. Fallback source scanning examines a

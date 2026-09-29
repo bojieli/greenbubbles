@@ -2358,6 +2358,7 @@ mod tests {
             account_holder_known: true,
             timezone: "+08:00".to_string(),
             order: "newest",
+            conversation_id: None,
             items: vec![
                 BriefLine {
                     from: "friend".to_string(),

@@ -230,8 +230,10 @@ GB_CLI="Native/GreenBubbles/target/release/greenbubbles"
 
 `messages list` and `messages search` print one reading page: who sent each
 message, whether it was the account holder, the local time, and the text.
-An image or file includes a path you can open. `chats rank` prints a short
-page for choosing chats. Add `--json` for the full page.
+An image or file includes a path you can open. Phone numbers, email
+addresses, identity numbers, and links stay on the page. `--redact` leaves
+those out.
+`chats rank` prints a short page for choosing chats. Add `--json` for the full page.
 
 Create an owner-only [query profile](QUERY_PROFILES.md) only when you also
 query a snapshot or a second account:
