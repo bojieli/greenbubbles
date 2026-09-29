@@ -189,9 +189,13 @@ greenbubbles contacts list --limit 50
 greenbubbles message get --conversation <conversation-id> --message <message-id>
 ```
 
-These commands return paginated JSON. Follow continuation cursors to retrieve
-more results, and check coverage fields for skipped or unsupported data.
-For attachment retrieval and access modes, see the [CLI reference](docs/CLI_REFERENCE.md).
+`messages list` and `messages search` print a compact reading page: one header,
+then one line per message. Each line names the sender, says whether it is the
+account holder, and gives the local time and the text. An image, video, or
+document also includes a local path. `chats rank` prints the same kind of page
+for choosing which chats matter. Follow `nextCursor` until `hasMore` is false.
+`--json` prints the full page, which is what `message get` needs for an id.
+The reading rules are in the [CLI reference](docs/CLI_REFERENCE.md).
 
 Prefer a window? Install the app and choose **Browse Live or Snapshot…**. The
 live source is the same installed WeChat database the CLI opens by default.

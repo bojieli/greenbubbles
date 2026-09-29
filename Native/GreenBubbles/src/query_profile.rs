@@ -386,16 +386,29 @@ fn database_root_recency(path: &Path) -> Option<i64> {
     newest
 }
 
+/// How `messages list` and `messages search` print a page.
+///
+/// Brief is the reading page: one line per message, without identifiers or
+/// source metadata. JSON is the full typed envelope.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MessageOutputFormat {
+    #[default]
+    Brief,
+    Json,
+}
+
 /// Optional everyday settings, in the same style as a coding agent's config.
 ///
-/// The file stores paths only. It never stores a key, passphrase, or recovery
-/// words. A missing file means "use the installed WeChat database and the
-/// passphrase file written by capture."
+/// The file stores paths and the message-page format. It never stores a key,
+/// passphrase, or recovery words. A missing file means "use the installed
+/// WeChat database, the passphrase file written by capture, and the brief
+/// reading page."
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QuerySettings {
     pub source_root: Option<PathBuf>,
     pub passphrase_file: Option<PathBuf>,
     pub default_profile: Option<String>,
+    pub message_format: MessageOutputFormat,
 }
 
 pub fn default_query_settings_path() -> Result<PathBuf, QueryProfileError> {
@@ -437,9 +450,12 @@ fn parse_query_settings(bytes: &[u8]) -> Result<QuerySettings, QueryProfileError
     let table = value
         .as_table()
         .ok_or_else(|| invalid_configuration("settings file must be a TOML table"))?;
-    if table.keys().any(|key| key != "source" && key != "profile") {
+    if table
+        .keys()
+        .any(|key| key != "source" && key != "profile" && key != "output")
+    {
         return Err(invalid_configuration(
-            "settings file only accepts [source] and [profile]",
+            "settings file only accepts [source], [profile], and [output]",
         ));
     }
     let mut settings = QuerySettings::default();
@@ -479,6 +495,22 @@ fn parse_query_settings(bytes: &[u8]) -> Result<QuerySettings, QueryProfileError
             let name = required_settings_string(name, "profile.default")?;
             validate_profile_name(name)?;
             settings.default_profile = Some(name.to_string());
+        }
+    }
+    if let Some(output) = table.get("output") {
+        let output = output
+            .as_table()
+            .ok_or_else(|| invalid_configuration("[output] must be a table"))?;
+        if output.keys().any(|key| key != "format") {
+            return Err(invalid_configuration("[output] only accepts format"));
+        }
+        if let Some(format) = output.get("format") {
+            let format = required_settings_string(format, "output.format")?;
+            settings.message_format = match format {
+                "brief" => MessageOutputFormat::Brief,
+                "json" => MessageOutputFormat::Json,
+                _ => return Err(invalid_configuration("output.format must be brief or json")),
+            };
         }
     }
     Ok(settings)
@@ -755,6 +787,9 @@ mod tests {
 
             [profile]
             default = "archive"
+
+            [output]
+            format = "json"
             "#,
         )
         .unwrap();
@@ -763,9 +798,17 @@ mod tests {
             PathBuf::from("/private/wechat/db_storage")
         );
         assert_eq!(accepted.default_profile.as_deref(), Some("archive"));
+        assert_eq!(accepted.message_format, MessageOutputFormat::Json);
+        assert_eq!(
+            parse_query_settings(b"[source]\nroot = \"/private/wechat/db_storage\"\n")
+                .unwrap()
+                .message_format,
+            MessageOutputFormat::Brief
+        );
 
         assert!(parse_query_settings(b"passphrase = \"secret\"\n").is_err());
         assert!(parse_query_settings(b"[source]\nroot = \"relative/db_storage\"\n").is_err());
+        assert!(parse_query_settings(b"[output]\nformat = \"pretty\"\n").is_err());
     }
 
     #[test]

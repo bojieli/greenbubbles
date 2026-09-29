@@ -23,8 +23,16 @@ The project skill is
 ```sh
 greenbubbles source status
 greenbubbles chats rank --minimum-self-messages 10 --limit 2000
-greenbubbles messages list --conversation ID --limit 80
+greenbubbles messages list --conversation ID --since <unix> --until <unix> --limit 80
 ```
+
+`messages list` and `messages search` print a compact reading page. Every line
+has `from` and `self`. `at` is local time. An image or file line may include
+`file`, a local path to open; do not copy that path into an article. Voice
+without a transcript stays `[voice]`. `chats rank` uses the same kind of page:
+`from`, `selfCount`, and `last`. Follow `nextCursor`, or pass `--limit 2000`.
+`--json` prints the full envelope. `[output] format` in
+`~/.greenbubbles/config.toml` selects the default.
 
 Search text goes through standard input:
 

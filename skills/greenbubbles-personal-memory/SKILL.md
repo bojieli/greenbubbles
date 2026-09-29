@@ -23,7 +23,8 @@ account whose own messages are Chinese, the whole project is Chinese.
 
 Read [references/priorities.md](references/priorities.md) before choosing
 chats, and [references/format-markdown.md](references/format-markdown.md)
-before writing. Command syntax is in [references/cli.md](references/cli.md).
+before writing. Command syntax, sender names, local times, and image or
+file paths are in [references/cli.md](references/cli.md).
 
 ## Ask, then read the live database
 
@@ -45,9 +46,16 @@ selected chat from the newest message backward with `messages list`, and use
 An incremental pass uses the same commands on the existing project. It does
 not start a second project, and it does not prepare a corpus.
 
-A year, two-year, or lifetime request is a knowledge base. The newest page
-of a few chats is not enough. Report how many chats were read. Do not imply
-that an unread chat was reviewed.
+A year, two-year, or lifetime request is a knowledge base. Open every
+qualifying chat in the window and page it to the window start. The dozen
+loudest chats, or a handful of searches, only produce scattered notes.
+Do not narrow the survey to save tokens. Read in batches that fit the
+current context: a few chats, or the next pages of a long chat, then revise
+the articles and record the cursor before reading the next batch. Volume is
+not a reason to stop the project. The reading rule is in
+[references/priorities.md](references/priorities.md). Report how many
+qualifying chats were opened, how many were filed, and how many remain
+unread. Do not imply that an unread chat was reviewed.
 
 ## Evidence and writing
 

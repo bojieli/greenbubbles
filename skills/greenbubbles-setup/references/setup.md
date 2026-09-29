@@ -41,10 +41,15 @@ A different database or passphrase file belongs in
 [source]
 root = "/absolute/path/to/db_storage"
 passphrase_file = "/absolute/path/to/passphrase.txt"
+
+[output]
+format = "brief"
 ```
 
-Leave a line out to keep its default. The file stores paths only. Never write
-the key into it, and never print the file's paths into chat.
+Leave a line out to keep its default. `output.format` is `brief` or `json`.
+`messages list`, `messages search`, and `chats rank` are brief unless the
+file or `--json` says otherwise. The file stores paths and that format.
+Never write the key into it, and never print the file's paths into chat.
 
 Create a profile only for a second account or a snapshot. Use an existing
 working profile when one is already configured:

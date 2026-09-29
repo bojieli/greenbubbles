@@ -37,16 +37,19 @@ use greenbubbles::{
     },
     latency::{compose_latency_evidence_sample, summarize_latency_evidence_samples},
     live_attachment::{
-        inspect_image_attachment, inspect_message_attachment, materialize_image_attachment,
-        materialize_message_attachment, serialize_attachment_error, AttachmentKind,
-        LiveAttachmentError,
+        fill_brief_media, inspect_image_attachment, inspect_message_attachment,
+        materialize_image_attachment, materialize_message_attachment, serialize_attachment_error,
+        AttachmentKind, LiveAttachmentError,
     },
     live_query::{
-        find_conversations as find_live_conversations, get_message as get_live_message,
+        brief_messages, brief_search, find_conversations as find_live_conversations,
+        get_message as get_live_message,
         get_search_result_message as get_live_search_result_message,
         list_contacts as list_live_contacts, list_conversations as list_live_conversations,
-        list_messages as list_live_messages, rank_conversations as rank_live_conversations,
-        search_messages as search_live_messages, serialize_query_error, serialize_query_response,
+        list_messages_in_time_range as list_live_messages_in_time_range,
+        rank_conversations as rank_live_conversations, rank_cursor_offset,
+        search_messages_in_time_range as search_live_messages_in_time_range, serialize_brief_page,
+        serialize_brief_rank, serialize_query_error, serialize_query_response,
         source_status as live_source_status, ContactKind, LiveQueryError, LiveQuerySource,
         QueryDatabaseAccess, DEFAULT_PAGE_LIMIT, DEFAULT_SEARCH_LIMIT, MAX_PAGE_LIMIT,
         MAX_SEARCH_QUERY_BYTES,
@@ -69,9 +72,9 @@ use greenbubbles::{
     query_profile::{
         default_live_credential_path, default_query_profile_path,
         discover_default_live_source_root, load_query_settings, profile_uses_placeholder_source,
-        read_private_32_byte_credential, read_private_snapshot_passphrase, QueryProfile,
-        QueryProfileAccess, QueryProfileError, QueryProfileStore, DEFAULT_LIVE_PROFILE_NAME,
-        QUERY_PROFILE_FORMAT_VERSION, QUERY_PROFILE_SCHEMA,
+        read_private_32_byte_credential, read_private_snapshot_passphrase, MessageOutputFormat,
+        QueryProfile, QueryProfileAccess, QueryProfileError, QueryProfileStore,
+        DEFAULT_LIVE_PROFILE_NAME, QUERY_PROFILE_FORMAT_VERSION, QUERY_PROFILE_SCHEMA,
     },
     reconcile::reconcile_archives,
     recoverable_snapshot::{
@@ -628,32 +631,63 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{}", conversations_command_help());
                 return Ok(());
             }
-            validate_command_options(
-                &remaining,
-                &[
-                    "--profile",
-                    "--limit",
-                    "--cursor",
-                    "--minimum-self-messages",
-                    "--snapshot-recovery-kit",
-                    "--snapshot-local-credential",
-                ],
-                &[
-                    "--passphrase-stdin",
-                    "--snapshot-key-stdin",
-                    "--snapshot-passphrase-stdin",
-                    "--decrypted",
-                ],
-            )?;
+            if subcommand == "rank" {
+                validate_command_options(
+                    &remaining,
+                    &[
+                        "--profile",
+                        "--limit",
+                        "--cursor",
+                        "--minimum-self-messages",
+                        "--snapshot-recovery-kit",
+                        "--snapshot-local-credential",
+                    ],
+                    &[
+                        "--passphrase-stdin",
+                        "--snapshot-key-stdin",
+                        "--snapshot-passphrase-stdin",
+                        "--decrypted",
+                        "--json",
+                        "--brief",
+                    ],
+                )?;
+            } else {
+                validate_command_options(
+                    &remaining,
+                    &[
+                        "--profile",
+                        "--limit",
+                        "--cursor",
+                        "--snapshot-recovery-kit",
+                        "--snapshot-local-credential",
+                    ],
+                    &[
+                        "--passphrase-stdin",
+                        "--snapshot-key-stdin",
+                        "--snapshot-passphrase-stdin",
+                        "--decrypted",
+                    ],
+                )?;
+            }
             let invocation = resolve_query_invocation(database_root, &remaining)?;
             let source = invocation.access.open_source(&invocation.source_root)?;
-            let limit = option_usize(&remaining, "--limit")?.unwrap_or(DEFAULT_PAGE_LIMIT);
             if subcommand == "rank" {
                 let minimum = option_usize(&remaining, "--minimum-self-messages")?.unwrap_or(10);
                 let rank_limit = option_usize(&remaining, "--limit")?.unwrap_or(100);
-                let response = rank_live_conversations(&source, minimum as u64, rank_limit)?;
-                println!("{}", serde_json::to_string_pretty(&response)?);
+                let offset = match option_string(&remaining, "--cursor")? {
+                    Some(token) => rank_cursor_offset(&token, minimum as u64)?,
+                    None => 0,
+                };
+                let response =
+                    rank_live_conversations(&source, minimum as u64, rank_limit, offset)?;
+                match message_output_format(&remaining)? {
+                    MessageOutputFormat::Json => {
+                        println!("{}", serde_json::to_string_pretty(&response)?)
+                    }
+                    MessageOutputFormat::Brief => print!("{}", serialize_brief_rank(&response)?),
+                }
             } else {
+                let limit = option_usize(&remaining, "--limit")?.unwrap_or(DEFAULT_PAGE_LIMIT);
                 let cursor = option_string(&remaining, "--cursor")?;
                 let response = list_live_conversations(&source, limit, cursor.as_deref())?;
                 println!("{}", serialize_query_response(&response)?);
@@ -995,6 +1029,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             "--conversation",
                             "--limit",
                             "--cursor",
+                            "--since",
+                            "--until",
                             "--snapshot-recovery-kit",
                             "--snapshot-local-credential",
                         ],
@@ -1003,6 +1039,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             "--snapshot-key-stdin",
                             "--snapshot-passphrase-stdin",
                             "--decrypted",
+                            "--json",
+                            "--brief",
                         ],
                     )?;
                     let invocation = resolve_query_invocation(database_root, &remaining)?;
@@ -1010,9 +1048,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let source = invocation.access.open_source(&invocation.source_root)?;
                     let limit = option_usize(&remaining, "--limit")?.unwrap_or(DEFAULT_PAGE_LIMIT);
                     let cursor = option_string(&remaining, "--cursor")?;
-                    let response =
-                        list_live_messages(&source, &conversation, limit, cursor.as_deref())?;
-                    println!("{}", serialize_query_response(&response)?);
+                    let since = option_i64(&remaining, "--since")?;
+                    let until = option_i64(&remaining, "--until")?;
+                    let response = list_live_messages_in_time_range(
+                        &source,
+                        &conversation,
+                        limit,
+                        cursor.as_deref(),
+                        since,
+                        until,
+                    )?;
+                    let mut brief = brief_messages(&source, &response);
+                    emit_message_page(
+                        message_output_format(&remaining)?,
+                        &response,
+                        &mut brief,
+                        source.attachment_account_root().as_deref(),
+                    )?;
                 }
                 "search" => {
                     validate_command_options(
@@ -1022,6 +1074,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             "--conversation",
                             "--limit",
                             "--cursor",
+                            "--since",
+                            "--until",
                             "--snapshot-recovery-kit",
                             "--snapshot-local-credential",
                         ],
@@ -1031,6 +1085,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             "--snapshot-passphrase-stdin",
                             "--decrypted",
                             "--query-stdin",
+                            "--json",
+                            "--brief",
                         ],
                     )?;
                     if !remaining.iter().any(|value| value == "--query-stdin") {
@@ -1046,14 +1102,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let limit =
                         option_usize(&remaining, "--limit")?.unwrap_or(DEFAULT_SEARCH_LIMIT);
                     let cursor = option_string(&remaining, "--cursor")?;
-                    let response = search_live_messages(
+                    let since = option_i64(&remaining, "--since")?;
+                    let until = option_i64(&remaining, "--until")?;
+                    let response = search_live_messages_in_time_range(
                         &source,
                         &query,
                         conversation.as_deref(),
                         limit,
                         cursor.as_deref(),
+                        since,
+                        until,
                     )?;
-                    println!("{}", serialize_query_response(&response)?);
+                    let mut brief = brief_search(&source, &response);
+                    emit_message_page(
+                        message_output_format(&remaining)?,
+                        &response,
+                        &mut brief,
+                        source.attachment_account_root().as_deref(),
+                    )?;
                 }
                 _ => {
                     return Err(format!(
@@ -2944,10 +3010,10 @@ const fn complete_command_listing() -> &'static str {
     concat!(
         "Complete command list. Most people only need the commands in 'greenbubbles help'.\n\n",
         "Browse:\n",
-        "  greenbubbles chats rank [--minimum-self-messages <n>] [--limit <1..2000>]\n",
+        "  greenbubbles chats rank [--minimum-self-messages <n>] [--limit <1..2000>] [--cursor <token>] [--json]\n",
         "  greenbubbles chats [--profile <name>] [--limit <1..500>] [--cursor <token>]\n",
-        "  greenbubbles messages list --conversation <id> [--limit <1..500>] [--cursor <token>]\n",
-        "  greenbubbles messages search --query-stdin [--conversation <id>] [--limit <1..200>]\n",
+        "  greenbubbles messages list --conversation <id> [--since <unix>] [--until <unix>] [--limit <1..500>] [--cursor <token>] [--json]\n",
+        "  greenbubbles messages search --query-stdin [--conversation <id>] [--since <unix>] [--until <unix>] [--limit <1..200>] [--json]\n",
         "  greenbubbles message get --conversation <id> --message <id>\n",
         "  greenbubbles contacts list [--kind <kind>] [--limit <1..500>] [--details]\n",
         "  greenbubbles source status\n",
@@ -3031,15 +3097,21 @@ const fn source_status_help() -> &'static str {
 const fn conversations_command_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles chats rank [--minimum-self-messages <n>] [--limit <1..2000>]\n",
+        "  greenbubbles chats rank [--minimum-self-messages <n>] [--limit <1..2000>] [--cursor <opaque-cursor>] [--json]\n",
         "  greenbubbles conversations list [--profile <name>] [--limit <1..500>] [--cursor <opaque-cursor>]\n",
         "  greenbubbles conversations list <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n\n",
         "`chats` is the same command as `conversations list`. `chats rank` orders direct\n",
-        "chats before groups, then by how many messages the account holder sent, and\n",
-        "returns no message text. Rank --limit is 1..2000 and defaults to 100.\n\n",
-        "Returns one bounded, keyset-paginated JSON page directly from session.db.\n",
-        "The source is opened read-only with SQLite query_only enforcement; no archive,\n",
-        "replica, staging database, search index, or media derivative is created.\n\n",
+        "chats before groups, then by how many messages the account holder sent. It\n",
+        "returns no message text. The default page is JSON Lines: a header, then one\n",
+        "object per chat with from (remark, nickname, alias, or the chat id — never\n",
+        "empty), id, kind, selfCount, and last as local time. The header includes\n",
+        "qualifying, accountHolderKnown, coverageComplete, and conversationCount.\n",
+        "Rank --limit is 1..2000 and defaults to 100. Follow nextCursor with --cursor\n",
+        "and repeat\n",
+        "--minimum-self-messages. --json prints the full report.\n\n",
+        "`conversations list` returns one bounded, keyset-paginated JSON page directly\n",
+        "from session.db. The source is opened read-only with SQLite query_only\n",
+        "enforcement; no archive, replica, staging database, or search index is created.\n\n",
         "Access modes:\n",
         "  no access arguments  Use the live WeChat default, or defaultProfile when\n",
         "                       a private profile file exists\n",
@@ -3051,8 +3123,11 @@ const fn conversations_command_help() -> &'static str {
         "  --snapshot-key-stdin Legacy raw-key snapshot compatibility\n",
         "  --decrypted         Explicitly query plaintext SQLite database files\n\n",
         "Options:\n",
-        "  --limit <n>         Return 1..500 conversations; default 100\n",
-        "  --cursor <token>    Continue from an opaque cursor returned by the prior page\n",
+        "  --minimum-self-messages <n>  Rank only chats where the account holder sent at least n messages; default 10\n",
+        "  --limit <n>         List returns 1..500 conversations (default 100). Rank returns 1..2000 (default 100)\n",
+        "  --cursor <token>    Continue from nextCursor. Rank also repeats --minimum-self-messages\n",
+        "  --json              Rank only: print the full JSON report\n",
+        "  --brief             Rank only: force the compact page\n",
         "  -h, --help          Show this help\n",
     )
 }
@@ -3142,15 +3217,30 @@ fn memory_subcommand_help(subcommand: &str) -> Result<&'static str, String> {
 const fn messages_command_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles messages list --conversation <id> [--profile <name>] [--limit <1..500>] [--cursor <opaque-cursor>]\n",
-        "  greenbubbles messages list <source-root> --conversation <id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n\n",
-        "  greenbubbles messages search --query-stdin [--profile <name>] [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n",
-        "  greenbubbles messages search <source-root> --query-stdin (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n\n",
-        "Returns one bounded, typed, keyset-paginated JSON page directly from numbered\n",
-        "WeChat message shards. Each shard uses a short read-only statement; the response\n",
-        "reports cross-database consistency and partial-coverage warnings explicitly. Search\n",
-        "prefers compatible native WeChat FTS. If it is unavailable, each response scans at\n",
-        "most 500 decoded source messages and returns a continuation without writing an index.\n\n",
+        "  greenbubbles messages list --conversation <id> [--profile <name>] [--since <unix>] [--until <unix>] [--limit <1..500>] [--cursor <opaque-cursor>] [--json]\n",
+        "  greenbubbles messages list <source-root> --conversation <id> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--since <unix>] [--until <unix>] [--limit <1..500>] [--cursor <opaque-cursor>] [--json]\n\n",
+        "  greenbubbles messages search --query-stdin [--profile <name>] [--conversation <id>] [--since <unix>] [--until <unix>] [--limit <1..200>] [--cursor <opaque-cursor>] [--json]\n",
+        "  greenbubbles messages search <source-root> --query-stdin (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--since <unix>] [--until <unix>] [--limit <1..200>] [--cursor <opaque-cursor>] [--json]\n\n",
+        "Prints one bounded reading page, newest message first. The default is JSON Lines:\n",
+        "a header, then one object per message. The header has returned, hasMore, order\n",
+        "(\"newest\"), timezone (the local offset), and nextCursor when another page exists.\n",
+        "Every message has from, self, at, and text. from is never empty: remark, then\n",
+        "nickname, then alias, then the in-group display name, then the wxid. self is true\n",
+        "when the account holder sent it and false otherwise. at is local time,\n",
+        "YYYY-MM-DD HH:MM. An image, video, or document adds file, a local path an agent\n",
+        "can open. Encrypted images are decoded into the private media cache; a path is\n",
+        "omitted when the file cannot be opened. Voice without a transcript stays [voice]\n",
+        "and has no file. Identifiers, type codes, and source metadata are omitted.\n",
+        "Follow nextCursor with --cursor until hasMore is false. Repeat --since and\n",
+        "--until with that cursor. Search prefers compatible native WeChat FTS. If it\n",
+        "is unavailable, each page scans at most 500 decoded source messages and returns\n",
+        "a continuation without writing an index. Search lines name the chat and do not\n",
+        "include file; open that conversation with messages list to read an image or file.\n\n",
+        "--json prints the full typed JSON page, including the opaque id needed by\n",
+        "message get. The default is brief. Set [output] format = \"json\" in\n",
+        "~/.greenbubbles/config.toml to change that default. --json and --brief override\n",
+        "the file for one command. The database directory and passphrase file are\n",
+        "[source] root and passphrase_file in the same file.\n\n",
         "Access modes:\n",
         "  no access arguments  Use the live WeChat default, or defaultProfile when\n",
         "                       a private profile file exists\n",
@@ -3163,8 +3253,12 @@ const fn messages_command_help() -> &'static str {
         "  --decrypted         Explicitly query plaintext SQLite database files\n\n",
         "Options:\n",
         "  --conversation <id> Exact wxid or chatroom identifier\n",
+        "  --since <unix>      Include messages at or after this unix second\n",
+        "  --until <unix>      Include messages at or before this unix second\n",
         "  --limit <n>         Return 1..500 messages; default 100\n",
-        "  --cursor <token>    Continue from an opaque cursor returned by the prior page\n",
+        "  --cursor <token>    Continue from the nextCursor of the prior page\n",
+        "  --json              Print the full JSON page\n",
+        "  --brief             Force the compact reading page\n",
         "  -h, --help          Show this help\n",
     )
 }
@@ -3172,11 +3266,17 @@ const fn messages_command_help() -> &'static str {
 const fn messages_search_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles messages search --query-stdin [--profile <name>] [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n",
-        "  greenbubbles messages search <source-root> --query-stdin (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--limit <1..200>] [--cursor <opaque-cursor>]\n\n",
-        "Runs one literal, parameterized, keyset-paginated query against a compatible\n",
-        "read-only native WeChat message FTS database. It never builds an index or falls\n",
-        "back to a corpus-wide message scan. Index freshness is reported as unverified.\n\n",
+        "  greenbubbles messages search --query-stdin [--profile <name>] [--conversation <id>] [--since <unix>] [--until <unix>] [--limit <1..200>] [--cursor <opaque-cursor>] [--json]\n",
+        "  greenbubbles messages search <source-root> --query-stdin (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--since <unix>] [--until <unix>] [--limit <1..200>] [--cursor <opaque-cursor>] [--json]\n\n",
+        "Runs one literal, parameterized, keyset-paginated query. It prefers the\n",
+        "read-only native WeChat message index and never builds one. If that index is\n",
+        "unavailable, one page decodes at most 500 source messages and returns a\n",
+        "continuation. The default page is the same JSON Lines reading format as\n",
+        "messages list, plus chat (or conversationId when the chat has no name).\n",
+        "from and self are always present. at is local time. Search lines do not include\n",
+        "file; open the conversation with messages list to read an image or file.\n",
+        "--json prints the full envelope. message get needs the opaque id from that\n",
+        "envelope. Set [output] format in ~/.greenbubbles/config.toml to change the default.\n\n",
         "Input ordering:\n",
         "  encrypted live source   input line 1 is the WeChat key; all remaining UTF-8\n",
         "                          input (maximum 16 KiB) is the search query\n",
@@ -3192,8 +3292,12 @@ const fn messages_search_help() -> &'static str {
         "Options:\n",
         "  --query-stdin       Required; search text is never accepted in an argument\n",
         "  --conversation <id> Restrict hits to one exact wxid or chatroom identifier\n",
+        "  --since <unix>      Include hits at or after this unix second\n",
+        "  --until <unix>      Include hits at or before this unix second\n",
         "  --limit <n>         Return 1..200 hits; default 50\n",
         "  --cursor <token>    Continue the exact same search from a prior page\n",
+        "  --json              Print the full JSON page\n",
+        "  --brief             Force the compact reading page\n",
         "  -h, --help          Show this help\n",
     )
 }
@@ -4866,6 +4970,41 @@ fn option_u64(arguments: &[String], option: &str) -> Result<Option<u64>, String>
                 .map_err(|_| format!("invalid integer for {option}"))
         })
         .transpose()
+}
+
+fn message_output_format(
+    arguments: &[String],
+) -> Result<MessageOutputFormat, Box<dyn std::error::Error>> {
+    let json = arguments.iter().any(|value| value == "--json");
+    let brief = arguments.iter().any(|value| value == "--brief");
+    if json && brief {
+        return Err("choose either --json or --brief".into());
+    }
+    if json {
+        return Ok(MessageOutputFormat::Json);
+    }
+    if brief {
+        return Ok(MessageOutputFormat::Brief);
+    }
+    Ok(load_query_settings()?.message_format)
+}
+
+fn emit_message_page(
+    format: MessageOutputFormat,
+    json_page: &impl serde::Serialize,
+    brief: &mut greenbubbles::live_query::BriefPage,
+    account_root: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match format {
+        MessageOutputFormat::Json => println!("{}", serialize_query_response(json_page)?),
+        MessageOutputFormat::Brief => {
+            if let Some(account_root) = account_root {
+                fill_brief_media(account_root, brief);
+            }
+            print!("{}", serialize_brief_page(brief)?);
+        }
+    }
+    Ok(())
 }
 
 fn option_i64(arguments: &[String], option: &str) -> Result<Option<i64>, String> {

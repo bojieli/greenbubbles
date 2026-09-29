@@ -18,12 +18,18 @@ the same kind of settings file a coding agent uses. It stores paths only:
 [source]
 root = "/absolute/path/to/db_storage"
 passphrase_file = "/absolute/path/to/passphrase.txt"
+
+[output]
+format = "brief"
 ```
 
 `root` overrides the newest installed WeChat database. `passphrase_file`
 overrides `~/.greenbubbles-acquire/passphrase.txt`. Leave either line out to
-keep that default. To use a saved snapshot by default, set
-`profile.default = "archive"` and leave `[source]` empty.
+keep that default. `output.format` is `brief` or `json`. Brief is the default
+reading page for `messages list`, `messages search`, and `chats rank`. `json`
+is the full envelope. `--json` and `--brief` override the file for one command. To use a
+saved snapshot by default, set `profile.default = "archive"` and leave
+`[source]` empty.
 
 A profile is for a second account or a snapshot. It stores which source and
 which credential file unlock it, so those commands stay short too:

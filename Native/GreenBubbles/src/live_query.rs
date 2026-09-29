@@ -8,6 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use chrono::{Local, TimeZone};
+use prost::Message as ProstMessage;
 use rusqlite::types::ValueRef;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -151,6 +153,18 @@ impl<'a> LiveQuerySource<'a> {
 
     pub(crate) fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Account directory that holds `msg/` beside `db_storage`, when this source
+    /// is a live WeChat account. Snapshot roots do not gain a media directory.
+    pub fn attachment_account_root(&self) -> Option<PathBuf> {
+        let parent = self.root.parent()?;
+        (self
+            .root
+            .file_name()
+            .is_some_and(|name| name == "db_storage")
+            && parent.join("msg").is_dir())
+        .then(|| parent.to_path_buf())
     }
 
     pub(crate) fn open_optional_database(
@@ -719,6 +733,44 @@ pub struct SearchItem {
     pub message_subtype_label: &'static str,
     pub snippet: String,
     pub snippet_truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BriefMedia {
+    pub kind: &'static str,
+    pub md5: Option<String>,
+    pub title: Option<String>,
+    pub unix: i64,
+    pub conversation_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BriefLine {
+    pub from: String,
+    #[serde(rename = "self")]
+    pub is_self: bool,
+    pub at: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    #[serde(skip)]
+    pub media: Option<BriefMedia>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BriefPage {
+    pub returned: usize,
+    pub has_more: bool,
+    pub next_cursor: Option<String>,
+    pub search_freshness: Option<&'static str>,
+    pub account_holder_known: bool,
+    pub timezone: String,
+    pub order: &'static str,
+    pub items: Vec<BriefLine>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2590,6 +2642,7 @@ pub struct ConversationRankReport {
     pub qualifying_conversation_count: usize,
     pub minimum_self_messages: u64,
     pub coverage_complete: bool,
+    pub page_offset: usize,
     pub warnings: Vec<QueryWarning>,
     pub items: Vec<RankedConversation>,
 }
@@ -2604,6 +2657,7 @@ pub fn rank_conversations(
     source: &LiveQuerySource<'_>,
     minimum_self_messages: u64,
     limit: usize,
+    offset: usize,
 ) -> Result<ConversationRankReport, LiveQueryError> {
     if !(1..=2_000).contains(&limit) {
         return Err(LiveQueryError::InvalidArgument(
@@ -2738,9 +2792,10 @@ pub fn rank_conversations(
             .then(left.id.cmp(&right.id))
     });
     let qualifying_conversation_count = ranked.len();
-    ranked.truncate(limit);
-    let mut items = ranked;
-    let _ = enrich_ranked_display_names(source, &mut items);
+    let page_offset = offset.min(qualifying_conversation_count);
+    let mut items = ranked.split_off(page_offset);
+    items.truncate(limit);
+    enrich_ranked_display_names(source, &mut items)?;
 
     Ok(ConversationRankReport {
         schema: QUERY_SCHEMA,
@@ -2753,6 +2808,7 @@ pub fn rank_conversations(
         qualifying_conversation_count,
         minimum_self_messages,
         coverage_complete,
+        page_offset,
         warnings,
         items,
     })
@@ -2765,23 +2821,32 @@ fn enrich_ranked_display_names(
     if items.is_empty() {
         return Ok(());
     }
-    let mut placeholders = items
-        .iter()
-        .map(|item| ConversationItem {
-            id: item.id.clone(),
-            display_name: None,
-            summary: None,
-            summary_decode_state: "complete",
-            summary_truncated: false,
-            sort_timestamp: 0,
-            last_message_type: None,
-            last_message_sender: None,
-            last_sender_display_name: None,
-        })
-        .collect::<Vec<_>>();
-    let _ = enrich_conversation_items(source, &mut placeholders)?;
-    for (item, enriched) in items.iter_mut().zip(placeholders) {
-        item.display_name = enriched.display_name;
+    for chunk in items.chunks_mut(MAX_PAGE_LIMIT) {
+        let mut placeholders = chunk
+            .iter()
+            .map(|item| ConversationItem {
+                id: item.id.clone(),
+                display_name: None,
+                summary: None,
+                summary_decode_state: "complete",
+                summary_truncated: false,
+                sort_timestamp: 0,
+                last_message_type: None,
+                last_message_sender: None,
+                last_sender_display_name: None,
+            })
+            .collect::<Vec<_>>();
+        enrich_conversation_items(source, &mut placeholders)?;
+        for (item, enriched) in chunk.iter_mut().zip(placeholders) {
+            item.display_name = enriched.display_name;
+            if item
+                .display_name
+                .as_deref()
+                .is_none_or(|name| name.trim().is_empty())
+            {
+                item.display_name = Some(item.id.clone());
+            }
+        }
     }
     Ok(())
 }
@@ -2981,7 +3046,7 @@ fn open_message_shards(source: &LiveQuerySource<'_>) -> Result<OpenMessageShards
     Ok(OpenMessageShards { shards, warnings })
 }
 
-pub(crate) fn list_messages_in_time_range(
+pub fn list_messages_in_time_range(
     source: &LiveQuerySource<'_>,
     conversation: &str,
     limit: usize,
@@ -3603,7 +3668,7 @@ pub fn search_messages(
     search_messages_in_time_range(source, query, conversation, limit, cursor, None, None)
 }
 
-pub(crate) fn search_messages_in_time_range(
+pub fn search_messages_in_time_range(
     source: &LiveQuerySource<'_>,
     query: &str,
     conversation: Option<&str>,
@@ -4396,6 +4461,656 @@ fn decode_cursor_kind(value: &str) -> Result<String, LiveQueryError> {
     Ok(decode_cursor::<CursorKind>(value)?.kind)
 }
 
+pub fn brief_message_text(content: &Value) -> String {
+    brief_message_body(content).0
+}
+
+struct MediaSeed {
+    kind: &'static str,
+    md5: Option<String>,
+    title: Option<String>,
+}
+
+fn brief_message_body(content: &Value) -> (String, Option<MediaSeed>) {
+    if let Some(kind) = content.as_str() {
+        return (kind_placeholder(kind), None);
+    }
+    let Some(object) = content.as_object() else {
+        return ("[unavailable]".to_string(), None);
+    };
+    if object.contains_key("unavailable") {
+        return ("[unavailable]".to_string(), None);
+    }
+    let Some((kind, value)) = object.iter().next() else {
+        return ("[unavailable]".to_string(), None);
+    };
+    match kind.as_str() {
+        "Text" | "System" | "Revoke" => (
+            readable_text(value).unwrap_or_else(|| kind_placeholder(kind)),
+            None,
+        ),
+        "Quote" => (quote_text(value), None),
+        "Image" | "Video" => {
+            let seed = media_seed(if kind == "Image" { "image" } else { "video" }, value);
+            (kind_placeholder(kind), seed)
+        }
+        "File" => {
+            let seed = media_seed("file", value);
+            let text = seed
+                .as_ref()
+                .and_then(|seed| seed.title.clone())
+                .unwrap_or_else(|| kind_placeholder(kind));
+            (text, seed)
+        }
+        "Link" | "MiniProgram" | "MergedMessages" | "ChannelVideo" | "AppGeneric"
+        | "RedEnvelope" => (titled_text(kind, value), None),
+        "Transfer" => (transfer_text(value), None),
+        "Unknown" => (unknown_text(value), None),
+        "Voice" => (kind_placeholder(kind), None),
+        other => (kind_placeholder(other), None),
+    }
+}
+
+fn media_seed(kind: &'static str, value: &Value) -> Option<MediaSeed> {
+    let fields = value.as_object()?;
+    let md5 = field_text(fields, "md5")
+        .map(|value| value.to_ascii_lowercase())
+        .filter(|value| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let title = field_text(fields, "title").map(str::to_string);
+    if md5.is_none() && title.is_none() {
+        return None;
+    }
+    Some(MediaSeed { kind, md5, title })
+}
+
+pub fn brief_messages(
+    source: &LiveQuerySource<'_>,
+    envelope: &QueryEnvelope<MessageItem>,
+) -> BriefPage {
+    let account_holder = source
+        .account_holder_source_id()
+        .filter(|value| !value.is_empty());
+    let room_names = group_member_names(
+        source,
+        envelope
+            .items
+            .iter()
+            .map(|item| item.conversation_id.as_str()),
+    );
+    let items = envelope
+        .items
+        .iter()
+        .map(|item| {
+            let (text, seed) = brief_message_body(&item.content);
+            let room_name = room_names
+                .get(&item.conversation_id)
+                .and_then(|members| members.get(&item.sender))
+                .map(String::as_str);
+            BriefLine {
+                from: reading_sender_name(
+                    item.sender_display_name.as_deref(),
+                    room_name,
+                    &item.sender,
+                ),
+                is_self: account_holder.is_some_and(|holder| item.sender == holder),
+                at: brief_local_stamp(item.created_at_unix),
+                text,
+                file: None,
+                chat: None,
+                conversation_id: None,
+                media: seed.map(|seed| BriefMedia {
+                    kind: seed.kind,
+                    md5: seed.md5,
+                    title: seed.title,
+                    unix: item.created_at_unix,
+                    conversation_id: item.conversation_id.clone(),
+                }),
+            }
+        })
+        .collect();
+    brief_page(account_holder.is_some(), None, &envelope.page, items)
+}
+
+pub fn brief_search(
+    source: &LiveQuerySource<'_>,
+    envelope: &QueryEnvelope<SearchItem>,
+) -> BriefPage {
+    let account_holder = source
+        .account_holder_source_id()
+        .filter(|value| !value.is_empty());
+    let names = resolve_contact_display_names(
+        source,
+        envelope
+            .items
+            .iter()
+            .map(|item| item.conversation_id.as_str()),
+    )
+    .map(|enrichment| enrichment.display_names)
+    .unwrap_or_default();
+    let room_names = group_member_names(
+        source,
+        envelope
+            .items
+            .iter()
+            .map(|item| item.conversation_id.as_str()),
+    );
+    let items = envelope
+        .items
+        .iter()
+        .map(|item| {
+            let chat = names
+                .get(&item.conversation_id)
+                .and_then(|name| present_name(Some(name.as_str())));
+            let room_name = room_names
+                .get(&item.conversation_id)
+                .and_then(|members| members.get(&item.sender))
+                .map(String::as_str);
+            BriefLine {
+                from: reading_sender_name(
+                    item.sender_display_name.as_deref(),
+                    room_name,
+                    &item.sender,
+                ),
+                is_self: account_holder.is_some_and(|holder| item.sender == holder),
+                at: brief_local_stamp(item.created_at_unix),
+                text: brief_snippet(item.message_type_label, &item.snippet),
+                file: None,
+                conversation_id: chat.is_none().then(|| item.conversation_id.clone()),
+                chat,
+                media: None,
+            }
+        })
+        .collect();
+    let freshness = envelope
+        .warnings
+        .iter()
+        .any(|warning| warning.code == "nativeSearchIndexFreshnessUnverified")
+        .then_some("unverified");
+    brief_page(account_holder.is_some(), freshness, &envelope.page, items)
+}
+
+pub fn serialize_brief_page(page: &BriefPage) -> Result<String, LiveQueryError> {
+    let mut header = serde_json::Map::new();
+    header.insert("returned".to_string(), json!(page.returned));
+    header.insert("hasMore".to_string(), json!(page.has_more));
+    header.insert("order".to_string(), json!(page.order));
+    header.insert("timezone".to_string(), json!(page.timezone));
+    if let Some(cursor) = &page.next_cursor {
+        header.insert("nextCursor".to_string(), json!(cursor));
+    }
+    if let Some(freshness) = page.search_freshness {
+        header.insert("searchFreshness".to_string(), json!(freshness));
+    }
+    if !page.account_holder_known {
+        header.insert("accountHolderKnown".to_string(), json!(false));
+    }
+    let mut bytes = serde_json::to_vec(&Value::Object(header))
+        .map_err(|_| LiveQueryError::Database("JSON response serialization failed".into()))?;
+    for item in &page.items {
+        bytes.push(b'\n');
+        bytes.extend(
+            serde_json::to_vec(item).map_err(|_| {
+                LiveQueryError::Database("JSON response serialization failed".into())
+            })?,
+        );
+    }
+    bytes.push(b'\n');
+    if bytes.len() > MAX_SERIALIZED_RESPONSE_BYTES {
+        return Err(LiveQueryError::ResponseTooLarge {
+            maximum_bytes: MAX_SERIALIZED_RESPONSE_BYTES,
+        });
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| LiveQueryError::Database("JSON response was not valid UTF-8".into()))
+}
+
+fn brief_page(
+    account_holder_known: bool,
+    search_freshness: Option<&'static str>,
+    page: &QueryPage,
+    items: Vec<BriefLine>,
+) -> BriefPage {
+    BriefPage {
+        returned: page.returned,
+        has_more: page.has_more,
+        next_cursor: page.next_cursor.clone(),
+        search_freshness,
+        account_holder_known,
+        timezone: brief_timezone_label(),
+        order: "newest",
+        items,
+    }
+}
+
+fn sender_label(display: Option<&str>, sender: &str) -> String {
+    present_name(display).unwrap_or_else(|| {
+        let sender = sender.trim();
+        if sender.is_empty() {
+            "unknown".to_string()
+        } else {
+            sender.to_string()
+        }
+    })
+}
+
+/// Contact remark, nickname, or alias wins. An in-group display name is used
+/// only when the address book has no name. The wxid remains when both are missing.
+fn reading_sender_name(
+    contact_name: Option<&str>,
+    room_name: Option<&str>,
+    sender: &str,
+) -> String {
+    if let Some(name) = present_name(contact_name) {
+        return name;
+    }
+    if let Some(name) = present_name(room_name) {
+        return name;
+    }
+    sender_label(None, sender)
+}
+
+#[derive(prost::Message)]
+struct RoomDataProto {
+    #[prost(message, repeated, tag = "1")]
+    users: Vec<RoomDataUserProto>,
+}
+
+#[derive(prost::Message)]
+struct RoomDataUserProto {
+    #[prost(string, tag = "1")]
+    user_name: String,
+    #[prost(string, optional, tag = "2")]
+    display_name: Option<String>,
+}
+
+fn group_member_names<'b>(
+    source: &LiveQuerySource<'_>,
+    conversation_ids: impl Iterator<Item = &'b str>,
+) -> BTreeMap<String, BTreeMap<String, String>> {
+    let mut rooms = BTreeSet::new();
+    for conversation_id in conversation_ids {
+        if conversation_id.contains("@chatroom")
+            && conversation_id.len() <= MAX_CONVERSATION_ID_BYTES
+            && !conversation_id.contains('\0')
+        {
+            rooms.insert(conversation_id.to_string());
+        }
+    }
+    if rooms.is_empty() {
+        return BTreeMap::new();
+    }
+    let Ok(connection) = source.open_database(Path::new("contact/contact.db")) else {
+        return BTreeMap::new();
+    };
+    let Ok(columns) = table_columns(&connection, "chat_room") else {
+        return BTreeMap::new();
+    };
+    let Some(id_column) = ["username", "user_name"]
+        .into_iter()
+        .find(|column| columns.contains(*column) && !column.contains(']'))
+    else {
+        return BTreeMap::new();
+    };
+    let Some(ext_column) = ["ext_buffer", "room_data", "member_data"]
+        .into_iter()
+        .find(|column| columns.contains(*column) && !column.contains(']'))
+    else {
+        return BTreeMap::new();
+    };
+
+    let mut names = BTreeMap::new();
+    let room_list = rooms.into_iter().collect::<Vec<_>>();
+    for chunk in room_list.chunks(100) {
+        let placeholders = (1..=chunk.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT [{id_column}], [{ext_column}] FROM [chat_room] WHERE [{id_column}] IN ({placeholders})"
+        );
+        let mut statement = match connection.prepare(&sql) {
+            Ok(statement) => statement,
+            Err(_) => return names,
+        };
+        let mut rows = match statement.query(rusqlite::params_from_iter(chunk.iter())) {
+            Ok(rows) => rows,
+            Err(_) => return names,
+        };
+        loop {
+            let row = match rows.next() {
+                Ok(Some(row)) => row,
+                _ => break,
+            };
+            let Some(room) = row
+                .get_ref(0)
+                .ok()
+                .and_then(|value| decode_sqlite_text(value).ok())
+            else {
+                continue;
+            };
+            let blob = match row.get_ref(1) {
+                Ok(ValueRef::Blob(bytes) | ValueRef::Text(bytes))
+                    if bytes.len() <= 2 * 1024 * 1024 =>
+                {
+                    bytes
+                }
+                _ => continue,
+            };
+            let members = decode_room_display_names(blob);
+            if !members.is_empty() {
+                names.insert(room, members);
+            }
+        }
+    }
+    names
+}
+
+fn decode_room_display_names(blob: &[u8]) -> BTreeMap<String, String> {
+    let proto = match RoomDataProto::decode(blob) {
+        Ok(proto) => proto,
+        Err(_) => return BTreeMap::new(),
+    };
+    let mut names = BTreeMap::new();
+    for user in proto.users.into_iter().take(5_000) {
+        let Some(display) = present_name(user.display_name.as_deref()) else {
+            continue;
+        };
+        if user.user_name.is_empty() || user.user_name.len() > MAX_CONVERSATION_ID_BYTES {
+            continue;
+        }
+        names.entry(user.user_name).or_insert(display);
+    }
+    names
+}
+
+fn brief_local_stamp(unix: i64) -> String {
+    Local
+        .timestamp_opt(unix, 0)
+        .single()
+        .map(|time| time.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| unix.to_string())
+}
+
+fn brief_timezone_label() -> String {
+    Local::now().format("%:z").to_string()
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RankCursor {
+    version: u32,
+    kind: String,
+    offset: usize,
+    minimum_self_messages: u64,
+}
+
+pub fn rank_cursor_offset(
+    token: &str,
+    minimum_self_messages: u64,
+) -> Result<usize, LiveQueryError> {
+    let cursor = decode_cursor::<RankCursor>(token)?;
+    if cursor.version != CURSOR_FORMAT_VERSION || cursor.kind != "conversations.rank" {
+        return Err(LiveQueryError::InvalidCursor(
+            "cursor is not a chats rank cursor".into(),
+        ));
+    }
+    if cursor.minimum_self_messages != minimum_self_messages {
+        return Err(LiveQueryError::InvalidCursor(
+            "rank cursor does not match --minimum-self-messages".into(),
+        ));
+    }
+    Ok(cursor.offset)
+}
+
+pub fn serialize_brief_rank(report: &ConversationRankReport) -> Result<String, LiveQueryError> {
+    let has_more = report.page_offset.saturating_add(report.items.len())
+        < report.qualifying_conversation_count;
+    let next_cursor = if has_more {
+        Some(encode_cursor(&RankCursor {
+            version: CURSOR_FORMAT_VERSION,
+            kind: "conversations.rank".to_string(),
+            offset: report.page_offset.saturating_add(report.items.len()),
+            minimum_self_messages: report.minimum_self_messages,
+        })?)
+    } else {
+        None
+    };
+    let mut header = serde_json::Map::new();
+    header.insert("returned".to_string(), json!(report.items.len()));
+    header.insert(
+        "qualifying".to_string(),
+        json!(report.qualifying_conversation_count),
+    );
+    header.insert("hasMore".to_string(), json!(has_more));
+    header.insert("order".to_string(), json!("direct-then-self-count"));
+    header.insert("timezone".to_string(), json!(brief_timezone_label()));
+    header.insert(
+        "accountHolderKnown".to_string(),
+        json!(report.account_holder_known),
+    );
+    header.insert(
+        "coverageComplete".to_string(),
+        json!(report.coverage_complete),
+    );
+    header.insert(
+        "conversationCount".to_string(),
+        json!(report.conversation_count),
+    );
+    if let Some(cursor) = next_cursor {
+        header.insert("nextCursor".to_string(), json!(cursor));
+    }
+    let mut bytes = serde_json::to_vec(&Value::Object(header))
+        .map_err(|_| LiveQueryError::Database("JSON response serialization failed".into()))?;
+    for item in &report.items {
+        let mut line = serde_json::Map::new();
+        line.insert(
+            "from".to_string(),
+            json!(sender_label(item.display_name.as_deref(), &item.id)),
+        );
+        line.insert("id".to_string(), json!(item.id));
+        line.insert("kind".to_string(), json!(item.kind));
+        line.insert("selfCount".to_string(), json!(item.self_message_count));
+        if let Some(unix) = item.last_self_message_unix {
+            line.insert("last".to_string(), json!(brief_local_stamp(unix)));
+        }
+        bytes.push(b'\n');
+        bytes.extend(
+            serde_json::to_vec(&Value::Object(line)).map_err(|_| {
+                LiveQueryError::Database("JSON response serialization failed".into())
+            })?,
+        );
+    }
+    bytes.push(b'\n');
+    if bytes.len() > MAX_SERIALIZED_RESPONSE_BYTES {
+        return Err(LiveQueryError::ResponseTooLarge {
+            maximum_bytes: MAX_SERIALIZED_RESPONSE_BYTES,
+        });
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| LiveQueryError::Database("JSON response was not valid UTF-8".into()))
+}
+
+fn kind_placeholder(kind: &str) -> String {
+    let label = match kind {
+        "Image" => "image",
+        "Voice" => "voice",
+        "Video" => "video",
+        "Emoji" => "emoji",
+        "Location" => "location",
+        "Pat" => "pat",
+        "Link" => "link",
+        "File" => "file",
+        "MiniProgram" => "mini program",
+        "MergedMessages" => "forwarded",
+        "ChannelVideo" => "channel",
+        "AppGeneric" => "attachment",
+        "RedEnvelope" => "red envelope",
+        "Transfer" => "transfer",
+        "System" => "system",
+        "Revoke" => "revoked",
+        "Quote" => "quote",
+        "Text" => "text",
+        "Unknown" => "unknown",
+        _ => "message",
+    };
+    format!("[{label}]")
+}
+
+fn is_markup(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.contains('<') && trimmed.contains('>')
+}
+
+fn readable_text(value: &Value) -> Option<String> {
+    let text = value.as_str()?.trim();
+    if text.is_empty() || is_markup(text) {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+fn field_text<'a>(object: &'a serde_json::Map<String, Value>, key: &str) -> Option<&'a str> {
+    let text = object.get(key)?.as_str()?.trim();
+    if text.is_empty() || is_markup(text) {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn quote_text(value: &Value) -> String {
+    let Some(fields) = value.as_object() else {
+        return kind_placeholder("Quote");
+    };
+    let reply = field_text(fields, "reply_text");
+    let refer = field_text(fields, "refer_content").map(|text| {
+        let mut short = text.to_string();
+        if short.len() > 240 {
+            let mut boundary = 240;
+            while boundary > 0 && !short.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            short.truncate(boundary);
+        }
+        short
+    });
+    match (reply, refer) {
+        (Some(reply), Some(refer)) if refer != reply => format!("{reply} ← {refer}"),
+        (Some(reply), _) => reply.to_string(),
+        (None, Some(refer)) => format!("← {refer}"),
+        _ => fields
+            .get("raw_xml")
+            .and_then(Value::as_str)
+            .and_then(markup_plain_text)
+            .unwrap_or_else(|| kind_placeholder("Quote")),
+    }
+}
+
+fn markup_plain_text(value: &str) -> Option<String> {
+    xml_element_text(value, "title")
+        .or_else(|| xml_element_text(value, "content"))
+        .or_else(|| xml_element_text(value, "des"))
+        .or_else(|| stripped_plain(value))
+}
+
+fn xml_element_text(value: &str, element: &str) -> Option<String> {
+    let open = format!("<{element}>");
+    let close = format!("</{element}>");
+    let start = value.find(&open)? + open.len();
+    let rest = value.get(start..)?;
+    let end = rest.find(&close)?;
+    let text = rest
+        .get(..end)?
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.is_empty() || text.contains('<') || text.len() > 500 {
+        return None;
+    }
+    if text.contains("wxid_") || text.contains("@chatroom") || text.contains("http") {
+        return None;
+    }
+    Some(text)
+}
+
+fn stripped_plain(value: &str) -> Option<String> {
+    let mut plain = String::new();
+    let mut in_tag = false;
+    for character in value.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => plain.push(character),
+            _ => {}
+        }
+    }
+    let text = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() || text.len() > 500 {
+        return None;
+    }
+    if text.contains("wxid_") || text.contains("@chatroom") || text.contains("http") {
+        return None;
+    }
+    Some(text)
+}
+
+fn titled_text(kind: &str, value: &Value) -> String {
+    let Some(fields) = value.as_object() else {
+        return kind_placeholder(kind);
+    };
+    match (field_text(fields, "title"), field_text(fields, "des")) {
+        (Some(title), Some(description)) if description != title => {
+            format!("{title} — {description}")
+        }
+        (Some(title), _) => title.to_string(),
+        (None, Some(description)) => description.to_string(),
+        _ => kind_placeholder(kind),
+    }
+}
+
+fn transfer_text(value: &Value) -> String {
+    value
+        .as_object()
+        .and_then(|fields| field_text(fields, "pay_memo"))
+        .filter(|memo| memo.chars().any(char::is_alphabetic))
+        .map(str::to_string)
+        .unwrap_or_else(|| kind_placeholder("Transfer"))
+}
+
+fn unknown_text(value: &Value) -> String {
+    value
+        .as_object()
+        .and_then(|fields| fields.get("raw"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .and_then(|text| {
+            if text.len() <= 500 && !is_markup(text) {
+                Some(text.to_string())
+            } else {
+                markup_plain_text(text)
+            }
+        })
+        .unwrap_or_else(|| kind_placeholder("Unknown"))
+}
+
+fn present_name(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+fn brief_snippet(label: &str, snippet: &str) -> String {
+    let trimmed = snippet.trim();
+    if trimmed.is_empty() || is_markup(trimmed) {
+        format!("[{label}]")
+    } else {
+        trimmed.to_string()
+    }
+}
+
 pub fn serialize_query_response<T: Serialize>(value: &T) -> Result<String, LiveQueryError> {
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|_| LiveQueryError::Database("JSON response serialization failed".into()))?;
@@ -5121,12 +5836,185 @@ fn database_error(message: &str) -> LiveQueryError {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn brief_text_keeps_words_and_drops_markup_and_identifiers() {
+        assert_eq!(brief_message_text(&json!({"Text": "  明天见  "})), "明天见");
+        assert_eq!(
+            brief_message_text(&json!({"Image": {"md5": "abc"}})),
+            "[image]"
+        );
+        assert_eq!(brief_message_text(&json!("Voice")), "[voice]");
+        let emoji = brief_message_text(&json!({
+            "Emoji": "<msg><emoji fromusername=\"wxid_secret\"></emoji></msg>"
+        }));
+        assert_eq!(emoji, "[emoji]");
+        assert!(!emoji.contains("wxid"));
+        let link = brief_message_text(&json!({
+            "Link": {
+                "title": "QCon",
+                "des": "opening remarks",
+                "url": "https://example.invalid/secret",
+                "raw_xml": "<msg/>",
+                "sub_type": 5
+            }
+        }));
+        assert_eq!(link, "QCon — opening remarks");
+        assert!(!link.contains("http"));
+        assert!(!link.contains('<'));
+        let quote = brief_message_text(&json!({
+            "Quote": {
+                "reply_text": "同意",
+                "refer_sender": "wxid_other",
+                "refer_content": "明天开会",
+                "raw_xml": "<appmsg/>"
+            }
+        }));
+        assert_eq!(quote, "同意 ← 明天开会");
+        assert!(!quote.contains("wxid"));
+        assert_eq!(
+            brief_message_text(&json!({"Transfer": {"pay_memo": "100.00", "amount_desc": "¥1"}})),
+            "[transfer]"
+        );
+        assert_eq!(
+            brief_message_text(&json!({"Transfer": {"pay_memo": "书稿"}})),
+            "书稿"
+        );
+        assert_eq!(
+            brief_message_text(&json!({"unavailable": "decodeFailed"})),
+            "[unavailable]"
+        );
+    }
+
+    #[test]
+    fn brief_page_is_one_record_per_line_without_message_metadata() {
+        let page = BriefPage {
+            returned: 1,
+            has_more: true,
+            next_cursor: Some("cursor-token".to_string()),
+            search_freshness: None,
+            account_holder_known: true,
+            timezone: brief_timezone_label(),
+            order: "newest",
+            items: vec![BriefLine {
+                from: "boj".to_string(),
+                is_self: true,
+                at: brief_local_stamp(1_727_539_200),
+                text: "hello".to_string(),
+                file: None,
+                chat: None,
+                conversation_id: None,
+                media: None,
+            }],
+        };
+        let encoded = serialize_brief_page(&page).unwrap();
+        let mut lines = encoded.lines();
+        let header: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        let item: Value = serde_json::from_str(lines.next().unwrap()).unwrap();
+        assert!(lines.next().is_none());
+        assert_eq!(header["returned"], 1);
+        assert_eq!(header["hasMore"], true);
+        assert_eq!(header["order"], "newest");
+        assert!(header["timezone"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
+        assert_eq!(header["nextCursor"], "cursor-token");
+        assert!(header.get("accountHolderKnown").is_none());
+        assert_eq!(item["from"], "boj");
+        assert_eq!(item["self"], true);
+        assert_eq!(item["at"], brief_local_stamp(1_727_539_200));
+        assert_eq!(item["text"], "hello");
+        assert!(item.get("file").is_none());
+        assert!(item.get("id").is_none());
+        assert!(item.get("sender").is_none());
+        assert!(!encoded.contains("serverId"));
+        assert!(!encoded.contains("schema"));
+    }
+
+    #[test]
+    fn brief_quote_keeps_plain_words_inside_markup() {
+        let quote = brief_message_text(&json!({
+            "Quote": {
+                "raw_xml": "<msg><title>明天下午见</title><fromusername>wxid_secret</fromusername></msg>"
+            }
+        }));
+        assert_eq!(quote, "明天下午见");
+        assert!(!quote.contains("wxid"));
+    }
+
+    #[test]
+    fn brief_sender_label_never_omits_the_name() {
+        assert_eq!(sender_label(Some(" 苏小姐 "), "wxid_a"), "苏小姐");
+        assert_eq!(sender_label(None, "wxid_a"), "wxid_a");
+        assert_eq!(sender_label(Some(" "), ""), "unknown");
+        assert_eq!(
+            reading_sender_name(Some("备注"), Some("群昵称"), "wxid_a"),
+            "备注"
+        );
+        assert_eq!(
+            reading_sender_name(None, Some("群昵称"), "wxid_a"),
+            "群昵称"
+        );
+        assert_eq!(reading_sender_name(None, None, "wxid_a"), "wxid_a");
+    }
+
+    #[test]
+    fn group_member_display_name_fills_a_sender_the_contact_book_does_not_name() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("db_storage");
+        fs::create_dir_all(root.join("contact")).unwrap();
+        fs::create_dir_all(root.join("session")).unwrap();
+        fs::create_dir_all(root.join("message")).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        let blob = wx_db::encode_room_data_for_test(&[
+            ("wxid_member", Some("小林")),
+            ("wxid_blank", Some("  ")),
+        ]);
+        let contact = Connection::open(root.join("contact/contact.db")).unwrap();
+        contact
+            .execute_batch("CREATE TABLE chat_room(username TEXT, ext_buffer BLOB);")
+            .unwrap();
+        contact
+            .execute(
+                "INSERT INTO chat_room VALUES (?1, ?2)",
+                params!["1@chatroom", blob],
+            )
+            .unwrap();
+        drop(contact);
+
+        let source = LiveQuerySource::open(&root, QueryDatabaseAccess::Decrypted).unwrap();
+        let names = group_member_names(&source, ["1@chatroom", "wxid_direct"].into_iter());
+        assert_eq!(
+            names
+                .get("1@chatroom")
+                .and_then(|members| members.get("wxid_member"))
+                .map(String::as_str),
+            Some("小林")
+        );
+        assert!(names
+            .get("1@chatroom")
+            .is_none_or(|members| !members.contains_key("wxid_blank")));
+        assert!(!names.contains_key("wxid_direct"));
+    }
+
+    #[test]
+    fn rank_cursor_round_trips_the_offset_for_the_same_threshold() {
+        let token = encode_cursor(&RankCursor {
+            version: 1,
+            kind: "conversations.rank".into(),
+            offset: 100,
+            minimum_self_messages: 10,
+        })
+        .unwrap();
+        assert_eq!(rank_cursor_offset(&token, 10).unwrap(), 100);
+        assert!(rank_cursor_offset(&token, 20).is_err());
+    }
+
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     use rusqlite::Connection;
     use tempfile::TempDir;
-
-    use super::*;
 
     #[test]
     fn explicit_source_sender_wins_over_a_malformed_group_prefix() {

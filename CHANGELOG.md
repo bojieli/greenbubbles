@@ -4,6 +4,22 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
+## 0.6.0 - 2026-09-29
+
+### Changed
+
+- `messages list` and `messages search` now default to a compact JSON Lines
+  reading page. Each line names the sender, says whether it is the account
+  holder, and uses local time. An image, video, or document includes a local
+  path an agent can open. Voice without a transcript stays `[voice]`. `--json`
+  still prints the full envelope. The default can also be set with
+  `[output] format` in `~/.greenbubbles/config.toml`.
+- `chats rank` prints the same kind of compact page, with a name on every chat,
+  and continues with `--cursor`. Contact names are resolved in batches, so a
+  long ranking no longer drops display names. `--json` prints the full report.
+- Quote and unrecognized messages keep readable words when those words are
+  present in the message. Identifiers and markup stay out of the reading page.
+
 ## 0.5.0 - 2026-09-29
 
 ### Changed

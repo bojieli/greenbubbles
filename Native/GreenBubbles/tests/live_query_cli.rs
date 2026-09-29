@@ -191,6 +191,7 @@ fn decrypted_cli_returns_versioned_cursor_pages_without_creating_an_archive() {
             "messages",
             "list",
             fixture.root.to_str().unwrap(),
+            "--json",
             "--decrypted",
             "--conversation",
             "wxid_talker",
@@ -212,6 +213,38 @@ fn decrypted_cli_returns_versioned_cursor_pages_without_creating_an_archive() {
     assert_eq!(messages["items"][0]["content"]["Text"], "s1-new");
     assert_eq!(messages["items"][0]["senderDisplayName"], "Sender Remark");
     assert_eq!(messages["items"][1]["content"]["Text"], "s0-new");
+
+    let brief = run(
+        &[
+            "messages",
+            "list",
+            fixture.root.to_str().unwrap(),
+            "--decrypted",
+            "--conversation",
+            "wxid_talker",
+            "--limit",
+            "1",
+        ],
+        None,
+    );
+    assert_success(&brief);
+    let brief_text = String::from_utf8(brief.stdout.clone()).unwrap();
+    assert!(!brief_text.contains("schema"));
+    assert!(!brief_text.contains("serverId"));
+    assert!(brief_text.contains("s1-new"));
+    let header: Value = serde_json::from_str(brief_text.lines().next().unwrap()).unwrap();
+    let line: Value = serde_json::from_str(brief_text.lines().nth(1).unwrap()).unwrap();
+    assert_eq!(header["returned"], 1);
+    assert_eq!(header["hasMore"], true);
+    assert_eq!(header["order"], "newest");
+    assert!(header["timezone"]
+        .as_str()
+        .is_some_and(|value| value.contains(':')));
+    assert_eq!(line["from"], "Sender Remark");
+    assert_eq!(line["self"], false);
+    assert_eq!(line["text"], "s1-new");
+    assert!(line["at"].as_str().is_some_and(|value| value.contains('-')));
+    assert!(line.get("file").is_none());
 
     let message_id = messages["items"][0]["id"].as_str().unwrap().to_string();
     let exact = run(
@@ -248,6 +281,7 @@ fn exact_message_identity_is_bound_to_source_and_conversation() {
             "messages",
             "list",
             fixture.root.to_str().unwrap(),
+            "--json",
             "--decrypted",
             "--conversation",
             "wxid_talker",
@@ -301,6 +335,7 @@ fn native_search_is_bounded_keyset_paginated_and_query_bound() {
             "messages",
             "search",
             fixture.root.to_str().unwrap(),
+            "--json",
             "--decrypted",
             "--query-stdin",
             "--limit",
@@ -327,6 +362,7 @@ fn native_search_is_bounded_keyset_paginated_and_query_bound() {
             "messages",
             "search",
             fixture.root.to_str().unwrap(),
+            "--json",
             "--decrypted",
             "--query-stdin",
             "--limit",
@@ -345,6 +381,7 @@ fn native_search_is_bounded_keyset_paginated_and_query_bound() {
             "messages",
             "search",
             fixture.root.to_str().unwrap(),
+            "--json",
             "--decrypted",
             "--query-stdin",
             "--limit",
@@ -363,6 +400,7 @@ fn native_search_is_bounded_keyset_paginated_and_query_bound() {
             "messages",
             "search",
             fixture.root.to_str().unwrap(),
+            "--json",
             "--decrypted",
             "--query-stdin",
             "--conversation",
@@ -386,6 +424,7 @@ fn missing_native_fts_uses_bounded_source_fallback_without_writes() {
             "messages",
             "search",
             fixture.root.to_str().unwrap(),
+            "--json",
             "--decrypted",
             "--query-stdin",
             "--conversation",
@@ -472,6 +511,7 @@ fn encrypted_cli_reads_directly_and_wrong_key_fails_without_disclosure() {
             "messages",
             "list",
             fixture.root.to_str().unwrap(),
+            "--json",
             "--passphrase-stdin",
             "--conversation",
             "wxid_talker",
@@ -524,6 +564,7 @@ fn encrypted_cli_reads_directly_and_wrong_key_fails_without_disclosure() {
             "messages",
             "search",
             fixture.root.to_str().unwrap(),
+            "--json",
             "--passphrase-stdin",
             "--query-stdin",
             "--limit",
@@ -593,6 +634,7 @@ fn default_and_named_profiles_remove_repeated_source_arguments() {
         &[
             "messages",
             "list",
+            "--json",
             "--profile",
             "alternate",
             "--conversation",
@@ -695,6 +737,7 @@ fn live_key_profile_keeps_key_out_of_arguments_and_search_stdin() {
         &[
             "messages",
             "search",
+            "--json",
             "--query-stdin",
             "--conversation",
             "wxid_talker",
@@ -755,6 +798,7 @@ fn missing_profile_opens_the_newest_live_database_with_the_captured_key() {
         &[
             "messages",
             "search",
+            "--json",
             "--query-stdin",
             "--conversation",
             "wxid_talker",
@@ -1150,7 +1194,7 @@ fn benchmark_fallback_search(
     fs::remove_file(fixture.root.join("message/message_fts.db")).unwrap();
     let files_before = fixture.relative_files();
     let root = fixture.root.to_str().unwrap();
-    let mut arguments = vec!["messages", "search", root];
+    let mut arguments = vec!["messages", "search", root, "--json"];
     if encrypted {
         arguments.push("--passphrase-stdin");
     } else {

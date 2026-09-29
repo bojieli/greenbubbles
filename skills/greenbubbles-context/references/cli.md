@@ -15,10 +15,21 @@ greenbubbles messages list --conversation <id> --limit 100
 greenbubbles messages search --query-stdin
 ```
 
+`messages list` and `messages search` print JSON Lines. The header has
+`returned`, `hasMore`, `order`, `timezone`, and `nextCursor`. Every message
+has `from` (never empty), `self` (`true` or `false`), `at` (local
+`YYYY-MM-DD HH:MM`), and `text`. An image, video, or document adds `file`,
+a local path you can open. Voice without a transcript stays `[voice]`.
+Search lines name the chat and do not include `file`. `chats rank` prints
+the same kind of page: `from`, `id`, `kind`, `selfCount`, and `last`.
+Pass `--json` when you need the typed envelope or a message id for
+`message get`. `[output] format` in the settings file selects the default.
+
 `chats` is the short form of `conversations list`. Both accept the same
 options. A custom database or passphrase path belongs in
 `~/.greenbubbles/config.toml` under `[source]`, as `root` and
-`passphrase_file`. Do not put those paths on every command.
+`passphrase_file`. `[output] format` is `brief` or `json`. Do not put those
+paths on every command.
 
 For a second account, a snapshot, or an explicit source, choose exactly one
 access mode:
@@ -72,7 +83,7 @@ The fallback examines at most 500 source messages and 16 conversations per
 response, may return an empty page with `hasMore: true`, and identifies itself
 with `fallbackSearchSourceWindowBounded`. Continue until `hasMore` is false.
 
-Every success uses `greenbubbles.query.v1`. Check:
+With `--json`, every success uses `greenbubbles.query.v1`. Check:
 
 - `consistency.guarantee`, `crossDatabaseAtomic`, and `coverageComplete`;
 - `warnings`, especially unavailable/incompatible shards,

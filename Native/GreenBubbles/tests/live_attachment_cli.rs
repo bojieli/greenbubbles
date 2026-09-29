@@ -656,6 +656,7 @@ impl MessageFixture {
             "messages",
             "list",
             self.database_root.to_str().unwrap(),
+            "--json",
             "--conversation",
             MESSAGE_CONVERSATION,
             "--limit",

@@ -87,10 +87,37 @@ second account or a snapshot.
 `greenbubbles help --all` shows the complete list. `greenbubbles chats` lists
 conversations; `conversations list` remains the same command.
 `greenbubbles chats rank` counts how many messages the account holder sent in
-each chat, with direct chats before groups, and returns no message text.
+each chat, with direct chats before groups, and returns no message text. Its
+default page is JSON Lines. The header has `returned`, `qualifying`, `hasMore`,
+`order` (`direct-then-self-count`), `timezone`, `accountHolderKnown`,
+`coverageComplete`, `conversationCount`, and `nextCursor` when another page
+exists. Each chat has `from` (never empty), `id`, `kind`, `selfCount`, and
+`last` as local `YYYY-MM-DD HH:MM`. `--limit` is 1..2000 and defaults to 100.
+Follow `nextCursor` with `--cursor` and repeat `--minimum-self-messages`.
+`--json` prints the full report, including each chat's total message count.
 
 ## Bounds and how to read a response
 
+- `messages list` and `messages search` print JSON Lines by default. The header
+  has `returned`, `hasMore`, `order` (`newest`), `timezone` (the local offset),
+  and `nextCursor` when another page exists. Search adds `searchFreshness` when
+  the native index was not checked, and `accountHolderKnown` only when the
+  account holder could not be identified. Each message has `from`, `self`,
+  `at`, and `text`. `from` is never empty: remark, then nickname, then alias,
+  then the in-group display name, then the wxid. `self` is `true` when the
+  account holder sent the message and `false` otherwise. `at` is local time,
+  `YYYY-MM-DD HH:MM`, in the header's timezone. An image, video, or document
+  adds `file`, a local path. Encrypted images are decoded into
+  `~/.greenbubbles/cache/media`. A path is omitted when the bytes cannot be
+  opened. Voice without a transcript stays `[voice]` and has no `file`. Search
+  lines name the chat with `chat`, or `conversationId` when it has no display
+  name, and do not include `file`; open that conversation with `messages list`
+  to read an image or file. Do not copy a `file` path into notes or a knowledge
+  base. Identifiers, type codes, and source metadata are omitted. `--json`
+  prints the full envelope, including the opaque id `message get` requires.
+  The default can also be set with `[output] format` in
+  `~/.greenbubbles/config.toml`. `--since` and `--until` are inclusive unix
+  seconds and must be repeated with the cursor.
 - Conversation and message lists default to 100 items, hard maximum 500.
 - Contact pages use the same 1..500 bound and source/filter-bound cursors.
 - Search has a hard maximum of 200 results. Fallback source scanning examines a

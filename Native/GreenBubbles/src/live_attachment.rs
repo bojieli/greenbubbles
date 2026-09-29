@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
@@ -11,8 +11,10 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use chrono::{Local, TimeZone};
+
 use crate::live_query::{
-    get_message, get_search_result_message, LiveQueryError, LiveQuerySource, MessageItem,
+    get_message, get_search_result_message, BriefPage, LiveQueryError, LiveQuerySource, MessageItem,
 };
 
 pub const ATTACHMENT_SCHEMA: &str = "greenbubbles.attachment.v1";
@@ -1713,6 +1715,271 @@ fn dat_format_name(format: Option<wx_media::DatFormat>) -> &'static str {
     }
 }
 
+/// Resolve image, video, and document messages to a path an agent can open.
+/// Voice stays unresolved. Encrypted WeChat image `.dat` files are decoded
+/// once into `~/.greenbubbles/cache/media`.
+pub fn fill_brief_media(account_root: &Path, page: &mut BriefPage) {
+    let mut listings = BTreeMap::<PathBuf, Vec<PathBuf>>::new();
+    for item in &mut page.items {
+        let Some(media) = item.media.clone() else {
+            continue;
+        };
+        if media.kind == "voice" {
+            item.media = None;
+            continue;
+        }
+        if let Some(path) = readable_media_path(account_root, &media, &mut listings) {
+            item.file = Some(path.to_string_lossy().into_owned());
+        }
+        item.media = None;
+    }
+}
+
+fn readable_media_path(
+    account_root: &Path,
+    media: &crate::live_query::BriefMedia,
+    listings: &mut BTreeMap<PathBuf, Vec<PathBuf>>,
+) -> Option<PathBuf> {
+    let md5 = media
+        .md5
+        .as_deref()
+        .filter(|value| value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let segments = conversation_directories(&media.conversation_id);
+    let months = month_folders(media.unix);
+    match media.kind {
+        "image" => {
+            let md5 = md5?;
+            for segment in &segments {
+                for month in &months {
+                    let directory = account_root
+                        .join("msg/attach")
+                        .join(segment)
+                        .join(month)
+                        .join("Img");
+                    for path in find_named_files(&directory, Some(md5), None, listings) {
+                        if let Some(readable) = readable_image_file(account_root, &path, md5) {
+                            return Some(readable);
+                        }
+                    }
+                }
+            }
+            None
+        }
+        "video" => {
+            let md5 = md5?;
+            for segment in &segments {
+                for month in &months {
+                    for directory in [
+                        account_root
+                            .join("msg/attach")
+                            .join(segment)
+                            .join(month)
+                            .join("Video"),
+                        account_root.join("msg/video").join(segment).join(month),
+                    ] {
+                        for path in find_named_files(&directory, Some(md5), None, listings) {
+                            if !is_opaque_dat(&path) {
+                                return Some(path);
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        }
+        "file" => {
+            let title = media
+                .title
+                .as_deref()
+                .and_then(|title| Path::new(title).file_name())
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty() && *name != "." && *name != "..");
+            for segment in &segments {
+                for month in &months {
+                    for directory in [
+                        account_root.join("msg/file").join(segment).join(month),
+                        account_root
+                            .join("msg/attach")
+                            .join(segment)
+                            .join(month)
+                            .join("File"),
+                    ] {
+                        for path in find_named_files(&directory, md5, title, listings) {
+                            if !is_opaque_dat(&path) {
+                                return Some(path);
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn conversation_directories(conversation_id: &str) -> Vec<String> {
+    let hash = format!("{:x}", md5::compute(conversation_id.as_bytes()));
+    if hash == conversation_id {
+        vec![hash]
+    } else {
+        vec![hash, conversation_id.to_string()]
+    }
+}
+
+fn month_folders(unix: i64) -> Vec<String> {
+    let mut months = Vec::new();
+    for candidate in [
+        unix,
+        unix.saturating_sub(32 * 24 * 60 * 60),
+        unix.saturating_add(32 * 24 * 60 * 60),
+    ] {
+        let folder = month_folder(candidate);
+        if !months.contains(&folder) {
+            months.push(folder);
+        }
+    }
+    months
+}
+
+fn is_opaque_dat(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("dat"))
+}
+
+fn month_folder(unix: i64) -> String {
+    Local
+        .timestamp_opt(unix, 0)
+        .single()
+        .map(|time| time.format("%Y-%m").to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn find_named_files(
+    directory: &Path,
+    md5_prefix: Option<&str>,
+    file_name: Option<&str>,
+    listings: &mut BTreeMap<PathBuf, Vec<PathBuf>>,
+) -> Vec<PathBuf> {
+    if md5_prefix.is_none() && file_name.is_none() {
+        return Vec::new();
+    }
+    cached_files(directory, listings)
+        .into_iter()
+        .filter(|path| {
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                return false;
+            };
+            if file_name.is_some_and(|expected| name == expected) {
+                return true;
+            }
+            md5_prefix.is_some_and(|prefix| {
+                name.to_ascii_lowercase()
+                    .starts_with(&prefix.to_ascii_lowercase())
+            })
+        })
+        .collect()
+}
+
+fn find_named_file(
+    directory: &Path,
+    md5_prefix: Option<&str>,
+    file_name: Option<&str>,
+    listings: &mut BTreeMap<PathBuf, Vec<PathBuf>>,
+) -> Option<PathBuf> {
+    find_named_files(directory, md5_prefix, file_name, listings)
+        .into_iter()
+        .next()
+}
+
+fn cached_files(directory: &Path, listings: &mut BTreeMap<PathBuf, Vec<PathBuf>>) -> Vec<PathBuf> {
+    if let Some(files) = listings.get(directory) {
+        return files.clone();
+    }
+    let mut files = Vec::new();
+    if let Ok(entries) = fs::read_dir(directory) {
+        for entry in entries.take(4_000) {
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_symlink() || !file_type.is_file() {
+                continue;
+            }
+            files.push(entry.path());
+        }
+    }
+    listings.insert(directory.to_path_buf(), files.clone());
+    files
+}
+
+fn readable_image_file(account_root: &Path, source: &Path, md5: &str) -> Option<PathBuf> {
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if matches!(
+        extension.as_str(),
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "heif"
+    ) {
+        return Some(source.to_path_buf());
+    }
+    if extension != "dat" {
+        return None;
+    }
+    let cache = media_cache_dir()?;
+    if let Some(existing) = find_named_file(&cache, Some(md5), None, &mut BTreeMap::new()) {
+        return Some(existing);
+    }
+    let encrypted = fs::read(source).ok()?;
+    if encrypted.len() as u64 > MAXIMUM_IMAGE_SOURCE_BYTES {
+        return None;
+    }
+    let prefix = &encrypted[..encrypted.len().min(32)];
+    let v2_aes_key = (wx_media::detect_dat_format(prefix) == Some(wx_media::DatFormat::V2))
+        .then(|| wx_media::derive_v2_key_from_dir(account_root).ok())
+        .flatten();
+    let decoded = wx_media::decrypt_dat(
+        &encrypted,
+        &wx_media::DatDecryptOptions {
+            v2_aes_key,
+            xor_key: None,
+        },
+    )
+    .ok()?;
+    let extension = if decoded.ext.is_empty() {
+        "img".to_string()
+    } else {
+        decoded.ext
+    };
+    if !extension
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    let output = cache.join(format!("{md5}.{extension}"));
+    fs::write(&output, &decoded.data).ok()?;
+    let mut permissions = fs::metadata(&output).ok()?.permissions();
+    permissions.set_mode(0o600);
+    fs::set_permissions(&output, permissions).ok()?;
+    Some(output)
+}
+
+fn media_cache_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let directory = PathBuf::from(home).join(".greenbubbles/cache/media");
+    fs::create_dir_all(&directory).ok()?;
+    let mut permissions = fs::metadata(&directory).ok()?.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&directory, permissions).ok()?;
+    Some(directory)
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -2046,5 +2313,107 @@ mod tests {
             video,
             document,
         }
+    }
+
+    #[test]
+    fn brief_page_points_at_a_readable_image_or_file_and_leaves_voice_alone() {
+        use chrono::{Local, TimeZone};
+
+        use crate::live_query::{BriefLine, BriefMedia};
+
+        let fixture = tempfile::tempdir().unwrap();
+        let account = fixture.path().join("account");
+        let conversation = "wxid_friend";
+        let image_md5 = "0123456789abcdef0123456789abcdef";
+        let unix = Local
+            .with_ymd_and_hms(2026, 8, 15, 12, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let month = month_folder(unix);
+        let hash = format!("{:x}", md5::compute(conversation.as_bytes()));
+        let image_directory = account
+            .join("msg/attach")
+            .join(&hash)
+            .join(&month)
+            .join("Img");
+        let file_directory = account.join("msg/file").join(&hash).join(&month);
+        fs::create_dir_all(&image_directory).unwrap();
+        fs::create_dir_all(&file_directory).unwrap();
+        fs::write(
+            image_directory.join(format!("{image_md5}.txt")),
+            b"not-an-image",
+        )
+        .unwrap();
+        let image = image_directory.join(format!("{image_md5}.jpg"));
+        fs::write(&image, b"jpeg-bytes").unwrap();
+        let document = file_directory.join("notes.pdf");
+        fs::write(&document, b"%PDF").unwrap();
+
+        let mut page = BriefPage {
+            returned: 3,
+            has_more: false,
+            next_cursor: None,
+            search_freshness: None,
+            account_holder_known: true,
+            timezone: "+08:00".to_string(),
+            order: "newest",
+            items: vec![
+                BriefLine {
+                    from: "friend".to_string(),
+                    is_self: false,
+                    at: "2026-08-15 12:00".to_string(),
+                    text: "[image]".to_string(),
+                    file: None,
+                    chat: None,
+                    conversation_id: None,
+                    media: Some(BriefMedia {
+                        kind: "image",
+                        md5: Some(image_md5.to_string()),
+                        title: None,
+                        unix,
+                        conversation_id: conversation.to_string(),
+                    }),
+                },
+                BriefLine {
+                    from: "friend".to_string(),
+                    is_self: false,
+                    at: "2026-08-15 12:01".to_string(),
+                    text: "notes.pdf".to_string(),
+                    file: None,
+                    chat: None,
+                    conversation_id: None,
+                    media: Some(BriefMedia {
+                        kind: "file",
+                        md5: None,
+                        title: Some("notes.pdf".to_string()),
+                        unix,
+                        conversation_id: conversation.to_string(),
+                    }),
+                },
+                BriefLine {
+                    from: "friend".to_string(),
+                    is_self: false,
+                    at: "2026-08-15 12:02".to_string(),
+                    text: "[voice]".to_string(),
+                    file: None,
+                    chat: None,
+                    conversation_id: None,
+                    media: Some(BriefMedia {
+                        kind: "voice",
+                        md5: None,
+                        title: None,
+                        unix,
+                        conversation_id: conversation.to_string(),
+                    }),
+                },
+            ],
+        };
+        fill_brief_media(&account, &mut page);
+        assert_eq!(page.items[0].file.as_deref(), image.to_str());
+        assert!(page.items[0].media.is_none());
+        assert_eq!(page.items[1].file.as_deref(), document.to_str());
+        assert!(page.items[2].file.is_none());
+        assert!(page.items[2].media.is_none());
     }
 }
