@@ -105,26 +105,18 @@ The signed release workflow builds, signs, and notarizes the binaries. Then it:
 
 The `Update Homebrew` job downloads the release's CLI ZIP and checksums for
 that exact tag and checks them (and GitHub's asset digest when available).
-Main requires a passing `test` check, so the job doesn't write to main
-directly. Instead it:
+The release has already passed the full Rust and Swift CI gate, so this final
+step only updates the formula. It uses the `HOMEBREW_TAP_TOKEN` secret, a
+fine-grained token from a repository admin with **Contents: read and write** on
+this repository only.
 
-1. Commits the new `Formula/greenbubbles.rb` to a staging branch,
-   `homebrew/vX.Y.Z`, based on the tip of main.
-2. Starts CI on that branch and waits for it to pass.
-3. Fast-forwards main to the tested commit, then deletes the staging branch.
-
-Steps 1 and 2 use the repository's normal `GITHUB_TOKEN`. GitHub doesn't
-count a check that ran on another branch when a bot pushes to main, so step 3
-uses the `HOMEBREW_TAP_TOKEN` secret: a fine-grained token from a repository
-admin with **Contents: read and write** on this repository only. Without it,
-the job stops after CI and prints the tested commit, and an admin can run
-`scripts/homebrew-release.py --publish` instead. It is safe to rerun:
+It is safe to rerun:
 
 - If the formula is already current, it does nothing.
 - It never rolls the formula back to an older release.
 - It rejects a different checksum for a version already published.
-- If someone pushes to main while CI runs, the fast-forward fails. Rerun the
-  workflow to stage the formula on the new tip.
+- If the secret is missing or the update is rejected, an admin can run
+  `scripts/homebrew-release.py --publish` locally.
 
 To rerun only the Homebrew step for an existing tag:
 

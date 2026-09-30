@@ -4,6 +4,16 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
+## 0.9.3 - 2026-09-30
+
+### Changed
+
+- Removed the flaky macOS process-launch media tests from the CI suite; the
+  remaining Swift tests run deterministically.
+- Simplified Homebrew publication: the release's full CI gate runs once, then
+  the formula is verified from the signed assets and updated with
+  `HOMEBREW_TAP_TOKEN` without a second staged-branch CI run.
+
 ## 0.9.2 - 2026-09-30
 
 ### Changed

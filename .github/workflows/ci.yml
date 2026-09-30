@@ -9,9 +9,6 @@ on:
   # Lets the release workflow gate on exactly these checks instead of
   # restating them, so the two cannot drift apart.
   workflow_call:
-  # The Homebrew workflow starts CI on its staged formula commit so the default
-  # branch's required "test" check passes before it fast-forwards.
-  workflow_dispatch:
 
 permissions:
   contents: read

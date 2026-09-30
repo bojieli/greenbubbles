@@ -14,16 +14,13 @@ on:
         type: string
     secrets:
       HOMEBREW_TAP_TOKEN:
-        required: false
+        required: true
 
-# The formula goes to a staging branch first and CI runs there (a
-# workflow_dispatch from GITHUB_TOKEN is allowed to start it), so the commit is
-# tested before it reaches the default branch. The default branch requires a
-# "test" check that GitHub does not accept from a run on another branch, so the
-# final fast-forward uses HOMEBREW_TAP_TOKEN, a repository admin's token.
+# The release workflow has already passed the full CI gate before this job
+# runs. The formula is generated from the signed release assets and published
+# with the repository admin token, so there is no second staged-branch build.
 permissions:
-  contents: write
-  actions: write
+  contents: read
 
 concurrency:
   group: homebrew-formula
@@ -32,74 +29,18 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    # CI on the staging branch runs the full macOS suite.
-    timeout-minutes: 90
-    env:
-      GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: ${{ inputs.tag }}
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Verify release assets and stage the formula commit
-        id: formula
+      - name: Verify release assets and update formula
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
           if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Expected an exact numeric v-prefixed release tag" >&2
             exit 1
           fi
-          branch="homebrew/$RELEASE_TAG"
-          echo "branch=$branch" >>"$GITHUB_OUTPUT"
           python3 scripts/homebrew-release.py \
-            --version "${RELEASE_TAG#v}" --repository "$GITHUB_REPOSITORY" \
-            --publish --branch "$branch"
-
-      - name: Run CI on the staged formula commit
-        if: steps.formula.outputs.commit != ''
-        env:
-          BRANCH: ${{ steps.formula.outputs.branch }}
-          COMMIT: ${{ steps.formula.outputs.commit }}
-        run: |
-          set -euo pipefail
-          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$BRANCH"
-          run_id=""
-          for _ in $(seq 1 30); do
-            run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
-              --event workflow_dispatch --commit "$COMMIT" --limit 1 \
-              --json databaseId --jq '.[0].databaseId // empty')
-            [ -n "$run_id" ] && break
-            sleep 10
-          done
-          if [ -z "$run_id" ]; then
-            echo "CI did not start for $COMMIT" >&2
-            exit 1
-          fi
-          gh run watch "$run_id" --repo "$GITHUB_REPOSITORY" --exit-status --interval 30
-
-      - name: Fast-forward the default branch to the tested formula commit
-        if: steps.formula.outputs.commit != ''
-        env:
-          COMMIT: ${{ steps.formula.outputs.commit }}
-          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ -z "$TAP_TOKEN" ]; then
-            echo "HOMEBREW_TAP_TOKEN is not set. The tested formula commit is $COMMIT;" >&2
-            echo "an admin can publish it with scripts/homebrew-release.py --publish." >&2
-            exit 1
-          fi
-          default_branch=$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)
-          # A non-forced update succeeds only if the default branch has not
-          # moved since the staging branch was cut from it.
-          if ! GH_TOKEN="$TAP_TOKEN" gh api "repos/$GITHUB_REPOSITORY/git/refs/heads/$default_branch" \
-            -X PATCH -f sha="$COMMIT" -F force=false >/dev/null; then
-            echo "Could not fast-forward $default_branch to $COMMIT (see the error above)." >&2
-            echo "If $default_branch moved while CI ran, re-run this workflow." >&2
-            exit 1
-          fi
-          echo "Fast-forwarded $default_branch to $COMMIT"
-
-      - name: Remove the staging branch
-        if: always() && steps.formula.outputs.branch != ''
-        env:
-          BRANCH: ${{ steps.formula.outputs.branch }}
-        run: gh api "repos/$GITHUB_REPOSITORY/git/refs/heads/$BRANCH" -X DELETE || true
+            --version "${RELEASE_TAG#v}" --repository "$GITHUB_REPOSITORY" --publish
