@@ -113,9 +113,12 @@ directly. Instead it:
 2. Starts CI on that branch and waits for it to pass.
 3. Fast-forwards main to the tested commit, then deletes the staging branch.
 
-It uses the repository's normal `GITHUB_TOKEN` with `contents: write` and
-`actions: write`, and nothing gets around branch protection. It is safe to
-rerun:
+Steps 1 and 2 use the repository's normal `GITHUB_TOKEN`. GitHub doesn't
+count a check that ran on another branch when a bot pushes to main, so step 3
+uses the `HOMEBREW_TAP_TOKEN` secret: a fine-grained token from a repository
+admin with **Contents: read and write** on this repository only. Without it,
+the job stops after CI and prints the tested commit, and an admin can run
+`scripts/homebrew-release.py --publish` instead. It is safe to rerun:
 
 - If the formula is already current, it does nothing.
 - It never rolls the formula back to an older release.

@@ -12,12 +12,15 @@ on:
       tag:
         required: true
         type: string
+    secrets:
+      HOMEBREW_TAP_TOKEN:
+        required: false
 
-# The default branch requires a passing "test" check, which a commit made by
-# this token does not have. So the formula goes to a staging branch first, CI
-# runs there (a workflow_dispatch from this token is allowed to start it), and
-# the default branch is fast-forwarded to that tested commit. Nothing bypasses
-# branch protection.
+# The formula goes to a staging branch first and CI runs there (a
+# workflow_dispatch from GITHUB_TOKEN is allowed to start it), so the commit is
+# tested before it reaches the default branch. The default branch requires a
+# "test" check that GitHub does not accept from a run on another branch, so the
+# final fast-forward uses HOMEBREW_TAP_TOKEN, a repository admin's token.
 permissions:
   contents: write
   actions: write
@@ -76,12 +79,21 @@ jobs:
         if: steps.formula.outputs.commit != ''
         env:
           COMMIT: ${{ steps.formula.outputs.commit }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           set -euo pipefail
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "HOMEBREW_TAP_TOKEN is not set. The tested formula commit is $COMMIT;" >&2
+            echo "an admin can publish it with scripts/homebrew-release.py --publish." >&2
+            exit 1
+          fi
           default_branch=$(gh api "repos/$GITHUB_REPOSITORY" --jq .default_branch)
-          if ! gh api "repos/$GITHUB_REPOSITORY/git/refs/heads/$default_branch" \
+          # A non-forced update succeeds only if the default branch has not
+          # moved since the staging branch was cut from it.
+          if ! GH_TOKEN="$TAP_TOKEN" gh api "repos/$GITHUB_REPOSITORY/git/refs/heads/$default_branch" \
             -X PATCH -f sha="$COMMIT" -F force=false >/dev/null; then
-            echo "$default_branch moved while CI ran; re-run this workflow to stage the formula on the new tip." >&2
+            echo "Could not fast-forward $default_branch to $COMMIT (see the error above)." >&2
+            echo "If $default_branch moved while CI ran, re-run this workflow." >&2
             exit 1
           fi
           echo "Fast-forwarded $default_branch to $COMMIT"

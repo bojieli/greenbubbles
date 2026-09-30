@@ -633,3 +633,5 @@ jobs:
     uses: ./.github/workflows/homebrew.yml
     with:
       tag: ${{ inputs.tag || github.ref_name }}
+    secrets:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
