@@ -197,6 +197,31 @@ Rules:
   Each bullet is one or two sentences, in time order. Nest a bullet when
   one date has several parts. The list is still prose. It is not a
   transcript and not a column of raw message lines.
+- A talk script, a pasted blog section, or a meeting-invite card becomes
+  the occasion and the claim. The script and the meeting id stay out of
+  the article. A `[quote]` with no words does not name the "他" in the
+  next line. Leave that sentence out. A call that leaves only a duration
+  is the occasion. The words are not on the page.
+- A forwarded auto-summary is the occasion. Claims inside it stay
+  attributed to that summary. A figure that appears only there stays out
+  of the article.
+- A credential, a reservation card, and an interview prompt are the
+  occasion. The secret, the street, the phone, and the prompt stay out.
+  Where he went, and what he decided, stay. A stipend or payroll form
+  keeps the employer and the title. The identity number, the bank card,
+  the branch, and the phone on that form stay out. A replaced class key
+  stays out. The leak, and the model he told them to use, stay. An ssh
+  line, a proxy export, or a VPN setup is the occasion. The address, the
+  key path, and the proxy lines stay out. When a greeting states a
+  personal name that differs from `from`, file that name and keep `from`
+  as the display. When he says an old company was not renamed into the
+  new one, file both names.
+- A display name's employer yields to the sentence that person typed.
+  An untitled book picture stays a book he translated. A checkout
+  workaround and someone else's filing deadline stay out. The signature
+  and the failed login stay.
+- Two pictures and then "pick either" are the pictures. A digest that
+  dropped the `[image]` lines is not the page.
 - One topic has one section. A new fact joins that section. It does not
   get a second copy, and it does not get glued onto a paragraph that is
   already hard to read.

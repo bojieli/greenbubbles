@@ -122,8 +122,10 @@ Order:
    Pass the same `--since` and `--until` for every chat. Follow each
    `nextCursor` on its own later command. One page of one chat is not the slice.
    On that page, `[voice]`, `[unknown]`, `[emoji]`, and `[revoked]` are
-   labels, not prose. Do not invent a transcript, a withdrawn sentence, or
-   the words inside an emoji-only body. Words kept beside an emoji name are
+   labels, not prose. A call that leaves only a duration is the same:
+   they talked, and the words are not on the page. Do not invent a
+   transcript, a withdrawn sentence, or the words inside an emoji-only
+   body. Words kept beside an emoji name are
    the text. A meeting invitation stays text unless `--redact` was passed.
    Do not pass `--redact` for this project.
 5. Revise the articles once for the slice. Follow
@@ -158,7 +160,12 @@ A few readings keep getting mis-filed:
 - A display name that includes an employer, a desk, or "HR" is that
   contact's label. It does not confirm where the account holder is going,
   and it does not fill in a company he left unnamed. File the company only
-  when his own message names it.
+  when his own message names it. When that person's own message names a
+  different employer from the label, file the sentence they typed. The
+  label does not replace it. When that person's own greeting states a
+  personal name that differs from `from`, file the name they typed and
+  keep `from` as the display. A WeChat system line that names someone
+  else is not a second contact.
 - Reaching the window start is not the same as having no durable fact.
   Mark no durable fact only after the page is read and it has none. A
   finished chat can still add sentences to the episode.
@@ -174,6 +181,9 @@ A few readings keep getting mis-filed:
   standing: proxy hops, identity-check steps, or similar. A street address
   or identity number that is his own fact stays in the article. If the same
   page also has a durable opinion, keep the opinion and drop the procedure.
+  An ssh command, a proxy export, or a VPN setup he types for someone else
+  is the occasion. File that a machine was opened, or that the network was
+  the problem. Leave the address, the key path, and the proxy lines out.
 - A two-letter fragment, such as "sd", is not a city. Leave it unexpanded.
 - A short reply answers the message in front of it. Do not treat it as
   retracting an earlier sentence on the same page unless its words do that.
@@ -198,6 +208,26 @@ A few readings keep getting mis-filed:
 - A nameplate or title he offers for one event is that day's wording. File
   it beside later bios. It does not close where he works. A joke about a
   sanctions list in a title is not a legal finding.
+- The next message can correct the one before it. File the corrected
+  wording. A mistype he immediately replaces is not a second claim, and it
+  does not need its own sentence.
+- The same chat can name an organization correctly a few messages later.
+  File the name he settled on. The earlier near-miss is not a second
+  organization, and it does not need a sentence of its own.
+- A word he typed and did not correct stays as he typed it. Do not silently
+  replace a near-miss technical term, and do not add a sentence that only
+  flags the slip.
+- A line that is only a title is the title he sent that minute. File it
+  beside the other titles. When the turn before it is `[unknown]` or a call
+  with no text, do not invent the question. A draft that arrives later,
+  with no reply from him on the page, was not approved on this page.
+- A one-word agreement with the other person's assumption about his
+  employer stays in the person note. Do not open a work sentence that names
+  their company as his. The display name still does not fill a company he
+  left unnamed.
+- A config dump, an overlay line, or a seller's answer about how two parts
+  fit is the occasion. File that the device was being set up and what he
+  concluded. Leave the dump and the wiring out.
 - An arrival time, a gate, a course start, or a meal is logistics. After
   the page is read, mark no durable fact when that is all it holds. A
   teacher's name that this page does not identify is not a school.
@@ -210,14 +240,20 @@ A few readings keep getting mis-filed:
 - An identity number on the page is the number he wrote, not a birthday.
   Do not derive a date of birth from it. Words around it, such as the unit
   on a form, can still be filed.
-- `[image]`, `[quote]`, `[file]`, and `[unknown]` with no words beside
-  them are not a document. Do not describe the picture, and do not open
-  the file into the article. A `[quote]` line is not his statement unless
+- `[image]`, `[quote]`, `[file]`, `[attachment]`, and `[unknown]` with no words beside
+  them are not a document. `[attachment]` is an app card with no readable
+  title and no file path. A call that leaves only a duration is the
+  same: they talked, and the words are not on the page. Do not describe
+  the picture, and do not open the file into the article. A `[quote]` line is not his statement unless
   the words beside it are his. Do not expand the placeholder.
 - A scratch digest that cuts a line short is not the message. If the
   sentence you would file ends in an ellipsis, re-read that line in the
   coverage jsonl before writing it. The page header's `conversationId` is
   not the display name. The name is `from` on the message line.
+- A self line of one or two words is still the answer. Do not drop it
+  because a digest keeps only longer lines. A city name, a "no", or a
+  tool name sent as its own message is the fact. Read it against the
+  line before it. A `[quote]` on the same page is still not his statement.
 - The same refusal, told to several people in one week and naming the same
   person, is one episode. A similar refusal that does not name that person
   stays a separate note. Do not merge them because the wording rhymes.
@@ -226,6 +262,8 @@ A few readings keep getting mis-filed:
   and it is not his.
 - "I had already left a startup" names that company only when he names it.
   Do not attach the exit to a later employer. Keep the dates side by side.
+  When he says the old name was not a rename of the new one, file both
+  names.
 - Accepting an offer, including a start date printed on the letter, is that
   day's acceptance. A later pause or withdrawal stays beside it. Neither
   sentence means he joined, and neither means the other side rejected him.
@@ -238,3 +276,67 @@ A few readings keep getting mis-filed:
 - An email address, a link, or a bare hostname on the page can be filed
   when it belongs to the fact. Do not pass `--redact` and then reconstruct
   what that flag removed.
+- When the line before "他" is `[quote]`, that person is not on the page.
+  Do not attach the visa, job, or status in his reply to the account
+  holder. Leave the sentence unfiled.
+- A self-sent talk script, a pasted blog section, or a meeting-invite
+  card is the occasion and the claim. Do not paste the script into the
+  article, and do not copy the meeting id.
+- `returned` 0 and `hasMore` false means that window page is empty. Rank
+  `selfCount` can still be higher: those messages sit outside `--since`,
+  or they did not decode. Mark the page read. It is not unread.
+- `returned` can equal `--limit` while `hasMore` is false. That header is
+  the end of the window. Do not open another page because the count
+  matches the limit.
+- Two counts he gives in the same minute both stay, including a headcount
+  and a breakdown that do not add up. Do not correct the arithmetic.
+- A valuation figure in the same sentence as a round count stays out of
+  the article. Keep the round count and the date. Do not write a sentence
+  whose only job is to say the figure was left out.
+- A valuation, a revenue, or a cloud-credit amount stays out even when the
+  sentence has no round count. Keep the companies, the comparison, and the
+  date. A performance table the other person pastes stays out. Keep his
+  conclusion and the date. Do not write a sentence whose only job is to
+  say the figure was left out.
+- A tracking number, a resume file, and a poster image are the occasion.
+  File where the parcel was, that he sent the resume, and the bio he typed
+  that minute. Leave the number, the file body, and the picture out.
+- A figure inside a rumor the other person calls false stays out. Keep
+  the denial, who said it, and the date. Do not write a sentence whose
+  only job is to say the figure was left out.
+- The same pasted greeting, including a New Year code poem, sent again
+  in another chat is still that script. File the occasion once. Do not
+  paste the script.
+- A summary he forwards from a pendant or a model, such as Limitless or
+  GPT-5, is not a sentence he typed. File the occasion. File a claim from
+  inside it only when he adopts that claim, or when he says the summary
+  is right overall, and say the summary is the one he forwarded. Keep the
+  errors he named. A financing figure that appears only inside that
+  summary stays out.
+- A line whose text is a credential, such as an API key, a token, or a
+  password, is not a sentence to copy. If he sent a temporary key so
+  someone could run a demo, file the occasion and leave the secret out.
+- A stipend or payroll form is one line that mixes a credential with a
+  job title. File the employer and the title he wrote. Leave the identity
+  number, the bank card, the branch, and the phone. Do not derive a
+  birthday from the number. A class key he says was leaked is the
+  occasion: file that he replaced it, and which model he told them to
+  use. Leave the new key out.
+- A reservation card and a dump of internal rows are the occasion. File
+  where he went and what he decided. Leave the street, the phone, the
+  room number, and the rows out of the article.
+- A picture of a book, when the words only say he translated it, is that
+  confirmation. Do not guess the title from a picture the reading page
+  did not transcribe.
+- A checkout workaround he types, and a filing deadline the other person
+  states, are the occasion. File that the page would not log in, or that
+  he signed and sent the file back. Leave the steps and the other
+  person's filing note out.
+- A coding prompt he pastes for an interview is the occasion. File that
+  he set the exercise and what he said about the result. Do not paste
+  the prompt.
+- "这两个" after two `[image]` lines means the pictures. A digest that
+  dropped those lines is not the page. Re-read the jsonl before treating
+  the phrase as two documents.
+- A joke that his own homepage or a title is casually written is that
+  day's tone. It does not retract the page or the title.

@@ -66,10 +66,29 @@ dates before writing the episode.
 An image, video, or document adds `file`, a local path. Open that path when
 the picture or document matters to the article. Do not copy the path, or the
 bytes' cache location, into the knowledge base. Voice with no transcript
-stays `[voice]` and has no `file`. Leave it as a placeholder. A text body
+stays `[voice]` and has no `file`. Leave it as a placeholder. `[attachment]`
+is an app card with no readable title. It has no `file` path. Leave it
+as a placeholder. A call that
+leaves only a duration is the same. File that they talked. The words are
+not on the page. A text body
 that is only identifiers and `true` or `false` is `[unknown]`. A text body
 that is only bracketed emoji names, in English such as `[Grin]` or in
 Chinese such as `[偷笑]`, is `[emoji]`; words beside those names are kept.
+A pasted API key, token, or password stays in the text. Do not copy it
+into the article. A stipend or payroll form stays in the text the same
+way: file the employer and the title, and leave the identity number,
+the bank card, the branch, and the phone. A class key he replaces after
+a leak stays in the text. File the leak and the model he named. Do not
+copy the new key. An ssh command, a proxy export, or a VPN setup stays
+in the text. File that a machine was opened, or that the network was
+the problem. Do not copy the address, the key path, or the proxy lines.
+When a greeting states a personal name that differs from `from`, file
+that name and keep `from` as the display. A reservation card stays in the text the same way:
+file the place name he used, and leave the street and the phone.
+A display name can name an employer that person's own message
+contradicts. File the sentence. An untitled book image stays a
+translation he confirmed. A checkout workaround and a filing note stay
+in the reading page. Do not copy the steps.
 A short recall notice is `[revoked]`, including `You recalled a message`,
 a Chinese notice, and a line that only says someone recalled a message.
 Do not recover the withdrawn words, and do not treat the English word "You"
@@ -87,7 +106,9 @@ Search lines add `chat` when the conversation has a display name, and
 conversation with `messages list` to read an image or file found by search.
 
 Follow `nextCursor` with `--cursor`, and repeat `--since` and `--until`,
-until `hasMore` is false or the oldest line is before the window. `--limit`
+until `hasMore` is false or the oldest line is before the window. A page
+that returns as many lines as `--limit` can still have `hasMore` false.
+That header is the end. Do not invent another cursor. `--limit`
 is 1..500 for list and 1..200 for search. A large chat is many pages. Read
 a batch, revise the articles, record the cursor, then read the next page.
 Keep only lines that belong in an article.
