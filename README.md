@@ -46,8 +46,9 @@ messages it reads are sent to that AI's provider.
 ## What you can do
 
 - **Browse and search:** list chats, read messages, and open attachments.
-- **Build notes about your life:** have your coding agent write Markdown notes
-  from your chats, with a link back to each source message.
+- **Build notes about your life:** have your coding agent write a private wiki
+  from your chats: one short article per part of your life, each fact tied to
+  the message it came from. Passwords and keys pasted into chats stay out.
 - **Keep notes current:** later runs add only new messages, and Git records
   every change so you can review it.
 - **Back up:** make an encrypted copy of your history, protected by a 24-word
@@ -205,7 +206,7 @@ reads the same WeChat data as the command-line tool.
 | Set up and start browsing | [User guide](docs/USER_GUIDE.md) |
 | Have my agent write notes from my chats | [Agent skills](docs/AGENT_SKILLS.md) |
 | Understand how the notes are organized | [Personal memory](docs/PERSONAL_MEMORY.md) |
-| Give an AI access to only some chats | [AI context CLI](docs/AI_CONTEXT_CLI.md) |
+| Give an AI access to only some chats | [Give an AI access to only some chats](docs/AI_CONTEXT_CLI.md) |
 | Back up and restore my history | [Recoverable snapshots](docs/RECOVERABLE_SNAPSHOTS.md) |
 | Fix a problem | [FAQ](docs/FAQ.md) and [known limitations](docs/KNOWN_LIMITATIONS.md) |
 | Understand the design | [Architecture](docs/ARCHITECTURE.md) and [threat model](docs/THREAT_MODEL.md) |

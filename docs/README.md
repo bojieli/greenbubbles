@@ -13,7 +13,7 @@ which parts, if any, an AI gets to see. Start with the
 | Install and browse my history | [User guide](USER_GUIDE.md) |
 | Have my coding agent write notes from my chats | [Agent skills](AGENT_SKILLS.md) |
 | Understand how those notes are organized | [Personal memory](PERSONAL_MEMORY.md) |
-| Give an AI access to only some chats | [AI context CLI](AI_CONTEXT_CLI.md), then [AI tool boundary](AI_TOOL_BOUNDARY.md) |
+| Give an AI access to only some chats | [Give an AI access to only some chats](AI_CONTEXT_CLI.md), then [AI tool boundary](AI_TOOL_BOUNDARY.md) |
 | Keep a backup that works without WeChat | [Recoverable snapshots](RECOVERABLE_SNAPSHOTS.md) |
 | Fix something that isn't working | [FAQ](FAQ.md) |
 | Know what it can't do before installing | [Known limitations](KNOWN_LIMITATIONS.md) and [threat model](THREAT_MODEL.md) |
@@ -35,7 +35,7 @@ which parts, if any, an AI gets to see. Start with the
 - [History browser](HISTORY_BROWSER.md): the Mac app, what it shows and stores,
   and what it deliberately can't do.
 - [Recoverable snapshots](RECOVERABLE_SNAPSHOTS.md): encrypted backups, the 24
-  recovery words, changing how a backup is unlocked, and testing recovery.
+  recovery phrase, changing how a backup is unlocked, and testing recovery.
 - [Key setup guide](PASSPHRASE_ACQUISITION.md): copying the database key from
   your own WeChat app, checking it, and fixing problems.
 
@@ -46,7 +46,7 @@ which parts, if any, an AI gets to see. Start with the
   date.
 - [Personal memory](PERSONAL_MEMORY.md): how the agent turns your chats into a
   set of notes, one article per area of your life.
-- [AI context CLI](AI_CONTEXT_CLI.md): answering one AI request at a time,
+- [Give an AI access to only some chats](AI_CONTEXT_CLI.md): answering one AI request at a time,
   giving an AI access limited to chats you choose, and the built-in Gemini
   summarizer.
 - [AI tool boundary](AI_TOOL_BOUNDARY.md): what an AI tool may ask for, and

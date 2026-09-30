@@ -140,7 +140,7 @@ It depends on how the AI reaches your data.
   fields are allowed, an optional date range, and whether a cloud AI may see
   it. Cloud access is off unless you turn it on for that chat. Every allowed or
   denied request is written to a tamper-evident audit log with no message text.
-  See [AI context CLI](AI_CONTEXT_CLI.md).
+  See [Give an AI access to only some chats](AI_CONTEXT_CLI.md).
 - **Through the command line or a coding agent:** it has the same access to
   your files that you have. A skill tells an agent what to do, but it can't
   restrict it. Use the connector when you need enforced limits.
@@ -236,7 +236,7 @@ is for.
 This is also why GreenBubbles won't let you remove the last recovery phrase,
 and why it writes the recovery kit before the long backup starts, not after.
 
-### Where should I keep the recovery words?
+### Where should I keep the recovery phrase?
 
 Anywhere except next to the only copy of the backup. A real backup needs an
 intact backup copy **and** a working recovery phrase, kept in different places.

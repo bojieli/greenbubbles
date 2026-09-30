@@ -1,58 +1,72 @@
-# Giving an AI context
+# Give an AI access to only some chats
 
-For installation and direct use from Codex, Claude Code, OpenCode, Kimi Code, Gemini CLI, or Grok Build, see [Portable agent skills](AGENT_SKILLS.md).
+This page is for two jobs:
 
-The `greenbubbles` command line is the primary agent surface. It serves
-source-faithful WeChat context without a long-running process, without SQL, and
-without access to restoration secrets. The repository skill in
-`skills/greenbubbles-context` gives a compatible agent the short version of
-these instructions.
+- **Let GreenBubbles write a summary with Gemini.** Jump to
+  [Model-generated live memory](#model-generated-live-memory).
+- **Let an AI see only some of your chats.** Start with
+  [Pick an approach](#pick-an-approach), then write a policy file.
 
-Three levels, in increasing order of deliberateness:
+If you just want your coding agent (Codex, Claude Code, OpenCode, Kimi Code,
+Gemini CLI, or Grok Build) to read your chats and write notes, you don't need
+this page. See the [agent skills guide](AGENT_SKILLS.md).
 
-| Level | Command | Use when |
+Everything here uses the `greenbubbles` command. Each command runs once and
+exits: there is no background service, no SQL, and no access to your backup
+recovery secrets. The skill in `skills/greenbubbles-context` gives an agent a
+short version of these instructions.
+
+## Pick an approach
+
+| Approach | Commands | Use it when |
 | --- | --- | --- |
-| Direct bounded read | `messages list/search`, `message get` | You are at a terminal, with your own authority |
-| Policy-scoped query | `connector-query-direct`, `ai-query` | An AI caller needs a boundary you control |
-| Static export | `ai-export`, then `ai-memory-export` | You want a durable, auditable bundle to ingest |
-| Generated memory | `ai-summarize-direct` | You want a real model to compile a small cited wiki from live authorized messages |
-| Corpus-scale agent memory | `memory prepare/next/page/acknowledge/commit/status` | One Pi agent should iteratively refine a cited wiki over all messages or a composable command-line scope without traversing a million messages itself |
+| Read directly | `messages list`, `messages search`, `message get` | You're at a terminal and can read everything yourself |
+| Query through a policy | `connector-query-direct`, `ai-query` | An AI should see only what a policy file allows |
+| Export a bundle | `ai-export`, then `ai-memory-export` | You want a fixed, verifiable set of files to load into another tool |
+| Summarize with Gemini | `ai-summarize-direct` | You want a model to write a small cited summary from chats you allowed |
+| Build notes over everything | `memory prepare`, `next`, `page`, `acknowledge`, `commit`, `status` | An agent should build notes from your whole history, a batch at a time |
 
-For ordinary conversation and message reads, `connector-query-direct` is the
-preferred policy-scoped path: one typed request against live or snapshot
-SQLite, JSON out, the normal chained audit appended, and exit — with no JSONL
-archive and no encrypted replica involved. The plain resource commands remain
-simplest when you do not need a separate AI policy boundary at all.
+For ordinary policy-limited reads, use `connector-query-direct`. It reads your
+live WeChat data (or a backup), answers one JSON request, adds an entry to the
+audit log, and exits. It doesn't need an export or a replica. If you don't need
+a policy at all, the plain `messages` commands are simpler.
+
+A **replica** is a private, encrypted, restored copy of your history that
+GreenBubbles can keep for faster and richer queries. `ai-query` and `ai-export`
+read a replica; the direct commands read WeChat's own files.
 
 ## Which policy applies
 
-`connector-query-direct` uses a **source-bound** policy for ordinary list,
-search and get operations, enforcing capability, conversation, time, field,
-result/summary and destination bounds.
+There are two kinds of policy file, and each works with different commands.
 
-`ai-query` and `ai-export` reuse the **replica tool policy**, which binds one
-account and grants operations, normalized fields, inclusive time ranges and
-local-or-remote release independently per conversation, with cached Moments as
-a separate scope.
+- **Direct policy** — used by `connector-query-direct` and
+  `ai-summarize-direct`. It limits which operations, conversations, dates, and
+  message fields are allowed, how many results come back, and whether results
+  may go to a cloud model.
+- **Replica policy** — used by `ai-query` and `ai-export`. It is tied to one
+  account. For each conversation it grants operations, message fields,
+  inclusive date ranges, and local or cloud release separately. Cached Moments
+  have their own scope.
 
-The two are not interchangeable, and the reason is structural rather than
-stylistic: replica identifiers are account-scoped one-way hashes, while direct
-identifiers are the source's own. A policy for one is rejected by the other
-rather than silently reinterpreted.
+You can't swap one for the other. The replica uses one-way hashed IDs tied to
+the account, while the direct commands use WeChat's own IDs, so a policy
+written for one is rejected by the other instead of being misread.
 
-The replica key is consumed only from standard input. Requests, policies, audit
-logs, progress logs and bundles all live under owner-controlled mode-`0700`
-directories, with private files at `0600`. Search terms and message bodies
-never appear in process arguments or in the body-free audit log.
+Some rules apply to both:
 
-**`ai-query` accepts only read operations.** It rejects drafts, previews,
-bootstrap, synchronization, refresh, approval, send, or any other mutation.
-Message text is returned as untrusted source content and cannot select another
-operation or widen a policy.
+- The replica key is read only from standard input.
+- Requests, policies, audit logs, progress logs, and bundles must live in
+  folders only you can open (mode `0700`), with private files at `0600`.
+- Search terms and message text never appear in command-line arguments or in
+  the audit log.
+- **`ai-query` only reads.** It rejects drafts, previews, bootstrap, sync,
+  refresh, approval, sending, and every other change. Message text is treated
+  as untrusted content: nothing in a message can trigger another operation or
+  widen the policy.
 
 ## One-shot queries
 
-Put a request in an owner-only file:
+Write the request to a file only you can read:
 
 ```json
 {
@@ -69,18 +83,21 @@ Put a request in an owner-only file:
 }
 ```
 
+Then run:
+
 ```sh
 greenbubbles connector-query-direct \
   <source-root> <direct-policy.json> <audit.ndjson> <request.json> \
   --passphrase-stdin
 ```
 
-The direct backend supports `capabilities`, `status`, `listConversations`,
-`searchMessages`, `getMessages` and `getMessage`. Use the replica query below
-only for restored coverage and enrichment, changes, cached Moments, artifacts,
-or anything else that is genuinely replica-only.
+The direct command supports `capabilities`, `status`, `listConversations`,
+`searchMessages`, `getMessages`, and `getMessage`.
 
-The replica form uses schema `greenbubbles.ai-query.v1`:
+Use a replica query only for things the direct command can't do: restored
+coverage details, changes since a checkpoint, cached Moments, attachments
+(artifacts), and contact or conversation lookups. Its request uses schema
+`greenbubbles.ai-query.v1`:
 
 ```json
 {
@@ -103,28 +120,34 @@ greenbubbles ai-query \
   --replica-key-stdin
 ```
 
-Supported: `capabilities`, `status`, `coverage`, `getChanges`,
+It supports `capabilities`, `status`, `coverage`, `getChanges`,
 `getCachedMoments`, `listConversations`, `searchMessages`, `getMessages`,
-`getMessage`, `getArtifact`, `resolveContact`, `resolveConversation`. Their
-bodies are the same tagged JSON union documented in
-[CONNECTOR_API.md](CONNECTOR_API.md).
+`getMessage`, `getArtifact`, `resolveContact`, and `resolveConversation`. The
+request and response bodies are described in [CONNECTOR_API.md](CONNECTOR_API.md).
 
 ### What comes back with the content
 
-Every response carries `formatVersion`, schema, API version, request identity,
-`ok`, a `context` object, and either `result` or `error`. The context object is
-the part an agent must actually read: the account, replica and checkpoint
-binding; the privacy-safe `selfParticipantId` when the replica is
-account-bound; client compatibility; archive scope; total, fresh, unavailable
-and preserved-stale database counts; canonical entity counts; gap counts;
-checkpoint age; `sourceCoverageComplete`; stable `limitationCodes`; and a
-plain-language `coverageNote`.
+Every response has `formatVersion`, the schema, the API version, the request
+identity, `ok`, a `context` object, and either `result` or `error`.
 
-The command checks the checkpoint **before and after** the request. A
-concurrent sync produces an integrity error rather than content paired with
-freshness metadata from a different generation.
+An agent should always read `context`. It says:
+
+- which account, replica, and checkpoint (sync point) the answer comes from;
+- `selfParticipantId`, a privacy-safe ID for you, when the replica is bound to
+  your account;
+- whether the WeChat version is supported, and what the archive covers;
+- how many databases are total, fresh, unavailable, or kept from an older sync;
+- how many conversations, contacts, messages, and gaps there are;
+- how old the checkpoint is, and `sourceCoverageComplete`;
+- stable `limitationCodes`, plus a plain-language `coverageNote`.
+
+The command checks the checkpoint **before and after** answering. If a sync
+happens in between, you get an integrity error instead of content mixed with
+freshness details from a different sync.
 
 ## Static bundles
+
+An export writes every message the policy allows into a fixed set of files:
 
 ```sh
 greenbubbles ai-export \
@@ -132,40 +155,45 @@ greenbubbles ai-export \
   --replica-key-stdin --requester <id> [--destination local|remote]
 ```
 
-The output path must not exist. GreenBubbles writes a private sibling staging
-directory, pages through every authorized message at a *single* checkpoint,
-flushes and fsyncs each file, verifies the final checkpoint, and publishes with
-one rename. An error or a concurrent sync removes the staging directory, so
-there is never an apparently complete but actually partial generation.
+The output folder must not exist yet. GreenBubbles builds the bundle in a
+private staging folder next to it, reads everything at a *single* checkpoint,
+flushes each file to disk, checks the checkpoint again, and then renames the
+staging folder into place in one step. If anything fails, or a sync happens
+during the export, the staging folder is deleted. You never get a bundle that
+looks complete but isn't.
 
-New exports write `greenbubbles.ai-context.v2`, which requires the replica to
-carry account-holder identity evidence integrity-bound to the selected account.
-An unbound legacy replica is refused. The opaque `selfParticipantId` is safe to
-propagate; the source WeChat identifier stays confined to the private
-snapshot and archive boundary. `audit-ai-context` and the history loader still
-accept version-1 bundles.
+New exports use schema `greenbubbles.ai-context.v2`. It needs a replica that
+carries verified proof of which account is yours. An older replica without that
+proof is refused. The bundle identifies you only by the opaque
+`selfParticipantId`, which is safe to share; your real WeChat ID stays inside
+the private backup and archive. `audit-ai-context` and the history viewer
+still accept version-1 bundles.
 
-`manifest.json` carries a deterministic bundle identity bound to replica,
-checkpoint, policy digest, destination, policy source identity and
-`selfParticipantId`; creation time, requester, destination and explicit
-`exportComplete` state; the complete context and freshness object; enabled
-conversation, contact, message and attachment counts; the
-attachment-resolution error count; and relative file names, record counts, byte
-counts and SHA-256 digests.
+A bundle has five files: `manifest.json` and four JSONL files.
+
+`manifest.json` holds:
+
+- a bundle ID tied to the replica, checkpoint, policy digest, destination,
+  policy source, and `selfParticipantId`;
+- when it was made, the requester, the destination, and whether
+  `exportComplete` is true;
+- the full `context` and freshness details;
+- how many conversations, contacts, messages, and attachments were included,
+  and how many attachments failed to resolve;
+- each file's name, record count, byte count, and SHA-256 digest.
 
 | File | What it holds |
 | --- | --- |
-| `conversations.jsonl` | Stable ID, human label, kind, participant names and roles, explicit `groupOwnerParticipantId` evidence, decode state, source freshness, capabilities, allowed fields, time range. **Group ownership is never read as account ownership.** |
-| `contacts.jsonl` | Stable participant ID, preferred normalized display name, local-profile availability, source freshness, enabled conversations, per-conversation names and roles. Every representation of the bound account holder is labelled `You`. |
-| `messages.jsonl` | Stable message and conversation IDs, conversation label, sender ID and name, optional `isAccountHolder`, creation time, ordinal, direction, logical type and subtype, normalized payload kind and summary, per-message freshness, sanitized relationships and attachment references, plus `omittedRelationshipReferenceCount` and `omittedArtifactReferenceCount`. |
-| `artifacts.jsonl` | Stable artifact ID, referencing conversations, availability and decode state, format, byte count, digest, safe account-relative path, and an explicit resolution error when verification fails. |
+| `conversations.jsonl` | Stable ID, a readable label, kind, participants and their roles, explicit `groupOwnerParticipantId` evidence, decode state, freshness, capabilities, allowed fields, and time range. **Owning a group never means the group owner is you.** |
+| `contacts.jsonl` | Stable participant ID, preferred display name, whether a local profile exists, freshness, the conversations they appear in, and their name and role in each. You are labelled `You` everywhere. |
+| `messages.jsonl` | Stable message and conversation IDs, the conversation label, sender ID and name, optional `isAccountHolder`, time, order, direction, message type and subtype, a short payload kind and summary, freshness, cleaned-up links to related messages and attachments, and `omittedRelationshipReferenceCount` and `omittedArtifactReferenceCount`. |
+| `artifacts.jsonl` | Stable attachment ID, the conversations that reference it, availability and decode state, format, size, digest, a safe path relative to the account, and an explicit error when verification fails. |
 
-Static files deliberately omit source logical paths, database/table/row
-identities, raw columns, packed fields, original base64 payloads, raw XML,
-schema SQL and absolute filesystem paths. The lossless replica and restoration
-archive keep those inside the local trust boundary, where they belong.
+Bundles deliberately leave out internal file paths, database and row IDs, raw
+columns, packed fields, original base64 data, raw XML, database schemas, and
+absolute paths. Those stay in the replica and backup on your Mac.
 
-Verify a bundle after copying it and before indexing it:
+Check a bundle after copying it and before loading it anywhere:
 
 ```sh
 greenbubbles audit-ai-context <context-bundle-directory> \
@@ -173,56 +201,60 @@ greenbubbles audit-ai-context <context-bundle-directory> \
   [--progress-json | --quiet-progress]
 ```
 
-It checks the exact five-file inventory, owner-only permissions, manifest and
-record schemas, sizes, digests and counts, unique identities, every
-conversation–contact–message–artifact reference, per-record freshness
-consistency, sender-versus-account direction consistency, and the
-bundle/checkpoint/policy/account-holder identity — emitting counts and booleans
-only, never a label, a message, a name, a path or an identifier.
+It checks:
+
+- that exactly those five files exist, readable only by you;
+- every manifest and record schema, size, digest, and count;
+- that IDs are unique and every reference between conversations, contacts,
+  messages, and attachments resolves;
+- that freshness labels and message directions are consistent;
+- that the bundle, checkpoint, policy, and account-holder identity match.
+
+It prints only counts and true/false results, never a label, message, name,
+path, or ID.
 
 ### Who is "you"
 
-When sender and direction fields are authorized, version 2 applies exactly one
-rule: `senderId == selfParticipantId` is outgoing; every other sender is
-incoming. A self sender is labelled `You`. Query and export normalize an
-authorized pair to that rule, and bundle audit rejects a pair that still
-disagrees.
+When sender and direction fields are allowed, version 2 uses exactly one rule:
+a message whose `senderId` equals `selfParticipantId` is outgoing, and every
+other message is incoming. Your messages are labelled `You`. Queries and
+exports apply that rule, and the bundle check rejects any record that still
+disagrees with it.
 
-**No contact name, direct-chat peer, message frequency or group-owner field is
-ever used to guess who you are.** Sender-less records may retain an explicit
-source direction; otherwise they stay unknown.
+**GreenBubbles never guesses who you are from a contact name, the other person
+in a one-on-one chat, how often someone writes, or who owns a group.** A record
+with no sender keeps its original direction if WeChat recorded one; otherwise
+the direction stays unknown.
 
-The live direct connector applies the same source-level rule before replica
-restoration. It derives the raw account identifier only from the validated
-account directory containing the selected `db_storage`. When `sender` is
-authorized, each known sender receives `isAccountHolder: true|false`, and self
-is displayed as `You`; absent or policy-withheld senders omit the marker. The
-raw bound account identifier stays inside the connector boundary.
+The direct commands apply the same rule to live data. They work out your WeChat
+ID only from the verified account folder that contains the selected
+`db_storage`. When the policy allows `sender`, each known sender gets
+`isAccountHolder: true|false`, and you are shown as `You`. Senders that are
+missing or withheld by the policy get no marker. Your raw account ID never
+leaves the command.
 
 ### Attachments
 
-Metadata is included only after a descriptor read and digest verification.
-A verification failure becomes a typed artifact error and does not abort
-unrelated messages or attachments. An agent that needs the actual file must
-make an authorized local `getArtifact` call — **a remote destination never
-receives a path.**
+Attachment details are included only after GreenBubbles reads the file's
+descriptor and verifies its digest. If one attachment fails, it gets a typed
+error and the rest of the export continues. To get the actual file, an agent
+must make a local, authorized `getArtifact` call. **A cloud destination never
+receives a file path.**
 
-Export resolves attachment metadata as one internal batch rather than one
-connector request per attachment, and authorization comes exclusively from the
-attachment references already returned by policy-authorized message pages. A
-single read-only SQLCipher transaction loads the canonical artifacts in stable
-ID order through bounded batches, loading the bound restoration report once,
-with one reusable descriptor and digest verifier for every available file.
-Missing, malformed or changed individual artifacts become typed records; a
-replica identity, checkpoint or report failure still fails the whole export.
-The journal records one aggregate `exportArtifacts` event, and the
-start-versus-end checkpoint comparison discards the staged bundle if a
-synchronization raced the batch.
+The export handles all attachments together rather than one request per file.
+It only looks at attachments already referenced by messages the policy
+allowed. It reads them in one read-only database transaction, in batches, and
+reuses one verifier for every file. A missing, malformed, or changed attachment
+becomes a typed record. A problem with the replica itself, the checkpoint, or
+the restoration report still fails the whole export. The audit log gets one
+summary `exportArtifacts` entry, and if a sync happened during the export, the
+staged bundle is thrown away.
 
 ## Memory projection
 
-The five-file bundle is an interchange and audit format. It is not an efficient
-prompt or ingestion format when a corpus holds millions of message lines.
+The five-file bundle is good for exchange and checking, but it's an inefficient
+thing to load when you have millions of messages. `ai-memory-export` turns a
+bundle into chunks sized for memory tools such as Mem0 and QMD:
 
 ```sh
 greenbubbles ai-memory-export \
@@ -233,29 +265,32 @@ greenbubbles ai-memory-export \
   [--progress-json | --quiet-progress]
 ```
 
-Defaults are 64 messages and 49,152 UTF-8 bytes per chunk, and boundaries are
-deterministic for a given source generation and option set.
+By default each chunk has up to 64 messages and 49,152 bytes of UTF-8 text. The
+same bundle and options always produce the same chunks.
 
-| Output | Purpose |
+| Output | What it's for |
 | --- | --- |
-| `manifest.json` | Projection and source IDs, account/checkpoint/policy binding, chunk parameters, freshness, omission and truncation counts, limitations, compatibility flags |
-| `memories.jsonl` | Vendor-neutral chunks with `messages: [{role, content}]`, source-message evidence, stable citations, and flat metadata suited to Mem0-style `add(...)` calls |
-| `documents/` | One bounded Markdown document per chunk for QMD, Khoj and similar. Paths and IDs are stable and contain no contact or conversation names |
-| `documents.jsonl` | The document inventory: stable IDs, relative paths, byte counts, SHA-256 |
-| `README.md` | Local QMD and Mem0 ingestion examples, and the role-mapping caveat |
+| `manifest.json` | Output and source IDs; the account, checkpoint, and policy it came from; chunk settings; freshness; omission and truncation counts; limitations; compatibility flags |
+| `memories.jsonl` | Chunks in a neutral format with `messages: [{role, content}]`, source-message evidence, stable citations, and flat metadata that fits Mem0-style `add(...)` calls |
+| `documents/` | One Markdown document per chunk for QMD, Khoj, and similar tools. File names and IDs are stable and contain no contact or chat names |
+| `documents.jsonl` | The list of documents: stable IDs, relative paths, sizes, and SHA-256 digests |
+| `README.md` | Examples for loading into QMD and Mem0, and a note on the role mapping |
 
-The account holder maps to role `user` and other speakers to `assistant`. That
-is a transport convention for APIs that accept chat messages, nothing more —
-every content string repeats the actual speaker, the `self`/`other` actor, the
-timestamp and a `greenbubbles:message:<opaque-id>` citation, and
-`sourceMessages` keeps the structured evidence. **Never read the role mapping
-as evidence that another participant was an AI.**
+About roles: you are mapped to `user` and everyone else to `assistant`. That's
+only because many AI APIs expect chat messages in that shape. Every content
+string still names the real speaker, whether they are `self` or `other`, the
+time, and a `greenbubbles:message:<opaque-id>` citation, and `sourceMessages`
+keeps the structured evidence. **The role mapping never means another person
+was an AI.**
 
-The projector verifies the source manifest identity and every source file's
-byte count, record count and digest. A modified generation, unsafe path or
-inconsistent checkpoint fails closed. Inside an otherwise integrity-bound
-generation, a malformed record is skipped and reported through
-`projectionOmitted*Count` and `limitationCodes` while healthy records publish.
+Before writing anything, the command verifies the source bundle's identity and
+every file's size, record count, and digest. A modified bundle, an unsafe path,
+or a mismatched checkpoint stops it. Inside a bundle that passes those checks,
+a single malformed record is skipped and reported through the
+`projectionOmitted*Count` fields and `limitationCodes`, and the healthy records
+are still written.
+
+Check the output:
 
 ```sh
 greenbubbles audit-ai-memory <AI-memory-output-directory> \
@@ -263,134 +298,168 @@ greenbubbles audit-ai-memory <AI-memory-output-directory> \
   [--progress-json | --quiet-progress]
 ```
 
-Tested framework workflows and update semantics are in
+Tested setups for specific memory tools, and how updates work, are in
 [AI_MEMORY_INTEGRATION.md](AI_MEMORY_INTEGRATION.md).
 
 ## Model-generated live memory
 
-`ai-memory-export` above is intentionally deterministic: it prepares Mem0/QMD
-inputs but does not ask a model to infer a wiki. Use the explicit live summary
-command when model inference is desired:
+`ai-memory-export` never calls a model; it only prepares files. To have Gemini
+actually write a cited summary, use `ai-summarize-direct`. It costs money: you
+need your own `GEMINI_API_KEY`, and Google bills it separately from any coding
+agent subscription.
 
-```sh
-export GEMINI_API_KEY='<provided outside process arguments>'
-greenbubbles ai-summarize-direct \
-  <live-db_storage> <direct-policy.json> <audit.ndjson> \
-  <new-memory-output-directory> --requester <stable-id> \
-  --max-messages-per-conversation 200 --passphrase-stdin
-```
+1. **Write a direct policy.** For each chat you want summarized, set
+   `allowRemoteModel` and grant the list and read capabilities plus the
+   `sender` and `content` message fields. Chats without `allowRemoteModel` are
+   skipped. The command refuses to run if no chat qualifies, or if a chosen
+   chat is missing list, `sender`, or `content`.
+2. **Set the API key** in your environment. It is never accepted as an
+   argument:
 
-The policy must grant `list`, `read`, `sender`, and `content`, and each selected
-scope must explicitly set `allowRemoteModel`. The passphrase remains stdin-only;
-the Gemini key is read only from `GEMINI_API_KEY` and is sent as an in-process
-HTTPS header, never as a subprocess argument.
+   ```sh
+   export GEMINI_API_KEY='<your key>'
+   ```
 
-The command invokes `gemini-3.8-flash`. Before the request, it replaces every
-potentially long canonical message ID with a short `M###` alias and sends only
-conversation label/kind/coverage plus compact message actor, speaker, time,
-kind and text fields. The model never receives canonical IDs, sender IDs,
-connector citations, freshness objects, attachment structures or policy/audit
-metadata. Chat text is explicitly delimited as untrusted evidence.
+3. **Run the summarizer**, choosing a new output folder:
 
-| Output | Purpose |
+   ```sh
+   greenbubbles ai-summarize-direct \
+     <live-db_storage> <direct-policy.json> <audit.ndjson> \
+     <new-memory-output-directory> --requester <stable-id> \
+     --max-messages-per-conversation 200 --passphrase-stdin
+   ```
+
+   Use `--decrypted` instead of `--passphrase-stdin` when the source is
+   plaintext SQLite database files. The per-chat message limit defaults to 200 and can be at most 1,000.
+4. **Review `memory.md`** before you rely on it.
+
+### What is sent to Gemini
+
+The command calls `gemini-3.8-flash`. Before sending, it replaces each long
+message ID with a short alias such as `M001`. It sends only each chat's label,
+kind, and coverage, plus each message's actor, speaker, time, kind, and text.
+Gemini never receives real message IDs, sender IDs, citations, freshness
+details, attachment data, or your policy and audit files. Chat text is clearly
+marked as untrusted evidence. The passphrase is read only from standard input,
+and the API key travels only in an HTTPS header from inside the process.
+
+### What you get
+
+| Output | What it's for |
 | --- | --- |
-| `memory.json` | Validated structured personal memory and conversation wiki with alias citations |
-| `memory.md` | Human-readable rendering for review |
-| `model-input.json` | Exact compact JSON embedded in the model prompt; no canonical message IDs |
-| `evidence.jsonl` | Private alias-to-canonical-ID, conversation, actor, timestamp and content-digest map |
-| `model-response.json` | Raw Gemini response for local diagnosis |
-| `manifest.json` | Source/policy/audit/model digests, token usage, byte reduction, author counts, coverage and file hashes |
+| `memory.json` | The checked, structured summary with alias citations |
+| `memory.md` | A readable version for review |
+| `model-input.json` | Exactly what was sent to the model; no real message IDs |
+| `evidence.jsonl` | Private map from each alias back to the real message ID, chat, sender, time, and content digest |
+| `model-response.json` | Gemini's raw reply, for troubleshooting |
+| `manifest.json` | Digests of the source, policy, audit log, and model; token usage; how much the input was shrunk; author counts; coverage; file hashes |
 
-GreenBubbles rejects malformed/truncated model JSON, unknown or repeated
-aliases, cross-conversation citations, raw canonical citation output, and any
-account-holder claim without at least one self-authored source. Ambiguous
-institution names such as `科大` may not be silently expanded. Incomplete
-bounded pages remain visibly incomplete in both memory files.
+GreenBubbles rejects the model's answer if:
 
-Every invocation publishes a new immutable owner-only generation atomically;
-it does not mutate or silently merge an earlier model-generated wiki. Run it
-again with a new output path after live data changes, then compare or promote
-the reviewed generation explicitly.
+- the JSON is malformed or cut off;
+- it cites an unknown or repeated alias, or cites a message from a different
+  chat;
+- it outputs a real message ID instead of an alias;
+- it claims something about you without citing at least one message you wrote.
+
+Ambiguous school or company names such as `科大` must not be expanded into a
+guess. If a chat was only partly read, both memory files say so.
+
+Each run writes a new folder, readable only by you, in one atomic step. It
+never changes or merges an earlier summary. When your chats change, run it
+again into a new folder, then compare the two and keep the one you've reviewed.
 
 <a id="corpus-scale-pi-memory"></a>
 
 ## Corpus-scale personal memory
 
-`ai-summarize-direct` is deliberately bounded per selected conversation. For a
-whole live account, use a v2 `memory prepare`: one local process inventories the
-message tables and hydrates every eligible row into a canonical immutable
-corpus. Reuse that corpus with repeatable `memory next --conversation`,
-`--conversation-kind`, and `--sender` arguments plus inclusive RFC 3339
-`--from`/`--through` bounds. Categories intersect; empty evidence filters select
-the entire hydrated corpus. `--subject` is independent: it defaults to the
-authenticated account holder, accepts `person:<selector>`, or can be `none` for
-conversation-centric memory.
-`memory next` returns a small batch envelope; repeated
-`memory page` calls then return deterministic at-most-49,152-byte fragments
-with short `E#########`, `P######` and `C######` join keys and RFC 3339 message
-times. Page-level identity dictionaries preserve real source IDs, contact
-names/aliases, and group titles without repeating them on every message.
-Verbose canonical-message citation data stays in a local sidecar.
-The default personal-memory policy orders immutable units by deterministic
-account-holder relevance and active-period coverage, rather than exhausting
-the oldest conversation slice first; the schedule still traverses every
-prepared unit.
+`ai-summarize-direct` reads a limited number of messages per chat. To build
+notes from your whole history, most people should let their coding agent follow
+the [personal-memory skill](../skills/greenbubbles-personal-memory/SKILL.md),
+which reads live messages directly. The [personal memory guide](PERSONAL_MEMORY.md)
+explains it.
 
-Your existing agent can follow the [personal-memory skill](../skills/greenbubbles-personal-memory/SKILL.md)
-to review pages and update a Markdown or Python domain project. Use one writer
-per project. The optional driver launches separate coding-agent runs for this
-same workflow; see [personal memory](PERSONAL_MEMORY.md).
+There is also an advanced batch workflow built on an evidence archive:
+
+- `memory prepare` (v2) reads every message table once and copies every
+  eligible message into a fixed, read-only archive.
+- `memory next` picks the next batch. Narrow it with repeatable
+  `--conversation`, `--conversation-kind`, and `--sender` options and inclusive
+  RFC 3339 `--from` and `--through` dates. Different kinds of filter narrow the
+  selection together; with no filters, the whole archive is selected.
+- `--subject` chooses whose notes these are. It defaults to you, accepts
+  `person:<selector>` for someone else, or `none` for notes organized by chat.
+- `memory next` prints a short description of the batch. Repeated
+  `memory page` calls then return the messages in fixed pieces of at most
+  49,152 bytes, with short `E#########`, `P######`, and `C######` keys and
+  RFC 3339 times. Each page lists real IDs, contact names and aliases, and
+  group titles once, instead of on every message. Detailed citation data stays
+  in a local sidecar file.
+- By default, batches are ordered by how much they involve you and how active
+  that period was, not oldest first. Every batch is still reached eventually.
+
+Use one writer per notes folder. The optional driver script runs separate
+coding-agent sessions for this workflow; see [personal memory](PERSONAL_MEMORY.md).
 
 The older `wiki` format writes `conversations/C######.md`, `me.md`,
-`people/P######.md`, and `index.md`. Its commit checks include allowed page paths
-and retained/cited evidence. Domain Markdown and Python commits check structure
-and page acknowledgements; they do not verify the truth of facts or the quality
-of citations. Review the resulting diffs. An interrupted batch resumes from its
-saved state; GreenBubbles does not semantically merge prose.
-
+`people/P######.md`, and `index.md`, and its commit checks allowed page paths
+and kept or cited evidence. For Markdown and Python notes, commits check
+structure and which pages were acknowledged. They don't check whether facts are
+true or whether citations are good, so review the diffs yourself. An
+interrupted batch resumes from its saved state; GreenBubbles never merges prose
+on its own.
 
 ## Progress
 
-All four commands emit human progress on stderr by default, the same events as
-NDJSON with `--progress-json`, and a durable owner-only log with
-`--progress-file`. Events expose source and current-file sizes, source records,
-processed conversation and message counts, emitted or verified chunk and
-document counts and bytes, file position, elapsed time, phase percentage and
-end-to-end percentage. Large attachment sets emit exact cumulative milestones
-every 1,000 records plus a final count, rather than hundreds of thousands of
-flushed lines. Stdout stays machine-readable final JSON.
+`ai-export`, `audit-ai-context`, `ai-memory-export`, and `audit-ai-memory` all
+report progress:
 
-**Keep progress logs outside audited bundle directories**, so that auditing a
-bundle does not change the inventory being audited.
+- readable progress on stderr by default;
+- the same events as NDJSON with `--progress-json`;
+- a lasting, owner-only log with `--progress-file`;
+- no readable progress on stderr with `--quiet-progress`.
+
+Events show file sizes, records read, conversations and messages processed,
+chunks and documents written or checked, position in the file, elapsed time,
+and both the current step's and the overall percentage. Large attachment sets
+report a running total every 1,000 records plus a final count, instead of one
+line per file. Stdout always holds only the final JSON result.
+
+**Keep progress logs outside the bundle folder**, so checking a bundle doesn't
+change the files being checked.
 
 ## Partial coverage, precisely
 
-Unavailable databases do not block synchronization or publication. Their counts
-and preserved-stale state stay visible in every query and every manifest. Each
-message is independently labelled `fresh` or `preservedStale`; conversations
-and contacts use `fresh`, `preservedStale`, `mixed` or `derived` according to
-their retained evidence. Records carried from an earlier generation stay
-queryable but are **never** presented as observations from the current sync.
+Some WeChat databases may be unreadable. That doesn't stop a sync or an export.
+Their counts, and any data kept from an earlier sync, stay visible in every
+answer and manifest.
 
-The rule that follows from that, and the one an agent is most likely to break:
-**absence from an unavailable shard is not a deletion.**
+- Each message is labelled `fresh` or `preservedStale`.
+- Conversations and contacts are `fresh`, `preservedStale`, `mixed`, or
+  `derived`, depending on the evidence behind them.
+- Records kept from an earlier sync can still be queried, but they are
+  **never** presented as something seen in the current sync.
 
-The same isolation applies to a missing replica domain table, an optional
-search index, or a malformed row: the operation returns the healthy subset — or
-an empty *successful* page — with typed omission counts and `limitationCodes`.
-Malformed, empty, duplicate or structurally inconsistent optional references
-are removed individually, and the corresponding `malformed*ReferenceOmitted`
-limitation is carried into both audits.
+The rule an agent is most likely to break: **a message missing from an
+unreadable database has not been deleted.**
 
-Participant and artifact lookups follow the same rule with one important limit.
-If a healthy authorized conversation still proves participant membership, a
-missing profile becomes a derived contact with
-`unavailableParticipantProfileSynthesized`; if a healthy canonical message
-proves an attachment reference, a missing artifact record becomes a
-metadata-unavailable artifact with `unavailableArtifactMetadataSynthesized`.
-**No placeholder is returned when the remaining data cannot prove the requested
-identity is in policy scope.**
+The same applies to a missing replica table, an optional search index, or a
+malformed row. You get the healthy part of the answer, or an empty *successful*
+page, plus typed omission counts and `limitationCodes`. Broken, empty,
+duplicate, or inconsistent optional references are dropped one at a time, and
+the matching `malformed*ReferenceOmitted` limitation appears in both audits.
 
-And none of this softens the hard failures: key, account or checkpoint
-tampering, an unsafe path, or an authorization failure is an error, not a
-recoverable gap.
+Contacts and attachments work the same way, with one important limit:
+
+- If a healthy, allowed conversation still shows that someone is a member, a
+  missing profile becomes a derived contact marked
+  `unavailableParticipantProfileSynthesized`.
+- If a healthy message still references an attachment, a missing attachment
+  record becomes a metadata-unavailable attachment marked
+  `unavailableArtifactMetadataSynthesized`.
+- **Nothing is filled in when the remaining data can't prove the item is inside
+  the policy.**
+
+None of this relaxes the hard failures. Tampering with the key, account, or
+checkpoint, an unsafe path, or an authorization failure is an error, not a gap
+to work around.

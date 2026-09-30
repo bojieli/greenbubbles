@@ -361,8 +361,10 @@ During a holistic revise pass (`personal-memory-parallel.py revise`), the agent:
 
 ## Direct-session protocol
 
-Follow `cli.md` for page acknowledgements and commit syntax. `--format python`
-is set on `memory next`, never on `memory commit`. Use one writer per project.
+Run the `memory next`, `memory acknowledge`, and `memory commit` commands
+exactly as the driver prompt lists them; their full syntax is in
+`docs/CLI_REFERENCE.md` in the GreenBubbles repository. `--format python`
+is set on `memory next`, never on `memory commit`.
 Keep corpus generation and exact E######### evidence aliases in source comments;
 a session/date label alone is insufficient provenance. CLI syntax validation
 does not prove the extracted facts or generated constraints are correct.

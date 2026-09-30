@@ -508,6 +508,8 @@ class PortableSkillPrompts(unittest.TestCase):
             text = driver.skill_text(Namespace(skill="auto", agent="codex", skill_dir=str(root), format=fmt))
             self.assertIn(f"----- {included} -----", text)
             self.assertNotIn(f"----- {excluded} -----", text)
+            if fmt != "wiki":
+                self.assertIn("----- priorities.md -----", text)
 
     def test_driver_commands_preserve_paths_and_scope_as_arguments(self):
         import shlex

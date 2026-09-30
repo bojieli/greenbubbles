@@ -38,10 +38,10 @@ prompt, a GitHub issue, or a chat.**
 | See how much disk space WeChat really uses | Open your live history in the app and look at **Overview** |
 | Make a backup that doesn't depend on WeChat | App → **File → Create Recoverable Snapshot…** |
 | Open a backup day to day on this Mac | Unlock it with macOS Keychain |
-| Recover after losing this Mac, WeChat, or the key | Your backup copy plus your 24 recovery words, stored separately |
+| Recover after losing this Mac, WeChat, or the key | Your backup copy plus your 24-word recovery phrase, stored separately |
 | Export everything for forensic work | The restoration workflow, not normal browsing |
 
-The setup to aim for: **your 24 recovery words stored somewhere else, plus
+The setup to aim for: **your 24-word recovery phrase stored somewhere else, plus
 Keychain for everyday convenience.** Keychain is a convenience; it doesn't
 replace the words.
 
@@ -147,7 +147,7 @@ numbers are in [MEASUREMENTS.md](MEASUREMENTS.md).
 ## Make a backup (recoverable snapshot)
 
 A snapshot is an encrypted copy of your history that you can open later
-without WeChat or its key. It is protected by 24 recovery words.
+without WeChat or its key. It is protected by 24-word recovery phrase.
 
 1. Choose **File → Create Recoverable Snapshot…**.
 2. Choose the command-line tool and your `db_storage` folder.
@@ -159,9 +159,9 @@ without WeChat or its key. It is protected by 24 recovery words.
 5. Choose how to unlock the snapshot day to day:
    - **macOS Keychain**: easiest on this Mac;
    - **a hidden credential file**, readable only by you;
-   - **None**, if you'll always use the recovery words or a passphrase.
+   - **None**, if you'll always use the recovery phrase or a passphrase.
 6. Optionally add a passphrase you can remember. It is an extra way to unlock
-   the snapshot; it does **not** replace the recovery words.
+   the snapshot; it does **not** replace the recovery phrase.
 7. Click **Create Recovery Words**.
 8. Write down or save all 24 words, in order, somewhere separate: on paper, or
    in a password manager. Never reuse a cryptocurrency wallet phrase.
@@ -192,11 +192,11 @@ to unlock it:
 | Snapshot unlock in macOS Keychain | Everyday use on the Mac that made the snapshot |
 | Snapshot hidden-file unlock | Everyday use with your private credential file |
 | Snapshot passphrase (Argon2id) | If you set a passphrase |
-| Snapshot recovery words (portable) | Testing your recovery, or recovering on another Mac |
+| Snapshot recovery phrase (portable) | Testing your recovery, or recovering on another Mac |
 | Legacy snapshot raw key | Only for very old (format 1) snapshots |
 
 **Lost the Keychain entry or the hidden file?** You can't recreate it; it was
-a random key. Open the snapshot with your recovery words, then set up a new
+a random key. Open the snapshot with your recovery phrase, then set up a new
 unlock method as described in
 [RECOVERABLE_SNAPSHOTS.md](RECOVERABLE_SNAPSHOTS.md).
 

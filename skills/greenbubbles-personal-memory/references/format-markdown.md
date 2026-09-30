@@ -43,8 +43,9 @@ prose, see-also lines, references, revision notes, and alerts. Keep personal
 names, book titles, and product names as they are written. Translate the
 surrounding sentences.
 
-If an existing project is in another language, rewrite it into the account
-holder's language on the next pass. Do not leave an English scaffold beside
+For an account whose own messages are Chinese, the whole project is
+Chinese. If an existing project is in another language, rewrite it into the
+account holder's language on the next pass. Do not leave an English scaffold beside
 Chinese evidence. Ask which language to use only when their own messages do
 not settle it.
 
@@ -106,13 +107,14 @@ unread remainder. Name the commands used. Do not claim a complete window
 while chats remain unread.
 ```
 
-After revising articles, update the domain row, the alerts, and the
-timestamp. Severity is `CRITICAL`, `WARNING`, or `INFO`. Remove an alert
+After each reading session, revise the articles and `index.md`, then update
+the domain row, the coverage (window, chats read, searches run, chats not
+yet read), the alerts, and the timestamp. Severity is `CRITICAL`, `WARNING`, or `INFO`. Remove an alert
 when the underlying issue is gone.
 
 ## Canonical domain names
 
-Use one writer per project. Prefer these names:
+Prefer these names:
 
 | Name | Covers |
 |---|---|
@@ -187,8 +189,10 @@ Rules:
   announce an omission. That includes 不收成、不写成、不另写、不是已经、
   这里不记、金额不记、电话不记、做法不记, and any cousin of those. If a
   number, a phone, or a procedure stays out, it stays out silently. If two
-  dates disagree, write both dates and stop. If two people are different,
-  say who each one is. Do not spend a sentence on the merge you did not make.
+  people are different, say who each one is. Do not spend a sentence on the
+  merge you did not make.
+- When evidence conflicts, keep both dates in ordinary sentences, then stop.
+  Do not silently replace the older claim.
 - A paragraph is a few sentences, short enough to read without scrolling
   inside it. Before you add a fact, look at the paragraph you would extend.
   If it is already long, do not append. Open a new paragraph, a `###`
@@ -197,57 +201,33 @@ Rules:
   Each bullet is one or two sentences, in time order. Nest a bullet when
   one date has several parts. The list is still prose. It is not a
   transcript and not a column of raw message lines.
-- A talk script, a pasted blog section, or a meeting-invite card becomes
-  the occasion and the claim. The script and the meeting id stay out of
-  the article. A `[quote]` with no words does not name the "他" in the
-  next line. Leave that sentence out. A call that leaves only a duration
-  is the occasion. The words are not on the page.
-- A forwarded auto-summary is the occasion. Claims inside it stay
-  attributed to that summary. A figure that appears only there stays out
-  of the article.
-- A credential, a reservation card, and an interview prompt are the
-  occasion. The secret, the street, the phone, and the prompt stay out.
-  Where he went, and what he decided, stay. A stipend or payroll form
-  keeps the employer and the title. The identity number, the bank card,
-  the branch, and the phone on that form stay out. A replaced class key
-  stays out. The leak, and the model he told them to use, stay. An ssh
-  line, a proxy export, or a VPN setup is the occasion. The address, the
-  key path, and the proxy lines stay out. When a greeting states a
-  personal name that differs from `from`, file that name and keep `from`
-  as the display. When he says an old company was not renamed into the
-  new one, file both names.
-- A display name's employer yields to the sentence that person typed.
-  An untitled book picture stays a book he translated. A checkout
-  workaround and someone else's filing deadline stay out. The signature
-  and the failed login stay.
-- Two pictures and then "pick either" are the pictures. A digest that
-  dropped the `[image]` lines is not the page.
-- One topic has one section. A new fact joins that section. It does not
-  get a second copy, and it does not get glued onto a paragraph that is
-  already hard to read.
+- One topic has one section. Revise the prose in place: a new fact joins
+  the section it belongs to. It does not get a second copy, and it does not
+  get glued onto a paragraph that is already hard to read.
 - Say who is speaking. "He told Tracy" is his statement. "Tracy said" is hers.
 - When one episode is told in several chats, including a group and a direct
   chat, write it once, in order of `at`. Name each chat. Do not retell it
-  under every person.
-- Message time joins the chats. When someone later describes an earlier
-  event, the sentence keeps the event's date, and the reference keeps the
-  date they said it.
-- When evidence conflicts, keep both dates in the prose. Do not silently
-  replace the older claim.
+  under every person. A person stays a short entry in `family` or `social`.
+- The reading page inside one chat is newest first. The article is oldest
+  first inside the episode. Insert the new dates by `at`. Do not paste the
+  page onto the end of the paragraph.
+- When someone later describes an earlier event, the sentence keeps the
+  event's date, and the reference keeps the date they said it.
 - References name the chat display name, the message date, and whether the
   line came from `messages list` or `messages search`. Do not cite a corpus
-  alias. A phone number, email address, identity number, street address,
-  or link stays in the article when the message states it. Do not put a
-  real one into a public repository or a skill example.
+  alias. Do not put a real phone number, email address, identity number,
+  street address, or link into a public repository or a skill example.
 - Revision notes are append-only and short. They record that the article
   changed. The prose above them is the current account. Git holds the
   older wording.
 - Do not copy sample facts from this file into the user's project.
 
+What becomes an article sentence, and what stays out, is in
+[priorities.md](priorities.md#what-becomes-an-article-sentence).
+
 ## Revise pass
 
 Read `index.md`, the manifest, and every article. Fold duplicated facts
 into the section that owns them. Split an article that covers two life
-areas. Delete an index link that points nowhere. Leave a dated
-contradiction in the prose. Append one revision note per article you
-change, then git-commit the project.
+areas. Delete an index link that points nowhere. Append one revision note
+per article you change, then git-commit the project.

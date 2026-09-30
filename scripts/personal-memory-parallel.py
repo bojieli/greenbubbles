@@ -855,8 +855,9 @@ def skill_text(args: argparse.Namespace) -> str:
 
     Only Pi is configured to discover the project skill from disk. Rather than
     ask every other harness to install one, the driver inlines the same skill
-    file and its CLI reference, so an agent that has never heard of this
-    project still follows the identical protocol.
+    file, its CLI reference, the filing rules, and the selected format, so an
+    agent that has never heard of this project still follows the identical
+    protocol.
     """
     mode = args.skill
     if mode == "auto":
@@ -866,7 +867,9 @@ def skill_text(args: argparse.Namespace) -> str:
     root = Path(args.skill_dir)
     parts = [(root / "SKILL.md").read_text(encoding="utf-8")]
     fmt = getattr(args, "format", "wiki")
-    reference_names = (["cli.md", f"format-{fmt}.md"]
+    # priorities.md is the only home of the rules for what becomes an article
+    # sentence, including which secrets and personal details stay out.
+    reference_names = (["cli.md", "priorities.md", f"format-{fmt}.md"]
                        if fmt in ("markdown", "python") else ["wiki.md"])
     for reference in (root / "references" / name for name in reference_names):
         parts.append(f"\n\n----- {reference.name} -----\n\n"
