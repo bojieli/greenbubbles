@@ -4,6 +4,16 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
+## 0.9.1 - 2026-09-30
+
+### Changed
+
+- The personal-memory skill keeps credentials, payroll and reservation
+  details, ssh and proxy lines, pasted scripts and prompts, and valuation
+  figures out of the notes, and files the occasion instead.
+- The Homebrew workflow fast-forwards main with the `HOMEBREW_TAP_TOKEN`
+  secret after CI passes on the staged formula commit.
+
 ## 0.9.0 - 2026-09-30
 
 ### Changed
