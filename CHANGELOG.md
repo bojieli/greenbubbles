@@ -4,6 +4,18 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
+## 0.9.2 - 2026-09-30
+
+### Changed
+
+- Reorganized the personal-memory skill so each rule has one home, grouped
+  by topic, and included `priorities.md` in batch-agent prompts.
+- Rewrote the AI context, backup, and command-line guides for first-time
+  readers, while preserving their commands, fields, limits, and security
+  rules.
+- Standardized the documentation terms: a recovery phrase is the 24 words;
+  a recovery kit is the file that stores them.
+
 ## 0.9.1 - 2026-09-30
 
 ### Changed
