@@ -10,6 +10,7 @@ search string in an argument.
 ```sh
 greenbubbles source status
 greenbubbles chats rank --minimum-self-messages 10 --limit 2000
+greenbubbles chats find "Alice"
 greenbubbles messages list --conversation ID --since <unix> --until <unix> --limit 80
 printf '%s\n' 'query' | greenbubbles messages search --query-stdin --since <unix> --limit 25
 ```
@@ -19,6 +20,37 @@ paths and no message text.
 
 `greenbubbles chats` is the recent-activity list. It has no self-message
 count, so it is the wrong first query for importance.
+
+## Names and latest activity
+
+`chats find "name"` searches known identities by partial nickname, remark,
+alias, or ID without reading messages. `--conversation` on list/search/get
+accepts an exact ID or an unambiguous name, ignoring case. Exact names precede
+partial matches. If a name is ambiguous, choose an exact ID from the error;
+do not guess which person the user meant.
+
+For an explicitly requested view of recent messages across chats:
+
+```sh
+greenbubbles messages recent --limit 50
+greenbubbles messages recent --since <unix> --json
+```
+
+This reads across all identifiable chats. Use per-chat `messages list` for
+incremental work scoped to chosen chats. Recent is a discovery/debugging query,
+not a substitute for reading a selected chat in context or for ranking its
+importance. Compact lines include `chat` when known and `conversationId`;
+`--json` supplies full IDs for citations and deduplication. Messages are globally
+ordered by creation time, newest first, with deterministic ties. The default
+is 100 and the maximum is 500. Check full-envelope warnings and coverage:
+unidentifiable message tables may be omitted and databases are not read as one
+atomic snapshot.
+
+A recent cursor pages older messages in the same source and time window. To
+check new activity, run again without a cursor, optionally using an overlapping
+`--since` window and deduplicating full message IDs. This command stores no
+synchronization state and starts no watcher. Do not count a recent page as
+reviewing the history of every chat it mentions.
 
 ## Reading `chats rank`
 
@@ -41,7 +73,7 @@ Each chat line has `from` (never empty), `id`, `kind` (`direct` or
 `group`), `selfCount`, and `last` (local time of the account holder's
 newest message in that chat). `--json` prints the full report, including
 each chat's total message count. Use `from` for the person's name and `id`
-when you open the chat. How to rank is in [priorities.md](priorities.md).
+when you open the chat. How to rank is in [workflow.md](workflow.md).
 
 ## Reading a message page
 

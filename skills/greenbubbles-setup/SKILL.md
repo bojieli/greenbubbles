@@ -1,34 +1,43 @@
 ---
 name: greenbubbles-setup
-description: Set up or diagnose local GreenBubbles CLI access to the user's WeChat history for Codex, Claude Code, OpenCode, Kimi Code, Gemini CLI, Grok Build, or another shell-capable agent. Use for missing CLI, source profiles, credentials, or initial capture setup.
+description: Install or diagnose the local GreenBubbles CLI and read-only WeChat access. Use for a missing CLI, failed database access, source selection, or initial owner-operated key capture.
 ---
 
-# GreenBubbles setup
+# Set up GreenBubbles
 
-Use the installed local CLI; no embedded agent, MCP server, or separate model is required.
-Resolve resources relative to this SKILL.md, not the current working directory.
+Work on the user's Mac with the local CLI. Resolve file links relative to this
+skill. Setup needs no embedded agent, MCP server, or separate model API key.
 
-Run `python3 <this-skill>/scripts/doctor.py` first. Supply `--greenbubbles
-/absolute/path/to/greenbubbles` or `--profile NAME` when known. The helper checks
-CLI capabilities and opens the configured source read-only; it does not print
-credentials or message text, capture keys, change profiles, or launch agents.
-A failing check is a setup diagnosis, not evidence that history is empty.
-If a live source hangs, test one directory open with a timeout before retrying
-database reads. Workspace permission, Unix ownership, and macOS privacy access
-are separate. Compare the user's terminal with the agent host; do not infer TCC
-attribution from parent PID alone or diagnose a denial from a preflight log.
-Verify any privacy change with a fresh read before claiming access is fixed.
+## Check access
 
-Read [references/setup.md](references/setup.md) for installation, source setup,
-or owner-operated capture. For the live database, do not create a profile:
-after capture, `greenbubbles chats` opens the newest installed WeChat database
-and reads `~/.greenbubbles-acquire/passphrase.txt`. A different database or
-passphrase path belongs in `~/.greenbubbles/config.toml`, not in a command
-argument. Reuse an existing profile only for a snapshot or a second account.
-Never paste keys into chat, arguments, logs, or projects.
+Run `python3 <this-skill>/scripts/doctor.py` first. Supply
+`--greenbubbles /absolute/path/to/greenbubbles` or `--profile NAME` when known.
+The doctor checks capabilities and read-only source access without printing keys
+or messages. A failed check is a setup issue, not evidence of empty history.
 
-Once ready, read the sibling `../greenbubbles-context/SKILL.md` for bounded
-queries or `../greenbubbles-personal-memory/SKILL.md` for a maintained
-Markdown/Python project. Use host discovery if already available; copying the
-skills into discovery directories is optional. If a sibling is missing, locate
-the complete package rather than inventing commands. Keep the current host's normal tool permissions.
+## Fix the failed check
+
+Read [references/setup.md](references/setup.md) for the relevant installation,
+source/profile, or capture steps. Use `command -v greenbubbles` and
+`greenbubbles --version` to identify the selected executable; 0.10.0 includes
+`chats find`, name selection, and `messages recent`. Do not silently substitute
+another executable after a failed check.
+
+Ordinary live use needs no profile after capture: the CLI discovers the account
+and reads `~/.greenbubbles-acquire/passphrase.txt`. Custom paths belong in
+`~/.greenbubbles/config.toml`. Use profiles for a second account or a snapshot.
+Never put credentials in chat, arguments, logs, or projects.
+
+If a source hangs, diagnose one directory open with a timeout before retrying.
+Workspace permissions, Unix ownership, and macOS privacy access are separate;
+compare the user's terminal with the agent host and verify changes with a fresh
+read. Key capture is owner-operated; follow the setup reference's authorization
+requirements for steps that re-sign WeChat.
+
+## Continue the requested task
+
+After `source status` succeeds, use [context](../greenbubbles-context/SKILL.md)
+for a query or [personal memory](../greenbubbles-personal-memory/SKILL.md) for
+maintained notes. Reading messages across all chats is unnecessary to verify
+setup. Keep the complete sibling skill package available; installation into
+host discovery folders is optional.

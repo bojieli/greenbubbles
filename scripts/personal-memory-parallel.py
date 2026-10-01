@@ -867,9 +867,9 @@ def skill_text(args: argparse.Namespace) -> str:
     root = Path(args.skill_dir)
     parts = [(root / "SKILL.md").read_text(encoding="utf-8")]
     fmt = getattr(args, "format", "wiki")
-    # priorities.md is the only home of the rules for what becomes an article
+    # workflow.md selects the scope; priorities.md is the only home of the rules for what becomes an article
     # sentence, including which secrets and personal details stay out.
-    reference_names = (["cli.md", "priorities.md", f"format-{fmt}.md"]
+    reference_names = (["workflow.md", "cli.md", "priorities.md", f"format-{fmt}.md"]
                        if fmt in ("markdown", "python") else ["wiki.md"])
     for reference in (root / "references" / name for name in reference_names):
         parts.append(f"\n\n----- {reference.name} -----\n\n"

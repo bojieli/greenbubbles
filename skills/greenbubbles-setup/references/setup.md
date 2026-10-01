@@ -19,6 +19,22 @@ path or put it on PATH. A similarly named Swift discovery executable is not
 the memory CLI. `greenbubbles memory --help` must include `--format` and
 `acknowledge`. Never silently use a different executable after a failed check.
 
+For a Homebrew installation, update the tap and upgrade:
+
+```sh
+brew update
+brew upgrade bojieli/greenbubbles/greenbubbles
+greenbubbles --version
+greenbubbles messages recent --help
+```
+
+Version 0.10.0 adds nickname/remark/alias selection, `chats find`, and
+`messages recent`. If a local build shadows Homebrew, use `command -v
+greenbubbles` to identify the selected binary before concluding an upgrade
+failed. A successful help check confirms syntax, not database access. Verify
+access with `source status` before reading messages. The setup check does not
+need to read recent messages across every chat.
+
 ## Open the live database
 
 After capture, do not create a profile for the ordinary live source:
@@ -47,7 +63,7 @@ format = "brief"
 ```
 
 Leave a line out to keep its default. `output.format` is `brief` or `json`.
-`messages list`, `messages search`, and `chats rank` are brief unless the
+`messages list`, `messages recent`, `messages search`, and `chats rank` are brief unless the
 file or `--json` says otherwise. The file stores paths and that format.
 Never write the key into it, and never print the file's paths into chat.
 
