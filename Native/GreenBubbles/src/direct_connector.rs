@@ -1081,9 +1081,9 @@ fn direct_query_restore_error(error: LiveQueryError) -> RestoreError {
 
 fn query_error(error: LiveQueryError) -> ConnectorErrorBody {
     match error {
-        LiveQueryError::InvalidArgument(message) | LiveQueryError::InvalidCursor(message) => {
-            invalid(&message)
-        }
+        LiveQueryError::ConversationSelection(message)
+        | LiveQueryError::InvalidArgument(message)
+        | LiveQueryError::InvalidCursor(message) => invalid(&message),
         LiveQueryError::NotFound(message) => crate::connector::not_found(&message),
         LiveQueryError::SearchUnavailable(message) => unavailable("searchUnavailable", &message),
         LiveQueryError::UnsafeSource(message) => {

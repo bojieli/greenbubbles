@@ -7,7 +7,7 @@ they find your WeChat data on their own and read the key from
 
 ```sh
 greenbubbles chats
-greenbubbles messages list --conversation <id>
+greenbubbles messages list --conversation "Alice"
 ```
 
 Read on if you want to:
@@ -187,7 +187,7 @@ greenbubbles messages search --profile archive --query-stdin --limit 50 \
   < <owner-only-query-file>
 ```
 
-Profiles apply only to reading commands: `source status`, `conversations list`,
+Profiles apply only to reading commands, including `chats find` and `messages recent`: `source status`, `conversations list`,
 `messages list`, `messages search`, and `message get`. They don't affect
 creating or restoring backups, or anything else that writes.
 

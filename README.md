@@ -12,6 +12,7 @@
 <p align="center">
   <a href="#install">Install</a> ·
   <a href="#getting-your-database-key">Get your key</a> ·
+  <a href="#usage">CLI usage</a> ·
   <a href="#use-your-existing-coding-agent-recommended">Use with an agent</a> ·
   <a href="docs/README.md">Docs</a> ·
   <a href="docs/WECHAT_DATABASE_FORMAT.md">Database format</a> ·
@@ -116,6 +117,67 @@ After that, commands work with no extra arguments: they find your WeChat data
 and key on their own. You need a [query profile](docs/QUERY_PROFILES.md) only
 to read a second WeChat account or a backup.
 
+## Usage
+
+Once the key is set up, these commands read your live WeChat data:
+
+| Command | When to use it |
+| --- | --- |
+| `greenbubbles chats rank` | Find your most active conversations, ranked by how many messages you sent, with one-on-one chats first. |
+| `greenbubbles messages recent` | See the newest messages across all chats, with each chat identified. |
+| `greenbubbles chats find "Alice"` | Find a chat by nickname, remark, alias, or ID; partial names work. |
+| `greenbubbles messages list --conversation "Alice"` | Read the newest messages in one chat, including available attachment paths. |
+| `greenbubbles messages search --query-stdin` | Search message text across your chats. |
+| `greenbubbles messages search --conversation "Alice" --query-stdin` | Search message text within one chat. |
+| `greenbubbles chats` | Browse a page of chats and their IDs. |
+| `greenbubbles contacts list --details` | Browse contacts with their nicknames, remarks, and aliases. |
+| `greenbubbles message get --conversation <conversation-id> --message <message-id>` | Fetch one message using its ID from `--json` output. |
+| `greenbubbles source status` | Check database access and storage sizes without reading message text. |
+
+For searches, type the search text after running the command, then press
+Control-D. Run `greenbubbles help --all` for the full command list,
+`greenbubbles messages recent --help` for help with a specific command, or
+`greenbubbles --version` to check the installed version.
+
+Replace `"Alice"` with a chat's nickname, remark, or alias. `chats find` matches
+partial names without reading messages. `messages list` and `messages search`
+accept names too; if a name matches several chats, the command shows choices
+so you can use an exact ID.
+
+`messages list`, `messages recent`, and `messages search` print JSON Lines:
+a header, then one line per message with who sent it, whether it was you,
+the local time, and the text. Recent messages also identify the chat.
+`messages list` and `messages recent` include local paths for photos, videos,
+and files when they can be opened. Search results name the chat; use
+`messages list` to get attachment paths.
+
+- **Chat names:** `--conversation` accepts an exact ID, nickname, remark, or
+  alias. Exact names take priority over partial matches, ignoring case. If
+  several chats match, the error lists their IDs so you can choose one.
+- **Latest activity:** `messages recent` reads across all identifiable chats,
+  newest message time first. Each line includes the chat name and ID. Add
+  `--since <unix-seconds>` to check activity since your last synchronization;
+  poll again without `--cursor` for new arrivals.
+- **Defaults:** lists and recent messages return up to 100 results; search
+  returns up to 50. No extra source or credential flags are needed after setup.
+- **More results:** if the output says `hasMore: true`, run the same command
+  again with `--cursor` set to the `nextCursor` value it printed. Keep following
+  search cursors even through empty pages while `hasMore` is true.
+- **Time windows:** add `--since` and `--until` as Unix timestamps in seconds
+  to message lists, recent messages, or searches, and repeat them when paging.
+- **Hide personal details:** add `--redact` to leave out phone numbers, email
+  addresses, ID numbers, and links.
+- **Message IDs:** add `--json` to see full details, including the message IDs
+  that `message get` needs.
+- **Which chats matter:** `chats rank` lists your chats by how many messages
+  you sent in each, with one-on-one chats first. Use
+  `--minimum-self-messages <n>` to change the default minimum of 10.
+
+Details: [CLI reference](docs/CLI_REFERENCE.md).
+
+**Prefer a window?** Open the app and choose **Browse Live or Snapshot…**. It
+reads the same WeChat data as the command-line tool.
+
 ## Use your existing coding agent (recommended)
 
 You can let a coding agent you already pay for do the reading and writing:
@@ -163,40 +225,6 @@ writes a fresh summary; to keep improving the same set of notes over time, use
 a coding agent instead.
 
 Setup steps: [built-in summarizer guide](docs/AI_CONTEXT_CLI.md#model-generated-live-memory).
-
-## Usage
-
-Once the key is set up, these commands read your live WeChat data:
-
-```sh
-# List chats, then use an ID from the result.
-greenbubbles chats --limit 20
-greenbubbles messages list --conversation <conversation-id> --limit 50
-
-# Type what to search for, then press Control-D.
-greenbubbles messages search --query-stdin
-
-greenbubbles contacts list --limit 50
-greenbubbles message get --conversation <conversation-id> --message <message-id>
-```
-
-`messages list` and `messages search` print one line per message: who sent it,
-whether it was you, the local time, and the text. Photos, videos, and files
-show where they are on disk.
-
-- **More results:** if the output says `hasMore: true`, run the same command
-  again with `--cursor` set to the `nextCursor` value it printed.
-- **Hide personal details:** add `--redact` to leave out phone numbers, email
-  addresses, ID numbers, and links.
-- **Message IDs:** add `--json` to see full details, including the message IDs
-  that `message get` needs.
-- **Which chats matter:** `chats rank` lists your chats by how many messages
-  you sent in each, with one-on-one chats first.
-
-Details: [CLI reference](docs/CLI_REFERENCE.md).
-
-**Prefer a window?** Open the app and choose **Browse Live or Snapshot…**. It
-reads the same WeChat data as the command-line tool.
 
 ## Choose your next step
 

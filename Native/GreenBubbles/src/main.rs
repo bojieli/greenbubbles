@@ -42,17 +42,17 @@ use greenbubbles::{
         AttachmentKind, LiveAttachmentError,
     },
     live_query::{
-        brief_messages, brief_search, find_conversations as find_live_conversations,
-        get_message as get_live_message,
+        brief_messages, brief_recent_messages, brief_search, find_chats,
+        find_conversations as find_live_conversations, get_message as get_live_message,
         get_search_result_message as get_live_search_result_message,
         list_contacts as list_live_contacts, list_conversations as list_live_conversations,
         list_messages_in_time_range as list_live_messages_in_time_range,
-        rank_conversations as rank_live_conversations, rank_cursor_offset,
-        search_messages_in_time_range as search_live_messages_in_time_range, serialize_brief_page,
-        serialize_brief_rank, serialize_query_error, serialize_query_response,
-        source_status as live_source_status, ContactKind, LiveQueryError, LiveQuerySource,
-        QueryDatabaseAccess, DEFAULT_PAGE_LIMIT, DEFAULT_SEARCH_LIMIT, MAX_PAGE_LIMIT,
-        MAX_SEARCH_QUERY_BYTES,
+        rank_conversations as rank_live_conversations, rank_cursor_offset, recent_messages,
+        resolve_conversation, search_messages_in_time_range as search_live_messages_in_time_range,
+        serialize_brief_page, serialize_brief_rank, serialize_query_error,
+        serialize_query_response, source_status as live_source_status, ContactKind, LiveQueryError,
+        LiveQuerySource, QueryDatabaseAccess, DEFAULT_PAGE_LIMIT, DEFAULT_SEARCH_LIMIT,
+        MAX_PAGE_LIMIT, MAX_SEARCH_QUERY_BYTES,
     },
     merge::merge_incremental_archive,
     model::{ArtifactKind, ArtifactRole},
@@ -133,7 +133,14 @@ fn main() {
                 "{}",
                 serialize_query_error(operation, code, message, retryable)
             );
-            eprintln!("error: {message}");
+            if matches!(
+                error.downcast_ref::<LiveQueryError>(),
+                Some(LiveQueryError::ConversationSelection(_))
+            ) {
+                eprintln!("error: {error}");
+            } else {
+                eprintln!("error: {message}");
+            }
             eprintln!("A machine-readable copy of this error is on standard output.");
         } else if let Some(operation) = attachment_operation {
             let (code, message, retryable) = attachment_error_details(error.as_ref());
@@ -185,6 +192,9 @@ fn process_query_operation() -> Option<&'static str> {
         [command, subcommand] if command == "messages" && subcommand == "list" => {
             Some("messages.list")
         }
+        [command, subcommand] if command == "messages" && subcommand == "recent" => {
+            Some("messages.recent")
+        }
         [command, subcommand] if command == "messages" && subcommand == "search" => {
             Some("messages.search")
         }
@@ -198,6 +208,7 @@ fn query_error_details(
 ) -> (&'static str, &'static str, bool) {
     if let Some(error) = error.downcast_ref::<LiveQueryError>() {
         return match error {
+            LiveQueryError::ConversationSelection(_) => ("conversationSelection", "Choose an unambiguous chat name or exact conversation ID. See the matching chats on standard error.", false),
             LiveQueryError::InvalidArgument(_) => (
                 "invalidQuery",
                 "This query is missing a required value or uses a value outside the allowed range. Run the same command with --help.",
@@ -517,6 +528,7 @@ fn help_for_arguments(raw: &[String]) -> Option<&'static str> {
         ["memory", sub] => memory_subcommand_help(sub)
             .ok()
             .or(Some(memory_command_help())),
+        ["chats", "find", ..] | ["conversations", "find", ..] => Some(conversations_command_help()),
         ["chats"]
         | ["conversations"]
         | ["chats", "list"]
@@ -543,6 +555,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut arguments = raw.into_iter().peekable();
     let command = arguments.next().unwrap_or_else(|| "help".to_string());
+    if command == "--version" || command == "version" {
+        println!("greenbubbles {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if matches!(arguments.peek().map(String::as_str), Some("--help" | "-h")) {
         if let Some(help) = ai_command_help(&command) {
             println!("{help}");
@@ -611,10 +627,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", serialize_query_response(&response)?);
         }
         "chats" | "conversations" => {
-            let subcommand = arguments.next().unwrap_or_else(|| "list".to_string());
-            if subcommand != "list" && subcommand != "rank" {
+            let subcommand = if arguments.peek().is_some_and(|arg| !arg.starts_with('-')) {
+                arguments.next().unwrap()
+            } else {
+                "list".to_string()
+            };
+            if !matches!(subcommand.as_str(), "list" | "rank" | "find") {
                 return Err(format!(
-                    "'{subcommand}' is not a conversations command. Use 'greenbubbles chats' or 'greenbubbles chats rank'."
+                    "'{subcommand}' is not a conversations command. Use 'greenbubbles chats', 'greenbubbles chats find <name>', or 'greenbubbles chats rank'."
                 )
                 .into());
             }
@@ -622,6 +642,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("{}", conversations_command_help());
                 return Ok(());
             }
+            let selector = if subcommand == "find" {
+                Some(arguments.next().ok_or("chats find requires a name")?)
+            } else {
+                None
+            };
             let (database_root, remaining) =
                 split_optional_query_source(arguments.collect::<Vec<_>>());
             if remaining
@@ -671,7 +696,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             let invocation = resolve_query_invocation(database_root, &remaining)?;
             let source = invocation.access.open_source(&invocation.source_root)?;
-            if subcommand == "rank" {
+            if let Some(selector) = selector {
+                if option_string(&remaining, "--cursor")?.is_some() {
+                    return Err("chats find takes no cursor; refine the name instead".into());
+                }
+                let limit = option_usize(&remaining, "--limit")?.unwrap_or(DEFAULT_PAGE_LIMIT);
+                println!(
+                    "{}",
+                    serialize_query_response(&find_chats(&source, &selector, limit)?)?
+                );
+            } else if subcommand == "rank" {
                 let minimum = option_usize(&remaining, "--minimum-self-messages")?.unwrap_or(10);
                 let rank_limit = option_usize(&remaining, "--limit")?.unwrap_or(100);
                 let offset = match option_string(&remaining, "--cursor")? {
@@ -1021,6 +1055,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             match subcommand.as_str() {
+                "recent" => {
+                    validate_command_options(&remaining,
+                        &["--profile", "--limit", "--cursor", "--since", "--until", "--snapshot-recovery-kit", "--snapshot-local-credential"],
+                        &["--passphrase-stdin", "--snapshot-key-stdin", "--snapshot-passphrase-stdin", "--decrypted", "--json", "--brief", "--redact"])?;
+                    let invocation = resolve_query_invocation(database_root, &remaining)?;
+                    let source = invocation.access.open_source(&invocation.source_root)?;
+                    let response = recent_messages(&source, option_usize(&remaining, "--limit")?.unwrap_or(DEFAULT_PAGE_LIMIT), option_string(&remaining, "--cursor")?.as_deref(), option_i64(&remaining, "--since")?, option_i64(&remaining, "--until")?)?;
+                    let mut brief = brief_recent_messages(&source, &response, remaining.iter().any(|v| v == "--redact"));
+                    emit_message_page(message_output_format(&remaining)?, &response, &mut brief, source.attachment_account_root().as_deref())?;
+                }
                 "list" => {
                     validate_command_options_repeated(
                         &remaining,
@@ -1066,10 +1110,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let format = message_output_format(&remaining)?;
                     let redact = remaining.iter().any(|value| value == "--redact");
                     let account_root = source.attachment_account_root();
-                    for conversation in &conversations {
+                    for selector in &conversations {
+                        let conversation = resolve_conversation(&source, selector)?;
                         let response = list_live_messages_in_time_range(
                             &source,
-                            conversation,
+                            &conversation,
                             limit,
                             cursor.as_deref(),
                             since,
@@ -1115,7 +1160,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         query.pop();
                     }
                     let source = invocation.access.open_source(&invocation.source_root)?;
-                    let conversation = option_string(&remaining, "--conversation")?;
+                    let conversation = option_string(&remaining, "--conversation")?.map(|name| resolve_conversation(&source, &name)).transpose()?;
                     let limit =
                         option_usize(&remaining, "--limit")?.unwrap_or(DEFAULT_SEARCH_LIMIT);
                     let cursor = option_string(&remaining, "--cursor")?;
@@ -1141,7 +1186,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 _ => {
                     return Err(format!(
-                        "unsupported messages subcommand: {subcommand}; expected 'list' or 'search'"
+                        "unsupported messages subcommand: {subcommand}; expected 'list', 'recent', or 'search'"
                     )
                     .into())
                 }
@@ -1188,6 +1233,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let conversation = required_option(&remaining, "--conversation")?;
             let message_id = required_option(&remaining, "--message")?;
             let source = invocation.access.open_source(&invocation.source_root)?;
+            let conversation = resolve_conversation(&source, &conversation)?;
             let response = match get_live_message(&source, &conversation, &message_id) {
                 Ok(response) => response,
                 Err(LiveQueryError::InvalidCursor(_)) => {
@@ -3026,13 +3072,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 const fn complete_command_listing() -> &'static str {
     concat!(
-        "Complete command list. Most people only need the commands in 'greenbubbles help'.\n\n",
+        "Usage: greenbubbles <command> [options]\n\nComplete command list. Most people only need the commands in 'greenbubbles help'.\n\n",
         "Browse:\n",
         "  greenbubbles chats rank [--minimum-self-messages <n>] [--limit <1..2000>] [--cursor <token>] [--json]\n",
         "  greenbubbles chats [--profile <name>] [--limit <1..500>] [--cursor <token>]\n",
         "  greenbubbles messages list --conversation <id> [--conversation <id> ...] [--since <unix>] [--until <unix>] [--limit <1..500>] [--cursor <token>] [--redact] [--json]\n",
         "  greenbubbles messages search --query-stdin [--conversation <id>] [--since <unix>] [--until <unix>] [--limit <1..200>] [--redact] [--json]\n",
         "  greenbubbles message get --conversation <id> --message <id>\n",
+        "  greenbubbles chats find <nickname-or-remark>\n",
+        "  greenbubbles messages recent [--limit <1..500>] [--since <unix>] [--json]\n",
         "  greenbubbles contacts list [--kind <kind>] [--limit <1..500>] [--details]\n",
         "  greenbubbles source status\n",
         "  greenbubbles attachment inspect|materialize --conversation <id> --message <id> --kind image|voice|video|document\n\n",
@@ -3118,6 +3166,8 @@ const fn conversations_command_help() -> &'static str {
         "  greenbubbles chats rank [--minimum-self-messages <n>] [--limit <1..2000>] [--cursor <opaque-cursor>] [--json]\n",
         "  greenbubbles conversations list [--profile <name>] [--limit <1..500>] [--cursor <opaque-cursor>]\n",
         "  greenbubbles conversations list <source-root> (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--limit <1..500>] [--cursor <opaque-cursor>]\n\n",
+        "Find by name: greenbubbles chats find <name>. Matches nicknames, remarks, aliases\n",
+        "and IDs case-insensitively, including partial names. No messages are read.\n\n",
         "`chats` is the same command as `conversations list`. `chats rank` orders direct\n",
         "chats before groups, then by how many messages the account holder sent. It\n",
         "returns no message text. The default page is JSON Lines: a header, then one\n",
@@ -3287,7 +3337,7 @@ const fn messages_command_help() -> &'static str {
         "  --snapshot-key-stdin Legacy raw-key snapshot compatibility\n",
         "  --decrypted         Explicitly query plaintext SQLite database files\n\n",
         "Options:\n",
-        "  --conversation <id> Exact wxid or chatroom identifier\n",
+        "  --conversation <id> ID, nickname, remark or alias; ambiguous names show choices\n",
         "  --since <unix>      Include messages at or after this unix second\n",
         "  --until <unix>      Include messages at or before this unix second\n",
         "  --limit <n>         Return 1..500 messages; default 100\n",
@@ -3296,6 +3346,20 @@ const fn messages_command_help() -> &'static str {
         "  --json              Print the full JSON page\n",
         "  --brief             Force the compact reading page\n",
         "  -h, --help          Show this help\n",
+    )
+}
+
+const fn messages_recent_help() -> &'static str {
+    concat!(
+        "Usage:\n  greenbubbles messages recent [<source-root>] [--limit <1..500>] [--since <unix>] [--until <unix>] [--cursor <token>] [--json] [--redact]\n\n",
+        "Show a bounded page of the newest messages across all identifiable chats, ordered\n",
+        "by message time with deterministic ties. Defaults to 100. Each compact line\n",
+        "includes chat and conversationId, sender, local time and text. --json includes\n",
+        "message IDs and warnings. Follow nextCursor with --cursor and the same time\n",
+        "range. Poll without a cursor to see new arrivals; --since limits the window.\n",
+        "Reads live data by default; --profile selects a saved source. Explicit sources\n",
+        "take --passphrase-stdin, --decrypted, or a snapshot access mode. --brief forces\n",
+        "compact output. --help opens no database. No native search index is needed.\n",
     )
 }
 
@@ -3343,9 +3407,10 @@ const fn messages_search_help() -> &'static str {
 fn messages_subcommand_help(subcommand: &str) -> Result<&'static str, String> {
     match subcommand {
         "list" => Ok(messages_command_help()),
+        "recent" => Ok(messages_recent_help()),
         "search" => Ok(messages_search_help()),
         _ => Err(format!(
-            "unsupported messages subcommand: {subcommand}; expected 'list' or 'search'"
+            "unsupported messages subcommand: {subcommand}; expected 'list', 'recent', or 'search'"
         )),
     }
 }
@@ -3409,7 +3474,7 @@ const fn attachment_inspect_help() -> &'static str {
         "  --snapshot-key-stdin                 Legacy raw snapshot key\n",
         "  --decrypted                          Explicit plaintext SQLite source\n\n",
         "Options:\n",
-        "  --conversation <id>  Exact wxid or chatroom identifier\n",
+        "  --conversation <id>  ID, nickname, remark or alias; ambiguous names show choices\n",
         "  --message <id>       Opaque identity returned by messages list/search\n",
         "  --kind <kind>        image, voice, video, or document; default image\n",
         "  --md5 <hex>          Legacy image locator; exactly 32 hexadecimal characters\n",
@@ -3431,7 +3496,7 @@ const fn attachment_materialize_help() -> &'static str {
         "rejected. The response reports format, byte count, and SHA-256, but no paths.\n\n",
         "Access modes for --message are the same as attachment inspect.\n\n",
         "Options:\n",
-        "  --conversation <id>  Exact wxid or chatroom identifier\n",
+        "  --conversation <id>  ID, nickname, remark or alias; ambiguous names show choices\n",
         "  --message <id>       Opaque identity returned by messages list/search\n",
         "  --kind <kind>        image, voice, video, or document; default image\n",
         "  --md5 <hex>          Legacy image locator; exactly 32 hexadecimal characters\n",

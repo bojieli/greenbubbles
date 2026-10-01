@@ -48,6 +48,8 @@ const MAXIMUM_SQL_STATEMENT_DURATION: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Error)]
 pub enum LiveQueryError {
+    #[error("{0}")]
+    ConversationSelection(String),
     #[error("invalid query: {0}")]
     InvalidArgument(String),
     #[error("unsafe database source: {0}")]
@@ -827,6 +829,7 @@ pub struct BriefLine {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "conversationId")]
     pub conversation_id: Option<String>,
     #[serde(skip)]
     pub media: Option<BriefMedia>,
@@ -3084,6 +3087,276 @@ pub fn find_conversations(
     Ok(items)
 }
 
+/// Find contact/chat identities by any known name, without reading messages.
+pub fn find_chats(
+    source: &LiveQuerySource<'_>,
+    name: &str,
+    limit: usize,
+) -> Result<Vec<ContactItem>, LiveQueryError> {
+    validate_limit(limit)?;
+    validate_conversation_id(name)?;
+    let loaded = load_contact_records(source)?;
+    let needle = name.to_lowercase();
+    let mut matches = Vec::new();
+    for record in loaded.records.values() {
+        if [
+            Some(record.id.as_str()),
+            record.remark.as_deref(),
+            record.nickname.as_deref(),
+            record.alias.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|v| v.to_lowercase().contains(&needle))
+        {
+            let kind = classify_contact_id(
+                &record.id,
+                source.account_holder_source_id(),
+                record.in_contact_table,
+                record.in_chat_room_table,
+            );
+            matches.push(ContactItem {
+                id: record.id.clone(),
+                display_name: contact_display_name(record, kind),
+                kind,
+                is_account_holder: kind == ContactKind::AccountHolder,
+                remark: record.remark.clone(),
+                nickname: record.nickname.clone(),
+                alias: record.alias.clone(),
+            });
+        }
+    }
+    if matches.len() > limit {
+        return Err(LiveQueryError::InvalidArgument(format!(
+            "more than {limit} chats match; refine the name or increase --limit (maximum 500)"
+        )));
+    }
+    Ok(matches)
+}
+
+/// Resolve an exact ID first, then an unambiguous nickname, remark or alias.
+pub fn resolve_conversation(
+    source: &LiveQuerySource<'_>,
+    selector: &str,
+) -> Result<String, LiveQueryError> {
+    validate_conversation_id(selector)?;
+    if selector.starts_with("wxid_")
+        || selector.ends_with("@chatroom")
+        || find_conversation(source, selector)?.is_some()
+    {
+        return Ok(selector.to_string());
+    }
+    let contacts = load_contact_records(source)?;
+    if contacts.records.contains_key(selector) {
+        return Ok(selector.to_string());
+    }
+    let needle = selector.to_lowercase();
+    let matches = |exact: bool| {
+        contacts
+            .records
+            .values()
+            .filter(|record| {
+                [
+                    record.remark.as_deref(),
+                    record.nickname.as_deref(),
+                    record.alias.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|name| {
+                    let name = name.to_lowercase();
+                    if exact {
+                        name == needle
+                    } else {
+                        name.contains(&needle)
+                    }
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut candidates = matches(true);
+    if candidates.is_empty() {
+        candidates = matches(false);
+    }
+    match candidates.as_slice() {
+        [record] => Ok(record.id.clone()),
+        [] => Err(LiveQueryError::ConversationSelection(format!(
+            "no chat matches '{selector}'; run greenbubbles chats"
+        ))),
+        _ => Err(LiveQueryError::ConversationSelection(format!(
+            "'{selector}' matches several chats; use an exact ID: {}",
+            candidates
+                .iter()
+                .take(20)
+                .map(|r| format!(
+                    "{} ({})",
+                    r.remark
+                        .as_ref()
+                        .or(r.nickname.as_ref())
+                        .or(r.alias.as_ref())
+                        .unwrap_or(&r.id),
+                    r.id
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RecentCursor {
+    version: u32,
+    kind: String,
+    source_identity: String,
+    since: Option<i64>,
+    until: Option<i64>,
+    conversation: String,
+    message: MessageCursor,
+}
+
+/// A globally ordered page from all identifiable message tables, including
+/// chats absent from the session list. Opens each shard once.
+pub fn recent_messages(
+    source: &LiveQuerySource<'_>,
+    limit: usize,
+    cursor: Option<&str>,
+    since: Option<i64>,
+    until: Option<i64>,
+) -> Result<QueryEnvelope<MessageItem>, LiveQueryError> {
+    validate_limit(limit)?;
+    if since.zip(until).is_some_and(|(start, end)| start > end) {
+        return Err(LiveQueryError::InvalidArgument(
+            "message time range is inverted".into(),
+        ));
+    }
+    let boundary = cursor.map(decode_cursor::<RecentCursor>).transpose()?;
+    if let Some(c) = &boundary {
+        if c.version != CURSOR_FORMAT_VERSION
+            || c.kind != "messages.recent"
+            || c.source_identity != source.identity
+            || c.since != since
+            || c.until != until
+        {
+            return Err(LiveQueryError::InvalidCursor(
+                "cursor does not belong to this recent-message source and time range".into(),
+            ));
+        }
+    }
+    let reader = LiveCorpusReader::open(source)?;
+    let mut items = Vec::new();
+    let mut warnings = reader.inventory.warnings.clone();
+    let mut coverage_complete = reader.inventory.coverage_complete;
+    let mut more = false;
+    for conversation in &reader.inventory.conversations {
+        if conversation.kind == ConversationKind::Unresolved {
+            continue;
+        }
+        let page = list_messages_in_time_range_with_open_shards(
+            source,
+            &conversation.source_id,
+            limit,
+            None,
+            since,
+            until,
+            Some(&reader.open_shards),
+            false,
+            Some(boundary.as_ref()),
+        )?;
+        more |= page.page.has_more;
+        coverage_complete &= page.consistency.coverage_complete;
+        warnings.extend(page.warnings);
+        items.extend(page.items);
+        // Bound retained message bodies independently of the number of chats.
+        items.sort_by_cached_key(|item| std::cmp::Reverse(recent_item_key(item)));
+        if items.len() > limit {
+            more = true;
+            items.truncate(limit);
+        }
+    }
+    let next_cursor = if more {
+        items
+            .last()
+            .map(|item| {
+                encode_cursor(&RecentCursor {
+                    version: CURSOR_FORMAT_VERSION,
+                    kind: "messages.recent".into(),
+                    source_identity: source.identity.clone(),
+                    since,
+                    until,
+                    conversation: item.conversation_id.clone(),
+                    message: decode_message_cursor(&item.id)?,
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let enrichment = enrich_message_items(source, &mut items)?;
+    coverage_complete &= enrichment.coverage_complete;
+    warnings.extend(enrichment.warnings);
+    coalesce_warnings(&mut warnings);
+    Ok(QueryEnvelope {
+        schema: QUERY_SCHEMA,
+        format_version: QUERY_FORMAT_VERSION,
+        operation: "messages.recent",
+        ok: true,
+        source: source_description(source),
+        consistency: QueryConsistency {
+            guarantee: "perDatabaseReadStatement",
+            database_count: reader.open_shards.shards.len() + 2,
+            cross_database_atomic: false,
+            coverage_complete,
+            observed_at_unix_milliseconds: now_unix_milliseconds(),
+        },
+        page: QueryPage {
+            limit,
+            returned: items.len(),
+            has_more: more,
+            next_cursor,
+        },
+        warnings,
+        items,
+    })
+}
+
+fn recent_item_key(item: &MessageItem) -> (i64, i64, i64, u32, i64, String) {
+    // Message identities are generated locally from validated source rows.
+    let c = decode_message_cursor(&item.id).expect("projected message identity");
+    (
+        item.created_at_unix,
+        item.sort_sequence,
+        item.server_id,
+        c.shard_id,
+        c.row_id,
+        item.conversation_id.clone(),
+    )
+}
+
+pub fn brief_recent_messages(
+    source: &LiveQuerySource<'_>,
+    envelope: &QueryEnvelope<MessageItem>,
+    redact: bool,
+) -> BriefPage {
+    let mut page = brief_messages(source, envelope, redact);
+    let names = resolve_contact_display_names(
+        source,
+        envelope
+            .items
+            .iter()
+            .map(|item| item.conversation_id.as_str()),
+    )
+    .map(|e| e.display_names)
+    .unwrap_or_default();
+    for (line, item) in page.items.iter_mut().zip(&envelope.items) {
+        line.chat = names
+            .get(&item.conversation_id)
+            .and_then(|name| present_name(Some(name), redact));
+        line.conversation_id = Some(item.conversation_id.clone());
+    }
+    page
+}
+
 pub fn list_messages(
     source: &LiveQuerySource<'_>,
     conversation: &str,
@@ -3136,6 +3409,7 @@ pub fn list_messages_in_time_range(
         not_after_unix,
         None,
         true,
+        None,
     )
 }
 
@@ -3149,6 +3423,7 @@ fn list_messages_in_time_range_with_open_shards(
     not_after_unix: Option<i64>,
     open_shards: Option<&OpenMessageShards>,
     enrich_contacts: bool,
+    recent: Option<Option<&RecentCursor>>,
 ) -> Result<QueryEnvelope<MessageItem>, LiveQueryError> {
     validate_limit(limit)?;
     validate_conversation_id(conversation)?;
@@ -3255,6 +3530,12 @@ fn list_messages_in_time_range_with_open_shards(
         let compression_type = optional_message_column(&columns, "WCDB_CT_message_content");
         let compressed_content = optional_message_column(&columns, "compress_content");
 
+        let recent_boundary = recent.flatten();
+        let order = if recent.is_some() {
+            "m.create_time DESC, m.sort_seq DESC, m.server_id DESC, m.rowid DESC"
+        } else {
+            "m.sort_seq DESC, m.create_time DESC, m.server_id DESC, m.rowid DESC"
+        };
         let sql = format!(
             "SELECT m.rowid, m.sort_seq, m.server_id, m.local_type, {sender_expression}, \
                     m.create_time, m.message_content, {packed_info}, {status}, \
@@ -3265,7 +3546,10 @@ fn list_messages_in_time_range_with_open_shards(
                     < (:cursor_sort, :cursor_time, :cursor_server, :cursor_shard, :cursor_row)) \
                AND (:not_before IS NULL OR m.create_time >= :not_before) \
                AND (:not_after IS NULL OR m.create_time <= :not_after) \
-             ORDER BY m.sort_seq DESC, m.create_time DESC, m.server_id DESC, m.rowid DESC \
+               AND (:recent_time IS NULL OR
+                    (m.create_time, m.sort_seq, m.server_id, {shard_id}, m.rowid, :conversation)
+                    < (:recent_time, :recent_sort, :recent_server, :recent_shard, :recent_row, :recent_conversation))
+             ORDER BY {order} \
              LIMIT :fetch_limit",
             shard_id = shard.shard_id,
         );
@@ -3295,6 +3579,13 @@ fn list_messages_in_time_range_with_open_shards(
             ":not_before": not_before_unix,
             ":not_after": not_after_unix,
             ":fetch_limit": fetch_limit as i64,
+            ":recent_time": recent_boundary.map(|c| c.message.create_time),
+            ":recent_sort": recent_boundary.map(|c| c.message.sort_sequence),
+            ":recent_server": recent_boundary.map(|c| c.message.server_id),
+            ":recent_shard": recent_boundary.map(|c| c.message.shard_id as i64),
+            ":recent_row": recent_boundary.map(|c| c.message.row_id),
+            ":recent_conversation": recent_boundary.map(|c| c.conversation.as_str()),
+            ":conversation": conversation,
         });
         let mut rows = match query_result {
             Ok(rows) => rows,
@@ -3342,7 +3633,13 @@ fn list_messages_in_time_range_with_open_shards(
         ));
     }
 
-    messages.sort_unstable_by(|left, right| right.key.cmp(&left.key));
+    messages.sort_unstable_by(|left, right| {
+        if recent.is_some() {
+            (right.key.create_time, &right.key).cmp(&(left.key.create_time, &left.key))
+        } else {
+            right.key.cmp(&left.key)
+        }
+    });
     let has_more = messages.len() > limit;
     messages.truncate(limit);
     let next_cursor = if has_more {
@@ -4201,6 +4498,7 @@ fn search_messages_fallback_in_time_range(
                     .expect("non-empty fallback conversation set opens message shards"),
             ),
             false,
+            None,
         )?;
         statement_count = statement_count.saturating_add(1);
         queried_database_count =

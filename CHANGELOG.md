@@ -4,6 +4,23 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
+## 0.10.0 - 2026-10-01
+
+### Added
+
+- `chats find <name>` finds known identities by nickname, remark, alias, or ID.
+- Message list, search, and exact-message retrieval accept unambiguous chat
+  names; ambiguous names show the matching IDs.
+- `messages recent` shows a globally time-ordered page across identifiable
+  chats, with chat labels, time filters, source-bound pagination, and full
+  message IDs for debugging and synchronization.
+- `--version` prints the installed CLI version.
+
+### Fixed
+
+- `chats --limit` and other options no longer get mistaken for subcommands.
+- Top-level help includes `Usage`, matching the Homebrew smoke test.
+
 ## 0.9.5 - 2026-10-01
 
 ### Changed

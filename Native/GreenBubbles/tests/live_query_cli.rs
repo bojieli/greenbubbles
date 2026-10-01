@@ -1401,3 +1401,152 @@ fn assert_success(output: &Output) {
     );
     assert!(output.stderr.is_empty());
 }
+
+#[test]
+fn friendly_chat_lookup_and_name_selection_are_unambiguous() {
+    let fixture = Fixture::new(false);
+    let root = fixture.root.to_str().unwrap();
+    let found = run(&["chats", "find", "nickname a", root, "--decrypted"], None);
+    assert_success(&found);
+    let found: Value = serde_json::from_slice(&found.stdout).unwrap();
+    assert_eq!(found[0]["id"], "wxid_a");
+    assert_eq!(found[0]["nickname"], "Nickname A");
+    for selector in ["Talker Remark", "talker", "wxid_talker"] {
+        let page = run(
+            &[
+                "messages",
+                "list",
+                root,
+                "--decrypted",
+                "--conversation",
+                selector,
+                "--json",
+            ],
+            None,
+        );
+        assert_success(&page);
+        let page: Value = serde_json::from_slice(&page.stdout).unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), 4);
+        assert_eq!(page["items"][0]["conversationId"], "wxid_talker");
+    }
+    let ambiguous = run(
+        &[
+            "messages",
+            "list",
+            root,
+            "--decrypted",
+            "--conversation",
+            "Nickname",
+            "--json",
+        ],
+        None,
+    );
+    assert!(!ambiguous.status.success());
+    let error = String::from_utf8(ambiguous.stderr).unwrap();
+    assert!(error.contains("wxid_a"));
+    assert!(error.contains("wxid_b"));
+    let absent = run(
+        &[
+            "messages",
+            "list",
+            root,
+            "--decrypted",
+            "--conversation",
+            "Nobody",
+        ],
+        None,
+    );
+    assert!(!absent.status.success());
+    assert!(String::from_utf8(absent.stderr)
+        .unwrap()
+        .contains("no chat matches"));
+    let listed = run(
+        &["chats", "list", root, "--decrypted", "--limit", "2"],
+        None,
+    );
+    assert_success(&listed);
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["page"]["returned"], 2);
+}
+
+#[test]
+fn recent_messages_merge_all_chats_by_time_and_page_ties_once() {
+    let fixture = Fixture::new(false);
+    let root = fixture.root.to_str().unwrap();
+    let other_table = format!("Msg_{:x}", md5::compute(b"wxid_other"));
+    let connection = Connection::open(fixture.root.join("message/message_0.db")).unwrap();
+    connection.execute_batch(&format!(
+        "CREATE TABLE [{other_table}](server_id INTEGER, sort_seq INTEGER, local_type INTEGER, real_sender_id INTEGER, create_time INTEGER, message_content BLOB);
+         INSERT INTO [{other_table}] VALUES (0, 100, 1, 1, 1000, 'same timestamp'), (0, 1, 1, 1, 1100, 'newest across chats');"
+    )).unwrap();
+    let mut cursor = None;
+    let mut ids = std::collections::BTreeSet::new();
+    let mut times = Vec::new();
+    for _ in 0..10 {
+        let mut args = vec![
+            "messages",
+            "recent",
+            root,
+            "--decrypted",
+            "--limit",
+            "1",
+            "--json",
+        ];
+        if let Some(token) = cursor.as_deref() {
+            args.extend(["--cursor", token]);
+        }
+        let output = run(&args, None);
+        assert_success(&output);
+        let page: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(page["operation"], "messages.recent");
+        for item in page["items"].as_array().unwrap() {
+            assert!(ids.insert(item["id"].as_str().unwrap().to_string()));
+            times.push(item["createdAtUnix"].as_i64().unwrap());
+        }
+        if page["page"]["hasMore"] == false {
+            break;
+        }
+        cursor = Some(page["page"]["nextCursor"].as_str().unwrap().to_string());
+    }
+    assert_eq!(times, vec![1100, 1000, 1000, 1000, 900, 800]);
+    let output = run(
+        &["messages", "recent", root, "--decrypted", "--since", "1050"],
+        None,
+    );
+    assert_success(&output);
+    let lines = String::from_utf8(output.stdout).unwrap();
+    let message: Value = serde_json::from_str(lines.lines().nth(1).unwrap()).unwrap();
+    assert_eq!(message["chat"], "Other Conversation");
+    assert_eq!(message["conversationId"], "wxid_other");
+    assert_eq!(message["text"], "newest across chats");
+    let wrong_range = run(
+        &[
+            "messages",
+            "recent",
+            root,
+            "--decrypted",
+            "--cursor",
+            cursor.as_deref().unwrap(),
+            "--since",
+            "1050",
+        ],
+        None,
+    );
+    assert!(!wrong_range.status.success());
+    let error: Value = serde_json::from_slice(&wrong_range.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "invalidCursor");
+    let wrong_kind = run(
+        &[
+            "messages",
+            "list",
+            root,
+            "--decrypted",
+            "--conversation",
+            "wxid_talker",
+            "--cursor",
+            cursor.as_deref().unwrap(),
+        ],
+        None,
+    );
+    assert!(!wrong_kind.status.success());
+}
