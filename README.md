@@ -5,8 +5,8 @@
 <h1 align="center">GreenBubbles</h1>
 
 <p align="center">
-  <strong>Your WeChat history, searchable locally and organized by your own AI agent.</strong><br>
-  A Mac app and CLI. Local storage; you choose what your AI sees.
+  <strong>Enable your AI agents to access your WeChat history in real time.</strong><br>
+  Mac CLI + skills for agents. Local storage only.
 </p>
 
 <p align="center">
@@ -26,8 +26,12 @@
   <img src="https://img.shields.io/badge/status-research%20alpha-f59e0b" alt="Status: research alpha">
 </p>
 
-GreenBubbles is a Mac app and command-line tool for reading your own WeChat
-history. It reads the database files WeChat already keeps on your Mac, so there
+<p align="center">
+  <img src="assets/how-it-works.svg" alt="GreenBubbles queries WeChat’s original encrypted databases locally and returns live results to your agent, without maintaining an exported chat database. A separate optional path creates an encrypted backup you can unlock and query later without WeChat." width="820">
+</p>
+
+GreenBubbles is a Mac command-line tool for reading your own WeChat history.
+It reads the database files WeChat already keeps on your Mac, so there
 is no export step and no second copy to keep up to date. You can:
 
 - browse and search your chats on your own computer;
@@ -39,10 +43,6 @@ is no export step and no second copy to keep up to date. You can:
 Setup copies a key out of your own WeChat app, which needs administrator access.
 Reading and searching happen entirely on your Mac. If you use a cloud AI, the
 messages it reads are sent to that AI's provider.
-
-<p align="center">
-  <img src="assets/how-it-works.svg" alt="GreenBubbles queries WeChat’s original encrypted databases locally and returns live results to your agent, without maintaining an exported chat database. A separate optional path creates an encrypted backup you can unlock and query later without WeChat." width="820">
-</p>
 
 ## What you can do
 
@@ -133,9 +133,7 @@ echo "$(brew --prefix greenbubbles)/libexec/skills/greenbubbles-personal-memory/
 Then tell your agent something like:
 
 > Read the GreenBubbles personal-memory SKILL.md at that path. Organize my
-> chosen conversations into Markdown notes in ~/memory/me. Cite the source
-> messages, and update existing notes instead of starting over. If GreenBubbles
-> isn't set up yet, follow its setup skill.
+> conversations in the recent month into Markdown notes.
 
 If you use the ZIP or a source checkout, the skill is at
 `skills/greenbubbles-personal-memory/SKILL.md`; keep the files around it in
@@ -156,7 +154,7 @@ More help: [agent skills guide](docs/AGENT_SKILLS.md).
 ## Use the built-in summarizer (optional)
 
 If you don't use a coding agent, GreenBubbles can send chosen chats to Google's
-Gemini itself and save a cited summary as `memory.md` and `memory.json`. Run it
+Gemini and save a cited summary as `memory.md` and `memory.json`. Run it
 with `ai-summarize-direct`.
 
 This needs your own `GEMINI_API_KEY` and is billed by Google separately. Only
