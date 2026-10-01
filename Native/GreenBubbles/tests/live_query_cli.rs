@@ -1550,3 +1550,111 @@ fn recent_messages_merge_all_chats_by_time_and_page_ties_once() {
     );
     assert!(!wrong_kind.status.success());
 }
+
+#[test]
+fn command_line_queries_match_stdin_and_keep_credential_input_separate() {
+    let fixture = Fixture::new(false);
+    let root = fixture.root.to_str().unwrap();
+    let args = run(
+        &[
+            "messages",
+            "search",
+            root,
+            "--decrypted",
+            "--query",
+            "hello",
+            "--conversation",
+            "Talker Remark",
+            "--json",
+        ],
+        None,
+    );
+    let stdin = run(
+        &[
+            "messages",
+            "search",
+            root,
+            "--decrypted",
+            "--query-stdin",
+            "--conversation",
+            "Talker Remark",
+            "--json",
+        ],
+        Some(b"hello\n"),
+    );
+    assert_success(&args);
+    assert_success(&stdin);
+    let args: Value = serde_json::from_slice(&args.stdout).unwrap();
+    let stdin: Value = serde_json::from_slice(&stdin.stdout).unwrap();
+    assert_eq!(args["items"], stdin["items"]);
+    assert_eq!(args["items"].as_array().unwrap().len(), 2);
+    let both = run(
+        &[
+            "messages",
+            "search",
+            root,
+            "--decrypted",
+            "--query",
+            "hello",
+            "--query-stdin",
+        ],
+        None,
+    );
+    assert!(!both.status.success());
+    let missing = run(&["messages", "search", root, "--decrypted"], None);
+    assert!(!missing.status.success());
+    let empty = run(
+        &["messages", "search", root, "--decrypted", "--query", ""],
+        None,
+    );
+    assert!(!empty.status.success());
+    let oversized = "x".repeat(16 * 1024 + 1);
+    let oversized = run(
+        &[
+            "messages",
+            "search",
+            root,
+            "--decrypted",
+            "--query",
+            &oversized,
+        ],
+        None,
+    );
+    assert!(!oversized.status.success());
+    // The same input option works when no native index exists.
+    fs::remove_file(fixture.root.join("message/message_fts.db")).unwrap();
+    let fallback = run(
+        &[
+            "messages",
+            "search",
+            root,
+            "--decrypted",
+            "--query",
+            "s0-new",
+            "--conversation",
+            "Talker Remark",
+            "--json",
+        ],
+        None,
+    );
+    assert_success(&fallback);
+    let fallback: Value = serde_json::from_slice(&fallback.stdout).unwrap();
+    assert_eq!(fallback["items"].as_array().unwrap().len(), 1);
+    let encrypted = Fixture::new(true);
+    let key = format!("{}\n", hex::encode(RAW_KEY));
+    let output = run(
+        &[
+            "messages",
+            "search",
+            encrypted.root.to_str().unwrap(),
+            "--passphrase-stdin",
+            "--query",
+            "hello",
+            "--json",
+        ],
+        Some(key.as_bytes()),
+    );
+    assert_success(&output);
+    let page: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(page["items"].as_array().unwrap().len(), 3);
+}

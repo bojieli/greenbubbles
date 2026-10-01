@@ -99,7 +99,7 @@ put decrypted databases and keys in ordinary temporary directories.
 source status <database-root>
 conversations list <root> [--limit N] [--cursor TOKEN]
 messages list <root> --conversation ID [--limit N] [--cursor TOKEN]
-messages search <root> --query-stdin [--conversation ID] [--limit N] [--cursor TOKEN]
+messages search <root> (--query TEXT | --query-stdin) [--conversation ID] [--limit N] [--cursor TOKEN]
 message get <root> --conversation ID --message ID
 attachment inspect|materialize <account-or-root> --conversation ID
     --message OPAQUE_ID --kind image|voice|video|document …

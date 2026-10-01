@@ -180,7 +180,8 @@ greenbubbles messages list --conversation <conversation-id> --limit 100
 greenbubbles source status --profile archive
 ```
 
-For search, type or pipe only the search text; the key comes from the profile:
+For search, use `--query "text"`; the key comes from the profile. Use
+`--query-stdin` when typing interactively or piping the query:
 
 ```sh
 greenbubbles messages search --profile archive --query-stdin --limit 50 \

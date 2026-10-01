@@ -37,6 +37,7 @@ greenbubbles chats --limit 20
 greenbubbles chats find "Alice"
 greenbubbles messages list --conversation "Alice" --limit 50
 greenbubbles messages recent --limit 50
+greenbubbles messages search --query "keyword"
 ```
 
 Use a nickname, remark, alias, or exact ID for `--conversation`. Names match

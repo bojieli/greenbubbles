@@ -14,7 +14,7 @@ greenbubbles chats --limit 100
 greenbubbles chats find "Alice"
 greenbubbles messages list --conversation "Alice" --limit 100
 greenbubbles messages recent --limit 50
-greenbubbles messages search --query-stdin
+greenbubbles messages search --query "keyword"
 ```
 
 `messages list`, `messages recent`, and `messages search` print JSON Lines. The header has
@@ -97,6 +97,11 @@ Conversation and message cursors use keyset ordering, are bound to the source
 and filter, and should be discarded if the CLI rejects them. `message get`
 accepts an opaque identity returned by `messages list` or `messages search` for
 the same source and conversation.
+
+For ordinary search, pass `--query "text"` as an argument. Use `--query-stdin`
+for interactive or piped input instead. Choose exactly one. With `--query`,
+stdin is needed only for a credential in an explicit access mode. Keep keys out
+of arguments. Both input forms use the same literal, parameterized search.
 
 Search prefers WeChat's compatible native FTS database read-only. When native
 FTS is unavailable, it scans a fixed decoded source window without writing an

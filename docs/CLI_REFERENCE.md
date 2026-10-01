@@ -47,7 +47,7 @@ Once your key is set up, these need no extra arguments:
 | `greenbubbles messages recent` | Read the newest messages across all identifiable chats. |
 | `greenbubbles chats rank` | Rank chats by how many messages you sent. No message text. |
 | `greenbubbles messages list --conversation <id>` | Read one chat by ID or unambiguous name, newest first. |
-| `greenbubbles messages search --query-stdin` | Search messages. The search text comes from stdin. |
+| `greenbubbles messages search --query "keyword"` | Search messages using the quoted text. |
 | `greenbubbles message get --conversation <id> --message <id>` | Fetch one message by its opaque id. |
 | `greenbubbles contacts list` | List contacts. |
 
@@ -66,7 +66,7 @@ print the installed CLI version without reading a key or opening data.
 greenbubbles chats
 greenbubbles chats find "Alice"
 greenbubbles messages list --conversation "Alice"
-greenbubbles messages search --conversation "Alice" --query-stdin
+greenbubbles messages search --conversation "Alice" --query "keyword"
 greenbubbles messages recent --limit 50
 greenbubbles messages recent --since 1790812800 --json
 greenbubbles version
@@ -145,14 +145,17 @@ these flags; they're for snapshots, other accounts, and test data.
 | Older snapshot, raw key | `--snapshot-key-stdin` | the key, as line 1 |
 | Test data or plaintext | `--decrypted` | nothing |
 
-When a search also reads from stdin, the key or passphrase is line 1 and the
+When a search uses `--query-stdin`, the key or passphrase is line 1 and the
 search text is the rest. In file-based and plaintext modes, stdin holds only
 the search text.
 
-**Never put a key, passphrase, recovery phrase, replica key, or private search
-text in a command-line argument.** Arguments are visible to every process on
-the Mac, and typed values end up in shell history. Redirect an owner-only file
-into stdin instead.
+**Never put a key, passphrase, recovery phrase, or replica key in a command-line
+argument.** Redirect an owner-only credential file into stdin instead.
+Search text can use `--query "text"` or `--query-stdin`, but not both. `--query`
+uses stdin only for credentials when an explicit access mode requires them.
+Command-line search text can appear in shell history and process arguments;
+`--query-stdin` remains available for interactive input or piping. Both forms
+use the same bounded, parameterized literal search and accept at most 16 KiB.
 
 ## Reading `messages list`, `messages recent`, and `messages search`
 

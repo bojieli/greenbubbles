@@ -2,8 +2,8 @@
 
 Use these commands in the current agent's shell. No driver and no separate
 API key. Examples use `greenbubbles`. Substitute the verified absolute Rust
-CLI path when it is not on `PATH`. Quote paths. Never put a passphrase or a
-search string in an argument.
+CLI path when it is not on `PATH`. Quote paths. Never put a passphrase in an argument. Search text uses
+`--query "text"`, or `--query-stdin` for interactive/piped input.
 
 ## Commands
 
@@ -12,7 +12,7 @@ greenbubbles source status
 greenbubbles chats rank --minimum-self-messages 10 --limit 2000
 greenbubbles chats find "Alice"
 greenbubbles messages list --conversation ID --since <unix> --until <unix> --limit 80
-printf '%s\n' 'query' | greenbubbles messages search --query-stdin --since <unix> --limit 25
+greenbubbles messages search --query "keyword" --since <unix> --limit 25
 ```
 
 `source status` reports database count and storage bytes. It prints no
@@ -156,8 +156,7 @@ cursor, then read the next page. Keep only lines that belong in an article.
 
 ## Search
 
-`messages search` reads the query from standard input, never from an
-argument. Pipe the query. Search lines add `chat` when the conversation has
+`messages search` accepts `--query "text"` or `--query-stdin`, but not both. Search lines add `chat` when the conversation has
 a display name, and `conversationId` when it does not. A search line has no
 `file`. Open the conversation with `messages list` to read an image or file
 found by search.

@@ -13,12 +13,12 @@ account and saved key automatically; no profile or source arguments are needed.
 
 | User wants | Start with |
 | --- | --- |
-| Find a chat or person | `greenbubbles chats find "name"` |
-| Browse conversation names and IDs | `greenbubbles chats --limit 20` |
 | Read one chat | `greenbubbles messages list --conversation "name" --limit 50` |
 | Latest activity across chats | `greenbubbles messages recent --limit 50` |
-| Search text | `greenbubbles messages search --query-stdin` |
+| Search text | `greenbubbles messages search --query "keyword"` |
+| Browse conversation names and IDs | `greenbubbles chats --limit 20` |
 | Prioritize chats by participation | `greenbubbles chats rank --limit 100` |
+| Find a chat or person | `greenbubbles chats find "name"` |
 | Fetch a citation's message | `greenbubbles message get --conversation ID --message ID` |
 
 Names may be nicknames, remarks, aliases, or IDs. When several chats match,
@@ -43,6 +43,6 @@ claims; distinguish the account holder's words from other people's claims.
   [references/advanced.md](references/advanced.md).
 
 Read through GreenBubbles rather than raw SQL. Do not create a full archive to
-answer a bounded question. Never put keys or search text in command arguments
+answer a bounded question. Never put keys in command arguments
 or ask for secrets in chat. Keep cloud-model use within the user's authorized
 scope. `greenbubbles <command> --help` opens no database.

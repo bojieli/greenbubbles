@@ -1133,6 +1133,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         &[
                             "--profile",
                             "--conversation",
+                            "--query",
                             "--limit",
                             "--cursor",
                             "--since",
@@ -1151,11 +1152,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             "--redact",
                         ],
                     )?;
-                    if !remaining.iter().any(|value| value == "--query-stdin") {
-                        return Err("message search requires --query-stdin".into());
+                    let query_argument = option_string(&remaining, "--query")?;
+                    let query_stdin = remaining.iter().any(|value| value == "--query-stdin");
+                    if query_argument.is_some() == query_stdin {
+                        return Err("choose exactly one search input: --query <text> or --query-stdin".into());
                     }
                     let invocation = resolve_query_invocation(database_root, &remaining)?;
-                    let mut query = read_utf8_stdin_limited(MAX_SEARCH_QUERY_BYTES as u64)?;
+                    let mut query = match query_argument {
+                        Some(query) => Zeroizing::new(query),
+                        None => read_utf8_stdin_limited(MAX_SEARCH_QUERY_BYTES as u64)?,
+                    };
                     while query.ends_with(['\n', '\r']) {
                         query.pop();
                     }
@@ -3075,14 +3081,14 @@ const fn complete_command_listing() -> &'static str {
         "Usage: greenbubbles <command> [options]\n\nComplete command list. Most people only need the commands in 'greenbubbles help'.\n\n",
         "Version: greenbubbles version | greenbubbles -v | greenbubbles --version\n\n",
         "Browse:\n",
-        "  greenbubbles chats rank [--minimum-self-messages <n>] [--limit <1..2000>] [--cursor <token>] [--json]\n",
-        "  greenbubbles chats [--profile <name>] [--limit <1..500>] [--cursor <token>]\n",
-        "  greenbubbles messages list --conversation <id> [--conversation <id> ...] [--since <unix>] [--until <unix>] [--limit <1..500>] [--cursor <token>] [--redact] [--json]\n",
-        "  greenbubbles messages search --query-stdin [--conversation <id>] [--since <unix>] [--until <unix>] [--limit <1..200>] [--redact] [--json]\n",
-        "  greenbubbles message get --conversation <id> --message <id>\n",
-        "  greenbubbles chats find <nickname-or-remark>\n",
+        "  greenbubbles messages list --conversation <name-or-id> [--conversation <name-or-id> ...] [--since <unix>] [--until <unix>] [--limit <1..500>] [--cursor <token>] [--redact] [--json]\n",
         "  greenbubbles messages recent [--limit <1..500>] [--since <unix>] [--json]\n",
+        "  greenbubbles messages search --query <text> [--conversation <name-or-id>] [--since <unix>] [--until <unix>] [--limit <1..200>] [--redact] [--json]\n",
+        "  greenbubbles chats [--profile <name>] [--limit <1..500>] [--cursor <token>]\n",
+        "  greenbubbles chats rank [--minimum-self-messages <n>] [--limit <1..2000>] [--cursor <token>] [--json]\n",
+        "  greenbubbles chats find <nickname-or-remark>\n",
         "  greenbubbles contacts list [--kind <kind>] [--limit <1..500>] [--details]\n",
+        "  greenbubbles message get --conversation <id> --message <id>\n",
         "  greenbubbles source status\n",
         "  greenbubbles attachment inspect|materialize --conversation <id> --message <id> --kind image|voice|video|document\n\n",
         "Saved sources:\n",
@@ -3288,8 +3294,8 @@ const fn messages_command_help() -> &'static str {
         "Usage:\n",
         "  greenbubbles messages list --conversation <id> [--conversation <id> ...] [--profile <name>] [--since <unix>] [--until <unix>] [--limit <1..500>] [--cursor <opaque-cursor>] [--redact] [--json]\n",
         "  greenbubbles messages list <source-root> --conversation <id> [--conversation <id> ...] (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--since <unix>] [--until <unix>] [--limit <1..500>] [--cursor <opaque-cursor>] [--redact] [--json]\n\n",
-        "  greenbubbles messages search --query-stdin [--profile <name>] [--conversation <id>] [--since <unix>] [--until <unix>] [--limit <1..200>] [--cursor <opaque-cursor>] [--redact] [--json]\n",
-        "  greenbubbles messages search <source-root> --query-stdin (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--since <unix>] [--until <unix>] [--limit <1..200>] [--cursor <opaque-cursor>] [--redact] [--json]\n\n",
+        "  greenbubbles messages search (--query <text> | --query-stdin) [--profile <name>] [--conversation <id>] [--since <unix>] [--until <unix>] [--limit <1..200>] [--cursor <opaque-cursor>] [--redact] [--json]\n",
+        "  greenbubbles messages search <source-root> (--query <text> | --query-stdin) (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--since <unix>] [--until <unix>] [--limit <1..200>] [--cursor <opaque-cursor>] [--redact] [--json]\n\n",
         "Prints one bounded reading page, newest message first. The default is JSON Lines:\n",
         "a header, then one object per message. The header has returned, hasMore, order\n",
         "(\"newest\"), timezone (the local offset), and nextCursor when another page exists.\n",
@@ -3367,8 +3373,8 @@ const fn messages_recent_help() -> &'static str {
 const fn messages_search_help() -> &'static str {
     concat!(
         "Usage:\n",
-        "  greenbubbles messages search --query-stdin [--profile <name>] [--conversation <id>] [--since <unix>] [--until <unix>] [--limit <1..200>] [--cursor <opaque-cursor>] [--redact] [--json]\n",
-        "  greenbubbles messages search <source-root> --query-stdin (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--since <unix>] [--until <unix>] [--limit <1..200>] [--cursor <opaque-cursor>] [--redact] [--json]\n\n",
+        "  greenbubbles messages search (--query <text> | --query-stdin) [--profile <name>] [--conversation <id>] [--since <unix>] [--until <unix>] [--limit <1..200>] [--cursor <opaque-cursor>] [--redact] [--json]\n",
+        "  greenbubbles messages search <source-root> (--query <text> | --query-stdin) (--passphrase-stdin | --snapshot-recovery-kit <file> | --snapshot-local-credential <file> | --snapshot-passphrase-stdin | --snapshot-key-stdin | --decrypted) [--conversation <id>] [--since <unix>] [--until <unix>] [--limit <1..200>] [--cursor <opaque-cursor>] [--redact] [--json]\n\n",
         "Runs one literal, parameterized, keyset-paginated query. It prefers the\n",
         "read-only native WeChat message index and never builds one. If that index is\n",
         "unavailable, one page decodes at most 500 source messages and returns a\n",
@@ -3379,7 +3385,11 @@ const fn messages_search_help() -> &'static str {
         "Phone numbers, emails, identity numbers, and links stay unless --redact is set.\n",
         "--json prints the full envelope. message get needs the opaque id from that\n",
         "envelope. Set [output] format in ~/.greenbubbles/config.toml to change the default.\n\n",
-        "Input ordering:\n",
+        "Use --query \"text\" for a one-line search. --query-stdin reads the search\n",
+        "from standard input instead; run the command, type it, then press Ctrl-D.\n",
+        "Choose exactly one. With --query, stdin is used only for a key/passphrase\n",
+        "when the selected access mode requires one.\n\n",
+        "Input ordering with --query-stdin:\n",
         "  encrypted live source   input line 1 is the WeChat key; all remaining UTF-8\n",
         "                          input (maximum 16 KiB) is the search query\n",
         "  encrypted snapshot      input line 1 is the snapshot recovery key; all remaining\n",
@@ -3392,8 +3402,10 @@ const fn messages_search_help() -> &'static str {
         "                          credential file is read separately\n",
         "  --decrypted             all standard input is the search query\n\n",
         "Options:\n",
-        "  --query-stdin       Required; search text is never accepted in an argument\n",
-        "  --conversation <id> Restrict hits to one exact wxid or chatroom identifier\n",
+        "  --query <text>      Search for the quoted text passed as an argument\n",
+        "  --query-stdin       Read search text from standard input: run the command,\n",
+        "                      type the search on the next line, press Return and Ctrl-D\n",
+        "  --conversation <id> Restrict hits to one ID, nickname, remark or alias\n",
         "  --since <unix>      Include hits at or after this unix second\n",
         "  --until <unix>      Include hits at or before this unix second\n",
         "  --limit <n>         Return 1..200 hits; default 50\n",

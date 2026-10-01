@@ -123,19 +123,22 @@ Once the key is set up, these commands read your live WeChat data:
 
 | Command | When to use it |
 | --- | --- |
-| `greenbubbles chats rank` | Find your most active conversations, ranked by how many messages you sent, with one-on-one chats first. |
-| `greenbubbles messages recent` | See the newest messages across all chats, with each chat identified. |
-| `greenbubbles chats find "Alice"` | Find a chat by nickname, remark, alias, or ID; partial names work. |
 | `greenbubbles messages list --conversation "Alice"` | Read the newest messages in one chat, including available attachment paths. |
-| `greenbubbles messages search --query-stdin` | Search message text across your chats. |
-| `greenbubbles messages search --conversation "Alice" --query-stdin` | Search message text within one chat. |
+| `greenbubbles messages recent` | See the newest messages across all chats, with each chat identified. |
+| `greenbubbles messages search --query "keyword"` | Search message text across your chats. |
+| `greenbubbles messages search --conversation "Alice" --query "keyword"` | Search message text within one chat. |
 | `greenbubbles chats` | Browse a page of chats and their IDs. |
+| `greenbubbles chats rank` | Find your most active conversations, ranked by how many messages you sent, with one-on-one chats first. |
+| `greenbubbles chats find "Alice"` | Find a chat by nickname, remark, alias, or ID; partial names work. |
 | `greenbubbles contacts list --details` | Browse contacts with their nicknames, remarks, and aliases. |
 | `greenbubbles message get --conversation <conversation-id> --message <message-id>` | Fetch one message using its ID from `--json` output. |
 | `greenbubbles source status` | Check database access and storage sizes without reading message text. |
 
-For searches, type the search text after running the command, then press
-Control-D. Run `greenbubbles help --all` for the full command list,
+Replace `"keyword"` with the text to search for. `--query "text"` supplies it
+as a command-line argument. For interactive or piped input, use `--query-stdin`
+instead: run the command, type the search on the next line, press Return, then
+Control-D. Choose one input form per search.
+Run `greenbubbles help --all` for the full command list,
 `greenbubbles messages recent --help` for help with a specific command, or
 `greenbubbles version` (also `-v` or `--version`) to check the installed version.
 

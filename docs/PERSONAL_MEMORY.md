@@ -49,8 +49,8 @@ greenbubbles chats rank --minimum-self-messages 10 --limit 2000
 # Read one chat between two times (Unix timestamps).
 greenbubbles messages list --conversation ID --since <unix> --until <unix> --limit 80
 
-# Search. The search text is read from standard input.
-printf '%s\n' 'query' | greenbubbles messages search --query-stdin --limit 25
+# Search with a command-line term.
+greenbubbles messages search --query "keyword" --limit 25
 ```
 
 How to read the output:

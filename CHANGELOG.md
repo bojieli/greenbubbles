@@ -14,6 +14,8 @@ Notable changes to GreenBubbles are documented here. The project follows
 - `messages recent` shows a globally time-ordered page across identifiable
   chats, with chat labels, time filters, source-bound pagination, and full
   message IDs for debugging and synchronization.
+- `messages search --query "text"` accepts a command-line search term;
+  `--query-stdin` remains available for interactive or piped input.
 - `version`, `-v`, and `--version` print the installed CLI version.
 - Bundled setup, context, and personal-memory skills cover name selection,
   recent-message pagination, and incremental polling. Entrypoints route by task;
@@ -23,6 +25,7 @@ Notable changes to GreenBubbles are documented here. The project follows
 
 - `chats --limit` and other options no longer get mistaken for subcommands.
 - Top-level help includes `Usage`, matching the Homebrew smoke test.
+- README and CLI help put routine message reads first and explain stdin search.
 
 ## 0.9.5 - 2026-10-01
 
