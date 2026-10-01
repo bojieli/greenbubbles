@@ -18,6 +18,7 @@ which parts, if any, an AI gets to see. Start with the
 | Fix something that isn't working | [FAQ](FAQ.md) |
 | Know what it can't do before installing | [Known limitations](KNOWN_LIMITATIONS.md) and [threat model](THREAT_MODEL.md) |
 | Understand how it works | [Architecture](ARCHITECTURE.md), then [storage format](STORAGE_FORMAT.md) |
+| Understand WeChat files and message formats | [Database format](WECHAT_DATABASE_FORMAT.md) |
 | Check a performance claim | [Measurements](MEASUREMENTS.md) |
 | Compare it with WeChat export tools | [Comparison](COMPARISON.md) |
 | Contribute | [Contributing](../CONTRIBUTING.md) |
@@ -61,6 +62,7 @@ which parts, if any, an AI gets to see. Start with the
 - [Architecture](ARCHITECTURE.md): why GreenBubbles reads WeChat's data in
   place instead of exporting all of it, with the measurements behind that
   choice.
+- [Database format](WECHAT_DATABASE_FORMAT.md): the live directory layout, table discovery, message fields, media, XML, and CLI normalization.
 - [Storage format](STORAGE_FORMAT.md): what WeChat 4.1 writes to disk, how much
   of it GreenBubbles understands, and how gaps are reported.
 - [Restoration specification](RESTORATION_SPEC.md): the full, lossless export

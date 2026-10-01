@@ -14,6 +14,7 @@
   <a href="#getting-your-database-key">Get your key</a> ·
   <a href="#use-your-existing-coding-agent-recommended">Use with an agent</a> ·
   <a href="docs/README.md">Docs</a> ·
+  <a href="docs/WECHAT_DATABASE_FORMAT.md">Database format</a> ·
   <a href="CONTRIBUTING.md">Contribute</a>
 </p>
 
