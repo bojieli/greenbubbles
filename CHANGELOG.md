@@ -4,6 +4,18 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
+## 0.9.4 - 2026-10-01
+
+### Added
+
+- Added a documented guide to the live WeChat database layout, message table
+  fields, auxiliary stores, encryption, and message decoding.
+
+### Fixed
+
+- The live CLI now reads business message shards and media databases stored
+  beside current WeChat message shards.
+
 ## 0.9.3 - 2026-09-30
 
 ### Changed

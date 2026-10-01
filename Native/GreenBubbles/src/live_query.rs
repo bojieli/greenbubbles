@@ -308,20 +308,35 @@ impl<'a> LiveQuerySource<'a> {
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
-            let Some(number) = name
-                .strip_prefix("message_")
-                .and_then(|value| value.strip_suffix(".db"))
-            else {
+            let (prefix, number) = if let Some(number) = name.strip_prefix("message_") {
+                ("message_", number)
+            } else if let Some(number) = name.strip_prefix("biz_message_") {
+                ("biz_message_", number)
+            } else {
+                continue;
+            };
+            let Some(number) = number.strip_suffix(".db") else {
                 continue;
             };
             if number.is_empty() || !number.bytes().all(|byte| byte.is_ascii_digit()) {
                 continue;
             }
-            let shard_id = number.parse::<u32>().map_err(|_| {
+            let number = number.parse::<u32>().map_err(|_| {
                 LiveQueryError::UnsafeSource(
                     "message shard identifier is outside safe limits".into(),
                 )
             })?;
+            // Keep ordinary shard IDs stable for callers. Business shards use a
+            // separate range so warnings and coverage records remain unique.
+            let shard_id = if prefix == "message_" {
+                number
+            } else {
+                1_000_000u32.checked_add(number).ok_or_else(|| {
+                    LiveQueryError::UnsafeSource(
+                        "business message shard identifier is outside safe limits".into(),
+                    )
+                })?
+            };
             let relative_path = relative_directory.join(&name);
             self.safe_database_path(&relative_path)?;
             shards.push(MessageShard {
@@ -352,11 +367,16 @@ impl<'a> LiveQuerySource<'a> {
     }
 
     pub(crate) fn media_databases(&self) -> Result<Vec<PathBuf>, LiveQueryError> {
-        let relative_directory = Path::new("media");
+        let mut relative_directory = Path::new("media");
         let candidate = self.root.join(relative_directory);
         let metadata = match fs::symlink_metadata(&candidate) {
             Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                relative_directory = Path::new("message");
+                fs::symlink_metadata(self.root.join(relative_directory)).map_err(|_| {
+                    LiveQueryError::UnsafeSource("media database directory is unavailable".into())
+                })?
+            }
             Err(_) => {
                 return Err(LiveQueryError::UnsafeSource(
                     "media database directory is unavailable".into(),
@@ -414,7 +434,58 @@ impl<'a> LiveQuerySource<'a> {
                 ));
             }
         }
+        // Current WeChat builds keep voice metadata beside the message shards.
+        // Older snapshots may still have a top-level media directory, so scan
+        // both locations.
+        if !self.root.join("message").exists() {
+            databases.sort();
+            databases.dedup();
+            return Ok(databases);
+        }
+        let message_directory =
+            self.safe_database_directory(Path::new("message"), "message database directory")?;
+        for entry in fs::read_dir(&message_directory).map_err(|_| {
+            LiveQueryError::UnsafeSource("message database directory cannot be read".into())
+        })? {
+            let entry = entry.map_err(|_| {
+                LiveQueryError::UnsafeSource("message database inventory changed while read".into())
+            })?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let numbered = name
+                .strip_prefix("media_")
+                .and_then(|value| value.strip_suffix(".db"))
+                .is_some_and(|value| {
+                    !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit())
+                });
+            if name != "media.db" && !numbered {
+                continue;
+            }
+            if !entry
+                .file_type()
+                .map_err(|_| {
+                    LiveQueryError::UnsafeSource(
+                        "media database file type could not be inspected".into(),
+                    )
+                })?
+                .is_file()
+            {
+                return Err(LiveQueryError::UnsafeSource(
+                    "media database inventory contains a non-regular candidate".into(),
+                ));
+            }
+            let relative_path = Path::new("message").join(name);
+            self.safe_database_path(&relative_path)?;
+            databases.push(relative_path);
+        }
         databases.sort();
+        databases.dedup();
+        if databases.len() > MAXIMUM_SOURCE_DATABASE_FILES {
+            return Err(LiveQueryError::UnsafeSource(
+                "media database count exceeds the fixed safety limit".into(),
+            ));
+        }
         Ok(databases)
     }
 }
