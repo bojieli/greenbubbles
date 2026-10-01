@@ -137,7 +137,7 @@ Once the key is set up, these commands read your live WeChat data:
 For searches, type the search text after running the command, then press
 Control-D. Run `greenbubbles help --all` for the full command list,
 `greenbubbles messages recent --help` for help with a specific command, or
-`greenbubbles --version` to check the installed version.
+`greenbubbles version` (also `-v` or `--version`) to check the installed version.
 
 Replace `"Alice"` with a chat's nickname, remark, or alias. `chats find` matches
 partial names without reading messages. `messages list` and `messages search`

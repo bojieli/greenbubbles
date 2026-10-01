@@ -14,7 +14,7 @@ Notable changes to GreenBubbles are documented here. The project follows
 - `messages recent` shows a globally time-ordered page across identifiable
   chats, with chat labels, time filters, source-bound pagination, and full
   message IDs for debugging and synchronization.
-- `--version` prints the installed CLI version.
+- `version`, `-v`, and `--version` print the installed CLI version.
 - Bundled setup, context, and personal-memory skills cover name selection,
   recent-message pagination, and incremental polling. Entrypoints route by task;
   advanced exports and evidence rules have separate references.

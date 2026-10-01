@@ -24,7 +24,7 @@ For a Homebrew installation, update the tap and upgrade:
 ```sh
 brew update
 brew upgrade bojieli/greenbubbles/greenbubbles
-greenbubbles --version
+greenbubbles version
 greenbubbles messages recent --help
 ```
 

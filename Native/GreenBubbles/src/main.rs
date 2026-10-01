@@ -555,7 +555,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut arguments = raw.into_iter().peekable();
     let command = arguments.next().unwrap_or_else(|| "help".to_string());
-    if command == "--version" || command == "version" {
+    if matches!(command.as_str(), "--version" | "version" | "-v") {
         println!("greenbubbles {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
@@ -3073,6 +3073,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 const fn complete_command_listing() -> &'static str {
     concat!(
         "Usage: greenbubbles <command> [options]\n\nComplete command list. Most people only need the commands in 'greenbubbles help'.\n\n",
+        "Version: greenbubbles version | greenbubbles -v | greenbubbles --version\n\n",
         "Browse:\n",
         "  greenbubbles chats rank [--minimum-self-messages <n>] [--limit <1..2000>] [--cursor <token>] [--json]\n",
         "  greenbubbles chats [--profile <name>] [--limit <1..500>] [--cursor <token>]\n",

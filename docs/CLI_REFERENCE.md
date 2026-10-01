@@ -57,6 +57,9 @@ from `~/.greenbubbles-acquire/passphrase.txt`. To use a different path, set it
 in `~/.greenbubbles/config.toml`. Use a [query profile](QUERY_PROFILES.md) only
 for a second account or a backup.
 
+`greenbubbles version`, `greenbubbles -v`, and `greenbubbles --version` all
+print the installed CLI version without reading a key or opening data.
+
 ## Find chats and read recent activity
 
 ```sh
@@ -66,7 +69,7 @@ greenbubbles messages list --conversation "Alice"
 greenbubbles messages search --conversation "Alice" --query-stdin
 greenbubbles messages recent --limit 50
 greenbubbles messages recent --since 1790812800 --json
-greenbubbles --version
+greenbubbles version
 ```
 
 `chats find` returns a JSON array with IDs, display names, nicknames, remarks,

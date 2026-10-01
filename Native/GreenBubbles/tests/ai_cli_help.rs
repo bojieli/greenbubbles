@@ -96,3 +96,30 @@ fn personal_memory_help_exposes_the_agent_batch_contract_without_private_inputs(
         assert!(stdout.contains("--reviewed-no-durable-memory"));
     }
 }
+
+#[test]
+fn version_aliases_report_the_package_version_without_private_inputs() {
+    for alias in ["version", "-v", "--version"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
+            .arg(alias)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("greenbubbles {}\n", env!("CARGO_PKG_VERSION"))
+        );
+    }
+}
+
+#[test]
+fn top_level_help_satisfies_the_homebrew_smoke_test() {
+    let output = Command::new(env!("CARGO_BIN_EXE_greenbubbles"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let combined = [output.stdout, output.stderr].concat();
+    assert!(String::from_utf8(combined).unwrap().contains("Usage"));
+}
