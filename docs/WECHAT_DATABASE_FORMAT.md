@@ -215,6 +215,179 @@ SQLite full-text search tables also appear in several stores. Names ending in
 `_data`, `_idx`, `_content`, `_config`, or `_docsize` are usually FTS support
 tables, not independent message sources.
 
+## Database-by-database reference
+
+This section names the purpose of each database observed during the direct SQL
+check. A database can contain empty tables on one account and populated tables
+on another. An empty table is still useful evidence: it tells a reader what
+the WeChat build supports even when that feature has not been used.
+
+| Database | What it stores | How GreenBubbles uses it |
+| --- | --- | --- |
+| `message/message_<n>.db` | Ordinary chat shards. Each `Msg_<conversation-hash>` table stores one conversation's messages. `Name2Id` maps internal conversation IDs to usernames. | Primary live message source. |
+| `message/biz_message_<n>.db` | Business-account and business-chat message shards with the same `Msg_<hash>` row shape. | Primary message source when present. |
+| `message/media_<n>.db` | Voice and other media metadata, including `VoiceInfo` on builds that provide it. | Attachment lookup; it is not a message store. |
+| `message/message_resource.db` | Resource rows connecting a message to media metadata, IDs, hashes, or packed information. | Attachment lookup and provenance. |
+| `message/message_fts.db` | Full-text search indexes for messages. | Used only as an index when its schema matches; its shadow tables are not messages. |
+| `message/weclaw.db` | WeChat internal state. The inspected account had no usable content tables. | Inventory only unless a supported schema appears. |
+| `contact/contact.db` | Contacts, chat rooms, group membership, labels, business contacts, and tickets. | Sender names, participant types, groups, and enrichment. |
+| `contact/contact_fts.db` | Contact and chat-room-member search indexes. | Search/enrichment support only. |
+| `session/session.db` | Conversation list, drafts, unread counts, and last-message summaries. | Session enrichment and unread/session metadata; never the authoritative message history. |
+| `general/general.db` | Friend requests, transfers, red envelopes, recall records, web search, WeApp and Finder state. | Selected system-event enrichment; these tables are not ordinary chat shards. |
+| `hardlink/hardlink.db` | MD5-to-file indexes for images, videos, files, and directory IDs. | Resolves account-local attachment paths. |
+| `head_image/head_image.db` | Contact avatar blobs keyed by username and MD5. | Avatar or contact-image lookup when requested. |
+| `favorite/favorite.db` | Saved/favorite items and favorite tags. | Auxiliary saved-item inventory; not chat history. |
+| `favorite/favorite_fts.db` | Full-text index over favorite content. | Favorite search support only. |
+| `emoticon/emoticon.db` | Installed and non-store sticker packages, captions, files, and ordering. | Sticker metadata and resource lookup. |
+| `sns/sns.db` | Moments timeline, comments, drafts, top items, and timeline break markers. | Cached-surface inventory; it is not treated as ordinary chat history. |
+| `solitaire/solitaire.db` | WeChat Solitaire/接龙 content, folds, and validity state. | Auxiliary feature inventory. |
+| `bizchat/bizchat.db` | Business-chat groups and users. | Auxiliary business-contact metadata. |
+| `chatbot/chatbot_message.db` | Chatbot sessions and chatbot messages. | Auxiliary chatbot inventory; supported only when its message signature is explicitly recognized. |
+| `third_app_icon/third_app_icon.db` | Third-party app icon images keyed by app and MD5. | App-card resource enrichment. |
+| `MMKV`, `*.kvdb`, `*.material` | WeChat preferences, key/value state, or capture/material files. | Preserved in the inventory where relevant; not parsed as SQLite message tables. |
+
+The names above are the observed roles, not a guarantee that every WeChat
+release creates every file. WeChat may add a numeric suffix, create a new
+feature database, or move a feature into another store. GreenBubbles records
+that change as a schema or coverage difference instead of treating the new
+file as an ordinary message database.
+
+### Exact ordinary-message schema
+
+The current live message tables have names of the form
+`Msg_<32-lowercase-hex-characters>`. The hash identifies a conversation in
+WeChat's internal naming scheme; it is not a username and should not be used as
+one. The same row schema was observed in ordinary and business message stores:
+
+| Column | Meaning | Normalized by GreenBubbles |
+| --- | --- | --- |
+| `local_id` | WeChat's local row identifier. | Local message ID. |
+| `server_id` | Server-assigned message identifier. | Server message ID and identity fallback. |
+| `local_type` | Packed WeChat message type and subtype. | Split into numeric type/subtype and decoded with `wx-db`. |
+| `sort_seq` | WeChat's per-conversation ordering sequence. | Primary ordering field and cursor component. |
+| `real_sender_id` | Internal sender identifier for the row. | Sender evidence and contact lookup. |
+| `create_time` | Message creation time, represented by WeChat as an integer timestamp. | Local creation time after the source-time conversion. |
+| `status` | WeChat row/message state. | Preserved status; exposed in the live item. |
+| `upload_status` | Outgoing upload state. | Preserved in raw source columns; not used as delivery proof. |
+| `download_status` | Incoming/download state. | Preserved in raw source columns and relevant to media availability. |
+| `server_seq` | Server-side ordering or transport sequence. | Preserved as source metadata. |
+| `origin_source` | WeChat provenance/source marker. | Preserved as source metadata. |
+| `source` | WeChat source/provenance field. | Preserved as source metadata. |
+| `message_content` | Main message body: text, XML, packed bytes, or compressed data. | Decoded content and raw bytes. |
+| `compress_content` | Optional alternate compressed content blob. | Used only when non-empty and applicable. |
+| `packed_info_data` | Packed auxiliary information, commonly used by rich messages and attachments. | Preserved and passed to decoders/resource resolution. |
+| `WCDB_CT_message_content` | WCDB compression/storage marker for `message_content`. | Selects the appropriate content interpretation. |
+| `WCDB_CT_source` | WCDB compression/storage marker for `source`. | Preserved as source metadata. |
+
+Every `Msg_<hash>` table also has SQLite indexes whose names end in
+`_SENDERID`, `_SERVERID`, `_SORTSEQ`, or `_TYPE_SEQ`. Those indexes accelerate
+WeChat queries; they are not additional fields or message tables. `Name2Id`
+and `SendInfo` are companion tables: `Name2Id.user_name` maps an internal
+conversation ID to a username, while `SendInfo` associates a chat-name ID with
+a local message ID. `DeleteInfo`, `DeleteResInfo`, `HistoryAddMsgInfo`, and
+`HistorySysMsgInfo` track deletion/history operations and are auxiliary state.
+
+### Contact and group schema
+
+The central `contact` table has this exact live column set:
+
+```text
+id, username, local_type, alias, encrypt_username, flag, delete_flag,
+verify_flag, remark, remark_quan_pin, remark_pin_yin_initial, nick_name,
+pin_yin_initial, quan_pin, big_head_url, small_head_url, head_img_md5,
+chat_room_notify, is_in_chat_room, description, extra_buffer, chat_room_type
+```
+
+| Table | Columns | Meaning |
+| --- | --- | --- |
+| `contact` | The columns above | One contact or account record. `username` is the stable WeChat-side identifier; names, aliases, remarks, URLs, flags, and extension data are attributes. |
+| `stranger` | Same column set as `contact` | Contact-like records not yet in the normal contact set. |
+| `chat_room` | `id, username, owner, ext_buffer` | Group identity, group username, owner, and opaque extension data. |
+| `chatroom_member` | `room_id, member_id` | Many-to-many group-to-contact relationship. |
+| `chat_room_info_detail` | `room_id_, username_, announcement_, announcement_editor_, announcement_publish_time_, chat_room_status_, xml_announcement_, ext_buffer_` | Group announcement and status information. |
+| `contact_label` | `label_id_, label_name_, sort_order_` | User-defined contact labels. |
+| `biz_info` | `id, username, type, accept_type, child_type, version, external_info, brand_info, brand_icon_url, brand_list, brand_flag, belong, ext_buffer, home_url, sync_version` | Business/official-account metadata. |
+| `ticket_info` | `id, ticket` | Contact ticket or verification metadata. |
+
+The `*_pin_yin`, `quan_pin`, and initial columns are search forms of a name;
+they are not separate names. `extra_buffer`, `ext_buffer`, and similar blob
+columns are opaque WeChat extension data. GreenBubbles retains them when
+restoring raw columns but does not invent a public schema for their bytes.
+
+### Session schema
+
+`SessionTable` has this exact live column set:
+
+```text
+username, type, unread_count, unread_first_msg_srv_id,
+unread_first_pat_msg_local_id, unread_first_pat_msg_sort_seq, is_hidden,
+summary, draft, status, last_timestamp, sort_timestamp,
+last_clear_unread_timestamp, last_msg_locald_id, last_msg_type,
+last_msg_sub_type, last_msg_sender, last_sender_display_name,
+last_msg_ext_type
+```
+
+`username` identifies the conversation. `unread_count` and the
+`unread_first_*` fields describe the unread boundary. `is_hidden`, `status`,
+and `draft` describe UI/session state. The `last_*` fields are a cached summary
+of the latest message; they can be stale and do not replace the `Msg_<hash>`
+row. `SessionUnreadListTable_1` stores `username_id, server_id, create_time,
+local_id` for individual unread entries, and `SessionUnreadStatTable_1` stores
+`username_id, unread_stat` aggregate counts. `SessionDraft` stores
+`username, window_id, timestamp, draft_data`.
+
+### System and feature-table schemas
+
+The following field sets are confirmed by the live SQL inspection. Their
+meanings are limited to the feature named by the table; unfamiliar extension
+and buffer fields remain opaque.
+
+| Table | Exact columns | Meaning |
+| --- | --- | --- |
+| `FMessageTable` | `user_name_, type_, timestamp_, encrypt_user_name_, content_, is_sender_, ticket_, scene_, fmessage_detail_buf_, remark_, label_ids_` | Friend/contact event: user, event type/time, content, sender flag, ticket, scene, details, remark, and labels. |
+| `redEnvelopeTable` | `message_server_id, session_name, sender_user_name, native_url, send_id, scene_id, hb_status, hb_type, receive_status` | Red-envelope message/payment metadata and state. |
+| `transferTable` | `transfer_id, transcation_id, message_server_id, second_message_server_id, session_name, pay_sub_type, pay_receiver, pay_payer, begin_transfer_time, last_modified_time, invalid_time, last_update_time, delay_confirm_flag, bubble_clicked_flag` | Transfer identifiers, participants, timestamps, subtype, and UI/state flags. |
+| `revokemessage` | `to_user_name, svr_id, message_type, revoke_time, content, at_user_list` | Recall/revoke information for a message. |
+| `SnsTimeLine` | `tid, user_name, content, pack_info_buf` | Moments item ID, author, serialized content, and packed metadata. |
+| `SnsMessage_tmp3` | `local_id, create_time, type, feed_id, is_unread, from_username, from_nickname, to_username, to_nickname, content, serialized_comment_buf, serialized_ref_buf, comment_id, client_id, comment64_id, comment_flag, del_status, is_relative_me` | Moments comment/interaction rows and their serialized content/reference fields. |
+| `SnsTopItem_1` | `tid, username, summary, create_time, last_read_time, is_read` | Moments top-item/read-state cache. |
+| `fav_db_item` | `local_id, server_id, type, update_seq, flag, update_time, version, content, source_id, sync_status, upload_status, fromusr, fromusr_id, realchatname, realchatname_id, ext_buf, upload_error_code, trans_res_status, trans_res_error_code` | A saved item, its content/source, sender/chat context, sync state, and transfer errors. |
+| `head_image` | `username, md5, image_buffer, update_time` | Avatar bytes and their content hash. |
+| `file_hardlink_info_v4`, `image_hardlink_info_v4`, `video_hardlink_info_v4` | `md5_hash, md5, type, file_name, file_size, modify_time, dir1, dir2, _rowid_, extra_buffer` | Attachment hash, kind, name, size, modification time, directory IDs, and extension data. |
+| `VoiceInfo` (when present) | Server/local message ID aliases plus voice-data fields | Voice payload metadata; exact optional columns vary by build and are matched by signature. |
+| `kNonStoreEmoticonTable` | `type, md5, caption, product_id, aes_key, thumb_url, tp_url, auth_key, cdn_url, extern_url, extern_md5, encrypt_url, designer_id, activity_id` | Non-store sticker metadata and download/encryption URLs. |
+| `kStoreEmoticonPackageTable` | `package_id_, package_name_, payment_status_, download_status_, install_time_, remove_time_, sort_order_, introduction_, full_description_, copyright_, author_, store_icon_url_, panel_url_` | Installed sticker package metadata and lifecycle state. |
+
+The `db_info`, `config`, `buff`, and `table_info` tables use the common
+key/value columns `Key, ValueInt64, ValueDouble, ValueStdStr, ValueBlob`.
+Their values are database-local settings, not message fields.
+
+The attachment tables observed in the live account had these exact schemas:
+
+| Table | Exact columns | Meaning |
+| --- | --- | --- |
+| `MessageResourceInfo` | `message_id, chat_id, sender_id, message_local_type, message_create_time, message_local_id, message_svr_id, message_origin_source, packed_info` | Links a message to its resource record using message/chat/sender identity, type, time, local/server IDs, source marker, and packed metadata. |
+| `MessageResourceDetail` | `resource_id, message_id, type, size, create_time, access_time, status, data_index, packed_info` | Describes one resource, its size/timestamps/state, data slot, and packed details. |
+| `FtsRange` | `session_id, db_time_stamp, start_local_id, end_local_id, range_type` | Resource/full-text range boundaries for a session. |
+| `ChatName2Id` and `SenderName2Id` | `user_name, update_time` | Name-to-internal-ID mapping timestamps for resource lookup. |
+| `VoiceInfo` in `message/media_<n>.db` | `chat_name_id, create_time, local_id, svr_id, voice_data, data_index` | Voice row keyed by chat and local/server message IDs, with creation time, voice bytes, and a data slot. |
+
+`message_resource.db` also contains `FtsDeleteInfo(session_id,
+max_message_id)`, which records an FTS/resource deletion boundary. The many
+`*_INDEX` tables in these databases are SQLite indexes over the tables above.
+
+### How to read the schema safely
+
+Use `PRAGMA table_xinfo('<table>')` on a decrypted copy when you need declared
+types, nullability, generated-column flags, or hidden-column information.
+The field lists above intentionally show names only because SQLite declared
+types in WCDB are not reliable descriptions of the payload: a `BLOB` may be
+compressed bytes, serialized XML, or an opaque extension buffer. Never query
+or publish row values from a real account as part of a schema report. A safe
+schema report records the database path relative to `db_storage`, table name,
+column names, declared metadata, row count, and a structural fingerprint while
+omitting identifiers, names, message content, keys, and binary payloads.
+
 ## From a row to a message
 
 The parser preserves the original SQLite values and derives a normalized view.

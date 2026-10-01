@@ -4,6 +4,14 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
+## 0.9.5 - 2026-10-01
+
+### Changed
+
+- Expanded the WeChat database guide with database purposes, exact observed
+  table schemas, field meanings, attachment/resource tables, and safe schema
+  inspection guidance.
+
 ## 0.9.4 - 2026-10-01
 
 ### Added
