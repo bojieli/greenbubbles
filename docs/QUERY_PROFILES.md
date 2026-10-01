@@ -188,7 +188,7 @@ greenbubbles messages search --profile archive --query-stdin --limit 50 \
   < <owner-only-query-file>
 ```
 
-Profiles apply only to reading commands, including `chats find` and `messages recent`: `source status`, `conversations list`,
+Profiles apply only to reading commands, including `chats find`: `source status`, `conversations list`,
 `messages list`, `messages search`, and `message get`. They don't affect
 creating or restoring backups, or anything else that writes.
 

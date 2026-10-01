@@ -121,13 +121,20 @@ to read a second WeChat account or a backup.
 
 Once the key is set up, these commands read your live WeChat data:
 
+Browse as you would in WeChat: list conversations, then open the one you want.
+You can use its nickname, remark, alias, or exact ID:
+
+```sh
+greenbubbles chats
+greenbubbles messages list --conversation "Alice"
+```
+
 | Command | When to use it |
 | --- | --- |
 | `greenbubbles messages list --conversation "Alice"` | Read the newest messages in one chat, including available attachment paths. |
-| `greenbubbles messages recent` | See the newest messages across all chats, with each chat identified. |
+| `greenbubbles chats` | Browse a page of chats and their IDs. |
 | `greenbubbles messages search --query "keyword"` | Search message text across your chats. |
 | `greenbubbles messages search --conversation "Alice" --query "keyword"` | Search message text within one chat. |
-| `greenbubbles chats` | Browse a page of chats and their IDs. |
 | `greenbubbles chats rank` | Find your most active conversations, ranked by how many messages you sent, with one-on-one chats first. |
 | `greenbubbles chats find "Alice"` | Find a chat by nickname, remark, alias, or ID; partial names work. |
 | `greenbubbles contacts list --details` | Browse contacts with their nicknames, remarks, and aliases. |
@@ -139,7 +146,7 @@ as a command-line argument. For interactive or piped input, use `--query-stdin`
 instead: run the command, type the search on the next line, press Return, then
 Control-D. Choose one input form per search.
 Run `greenbubbles help --all` for the full command list,
-`greenbubbles messages recent --help` for help with a specific command, or
+`greenbubbles messages list --help` for help with a specific command, or
 `greenbubbles version` (also `-v` or `--version`) to check the installed version.
 
 Replace `"Alice"` with a chat's nickname, remark, or alias. `chats find` matches
@@ -147,27 +154,25 @@ partial names without reading messages. `messages list` and `messages search`
 accept names too; if a name matches several chats, the command shows choices
 so you can use an exact ID.
 
-`messages list`, `messages recent`, and `messages search` print JSON Lines:
+`messages list` and `messages search` print JSON Lines:
 a header, then one line per message with who sent it, whether it was you,
-the local time, and the text. Recent messages also identify the chat.
-`messages list` and `messages recent` include local paths for photos, videos,
+the local time, and the text.
+`messages list` includes local paths for photos, videos,
 and files when they can be opened. Search results name the chat; use
 `messages list` to get attachment paths.
 
 - **Chat names:** `--conversation` accepts an exact ID, nickname, remark, or
   alias. Exact names take priority over partial matches, ignoring case. If
   several chats match, the error lists their IDs so you can choose one.
-- **Latest activity:** `messages recent` reads across all identifiable chats,
-  newest message time first. Each line includes the chat name and ID. Add
-  `--since <unix-seconds>` to check activity since your last synchronization;
-  poll again without `--cursor` for new arrivals.
-- **Defaults:** lists and recent messages return up to 100 results; search
+- **Conversation time:** `chats` includes readable local `sortTime` alongside
+  the numeric Unix-seconds `sortTimestamp`.
+- **Defaults:** lists return up to 100 results; search
   returns up to 50. No extra source or credential flags are needed after setup.
 - **More results:** if the output says `hasMore: true`, run the same command
   again with `--cursor` set to the `nextCursor` value it printed. Keep following
   search cursors even through empty pages while `hasMore` is true.
 - **Time windows:** add `--since` and `--until` as Unix timestamps in seconds
-  to message lists, recent messages, or searches, and repeat them when paging.
+  to message lists or searches, and repeat them when paging.
 - **Hide personal details:** add `--redact` to leave out phone numbers, email
   addresses, ID numbers, and links.
 - **Message IDs:** add `--json` to see full details, including the message IDs

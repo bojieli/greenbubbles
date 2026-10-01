@@ -8,17 +8,16 @@ Notable changes to GreenBubbles are documented here. The project follows
 
 ### Added
 
+- Conversation listings include readable local `sortTime` beside Unix-seconds
+  `sortTimestamp`.
 - `chats find <name>` finds known identities by nickname, remark, alias, or ID.
 - Message list, search, and exact-message retrieval accept unambiguous chat
   names; ambiguous names show the matching IDs.
-- `messages recent` shows a globally time-ordered page across identifiable
-  chats, with chat labels, time filters, source-bound pagination, and full
-  message IDs for debugging and synchronization.
 - `messages search --query "text"` accepts a command-line search term;
   `--query-stdin` remains available for interactive or piped input.
 - `version`, `-v`, and `--version` print the installed CLI version.
 - Bundled setup, context, and personal-memory skills cover name selection,
-  recent-message pagination, and incremental polling. Entrypoints route by task;
+  conversation browsing and paging. Entrypoints route by task;
   advanced exports and evidence rules have separate references.
 
 ### Fixed

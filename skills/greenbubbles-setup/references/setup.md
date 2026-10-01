@@ -25,15 +25,15 @@ For a Homebrew installation, update the tap and upgrade:
 brew update
 brew upgrade bojieli/greenbubbles/greenbubbles
 greenbubbles version
-greenbubbles messages recent --help
+greenbubbles messages list --help
 ```
 
 Version 0.10.0 adds nickname/remark/alias selection, `chats find`, and
-`messages recent`. If a local build shadows Homebrew, use `command -v
+command-line `--query` search. If a local build shadows Homebrew, use `command -v
 greenbubbles` to identify the selected binary before concluding an upgrade
 failed. A successful help check confirms syntax, not database access. Verify
 access with `source status` before reading messages. The setup check does not
-need to read recent messages across every chat.
+need to read message text.
 
 ## Open the live database
 
@@ -63,7 +63,7 @@ format = "brief"
 ```
 
 Leave a line out to keep its default. `output.format` is `brief` or `json`.
-`messages list`, `messages recent`, `messages search`, and `chats rank` are brief unless the
+`messages list`, `messages search`, and `chats rank` are brief unless the
 file or `--json` says otherwise. The file stores paths and that format.
 Never write the key into it, and never print the file's paths into chat.
 

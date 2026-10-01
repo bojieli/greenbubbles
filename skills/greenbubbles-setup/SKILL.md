@@ -20,7 +20,7 @@ or messages. A failed check is a setup issue, not evidence of empty history.
 Read [references/setup.md](references/setup.md) for the relevant installation,
 source/profile, or capture steps. Use `command -v greenbubbles` and
 `greenbubbles --version` to identify the selected executable; 0.10.0 includes
-`chats find`, name selection, and `messages recent`. Do not silently substitute
+`chats find`, name selection, and command-line `--query` search. Do not silently substitute
 another executable after a failed check.
 
 Ordinary live use needs no profile after capture: the CLI discovers the account

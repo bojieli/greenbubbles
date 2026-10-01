@@ -13,11 +13,10 @@ the newest installed WeChat `db_storage` directory and read
 greenbubbles chats --limit 100
 greenbubbles chats find "Alice"
 greenbubbles messages list --conversation "Alice" --limit 100
-greenbubbles messages recent --limit 50
 greenbubbles messages search --query "keyword"
 ```
 
-`messages list`, `messages recent`, and `messages search` print JSON Lines. The header has
+`messages list` and `messages search` print JSON Lines. The header has
 `returned`, `hasMore`, `order`, `timezone`, and `nextCursor`. Every message
 has `from` (never empty), `self` (`true` or `false`), `at` (local
 `YYYY-MM-DD HH:MM`), and `text`. An image, video, or document adds `file`,
@@ -38,6 +37,10 @@ the same kind of page: `from`, `id`, `kind`, `selfCount`, and `last`.
 Pass `--json` when you need the typed envelope or a message id for
 `message get`. `[output] format` in the settings file selects the default.
 
+`chats` items include readable local `sortTime` beside numeric Unix-seconds
+`sortTimestamp`. They represent the same instant; use the numeric field for
+comparisons and the readable field for presentation.
+
 `chats` is the short form of `conversations list`. Both accept the same
 options. A custom database or passphrase path belongs in
 `~/.greenbubbles/config.toml` under `[source]`, as `root` and
@@ -52,20 +55,11 @@ then exact names, then unique partial names. Ambiguous names fail with IDs on
 stderr; select one rather than guessing. Names are shell arguments; use IDs
 when a name should stay out of command history.
 
-`messages recent` reads message tables across identifiable chats, including
-chats absent from the session list. It does not depend on native FTS. It
-orders messages by creation time descending with deterministic ties. Each
-reading line has `chat` when known and `conversationId`, plus ordinary message
-fields and available attachment paths. `--json` has full IDs and coverage
-warnings. Unidentifiable tables are omitted with incomplete coverage, and reads
-across databases are not atomic.
-
-Recent defaults to 100 messages (maximum 500); search defaults to 50 hits
-(maximum 200). `--since`/`--until` are inclusive Unix seconds. Recent cursors
-page older messages and must use the same source and time window. For new
-arrivals, poll without a cursor, use an overlapping `--since` window, and
-deduplicate IDs from `--json`. This is a query, not a durable watcher or change
-feed. Use per-chat reads for a scope limited to selected chats.
+Recommend listing conversations with `chats`, then opening a selected one with
+`messages list --conversation "name"`. Lists default to 100 results (maximum
+500); search defaults to 50 hits (maximum 200). `--since` and `--until` are
+inclusive Unix seconds. Follow `nextCursor` only with the same source and
+filters. A message-list cursor reads older messages in the selected chat.
 
 For a second account, a snapshot, or an explicit source, choose exactly one
 access mode:

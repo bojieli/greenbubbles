@@ -702,6 +702,7 @@ pub struct ConversationItem {
     pub summary_decode_state: &'static str,
     pub summary_truncated: bool,
     pub sort_timestamp: i64,
+    pub sort_time: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_message_type: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2646,6 +2647,7 @@ pub fn list_conversations(
             summary_decode_state: row.summary_decode_state,
             summary_truncated: row.summary_truncated,
             sort_timestamp: row.sort_timestamp,
+            sort_time: readable_local_time(row.sort_timestamp),
             last_message_type: row.last_message_type,
             last_message_sender: row.last_message_sender,
             last_sender_display_name: row.last_sender_display_name,
@@ -2907,6 +2909,7 @@ fn enrich_ranked_display_names(
                 summary_decode_state: "complete",
                 summary_truncated: false,
                 sort_timestamp: 0,
+                sort_time: None,
                 last_message_type: None,
                 last_message_sender: None,
                 last_sender_display_name: None,
@@ -2970,6 +2973,7 @@ pub fn find_conversation(
                 summary_decode_state,
                 summary_truncated,
                 sort_timestamp,
+                sort_time: readable_local_time(sort_timestamp),
                 last_message_type: row.get::<_, Option<i64>>(3)?.map(|value| value as u32),
                 last_message_sender: bounded_optional_string(row.get(4)?),
                 last_sender_display_name: bounded_optional_string(row.get(5)?),
@@ -3057,6 +3061,10 @@ pub fn find_conversations(
             sort_timestamp: row
                 .get(1)
                 .map_err(|error| database_error(&error.to_string()))?,
+            sort_time: readable_local_time(
+                row.get(1)
+                    .map_err(|error| database_error(&error.to_string()))?,
+            ),
             last_message_type: row
                 .get::<_, Option<i64>>(3)
                 .map_err(|error| database_error(&error.to_string()))?
@@ -3203,160 +3211,6 @@ pub fn resolve_conversation(
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct RecentCursor {
-    version: u32,
-    kind: String,
-    source_identity: String,
-    since: Option<i64>,
-    until: Option<i64>,
-    conversation: String,
-    message: MessageCursor,
-}
-
-/// A globally ordered page from all identifiable message tables, including
-/// chats absent from the session list. Opens each shard once.
-pub fn recent_messages(
-    source: &LiveQuerySource<'_>,
-    limit: usize,
-    cursor: Option<&str>,
-    since: Option<i64>,
-    until: Option<i64>,
-) -> Result<QueryEnvelope<MessageItem>, LiveQueryError> {
-    validate_limit(limit)?;
-    if since.zip(until).is_some_and(|(start, end)| start > end) {
-        return Err(LiveQueryError::InvalidArgument(
-            "message time range is inverted".into(),
-        ));
-    }
-    let boundary = cursor.map(decode_cursor::<RecentCursor>).transpose()?;
-    if let Some(c) = &boundary {
-        if c.version != CURSOR_FORMAT_VERSION
-            || c.kind != "messages.recent"
-            || c.source_identity != source.identity
-            || c.since != since
-            || c.until != until
-        {
-            return Err(LiveQueryError::InvalidCursor(
-                "cursor does not belong to this recent-message source and time range".into(),
-            ));
-        }
-    }
-    let reader = LiveCorpusReader::open(source)?;
-    let mut items = Vec::new();
-    let mut warnings = reader.inventory.warnings.clone();
-    let mut coverage_complete = reader.inventory.coverage_complete;
-    let mut more = false;
-    for conversation in &reader.inventory.conversations {
-        if conversation.kind == ConversationKind::Unresolved {
-            continue;
-        }
-        let page = list_messages_in_time_range_with_open_shards(
-            source,
-            &conversation.source_id,
-            limit,
-            None,
-            since,
-            until,
-            Some(&reader.open_shards),
-            false,
-            Some(boundary.as_ref()),
-        )?;
-        more |= page.page.has_more;
-        coverage_complete &= page.consistency.coverage_complete;
-        warnings.extend(page.warnings);
-        items.extend(page.items);
-        // Bound retained message bodies independently of the number of chats.
-        items.sort_by_cached_key(|item| std::cmp::Reverse(recent_item_key(item)));
-        if items.len() > limit {
-            more = true;
-            items.truncate(limit);
-        }
-    }
-    let next_cursor = if more {
-        items
-            .last()
-            .map(|item| {
-                encode_cursor(&RecentCursor {
-                    version: CURSOR_FORMAT_VERSION,
-                    kind: "messages.recent".into(),
-                    source_identity: source.identity.clone(),
-                    since,
-                    until,
-                    conversation: item.conversation_id.clone(),
-                    message: decode_message_cursor(&item.id)?,
-                })
-            })
-            .transpose()?
-    } else {
-        None
-    };
-    let enrichment = enrich_message_items(source, &mut items)?;
-    coverage_complete &= enrichment.coverage_complete;
-    warnings.extend(enrichment.warnings);
-    coalesce_warnings(&mut warnings);
-    Ok(QueryEnvelope {
-        schema: QUERY_SCHEMA,
-        format_version: QUERY_FORMAT_VERSION,
-        operation: "messages.recent",
-        ok: true,
-        source: source_description(source),
-        consistency: QueryConsistency {
-            guarantee: "perDatabaseReadStatement",
-            database_count: reader.open_shards.shards.len() + 2,
-            cross_database_atomic: false,
-            coverage_complete,
-            observed_at_unix_milliseconds: now_unix_milliseconds(),
-        },
-        page: QueryPage {
-            limit,
-            returned: items.len(),
-            has_more: more,
-            next_cursor,
-        },
-        warnings,
-        items,
-    })
-}
-
-fn recent_item_key(item: &MessageItem) -> (i64, i64, i64, u32, i64, String) {
-    // Message identities are generated locally from validated source rows.
-    let c = decode_message_cursor(&item.id).expect("projected message identity");
-    (
-        item.created_at_unix,
-        item.sort_sequence,
-        item.server_id,
-        c.shard_id,
-        c.row_id,
-        item.conversation_id.clone(),
-    )
-}
-
-pub fn brief_recent_messages(
-    source: &LiveQuerySource<'_>,
-    envelope: &QueryEnvelope<MessageItem>,
-    redact: bool,
-) -> BriefPage {
-    let mut page = brief_messages(source, envelope, redact);
-    let names = resolve_contact_display_names(
-        source,
-        envelope
-            .items
-            .iter()
-            .map(|item| item.conversation_id.as_str()),
-    )
-    .map(|e| e.display_names)
-    .unwrap_or_default();
-    for (line, item) in page.items.iter_mut().zip(&envelope.items) {
-        line.chat = names
-            .get(&item.conversation_id)
-            .and_then(|name| present_name(Some(name), redact));
-        line.conversation_id = Some(item.conversation_id.clone());
-    }
-    page
-}
-
 pub fn list_messages(
     source: &LiveQuerySource<'_>,
     conversation: &str,
@@ -3409,7 +3263,6 @@ pub fn list_messages_in_time_range(
         not_after_unix,
         None,
         true,
-        None,
     )
 }
 
@@ -3423,7 +3276,6 @@ fn list_messages_in_time_range_with_open_shards(
     not_after_unix: Option<i64>,
     open_shards: Option<&OpenMessageShards>,
     enrich_contacts: bool,
-    recent: Option<Option<&RecentCursor>>,
 ) -> Result<QueryEnvelope<MessageItem>, LiveQueryError> {
     validate_limit(limit)?;
     validate_conversation_id(conversation)?;
@@ -3530,12 +3382,6 @@ fn list_messages_in_time_range_with_open_shards(
         let compression_type = optional_message_column(&columns, "WCDB_CT_message_content");
         let compressed_content = optional_message_column(&columns, "compress_content");
 
-        let recent_boundary = recent.flatten();
-        let order = if recent.is_some() {
-            "m.create_time DESC, m.sort_seq DESC, m.server_id DESC, m.rowid DESC"
-        } else {
-            "m.sort_seq DESC, m.create_time DESC, m.server_id DESC, m.rowid DESC"
-        };
         let sql = format!(
             "SELECT m.rowid, m.sort_seq, m.server_id, m.local_type, {sender_expression}, \
                     m.create_time, m.message_content, {packed_info}, {status}, \
@@ -3546,10 +3392,7 @@ fn list_messages_in_time_range_with_open_shards(
                     < (:cursor_sort, :cursor_time, :cursor_server, :cursor_shard, :cursor_row)) \
                AND (:not_before IS NULL OR m.create_time >= :not_before) \
                AND (:not_after IS NULL OR m.create_time <= :not_after) \
-               AND (:recent_time IS NULL OR
-                    (m.create_time, m.sort_seq, m.server_id, {shard_id}, m.rowid, :conversation)
-                    < (:recent_time, :recent_sort, :recent_server, :recent_shard, :recent_row, :recent_conversation))
-             ORDER BY {order} \
+             ORDER BY m.sort_seq DESC, m.create_time DESC, m.server_id DESC, m.rowid DESC \
              LIMIT :fetch_limit",
             shard_id = shard.shard_id,
         );
@@ -3579,13 +3422,6 @@ fn list_messages_in_time_range_with_open_shards(
             ":not_before": not_before_unix,
             ":not_after": not_after_unix,
             ":fetch_limit": fetch_limit as i64,
-            ":recent_time": recent_boundary.map(|c| c.message.create_time),
-            ":recent_sort": recent_boundary.map(|c| c.message.sort_sequence),
-            ":recent_server": recent_boundary.map(|c| c.message.server_id),
-            ":recent_shard": recent_boundary.map(|c| c.message.shard_id as i64),
-            ":recent_row": recent_boundary.map(|c| c.message.row_id),
-            ":recent_conversation": recent_boundary.map(|c| c.conversation.as_str()),
-            ":conversation": conversation,
         });
         let mut rows = match query_result {
             Ok(rows) => rows,
@@ -3633,13 +3469,7 @@ fn list_messages_in_time_range_with_open_shards(
         ));
     }
 
-    messages.sort_unstable_by(|left, right| {
-        if recent.is_some() {
-            (right.key.create_time, &right.key).cmp(&(left.key.create_time, &left.key))
-        } else {
-            right.key.cmp(&left.key)
-        }
-    });
+    messages.sort_unstable_by(|left, right| right.key.cmp(&left.key));
     let has_more = messages.len() > limit;
     messages.truncate(limit);
     let next_cursor = if has_more {
@@ -4498,7 +4328,6 @@ fn search_messages_fallback_in_time_range(
                     .expect("non-empty fallback conversation set opens message shards"),
             ),
             false,
-            None,
         )?;
         statement_count = statement_count.saturating_add(1);
         queried_database_count =
@@ -5211,6 +5040,13 @@ fn decode_room_display_names(blob: &[u8]) -> BTreeMap<String, String> {
         names.entry(user.user_name).or_insert(display);
     }
     names
+}
+
+fn readable_local_time(unix: i64) -> Option<String> {
+    Local
+        .timestamp_opt(unix, 0)
+        .single()
+        .map(|time| time.format("%Y-%m-%d %H:%M:%S %:z").to_string())
 }
 
 fn brief_local_stamp(unix: i64) -> String {

@@ -42,17 +42,17 @@ use greenbubbles::{
         AttachmentKind, LiveAttachmentError,
     },
     live_query::{
-        brief_messages, brief_recent_messages, brief_search, find_chats,
-        find_conversations as find_live_conversations, get_message as get_live_message,
+        brief_messages, brief_search, find_chats, find_conversations as find_live_conversations,
+        get_message as get_live_message,
         get_search_result_message as get_live_search_result_message,
         list_contacts as list_live_contacts, list_conversations as list_live_conversations,
         list_messages_in_time_range as list_live_messages_in_time_range,
-        rank_conversations as rank_live_conversations, rank_cursor_offset, recent_messages,
-        resolve_conversation, search_messages_in_time_range as search_live_messages_in_time_range,
-        serialize_brief_page, serialize_brief_rank, serialize_query_error,
-        serialize_query_response, source_status as live_source_status, ContactKind, LiveQueryError,
-        LiveQuerySource, QueryDatabaseAccess, DEFAULT_PAGE_LIMIT, DEFAULT_SEARCH_LIMIT,
-        MAX_PAGE_LIMIT, MAX_SEARCH_QUERY_BYTES,
+        rank_conversations as rank_live_conversations, rank_cursor_offset, resolve_conversation,
+        search_messages_in_time_range as search_live_messages_in_time_range, serialize_brief_page,
+        serialize_brief_rank, serialize_query_error, serialize_query_response,
+        source_status as live_source_status, ContactKind, LiveQueryError, LiveQuerySource,
+        QueryDatabaseAccess, DEFAULT_PAGE_LIMIT, DEFAULT_SEARCH_LIMIT, MAX_PAGE_LIMIT,
+        MAX_SEARCH_QUERY_BYTES,
     },
     merge::merge_incremental_archive,
     model::{ArtifactKind, ArtifactRole},
@@ -191,9 +191,6 @@ fn process_query_operation() -> Option<&'static str> {
         }
         [command, subcommand] if command == "messages" && subcommand == "list" => {
             Some("messages.list")
-        }
-        [command, subcommand] if command == "messages" && subcommand == "recent" => {
-            Some("messages.recent")
         }
         [command, subcommand] if command == "messages" && subcommand == "search" => {
             Some("messages.search")
@@ -1055,16 +1052,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             match subcommand.as_str() {
-                "recent" => {
-                    validate_command_options(&remaining,
-                        &["--profile", "--limit", "--cursor", "--since", "--until", "--snapshot-recovery-kit", "--snapshot-local-credential"],
-                        &["--passphrase-stdin", "--snapshot-key-stdin", "--snapshot-passphrase-stdin", "--decrypted", "--json", "--brief", "--redact"])?;
-                    let invocation = resolve_query_invocation(database_root, &remaining)?;
-                    let source = invocation.access.open_source(&invocation.source_root)?;
-                    let response = recent_messages(&source, option_usize(&remaining, "--limit")?.unwrap_or(DEFAULT_PAGE_LIMIT), option_string(&remaining, "--cursor")?.as_deref(), option_i64(&remaining, "--since")?, option_i64(&remaining, "--until")?)?;
-                    let mut brief = brief_recent_messages(&source, &response, remaining.iter().any(|v| v == "--redact"));
-                    emit_message_page(message_output_format(&remaining)?, &response, &mut brief, source.attachment_account_root().as_deref())?;
-                }
                 "list" => {
                     validate_command_options_repeated(
                         &remaining,
@@ -1155,7 +1142,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let query_argument = option_string(&remaining, "--query")?;
                     let query_stdin = remaining.iter().any(|value| value == "--query-stdin");
                     if query_argument.is_some() == query_stdin {
-                        return Err("choose exactly one search input: --query <text> or --query-stdin".into());
+                        return Err(
+                            "choose exactly one search input: --query <text> or --query-stdin"
+                                .into(),
+                        );
                     }
                     let invocation = resolve_query_invocation(database_root, &remaining)?;
                     let mut query = match query_argument {
@@ -1166,7 +1156,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         query.pop();
                     }
                     let source = invocation.access.open_source(&invocation.source_root)?;
-                    let conversation = option_string(&remaining, "--conversation")?.map(|name| resolve_conversation(&source, &name)).transpose()?;
+                    let conversation = option_string(&remaining, "--conversation")?
+                        .map(|name| resolve_conversation(&source, &name))
+                        .transpose()?;
                     let limit =
                         option_usize(&remaining, "--limit")?.unwrap_or(DEFAULT_SEARCH_LIMIT);
                     let cursor = option_string(&remaining, "--cursor")?;
@@ -1192,7 +1184,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 _ => {
                     return Err(format!(
-                        "unsupported messages subcommand: {subcommand}; expected 'list', 'recent', or 'search'"
+                        "unsupported messages subcommand: {subcommand}; expected 'list' or 'search'"
                     )
                     .into())
                 }
@@ -3082,9 +3074,8 @@ const fn complete_command_listing() -> &'static str {
         "Version: greenbubbles version | greenbubbles -v | greenbubbles --version\n\n",
         "Browse:\n",
         "  greenbubbles messages list --conversation <name-or-id> [--conversation <name-or-id> ...] [--since <unix>] [--until <unix>] [--limit <1..500>] [--cursor <token>] [--redact] [--json]\n",
-        "  greenbubbles messages recent [--limit <1..500>] [--since <unix>] [--json]\n",
-        "  greenbubbles messages search --query <text> [--conversation <name-or-id>] [--since <unix>] [--until <unix>] [--limit <1..200>] [--redact] [--json]\n",
         "  greenbubbles chats [--profile <name>] [--limit <1..500>] [--cursor <token>]\n",
+        "  greenbubbles messages search --query <text> [--conversation <name-or-id>] [--since <unix>] [--until <unix>] [--limit <1..200>] [--redact] [--json]\n",
         "  greenbubbles chats rank [--minimum-self-messages <n>] [--limit <1..2000>] [--cursor <token>] [--json]\n",
         "  greenbubbles chats find <nickname-or-remark>\n",
         "  greenbubbles contacts list [--kind <kind>] [--limit <1..500>] [--details]\n",
@@ -3356,20 +3347,6 @@ const fn messages_command_help() -> &'static str {
     )
 }
 
-const fn messages_recent_help() -> &'static str {
-    concat!(
-        "Usage:\n  greenbubbles messages recent [<source-root>] [--limit <1..500>] [--since <unix>] [--until <unix>] [--cursor <token>] [--json] [--redact]\n\n",
-        "Show a bounded page of the newest messages across all identifiable chats, ordered\n",
-        "by message time with deterministic ties. Defaults to 100. Each compact line\n",
-        "includes chat and conversationId, sender, local time and text. --json includes\n",
-        "message IDs and warnings. Follow nextCursor with --cursor and the same time\n",
-        "range. Poll without a cursor to see new arrivals; --since limits the window.\n",
-        "Reads live data by default; --profile selects a saved source. Explicit sources\n",
-        "take --passphrase-stdin, --decrypted, or a snapshot access mode. --brief forces\n",
-        "compact output. --help opens no database. No native search index is needed.\n",
-    )
-}
-
 const fn messages_search_help() -> &'static str {
     concat!(
         "Usage:\n",
@@ -3420,10 +3397,9 @@ const fn messages_search_help() -> &'static str {
 fn messages_subcommand_help(subcommand: &str) -> Result<&'static str, String> {
     match subcommand {
         "list" => Ok(messages_command_help()),
-        "recent" => Ok(messages_recent_help()),
         "search" => Ok(messages_search_help()),
         _ => Err(format!(
-            "unsupported messages subcommand: {subcommand}; expected 'list', 'recent', or 'search'"
+            "unsupported messages subcommand: {subcommand}; expected 'list' or 'search'"
         )),
     }
 }

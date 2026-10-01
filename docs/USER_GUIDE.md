@@ -30,27 +30,23 @@ prompt, a GitHub issue, or a chat.**
 
 ## Everyday browsing
 
-After key setup, the CLI finds your account and saved key automatically:
+After key setup, the CLI finds your account and saved key automatically.
+List conversations, then read the selected chat, as you would in WeChat:
 
 ```sh
 greenbubbles chats --limit 20
-greenbubbles chats find "Alice"
 greenbubbles messages list --conversation "Alice" --limit 50
-greenbubbles messages recent --limit 50
-greenbubbles messages search --query "keyword"
+greenbubbles messages search --conversation "Alice" --query "keyword"
 ```
 
 Use a nickname, remark, alias, or exact ID for `--conversation`. Names match
-case-insensitively; an ambiguous name shows the matching IDs so you can choose.
-`chats find` also accepts partial names. `messages recent` shows the newest
-messages across identifiable chats and includes the chat name and ID on each
-line. Add `--json` for full message IDs and diagnostic warnings.
+case-insensitively; an ambiguous name shows matching IDs so you can choose.
+Use `chats find "Alice"` for partial-name lookup. Add `--json` for full message
+IDs and diagnostic warnings.
 
-The defaults are 100 results for lists/recent messages and 50 search hits.
-Use `--limit` for a smaller page and `--cursor` for older pages. To check new
-activity, run `messages recent` again without a cursor. `--since <unix-seconds>`
-limits the window; allow a small overlap and deduplicate message IDs if using
-this for synchronization. See the [CLI reference](CLI_REFERENCE.md).
+The defaults are 100 results for lists and 50 search hits. Use `--limit` for a
+smaller page, `--cursor` for older pages, and `--since`/`--until` as Unix seconds
+for a selected chat's time window. See the [CLI reference](CLI_REFERENCE.md).
 
 ## Pick what you want to do
 

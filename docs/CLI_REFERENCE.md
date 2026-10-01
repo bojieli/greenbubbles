@@ -44,7 +44,6 @@ Once your key is set up, these need no extra arguments:
 | --- | --- |
 | `greenbubbles chats` | List chats. Same as `conversations list`. |
 | `greenbubbles chats find "Alice"` | Find identities by partial nickname, remark, alias, or ID, without reading messages. |
-| `greenbubbles messages recent` | Read the newest messages across all identifiable chats. |
 | `greenbubbles chats rank` | Rank chats by how many messages you sent. No message text. |
 | `greenbubbles messages list --conversation <id>` | Read one chat by ID or unambiguous name, newest first. |
 | `greenbubbles messages search --query "keyword"` | Search messages using the quoted text. |
@@ -60,15 +59,13 @@ for a second account or a backup.
 `greenbubbles version`, `greenbubbles -v`, and `greenbubbles --version` all
 print the installed CLI version without reading a key or opening data.
 
-## Find chats and read recent activity
+## Browse conversations and find chats
 
 ```sh
 greenbubbles chats
 greenbubbles chats find "Alice"
 greenbubbles messages list --conversation "Alice"
 greenbubbles messages search --conversation "Alice" --query "keyword"
-greenbubbles messages recent --limit 50
-greenbubbles messages recent --since 1790812800 --json
 greenbubbles version
 ```
 
@@ -87,32 +84,22 @@ up to 20 matching names and IDs on stderr; choose an exact ID. Names are
 ordinary command arguments, so use an ID if you prefer to keep a name out of
 shell history. Missing names fail with a suggestion to list chats.
 
-`messages recent` reads message tables directly, across all chats whose
-identity can be recovered from contacts or sessions. It includes chats with
-message tables even when they are absent from the session list. It needs no
-native search index. Messages are ordered by creation time descending, with
-a deterministic tie order of sort sequence, server ID, shard, row, and chat ID.
-The default is 100 messages, and `--limit` accepts 1..500. Each compact line
-includes `chat` when available and `conversationId`, alongside the usual sender,
-local timestamp, text, and attachment path. `--json` includes full message IDs,
-coverage information, and warnings. Unidentifiable tables are omitted and
-reported through incomplete coverage; this command does not claim an atomic
-snapshot across databases.
+The recommended flow is `chats` to list conversations, then `messages list`
+to open one by name or ID. Use `--limit` for a smaller page and follow
+`nextCursor` with `--cursor` to read older messages. `--since` and `--until`
+limit that selected conversation to an inclusive Unix-second time window.
 
-`--since` and `--until` are inclusive Unix seconds. Follow `nextCursor` with
-`--cursor`, repeating the same time window and source. The recent cursor is
-bound to that window, source, and command. To debug new arrivals or synchronize
-recent activity, poll **without a cursor**, optionally using `--since` with an
-overlap, and deduplicate the full JSON message IDs. A cursor pages older
-messages; it does not watch for arrivals. There is no durable synchronization
-state or background watcher in this command.
+Conversation items include `sortTimestamp` as Unix seconds and `sortTime` as
+local `YYYY-MM-DD HH:MM:SS ±HH:MM`. Both represent the same instant.
+`sortTime` is `null` if a source timestamp cannot be represented as a date;
+pagination and ordering continue to use the original numeric value.
 
 ## All command families
 
 | Family | Commands | Use |
 | --- | --- | --- |
 | Query profiles | `profile path/template/list/show/validate/set-default` | Optional named sources for a second account or a snapshot. Live queries need none. |
-| Direct reads | `source status`, `conversations list/find`, `contacts list`, `messages list/recent/search`, `message get` | Read one bounded page from live data or a snapshot, without creating a restoration. |
+| Direct reads | `source status`, `conversations list/find`, `contacts list`, `messages list/search`, `message get` | Read one bounded page from live data or a snapshot, without creating a restoration. |
 | Attachments | `attachment inspect/materialize` | Inspect one message, or copy one chosen attachment to a new private path. |
 | Backups (snapshots) | `snapshot recovery-kit/local-credential/create/create-capture/verify/rewrap/rekey/retention` | Create, reopen, rotate keys for, verify, and retire encrypted backups. See [recoverable snapshots](RECOVERABLE_SNAPSHOTS.md). |
 | Offline restoration | `preflight`, `probe`, `restore`, `restore-publish` | Check and restore a saved, owner-authorized copy of WeChat's files. |
@@ -157,9 +144,9 @@ Command-line search text can appear in shell history and process arguments;
 `--query-stdin` remains available for interactive input or piping. Both forms
 use the same bounded, parameterized literal search and accept at most 16 KiB.
 
-## Reading `messages list`, `messages recent`, and `messages search`
+## Reading `messages list` and `messages search`
 
-All three print JSON Lines by default: one header line, then one line per message.
+Both print JSON Lines by default: one header line, then one line per message.
 
 **Header fields:**
 
@@ -182,11 +169,11 @@ All three print JSON Lines by default: one header line, then one line per messag
 - `self`: `true` if the account holder sent it, otherwise `false`.
 - `at`: local time as `YYYY-MM-DD HH:MM`, in the header's timezone.
 - `text`: the message text.
-- `file` (list and recent): a local path for an image, video, or document.
+- `file` (list only): a local path for an image, video, or document.
   Encrypted images are decoded into `~/.greenbubbles/cache/media`. The path is
   left out when the file can't be opened. Don't copy a `file` path into notes.
-- `chat` (search and recent): the chat's display name. A chat with no display name
-  gets `conversationId` instead. Recent lines always include `conversationId`.
+- `chat` (search only): the chat's display name. A chat with no display name
+  gets `conversationId` instead.
   Search lines have no `file`; open the chat
   with `messages list` to get one.
 
