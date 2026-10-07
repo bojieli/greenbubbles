@@ -3309,6 +3309,7 @@ fn list_messages_in_time_range_with_open_shards(
 
     for shard in &open_shards.shards {
         let connection = &shard.connection;
+        reset_query_deadline(connection)?;
         let table_exists = match connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
             [&table_name],
@@ -3329,6 +3330,7 @@ fn list_messages_in_time_range_with_open_shards(
             continue;
         }
 
+        reset_query_deadline(connection)?;
         let columns = match table_columns(connection, &table_name) {
             Ok(columns) => columns,
             Err(_) => {
@@ -3396,6 +3398,7 @@ fn list_messages_in_time_range_with_open_shards(
              LIMIT :fetch_limit",
             shard_id = shard.shard_id,
         );
+        reset_query_deadline(connection)?;
         let mut statement = match connection.prepare(&sql) {
             Ok(statement) => statement,
             Err(_) => {
@@ -7143,6 +7146,35 @@ mod tests {
             .collect::<Vec<_>>();
         let result = resolve_contact_display_names(&source, identifiers.iter().map(String::as_str));
         assert!(matches!(result, Err(LiveQueryError::InvalidArgument(_))));
+    }
+
+    #[test]
+    fn message_list_resets_expired_deadlines_on_reused_shards() {
+        let (_temp, root) = fixture();
+        let source = LiveQuerySource::open(&root, QueryDatabaseAccess::Decrypted).unwrap();
+        let shards = open_message_shards(&source).unwrap();
+        for shard in &shards.shards {
+            shard.connection.progress_handler(1, Some(|| true)).unwrap();
+        }
+        let page = list_messages_in_time_range_with_open_shards(
+            &source,
+            "wxid_talker",
+            10,
+            None,
+            None,
+            None,
+            Some(&shards),
+            true,
+        )
+        .unwrap();
+        assert!(page.consistency.coverage_complete);
+        assert!(page.warnings.is_empty());
+        let bodies = page
+            .items
+            .iter()
+            .map(|item| item.content["Text"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(bodies, ["s1-new", "s0-new", "s0-old", "s1-old"]);
     }
 
     #[test]
