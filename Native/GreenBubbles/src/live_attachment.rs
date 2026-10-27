@@ -264,9 +264,10 @@ pub fn materialize_image_attachment(
         &encrypted,
         &wx_media::DatDecryptOptions {
             v2_aes_key,
-            xor_key: None,
+            xor_key: wx_media::detect_xor_key(&source.account_root.join("msg/attach")),
         },
     )
+    .and_then(viewable_image)
     .map_err(|_| {
         LiveAttachmentError::Decode("the selected WeChat image could not be decoded safely".into())
     })?;
@@ -377,9 +378,10 @@ pub fn materialize_message_attachment(
                 &encrypted,
                 &wx_media::DatDecryptOptions {
                     v2_aes_key,
-                    xor_key: None,
+                    xor_key: wx_media::detect_xor_key(&protected_root.join("msg/attach")),
                 },
             )
+            .and_then(viewable_image)
             .map_err(|_| {
                 LiveAttachmentError::Decode(
                     "the selected WeChat image could not be decoded safely".into(),
@@ -805,7 +807,7 @@ fn resolve_filesystem_message_candidates(
         ));
     }
     let source_md5 = descriptor.source_md5.as_deref().unwrap_or("");
-    paths
+    let mut candidates = paths
         .into_iter()
         .map(|(relative_path, path)| {
             inspect_file_candidate(
@@ -818,7 +820,16 @@ fn resolve_filesystem_message_candidates(
                 Some(&descriptor.message_id),
             )
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    candidates.retain(|candidate| {
+        candidate_relative_path(candidate)
+            .parent()
+            .and_then(Path::parent)
+            != Some(Path::new("msg/file"))
+            || read_file_candidate(candidate)
+                .is_ok_and(|bytes| format!("{:x}", md5::compute(bytes)) == source_md5)
+    });
+    Ok(candidates)
 }
 
 fn hardlink_candidate_paths(
@@ -1003,6 +1014,9 @@ fn scan_scoped_filesystem_candidates(
     validate_path_segment(conversation, "conversation identifier")?;
     let conversation_hash = format!("{:x}", md5::compute(conversation.as_bytes()));
     let mut roots = Vec::<(PathBuf, Option<&'static str>)>::new();
+    if kind == AttachmentKind::Document {
+        roots.push((account_root.join("msg/file"), None));
+    }
     for segment in [conversation, conversation_hash.as_str()] {
         match kind {
             AttachmentKind::Video => {
@@ -1797,6 +1811,7 @@ fn readable_media_path(
             for segment in &segments {
                 for month in &months {
                     for directory in [
+                        account_root.join("msg/file").join(month),
                         account_root.join("msg/file").join(segment).join(month),
                         account_root
                             .join("msg/attach")
@@ -1805,7 +1820,15 @@ fn readable_media_path(
                             .join("File"),
                     ] {
                         for path in find_named_files(&directory, md5, title, listings) {
-                            if !is_opaque_dat(&path) {
+                            if !is_opaque_dat(&path)
+                                && (directory != account_root.join("msg/file").join(month)
+                                    || md5.is_some_and(|expected| {
+                                        fs::read(&path).is_ok_and(|bytes| {
+                                            format!("{:x}", md5::compute(bytes))
+                                                .eq_ignore_ascii_case(expected)
+                                        })
+                                    }))
+                            {
                                 return Some(path);
                             }
                         }
@@ -1916,6 +1939,17 @@ fn cached_files(directory: &Path, listings: &mut BTreeMap<PathBuf, Vec<PathBuf>>
     files
 }
 
+fn viewable_image(
+    mut image: wx_media::DecodedImage,
+) -> Result<wx_media::DecodedImage, wx_media::MediaError> {
+    if image.ext == "wxgf" {
+        let converted = wx_media::transcode_wxgf(&image.data)?;
+        image.data = converted.data;
+        image.ext = converted.ext.to_string();
+    }
+    Ok(image)
+}
+
 fn readable_image_file(account_root: &Path, source: &Path, md5: &str) -> Option<PathBuf> {
     let extension = source
         .extension()
@@ -1947,9 +1981,10 @@ fn readable_image_file(account_root: &Path, source: &Path, md5: &str) -> Option<
         &encrypted,
         &wx_media::DatDecryptOptions {
             v2_aes_key,
-            xor_key: None,
+            xor_key: wx_media::detect_xor_key(&account_root.join("msg/attach")),
         },
     )
+    .and_then(viewable_image)
     .ok()?;
     let extension = if decoded.ext.is_empty() {
         "img".to_string()
@@ -1972,7 +2007,7 @@ fn readable_image_file(account_root: &Path, source: &Path, md5: &str) -> Option<
 
 fn media_cache_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    let directory = PathBuf::from(home).join(".greenbubbles/cache/media");
+    let directory = PathBuf::from(home).join(".greenbubbles/cache/media/v2");
     fs::create_dir_all(&directory).ok()?;
     let mut permissions = fs::metadata(&directory).ok()?.permissions();
     permissions.set_mode(0o700);
