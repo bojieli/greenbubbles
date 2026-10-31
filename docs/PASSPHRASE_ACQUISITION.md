@@ -89,7 +89,8 @@ greenbubbles-acquire verify --passphrase-stdin [--db-root <path>]
   picks the account whose data was written most recently.
 
 The WeChat version is shown for information only. The tool does not refuse a
-version it hasn't seen, but it has only been tested on WeChat 4.1.12 and 4.1.13.
+version it hasn't seen. Confirmed captures are listed under
+[What has been tested](#what-has-been-tested).
 
 ## If something goes wrong
 
@@ -100,8 +101,9 @@ left with no key file rather than a wrong one.
   didn't restart it after re-signing. macOS blocks the attach.
 - **Timed out:** you didn't log out and back in within the time limit. Run
   `capture` again. An idle, logged-in WeChat never reveals the key.
-- **Verification failed:** the captured value didn't open your databases, so
-  nothing was saved. Check that you logged back into the same account.
+- **Verification failed:** captured values didn't open your databases, so
+  nothing was saved. The tool keeps waiting after a value that doesn't match
+  until the time limit. Check that you logged back into the same account.
 - **WeChat updated:** re-sign it and restart it before capturing again. A key
   you already saved keeps working as long as `verify` succeeds.
 
@@ -144,19 +146,25 @@ it is why you have to log out and back in.
 `greenbubbles-acquire capture` does this:
 
 1. Attaches Apple's `lldb` debugger to WeChat and pauses on
-   `CCKeyDerivationPBKDF` only when the password passed to it is exactly 32
-   bytes long.
-2. When you log back in, it reads those 32 bytes once (from register `x1` on
-   Apple silicon, `rsi` on Intel), then detaches. It reads nothing else and
-   changes nothing in WeChat. Because it pauses on a macOS function rather than
-   on WeChat's own code, it does not depend on a particular WeChat version.
+   `CCKeyDerivationPBKDF` only for the SQLCipher account-key derivation:
+   PBKDF2, a 32-byte password, a 16-byte salt, HMAC-SHA512, and 256,000
+   rounds. Other calls, including other 32-byte passwords, are ignored.
+2. When you log back in, it reads those 32 bytes (from register `x1` on
+   Apple silicon, `rsi` on Intel). It reads nothing else and changes nothing
+   in WeChat. If those bytes do not open your databases, it keeps waiting for
+   another matching call until the time limit. It detaches after a candidate
+   checks out, or when the time limit expires. Because it pauses on a macOS
+   function rather than on WeChat's own code, it does not depend on a
+   particular WeChat version, as long as that version derives the account key
+   with these parameters.
 3. On WeChat 4.1.13, logging out ends the WeChat process and logging in starts
    a new one. The tool notices and follows the new process.
 4. For each database file, it computes the file's key on your Mac
    (PBKDF2-HMAC-SHA512, 256,000 rounds, with that file's 16-byte salt).
 5. It proves each computed key is correct by checking SQLCipher 4's
-   authentication code on the file's first page. A key that fails this check is
-   never saved.
+   authentication code on the file's first page. A candidate that fails this
+   check is discarded and capture continues. A key is written only after at
+   least one database accepts it.
 
 Only the account key is saved. The per-file keys exist in memory only during
 the check and are then erased.
@@ -173,8 +181,16 @@ existing backup, never use this capture.
 - **2026-08-28, WeChat 4.1.13:** after WeChat auto-updated and was re-signed, a
   capture verified all 26 databases in 45 seconds. Logging out ended the WeChat
   process and logging in started a new one; the capture followed it.
+- **2026-10-31, WeChat 4.2.0 (build 270345), macOS 27.0.1, Apple silicon:**
+  GreenBubbles v0.10.0 stopped on an unrelated 32-byte `CCKeyDerivationPBKDF`
+  call. Verification failed and nothing was written. A capture that instead
+  required PBKDF2, a 32-byte password, a 16-byte salt, HMAC-SHA512, and
+  256,000 rounds verified all 26 databases (26 distinct salts). Live reads
+  then succeeded. On WeChat 4.1.15 (build 270100), macOS 26.6.2, Apple
+  silicon, the same parameter filter plus verification before giving up was
+  reported to succeed against 22 databases.
 
-That is two successful runs on one Mac and one account. It is not a promise
+These are specific Macs, WeChat versions, and accounts. They are not a promise
 that it will work on your Mac, your WeChat version, or your account.
 
 ## Credits

@@ -3,22 +3,35 @@
 import Foundation
 
 /// Parses lldb `memory read --size 1 --count 32 --format x` hexdump output into
-/// the captured 32-byte passphrase.
+/// captured 32-byte passphrases.
 ///
 /// A byte line looks like `0x16fdfddd8: 0x00 0x11 0x22 0x33 0x44 0x55 0x66 0x77`
 /// (lowercase hexadecimal, one address prefix, byte groups only). Any other
-/// lldb output is ignored. Returns the first 32 bytes once at least 32 have
-/// been collected, or `nil` while the output is still incomplete or malformed.
+/// lldb output is ignored. Each `memory read --count 32` contributes exactly
+/// 32 bytes; successive reads become successive candidates. A trailing partial
+/// read stays buffered until it reaches 32 bytes and is not mixed into the
+/// previous candidate.
 public enum LLDBOutputParser {
   public static func parsePassphrase(from output: String) -> [UInt8]? {
+    parsePassphrases(from: output).first
+  }
+
+  public static func parsePassphrases(from output: String) -> [[UInt8]] {
     var bytes: [UInt8] = []
+    defer { PassphraseSecret.zeroize(&bytes) }
     for rawLine in output.split(whereSeparator: \.isNewline) {
       let line = rawLine.trimmingCharacters(in: .whitespaces)
       guard let bytesInLine = parseByteLine(line) else { continue }
       bytes.append(contentsOf: bytesInLine)
     }
-    guard bytes.count >= 32 else { return nil }
-    return Array(bytes.prefix(32))
+    var candidates: [[UInt8]] = []
+    var index = 0
+    while index + PassphraseSecret.byteCount <= bytes.count {
+      let next = index + PassphraseSecret.byteCount
+      candidates.append(Array(bytes[index..<next]))
+      index = next
+    }
+    return candidates
   }
 
   /// Detects a failed `process attach` so the capture can fail fast instead of

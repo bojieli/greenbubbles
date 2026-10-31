@@ -459,15 +459,28 @@ do {
     )
     printNote("in WeChat, log out of the account (not just quit the app), then log back in")
     printNote("waiting up to \(arguments.timeoutSeconds) seconds for the login")
+    printNote(
+      "a captured value that does not open your databases is ignored; capture keeps waiting"
+    )
     var capture = LLDBPassphraseCapture()
     capture.verbose = arguments.verbose
     capture.outputHandler = { message in
       FileHandle.standardError.write(Data("note: \(message)\n".utf8))
     }
     let started = Date()
-    let passphrase = try capture.capture(timeoutSeconds: arguments.timeoutSeconds)
+    var verifiedSaltCount = 0
+    let passphrase: PassphraseSecret
+    do {
+      passphrase = try capture.capture(timeoutSeconds: arguments.timeoutSeconds) { secret in
+        verifiedSaltCount = try verifyPassphrase(secret, inventory: inventory)
+        return verifiedSaltCount > 0
+      }
+    } catch CaptureError.noAcceptableCandidate {
+      throw CLIError.verificationFailed(
+        "the captured bytes verified against no database; nothing was written"
+      )
+    }
     let captureDurationSeconds = Date().timeIntervalSince(started)
-    let verifiedSaltCount = try verifyPassphrase(passphrase, inventory: inventory)
     guard verifiedSaltCount > 0 else {
       throw CLIError.verificationFailed(
         "the captured bytes verified against no database; nothing was written"

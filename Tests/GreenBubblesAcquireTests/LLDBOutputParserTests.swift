@@ -81,6 +81,42 @@ struct LLDBOutputParserTests {
         0x16fdfddf8: 0xde 0xad 0xbe 0xef 0xde 0xad 0xbe 0xef
         """
     #expect(LLDBOutputParser.parsePassphrase(from: output) == expectedBytes)
+    #expect(LLDBOutputParser.parsePassphrases(from: output).count == 1)
+  }
+
+  @Test func parsesSuccessiveMemoryReadsAsSeparateCandidates() {
+    let second = """
+      0x16fdfde00: 0x01 0x01 0x01 0x01 0x01 0x01 0x01 0x01
+      0x16fdfde08: 0x02 0x02 0x02 0x02 0x02 0x02 0x02 0x02
+      0x16fdfde10: 0x03 0x03 0x03 0x03 0x03 0x03 0x03 0x03
+      0x16fdfde18: 0x04 0x04 0x04 0x04 0x04 0x04 0x04 0x04
+      """
+    let output = """
+      \(hexdumpLines)
+      (lldb) continue
+      Process 69454 resuming
+      \(second)
+      """
+    let candidates = LLDBOutputParser.parsePassphrases(from: output)
+    #expect(candidates.count == 2)
+    #expect(candidates[0] == expectedBytes)
+    #expect(
+      candidates[1] == [UInt8](repeating: 0x01, count: 8)
+        + [UInt8](repeating: 0x02, count: 8)
+        + [UInt8](repeating: 0x03, count: 8)
+        + [UInt8](repeating: 0x04, count: 8))
+    #expect(LLDBOutputParser.parsePassphrase(from: output) == expectedBytes)
+  }
+
+  @Test func partialSecondReadDoesNotMixWithTheFirstCandidate() {
+    let output =
+      hexdumpLines + "\n" + """
+        0x16fdfde00: 0x01 0x01 0x01 0x01 0x01 0x01 0x01 0x01
+        0x16fdfde08: 0x02 0x02 0x02 0x02 0x02 0x02 0x02 0x02
+        """
+    let candidates = LLDBOutputParser.parsePassphrases(from: output)
+    #expect(candidates.count == 1)
+    #expect(candidates[0] == expectedBytes)
   }
 
   @Test func detectsAttachFailure() {
