@@ -4,6 +4,16 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- `greenbubbles-acquire capture` no longer stops on the first unrelated
+  32-byte `CCKeyDerivationPBKDF` call. The breakpoint matches the SQLCipher
+  account-key derivation (PBKDF2, 32-byte password, 16-byte salt, HMAC-SHA512,
+  256,000 rounds). A candidate that does not verify is ignored until one does,
+  or the timeout expires. Nothing is written when no candidate verifies.
+
 ## 0.10.0 - 2026-10-01
 
 ### Added
