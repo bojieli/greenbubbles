@@ -559,7 +559,8 @@ do {
       )
       print("  written to \(output.path) (mode 0600, owner-only)")
       print("")
-      if let profile {
+      // An explicit --output is not the file the profile reads.
+      if let profile, arguments.output == nil {
         print("Use it with:  greenbubbles <args> --profile \(profile.name)")
       } else {
         print("Use it with:  cat \(output.path) | greenbubbles <args> --passphrase-stdin")
