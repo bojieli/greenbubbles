@@ -26,6 +26,8 @@ another executable after a failed check.
 Ordinary live use needs no profile after capture: the CLI discovers the account
 and reads `~/.greenbubbles-acquire/passphrase.txt`. Custom paths belong in
 `~/.greenbubbles/config.toml`. Use profiles for a second account or a snapshot.
+When a profile file exists, its default profile's key file is used instead, so
+check access with `doctor.py` or `source status`, not by looking for that file.
 Never put credentials in chat, arguments, logs, or projects.
 
 If a source hangs, diagnose one directory open with a timeout before retrying.

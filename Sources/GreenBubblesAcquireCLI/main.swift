@@ -43,6 +43,7 @@ struct Arguments {
   var output: URL?
   var timeoutSeconds = LLDBPassphraseCapture.defaultTimeoutSeconds
   var dbRoot: URL?
+  var profile: String?
   var overwrite = false
   var passphraseStdin = false
   var includePaths = false
@@ -83,6 +84,10 @@ struct Arguments {
         index += 1
         guard index < arguments.count else { throw CLIError.missingValue(option) }
         dbRoot = URL(fileURLWithPath: arguments[index])
+      case "--profile":
+        index += 1
+        guard index < arguments.count else { throw CLIError.missingValue(option) }
+        profile = arguments[index]
       case "--overwrite":
         overwrite = true
       case "--passphrase-stdin":
@@ -115,10 +120,13 @@ private let usage = """
     help                   Show this help
 
   Options:
-    --output <path>        Where capture writes the passphrase (default:
-                           ~/.greenbubbles-acquire/passphrase.txt, mode 0600)
+    --output <path>        Where capture writes the passphrase (default: the
+                           query profile's credentialFile, else
+                           ~/.greenbubbles-acquire/passphrase.txt; mode 0600)
     --timeout-seconds <n>  Capture window in seconds (default: 300)
-    --db-root <path>       Override the auto-discovered active db_storage root
+    --db-root <path>       Override the profile's or auto-discovered db_storage root
+    --profile <name>       Use this live query profile's sourceRoot and
+                           credentialFile (default: the file's defaultProfile)
     --overwrite            Replace an existing passphrase output file
     --passphrase-stdin     Read the 32-byte passphrase from standard input
     --include-paths        Include sensitive filesystem paths in local output
@@ -227,6 +235,40 @@ private func invokingUserHomeDirectory() -> URL {
   return FileManager.default.homeDirectoryForCurrentUser
 }
 
+// The user who will read the key: the sudo caller when running as root.
+private func invokingUserIDs() -> (uid: uid_t, gid: gid_t) {
+  if geteuid() == 0, let sudoUser = ProcessInfo.processInfo.environment["SUDO_USER"],
+    let entry = getpwnam(sudoUser)
+  {
+    return (entry.pointee.pw_uid, entry.pointee.pw_gid)
+  }
+  return (getuid(), getgid())
+}
+
+// Same location rules as the Rust CLI's query profiles.
+private func queryProfilesFile() -> URL {
+  if let custom = ProcessInfo.processInfo.environment["GREENBUBBLES_QUERY_PROFILES_FILE"],
+    custom.hasPrefix("/")
+  {
+    return URL(fileURLWithPath: custom)
+  }
+  return invokingUserHomeDirectory().appending(path: ".greenbubbles/query-profiles.json")
+}
+
+// Explicit --db-root and --output win; a profile fills in what they leave out.
+private func resolveProfile(_ arguments: Arguments, needsOutput: Bool) throws -> LiveQueryProfile? {
+  if arguments.profile == nil, arguments.dbRoot != nil, !needsOutput || arguments.output != nil {
+    return nil
+  }
+  let profile = try QueryProfileTarget.resolve(
+    name: arguments.profile,
+    file: queryProfilesFile(),
+    ownerUID: invokingUserIDs().uid
+  )
+  if let profile { printNote("using query profile \(profile.name)") }
+  return profile
+}
+
 private func resolveDatabaseRoot(_ option: URL?) throws -> URL {
   if let option {
     return option.standardizedFileURL
@@ -270,7 +312,11 @@ private func latestDatabaseModification(_ root: URL) -> Date {
   return latest
 }
 
-private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightResult {
+private func runPreflight(
+  dbRootOption: URL?,
+  rootOrigin: String = "from --db-root",
+  includePaths: Bool
+) -> PreflightResult {
   var checks: [PreflightCheck] = []
   var remediation: String?
 
@@ -356,7 +402,7 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
     let inventory = try DatabaseSaltInventory(root: root)
     databaseCount = inventory.entries.count
     distinctSaltCount = inventory.distinctSalts.count
-    let origin = dbRootOption == nil ? "auto-discovered" : "from --db-root"
+    let origin = dbRootOption == nil ? "auto-discovered" : rootOrigin
     if inventory.entries.isEmpty {
       databaseLabel = "database root found (\(origin)) but it contains no databases"
     } else {
@@ -396,6 +442,11 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
   return PreflightResult(report: report, checks: checks)
 }
 
+private func rootOrigin(_ arguments: Arguments, _ profile: LiveQueryProfile?) -> String {
+  if arguments.dbRoot == nil, let profile { return "from query profile \(profile.name)" }
+  return "from --db-root"
+}
+
 private func verifyPassphrase(
   _ passphrase: PassphraseSecret,
   inventory: DatabaseSaltInventory
@@ -422,8 +473,10 @@ do {
   case .help:
     print(usage)
   case .preflight:
+    let profile = try resolveProfile(arguments, needsOutput: false)
     let result = runPreflight(
-      dbRootOption: arguments.dbRoot,
+      dbRootOption: arguments.dbRoot ?? profile?.sourceRoot,
+      rootOrigin: rootOrigin(arguments, profile),
       includePaths: arguments.includePaths
     )
     if arguments.json {
@@ -433,13 +486,17 @@ do {
     }
     if !result.report.ready { exit(1) }
   case .capture:
+    let profile = try resolveProfile(arguments, needsOutput: true)
+    let dbRoot = arguments.dbRoot ?? profile?.sourceRoot
     let output =
       arguments.output
+      ?? profile?.credentialFile
       ?? invokingUserHomeDirectory()
       .appending(path: ".greenbubbles-acquire", directoryHint: .isDirectory)
       .appending(path: "passphrase.txt")
     let preflight = runPreflight(
-      dbRootOption: arguments.dbRoot,
+      dbRootOption: dbRoot,
+      rootOrigin: rootOrigin(arguments, profile),
       includePaths: arguments.includePaths
     )
     guard preflight.report.ready else {
@@ -450,7 +507,7 @@ do {
       }
       exit(1)
     }
-    let root = try resolveDatabaseRoot(arguments.dbRoot)
+    let root = try resolveDatabaseRoot(dbRoot)
     let inventory = try DatabaseSaltInventory(root: root)
     printNote(
       "why this step: the passphrase only crosses the system key-derivation "
@@ -473,7 +530,12 @@ do {
         "the captured bytes verified against no database; nothing was written"
       )
     }
-    try SecretOutputWriter().write(passphrase, to: output, overwrite: arguments.overwrite)
+    try SecretOutputWriter().write(
+      passphrase,
+      to: output,
+      overwrite: arguments.overwrite,
+      owner: invokingUserIDs()
+    )
     if arguments.json {
       try printJSON(
         AcquisitionReport(
@@ -497,14 +559,20 @@ do {
       )
       print("  written to \(output.path) (mode 0600, owner-only)")
       print("")
-      print("Use it with:  cat \(output.path) | greenbubbles <args> --passphrase-stdin")
+      // An explicit --output is not the file the profile reads.
+      if let profile, arguments.output == nil {
+        print("Use it with:  greenbubbles <args> --profile \(profile.name)")
+      } else {
+        print("Use it with:  cat \(output.path) | greenbubbles <args> --passphrase-stdin")
+      }
     }
   case .verify:
     guard arguments.passphraseStdin else {
       throw CLIError.missingRequiredOption("--passphrase-stdin")
     }
     let passphrase = try PassphraseSecret.readFromStandardInput()
-    let root = try resolveDatabaseRoot(arguments.dbRoot)
+    let profile = try resolveProfile(arguments, needsOutput: false)
+    let root = try resolveDatabaseRoot(arguments.dbRoot ?? profile?.sourceRoot)
     let inventory = try DatabaseSaltInventory(root: root)
     let verifiedSaltCount = try verifyPassphrase(passphrase, inventory: inventory)
     let distinctSaltCount = inventory.distinctSalts.count

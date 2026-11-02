@@ -4,6 +4,22 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- `greenbubbles-acquire capture`, `verify`, and `preflight` follow query
+  profiles. `--profile <name>` takes the profile's `sourceRoot` and
+  `credentialFile`. With no flags, a live `defaultProfile` is used when
+  `~/.greenbubbles/query-profiles.json` exists. Explicit `--db-root` and
+  `--output` still win. The profile file must be a regular, owner-only file.
+
+### Fixed
+
+- Under `sudo`, `capture` now hands the key file, and a folder it creates, to
+  the user who ran `sudo`. Before, both stayed owned by root, so the user's own
+  `greenbubbles` could not read the key.
+
 ## 0.10.0 - 2026-10-01
 
 ### Added
