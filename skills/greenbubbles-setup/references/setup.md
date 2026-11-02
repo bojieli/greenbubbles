@@ -50,6 +50,11 @@ WeChat account currently in use and read
 source path. A missing passphrase file or an unreadable database returns
 `invalidProfile`, with a plain-language explanation on the terminal.
 
+Once `~/.greenbubbles/query-profiles.json` exists, its `defaultProfile` wins
+and the key is that profile's `credentialFile`, not
+`~/.greenbubbles-acquire/passphrase.txt`. Judge access by `greenbubbles source
+status` (or `doctor.py`), never by whether the default key file exists.
+
 A different database or passphrase file belongs in
 `~/.greenbubbles/config.toml`, not on the command line:
 
@@ -126,10 +131,12 @@ sudo greenbubbles-acquire capture
 ```
 
 The helper does not automate re-signing or sudo. Keep these owner-operated steps
-visible; do not run them as a side effect of a query or setup check. The default
-key output is `~/.greenbubbles-acquire/passphrase.txt` for the invoking environment;
-confirm the actual helper output path and file ownership before configuring a
-profile. Use explicit `--output` and `--db-root` from helper help when needed.
+visible; do not run them as a side effect of a query or setup check. Capture
+writes the key where queries will read it: the default query profile's
+`credentialFile` when a live profile file exists, otherwise
+`~/.greenbubbles-acquire/passphrase.txt`. The file is handed back to the user
+who ran `sudo`. For a second account, run only that WeChat copy and pass
+`--profile <name>`; explicit `--output` and `--db-root` override the profile.
 Never request the key in chat. If capture fails, report its prerequisite failure;
 do not repeatedly attach or modify the application.
 

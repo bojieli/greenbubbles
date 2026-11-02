@@ -68,10 +68,10 @@ greenbubbles chats --limit 20
 ## Command options
 
 ```sh
-greenbubbles-acquire preflight [--json] [--db-root <path>]
-greenbubbles-acquire capture [--output <path>] [--timeout-seconds 300] \
-  [--db-root <path>] [--overwrite]
-greenbubbles-acquire verify --passphrase-stdin [--db-root <path>]
+greenbubbles-acquire preflight [--json] [--profile <name>] [--db-root <path>]
+greenbubbles-acquire capture [--profile <name>] [--output <path>] \
+  [--timeout-seconds 300] [--db-root <path>] [--overwrite]
+greenbubbles-acquire verify --passphrase-stdin [--profile <name>] [--db-root <path>]
 ```
 
 - **`preflight`** checks that WeChat is installed and running, whether it has
@@ -85,6 +85,11 @@ greenbubbles-acquire verify --passphrase-stdin [--db-root <path>]
 - **`verify`** checks a saved key against your databases without touching
   WeChat. Pipe the key file into it. Use it after WeChat creates new database
   files; the same key opens them, so you don't need to capture again.
+- **`--profile`** uses a live [query profile](QUERY_PROFILES.md): its
+  `sourceRoot` is the data folder and its `credentialFile` is where `capture`
+  writes the key. Without `--profile`, the file's `defaultProfile` is used when
+  `~/.greenbubbles/query-profiles.json` exists and that profile is live.
+  `--db-root` and `--output` override the profile's values.
 - **`--db-root`** points at a specific WeChat data folder. Normally the tool
   picks the account whose data was written most recently.
 
@@ -106,6 +111,10 @@ left with no key file rather than a wrong one.
   you already saved keeps working as long as `verify` succeeds.
 
 ## Where the key is saved
+
+If you use [query profiles](QUERY_PROFILES.md), the key goes to the profile's
+`credentialFile` instead (see `--profile` above). Either way, the file and a
+folder that `capture` creates belong to the account that ran `sudo`, not to root.
 
 The key is saved as 64 hexadecimal characters in
 `~/.greenbubbles-acquire/passphrase.txt`. The file can be read only by your

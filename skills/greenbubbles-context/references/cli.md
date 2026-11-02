@@ -7,7 +7,8 @@ help exits without opening private inputs or reading a key.
 
 Ordinary live reads need no profile, source path, or access flag. They open
 the newest installed WeChat `db_storage` directory and read
-`~/.greenbubbles-acquire/passphrase.txt`:
+`~/.greenbubbles-acquire/passphrase.txt`, or use the `defaultProfile` of
+`~/.greenbubbles/query-profiles.json` when that file exists:
 
 ```text
 greenbubbles chats --limit 100

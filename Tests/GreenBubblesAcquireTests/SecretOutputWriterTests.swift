@@ -23,6 +23,22 @@ struct SecretOutputWriterTests {
     #expect(try posixMode(of: output.deletingLastPathComponent()) == 0o700)
   }
 
+  @Test func handsFileAndCreatedFolderToTheGivenOwner() throws {
+    let base = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let output = base.appending(path: "nested/passphrase.txt")
+
+    let secret = try PassphraseSecret(bytes: bytesFromHex(passphraseHex))
+    // Non-root tests can only hand files to themselves; the sudo case is the
+    // same call with the invoking user's ids.
+    try SecretOutputWriter().write(secret, to: output, owner: (getuid(), getgid()))
+
+    var info = stat()
+    #expect(lstat(output.path, &info) == 0 && info.st_uid == getuid())
+    #expect(lstat(output.deletingLastPathComponent().path, &info) == 0 && info.st_uid == getuid())
+    #expect(try posixMode(of: output) == 0o600)
+  }
+
   @Test func refusesToOverwriteUnlessRequested() throws {
     let base = try makeTemporaryDirectory()
     defer { try? FileManager.default.removeItem(at: base) }

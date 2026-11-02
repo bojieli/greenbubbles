@@ -21,18 +21,26 @@ public enum SecretOutputError: Error, Equatable, CustomStringConvertible {
 /// lowercase hexadecimal characters plus a trailing newline to an
 /// owner-specified file. The parent directory is created or enforced to mode
 /// 0700, the file is mode 0600, and creation is exclusive (`O_CREAT | O_EXCL`,
-/// failing rather than overwriting) unless `overwrite` is set.
+/// failing rather than overwriting) unless `overwrite` is set. With `owner`,
+/// the file and a parent folder created here are handed to that user.
 public struct SecretOutputWriter: Sendable {
   public init() {}
 
   public func write(
     _ secret: PassphraseSecret,
     to url: URL,
-    overwrite: Bool = false
+    overwrite: Bool = false,
+    owner: (uid: uid_t, gid: gid_t)? = nil
   ) throws {
     let parent = url.standardizedFileURL.deletingLastPathComponent()
+    let parentExisted = FileManager.default.fileExists(atPath: parent.path)
     try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
     try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
+    // Capture runs under sudo; without this, a folder it creates in the
+    // user's home stays root-owned and the user's own CLI cannot read the key.
+    if let owner, !parentExisted, Darwin.chown(parent.path, owner.uid, owner.gid) != 0 {
+      throw SecretOutputError.posix(operation: "hand passphrase folder to the user", code: errno)
+    }
 
     var flags = O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW
     if overwrite {
@@ -48,6 +56,9 @@ public struct SecretOutputWriter: Sendable {
     defer { Darwin.close(descriptor) }
     guard Darwin.fchmod(descriptor, 0o600) == 0 else {
       throw SecretOutputError.posix(operation: "restrict passphrase output", code: errno)
+    }
+    if let owner, Darwin.fchown(descriptor, owner.uid, owner.gid) != 0 {
+      throw SecretOutputError.posix(operation: "hand passphrase output to the user", code: errno)
     }
 
     var payload = Self.hexPayload(of: secret)
