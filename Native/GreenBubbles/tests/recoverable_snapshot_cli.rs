@@ -1146,6 +1146,69 @@ fn encrypted_wechat_source_becomes_independently_recoverable_snapshot() {
 }
 
 #[test]
+fn contact_fts_index_built_by_a_different_tokenizer_still_snapshots_and_verifies() {
+    let fixture = EncryptedFixture::new();
+    // WeChat indexes contacts with pinyin tokens that the reimplemented
+    // MMFtsTokenizer never emits. Editing the content behind the index after
+    // insertion leaves the same mismatch, with made-up data and no tokenizer.
+    let contact_fts = open_encrypted_database(&fixture.source.join("contact/contact_fts.db"));
+    contact_fts
+        .execute_batch(
+            "CREATE VIRTUAL TABLE contact_fts_v5 USING fts5(nick_name, remark);
+             INSERT INTO contact_fts_v5 VALUES ('made up friend', 'zhang san');
+             UPDATE contact_fts_v5_content SET c0 = 'different text', c1 = 'li si';",
+        )
+        .unwrap();
+    let source_rows: Vec<String> = contact_fts
+        .prepare("PRAGMA integrity_check")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        source_rows,
+        ["malformed inverted index for FTS5 table main.contact_fts_v5"]
+    );
+    drop(contact_fts);
+
+    let snapshot = fixture.parent.join("contact-fts-snapshot");
+    let create_input = format!(
+        "{}\n{}\n",
+        hex::encode(WECHAT_KEY),
+        hex::encode(RECOVERY_KEY)
+    );
+    let created = run(
+        &[
+            "snapshot",
+            "create",
+            fixture.source.to_str().unwrap(),
+            snapshot.to_str().unwrap(),
+            "--source-passphrase-stdin",
+            "--snapshot-key-stdin",
+        ],
+        Some(create_input.as_bytes()),
+    );
+    assert_success(&created);
+
+    let recovery_input = format!("{}\n", hex::encode(RECOVERY_KEY));
+    let verified = run(
+        &[
+            "snapshot",
+            "verify",
+            snapshot.to_str().unwrap(),
+            "--snapshot-key-stdin",
+        ],
+        Some(recovery_input.as_bytes()),
+    );
+    assert_success(&verified);
+    let report: Value = serde_json::from_slice(&verified.stdout).unwrap();
+    assert_eq!(report["sqliteIntegrityVerified"], true);
+    assert_eq!(report["encryptedAtRest"], true);
+    assert_eq!(report["databaseCount"], 6);
+}
+
+#[test]
 fn snapshot_create_rejects_reusing_wechat_key_as_recovery_input() {
     let fixture = EncryptedFixture::new();
     let snapshot = fixture.parent.join("reused-key-snapshot");

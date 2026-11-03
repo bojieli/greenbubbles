@@ -90,7 +90,9 @@ The check takes no WeChat key. It confirms:
 - every database is closed, with no leftover `-wal`, `-shm`, or `-journal`
   file, and is encrypted, not plaintext;
 - every database opens with the recovery key and passes SQLite's integrity
-  check, with the expected page count, size, and SHA-256 hash.
+  check, with the expected page count, size, and SHA-256 hash. The one row
+  allowed is FTS5's "malformed inverted index" for a WeChat search index (see
+  step 7 below).
 
 A pass prints a report with `recoveryVerifiedWithoutWechatKey: true`. That
 proves this one drill worked. It is not a reason to delete your only other
@@ -353,7 +355,12 @@ requires `contact/contact.db` and `session/session.db`. For each file it:
 5. closes the result and reopens it using **only** the recovery key;
 6. rejects the file if it has a plaintext `SQLite format 3` header;
 7. runs `PRAGMA integrity_check`, hashes the closed file, and records its size
-   and page count;
+   and page count. Every row must be `ok`, with one exception: "malformed
+   inverted index for FTS5 table …". FTS5 checks its index by tokenizing each
+   row again, and GreenBubbles' copy of WeChat's `MMFtsTokenizer` does not
+   produce WeChat's pinyin tokens, so WeChat's contact search indexes always
+   fail that one check. The search index is built from the other data; every
+   B-tree check, including the FTS5 tables' own storage, must still pass;
 8. saves files and folders to disk, then moves the finished snapshot into place
    in a single step.
 
