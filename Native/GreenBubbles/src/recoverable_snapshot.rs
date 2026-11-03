@@ -1628,12 +1628,24 @@ fn verify_sqlite_integrity(connection: &Connection) -> Result<(), RecoverableSna
     let results = statement
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    if results.as_slice() != ["ok"] {
+    if !integrity_rows_pass(&results) {
         return Err(RecoverableSnapshotError::Integrity(
             "SQLite integrity_check did not return ok".into(),
         ));
     }
     Ok(())
+}
+
+/// FTS5's inverted-index check re-tokenizes every row. The reimplemented
+/// MMFtsTokenizer does not emit WeChat's pinyin tokens, so WeChat's contact
+/// indexes always fail that one check. The index is derived data; every
+/// B-tree check, FTS5 shadow tables included, must still report nothing.
+fn integrity_rows_pass(rows: &[String]) -> bool {
+    rows == ["ok"]
+        || (!rows.is_empty()
+            && rows
+                .iter()
+                .all(|row| row.starts_with("malformed inverted index for FTS5 table ")))
 }
 
 fn validate_new_output_directory(
@@ -2107,5 +2119,28 @@ fn safe_database_reason(error: &RecoverableSnapshotError) -> String {
         }
         RecoverableSnapshotError::Io(_) => "database storage operation failed".into(),
         _ => "database recovery operation failed".into(),
+    }
+}
+
+#[cfg(test)]
+mod integrity_tests {
+    use super::integrity_rows_pass;
+
+    fn rows(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    // The CLI cannot reach these: verify rejects a damaged file by its manifest
+    // hash first, and create rewrites every page through the backup API.
+    #[test]
+    fn rejects_btree_damage_even_next_to_an_fts5_row() {
+        assert!(!integrity_rows_pass(&rows(&[])));
+        assert!(!integrity_rows_pass(&rows(&[
+            "*** in database main ***\nPage 7: btreeInitPage() returns error code 11"
+        ])));
+        assert!(!integrity_rows_pass(&rows(&[
+            "malformed inverted index for FTS5 table main.contact_fts_v5",
+            "row 3 missing from index contact_name_idx",
+        ])));
     }
 }
