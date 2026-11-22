@@ -278,29 +278,38 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
   var processHardeningStatus: ProcessHardeningStatus? = nil
   var processLabel = "WeChat is not running"
   var processHint: String? = "start WeChat and log in before capturing"
-  if let processIDs = try? WeChatProcessLocator().processIDs(), let first = processIDs.first {
-    wechatProcessRunning = true
-    let status = RuntimeHardeningProbe.status(forProcessID: first)
-    processHardeningStatus = status
-    let version = [clientMarketingVersion, clientBuildVersion.map { "build \($0)" }]
-      .compactMap { $0 }.joined(separator: ", ")
-    let suffix = version.isEmpty ? "" : " (\(version))"
-    switch status {
-    case .hardened:
-      processLabel = "WeChat is running\(suffix), but Hardened Runtime is still active"
-      processHint = "re-sign the app, then restart WeChat:\n    \(resignRemediation)"
-      remediation = resignRemediation
-    case .notHardened:
-      processLabel = "WeChat is running\(suffix), Hardened Runtime removed"
-      processHint = nil
-    case .unknown:
-      processLabel = "WeChat is running\(suffix), hardening status unknown (proceeding)"
-      processHint = nil
+  do {
+    if let processID = try WeChatProcessLocator().uniqueProcessID() {
+      wechatProcessRunning = true
+      let status = RuntimeHardeningProbe.status(forProcessID: processID)
+      processHardeningStatus = status
+      let version = [clientMarketingVersion, clientBuildVersion.map { "build \($0)" }]
+        .compactMap { $0 }.joined(separator: ", ")
+      let suffix = version.isEmpty ? "" : " (\(version))"
+      switch status {
+      case .hardened:
+        processLabel = "WeChat is running\(suffix), but Hardened Runtime is still active"
+        processHint = "re-sign the app, then restart WeChat:\n    \(resignRemediation)"
+        remediation = resignRemediation
+      case .notHardened:
+        processLabel = "WeChat is running\(suffix), Hardened Runtime removed"
+        processHint = nil
+      case .unknown:
+        processLabel = "WeChat is running\(suffix), hardening status unknown (proceeding)"
+        processHint = nil
+      }
     }
+  } catch ProcessLocatorError.multipleProcesses {
+    wechatProcessRunning = true
+    processLabel = ProcessLocatorError.multipleProcesses.description
+    processHint = "quit the other copies before continuing"
+  } catch {
+    processLabel = String(describing: error)
+    processHint = nil
   }
   checks.append(
     PreflightCheck(
-      ok: wechatProcessRunning && processHardeningStatus != .hardened,
+      ok: processHardeningStatus != nil && processHardeningStatus != .hardened,
       label: processLabel,
       hint: processHint
     ))
