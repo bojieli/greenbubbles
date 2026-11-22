@@ -79,10 +79,10 @@ families are:
 | `sha2` | 0.10.9 | MIT OR Apache-2.0 | integrity digests |
 | `tempfile` | 3.27.0 | MIT OR Apache-2.0 | private temporary workspaces |
 | `thiserror` | 2.0.20 | MIT OR Apache-2.0 | errors |
-| `ureq` | 2.12.1 | MIT OR Apache-2.0 | in-process TLS/HTTP transport for the explicit Gemini summary command; API keys never enter subprocess arguments |
+| `ureq` | 3.4.2 | MIT OR Apache-2.0 | in-process TLS/HTTP transport for the explicit Gemini summary command; API keys never enter subprocess arguments |
 | `walkdir` | 2.5.0 | Unlicense/MIT | bounded media traversal |
 | `zeroize` | 1.9.0 | Apache-2.0 OR MIT | secret cleanup |
-| `zstd` | 0.13.5 | BSD-3-Clause | compressed private restoration-ordering spool |
+| `zstd` | 0.14.4 | BSD-3-Clause | compressed private restoration-ordering spool |
 | `wx-context`, `wx-db`, `wx-decrypt`, `wx-media` | 0.7.4 at the revision below | absent on package records | pinned decoder primitives |
 | `filetime` (development only) | 0.2.29 | MIT/Apache-2.0 | timestamp tests |
 
