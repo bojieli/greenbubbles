@@ -821,7 +821,7 @@ impl ArtifactResolver {
             source_resource_row_id: resource.map(|value| value.source_row_id),
         };
         if let Some(data) = image_data.as_deref() {
-            self.decode_image(data, &artifact_id, &mut artifact)?;
+            self.decode_image(root, &canonical, data, &artifact_id, &mut artifact)?;
         }
         match self.artifacts.get_mut(&artifact_id) {
             Some(existing) => {
@@ -851,15 +851,13 @@ impl ArtifactResolver {
 
     fn decode_image(
         &self,
+        account_root: &Path,
+        source_path: &Path,
         data: &[u8],
         artifact_id: &str,
         artifact: &mut CanonicalArtifact,
     ) -> Result<(), RestoreError> {
         let format = wx_media::detect_dat_format(data);
-        let options = wx_media::DatDecryptOptions {
-            v2_aes_key: self.v2_image_key,
-            xor_key: None,
-        };
         if matches!(format, Some(wx_media::DatFormat::V2)) && self.v2_image_key.is_none() {
             artifact.decode_state = ArtifactDecodeState::KeyUnavailable;
             artifact.verification_detail = Some(
@@ -868,7 +866,12 @@ impl ArtifactResolver {
             );
             return Ok(());
         }
-        match wx_media::decrypt_dat(data, &options) {
+        match crate::live_attachment::decode_image_data(
+            account_root,
+            source_path,
+            data,
+            self.v2_image_key,
+        ) {
             Ok(decoded) => {
                 let relative = PathBuf::from("derived")
                     .join("images")
