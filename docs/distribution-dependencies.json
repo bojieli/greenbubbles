@@ -287,8 +287,8 @@
         "licenseMetadata" : "MIT OR Apache-2.0",
         "name" : "toml",
         "optional" : false,
-        "requirement" : "^0.9",
-        "resolvedVersion" : "0.9.12+spec-1.1.0",
+        "requirement" : "^1.1",
+        "resolvedVersion" : "1.1.4+spec-1.1.0",
         "source" : "registry+https://github.com/rust-lang/crates.io-index",
         "usesDefaultFeatures" : true
       },
