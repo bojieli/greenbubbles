@@ -300,8 +300,8 @@
         "licenseMetadata" : "MIT OR Apache-2.0",
         "name" : "ureq",
         "optional" : false,
-        "requirement" : "^2.12",
-        "resolvedVersion" : "2.12.1",
+        "requirement" : "^3.4",
+        "resolvedVersion" : "3.4.2",
         "source" : "registry+https://github.com/rust-lang/crates.io-index",
         "usesDefaultFeatures" : true
       },
