@@ -85,8 +85,10 @@ greenbubbles-acquire verify --passphrase-stdin [--db-root <path>]
 - **`verify`** checks a saved key against your databases without touching
   WeChat. Pipe the key file into it. Use it after WeChat creates new database
   files; the same key opens them, so you don't need to capture again.
-- **`--db-root`** points at a specific WeChat data folder. Normally the tool
-  picks the account whose data was written most recently.
+- **`--db-root`** points at a specific WeChat data folder. The tool selects a root
+  automatically only when discovery finds exactly one. With several accounts,
+  choose the intended directory explicitly. This option selects data on disk.
+  It does not select a running application copy.
 
 The WeChat version is shown for information only. The tool does not refuse a
 version it hasn't seen, but it has only been tested on WeChat 4.1.12 and 4.1.13.
