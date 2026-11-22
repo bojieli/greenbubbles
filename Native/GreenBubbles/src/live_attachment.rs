@@ -1542,7 +1542,15 @@ fn validate_owned_directory_within(
     let canonical = path.canonicalize().map_err(|_| {
         LiveAttachmentError::UnsafeSource(format!("{description} could not be canonicalized"))
     })?;
-    if canonical != path || !canonical.starts_with(account_root) {
+    // macOS can spell the parent of the selected root as either /var or
+    // /private/var. Compare components below the root without allowing
+    // a symlink inside the account (or the account directory itself).
+    validate_owned_real_directory(account_root, "selected root")?;
+    let selected = account_root.canonicalize()?;
+    let relative = path.strip_prefix(account_root).map_err(|_| {
+        LiveAttachmentError::UnsafeSource(format!("{description} escapes the selected account"))
+    })?;
+    if canonical != selected.join(relative) {
         return Err(LiveAttachmentError::UnsafeSource(format!(
             "{description} contains a symbolic link or escapes the selected account"
         )));
@@ -2205,6 +2213,21 @@ mod tests {
             assert_eq!(unpacked.ext, ext);
             assert_eq!(&unpacked.data, payload);
         }
+    }
+
+    #[test]
+    fn media_allows_parent_aliases_and_rejects_links_below_the_account() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        let media = real.join("account/media");
+        fs::create_dir_all(&media).unwrap();
+        fs::write(media.join("sample"), b"sample").unwrap();
+        let alias = temp.path().join("parent-alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let account = alias.join("account");
+        assert!(open_bounded_media(&account, &account.join("media/sample"), 64).is_some());
+        std::os::unix::fs::symlink(&media, account.join("linked-media")).unwrap();
+        assert!(open_bounded_media(&account, &account.join("linked-media/sample"), 64).is_none());
     }
 
     #[test]
