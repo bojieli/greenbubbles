@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 
@@ -24,6 +24,7 @@ const MAXIMUM_CONVERSATION_DIRECTORIES: usize = 4_096;
 const MAXIMUM_CONVERSATION_FILES: usize = 100_000;
 const MAXIMUM_ATTACHMENT_CANDIDATES: usize = 256;
 const MAXIMUM_IMAGE_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
+const MAXIMUM_THUMBNAIL_BYTES: u64 = 2 * 1024 * 1024;
 const MAXIMUM_VOICE_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
 const MAXIMUM_VIDEO_SOURCE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAXIMUM_DOCUMENT_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
@@ -260,14 +261,12 @@ pub fn materialize_image_attachment(
     } else {
         None
     };
-    let decoded = wx_media::decrypt_dat(
+    let decoded = decode_image(
+        &source.account_root,
+        candidate_file_path(&candidate),
         &encrypted,
-        &wx_media::DatDecryptOptions {
-            v2_aes_key,
-            xor_key: wx_media::detect_xor_key(&source.account_root.join("msg/attach")),
-        },
+        v2_aes_key,
     )
-    .and_then(viewable_image)
     .map_err(|_| {
         LiveAttachmentError::Decode("the selected WeChat image could not be decoded safely".into())
     })?;
@@ -374,14 +373,12 @@ pub fn materialize_message_attachment(
             } else {
                 None
             };
-            let decoded = wx_media::decrypt_dat(
+            let decoded = decode_image(
+                protected_root,
+                candidate_file_path(&candidate),
                 &encrypted,
-                &wx_media::DatDecryptOptions {
-                    v2_aes_key,
-                    xor_key: wx_media::detect_xor_key(&protected_root.join("msg/attach")),
-                },
+                v2_aes_key,
             )
-            .and_then(viewable_image)
             .map_err(|_| {
                 LiveAttachmentError::Decode(
                     "the selected WeChat image could not be decoded safely".into(),
@@ -1121,43 +1118,42 @@ fn scan_scoped_filesystem_candidates(
     Ok(())
 }
 
-fn shared_document_matches(account_root: &Path, path: &Path, expected: &str) -> bool {
-    let Some(parent) = path.parent() else {
-        return false;
-    };
-    if validate_owned_directory_within(account_root, parent, "shared document month").is_err() {
-        return false;
-    }
-    let Ok(file) = OpenOptions::new()
+fn open_bounded_media(account_root: &Path, path: &Path, limit: u64) -> Option<(File, FileVersion)> {
+    let parent = path.parent()?;
+    validate_owned_directory_within(account_root, parent, "media directory").ok()?;
+    let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)
-    else {
-        return false;
-    };
-    let Ok(metadata) = file.metadata() else {
-        return false;
-    };
+        .ok()?;
+    let metadata = file.metadata().ok()?;
     if !metadata.is_file()
         || metadata.uid() != unsafe { libc::geteuid() }
         || metadata.len() == 0
-        || metadata.len() > MAXIMUM_DOCUMENT_SOURCE_BYTES
+        || metadata.len() > limit
     {
-        return false;
+        return None;
     }
     let version = FileVersion::from_metadata(&metadata);
-    if validate_owned_directory_within(account_root, parent, "shared document month").is_err()
-        || !fs::symlink_metadata(path).is_ok_and(|before| version.matches(&before))
-    {
-        return false;
+    validate_owned_directory_within(account_root, parent, "media directory").ok()?;
+    if !version.matches(&fs::symlink_metadata(path).ok()?) {
+        return None;
     }
+    Some((file, version))
+}
+
+fn shared_document_matches(account_root: &Path, path: &Path, expected: &str) -> bool {
+    let Some((file, version)) =
+        open_bounded_media(account_root, path, MAXIMUM_DOCUMENT_SOURCE_BYTES)
+    else {
+        return false;
+    };
     let mut digest = md5::Context::new();
-    let mut bounded = (&file).take(metadata.len() + 1);
-    if !std::io::copy(&mut bounded, &mut digest).is_ok_and(|count| count == metadata.len()) {
+    let mut bounded = (&file).take(version.byte_count + 1);
+    if !std::io::copy(&mut bounded, &mut digest).is_ok_and(|count| count == version.byte_count) {
         return false;
     }
-    validate_owned_directory_within(account_root, parent, "shared document month").is_ok()
-        && fs::symlink_metadata(path).is_ok_and(|after| version.matches(&after))
+    fs::symlink_metadata(path).is_ok_and(|after| version.matches(&after))
         && format!("{:x}", digest.finalize()).eq_ignore_ascii_case(expected)
 }
 
@@ -2002,13 +1998,76 @@ fn cached_files(directory: &Path, listings: &mut BTreeMap<PathBuf, Vec<PathBuf>>
     files
 }
 
-fn viewable_image(
+fn decode_image(
+    account_root: &Path,
+    source: &Path,
+    bytes: &[u8],
+    v2_aes_key: Option<[u8; 16]>,
+) -> Result<wx_media::DecodedImage, wx_media::MediaError> {
+    // The length of the encoded trailing segment occupies bytes 10..14 of V1/V2.
+    let has_encoded_tail = wx_media::detect_dat_format(bytes).is_some()
+        && bytes.get(10..14).is_some_and(|size| size != [0; 4]);
+    let xor_key = if has_encoded_tail {
+        Some(
+            selected_image_xor_hint(account_root, source, bytes)
+                .ok_or(wx_media::MediaError::XorKeyDetectionFailed)?,
+        )
+    } else {
+        None
+    };
+    wx_media::decrypt_dat(
+        bytes,
+        &wx_media::DatDecryptOptions {
+            v2_aes_key,
+            xor_key,
+        },
+    )
+    .and_then(unpack_image)
+}
+
+// The upstream format detector scans a directory recursively. Give it a private
+// sample containing only the selected image's matching thumbnail.
+fn selected_image_xor_hint(account_root: &Path, source: &Path, image: &[u8]) -> Option<u8> {
+    let stem = source.file_stem()?.to_str()?.split('_').next()?;
+    normalize_md5(stem).ok()?;
+    let thumbnail = source.with_file_name(format!("{stem}_t.dat"));
+    let temp = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .ok()?;
+    let sample = temp.path().join("selected_t.dat");
+    if let Some((file, version)) =
+        open_bounded_media(account_root, &thumbnail, MAXIMUM_THUMBNAIL_BYTES)
+    {
+        let output = File::create_new(&sample).ok()?;
+        let count = std::io::copy(&mut file.take(version.byte_count + 1), &mut &output).ok()?;
+        if count != version.byte_count || !version.matches(&fs::symlink_metadata(&thumbnail).ok()?)
+        {
+            return None;
+        }
+    } else if image.len() as u64 <= MAXIMUM_THUMBNAIL_BYTES {
+        fs::write(&sample, image).ok()?;
+    } else {
+        return None;
+    }
+    wx_media::detect_xor_key(temp.path())
+}
+
+fn unpack_image(
     mut image: wx_media::DecodedImage,
 ) -> Result<wx_media::DecodedImage, wx_media::MediaError> {
+    if image.data.len() as u64 > MAXIMUM_IMAGE_SOURCE_BYTES {
+        return Err(wx_media::MediaError::InvalidFormat {
+            reason: "image exceeds the source limit".into(),
+        });
+    }
     if image.ext == "wxgf" {
-        let converted = wx_media::transcode_wxgf(&image.data)?;
-        image.data = converted.data;
-        image.ext = converted.ext.to_string();
+        let (data, ext) = match wx_media::parse_wxgf(&image.data)? {
+            wx_media::WxgfContent::EmbeddedImage { data, ext } => (data, ext),
+            wx_media::WxgfContent::Hevc(data) => (data, "hevc"),
+        };
+        image.data = data;
+        image.ext = ext.to_string();
     }
     Ok(image)
 }
@@ -2023,59 +2082,82 @@ fn readable_image_file(account_root: &Path, source: &Path, md5: &str) -> Option<
         extension.as_str(),
         "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "heif"
     ) {
+        open_bounded_media(account_root, source, MAXIMUM_IMAGE_SOURCE_BYTES)?;
         return Some(source.to_path_buf());
     }
     if extension != "dat" {
         return None;
     }
-    let cache = media_cache_dir()?;
+    let cache = media_cache_dir(account_root)?;
     if let Some(existing) = find_named_file(&cache, Some(md5), None, &mut BTreeMap::new()) {
-        return Some(existing);
+        if existing.file_stem().and_then(|s| s.to_str()) == Some(md5)
+            && open_bounded_media(&cache, &existing, MAXIMUM_IMAGE_SOURCE_BYTES).is_some()
+            && matches!(
+                existing.extension().and_then(|e| e.to_str()),
+                Some("jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "heif" | "bmp")
+            )
+        {
+            return Some(existing);
+        }
     }
-    let encrypted = fs::read(source).ok()?;
-    if encrypted.len() as u64 > MAXIMUM_IMAGE_SOURCE_BYTES {
+    let (file, version) = open_bounded_media(account_root, source, MAXIMUM_IMAGE_SOURCE_BYTES)?;
+    let mut encrypted = Vec::new();
+    file.take(version.byte_count + 1)
+        .read_to_end(&mut encrypted)
+        .ok()?;
+    if encrypted.len() as u64 != version.byte_count
+        || !version.matches(&fs::symlink_metadata(source).ok()?)
+    {
         return None;
     }
     let prefix = &encrypted[..encrypted.len().min(32)];
     let v2_aes_key = (wx_media::detect_dat_format(prefix) == Some(wx_media::DatFormat::V2))
         .then(|| wx_media::derive_v2_key_from_dir(account_root).ok())
         .flatten();
-    let decoded = wx_media::decrypt_dat(
-        &encrypted,
-        &wx_media::DatDecryptOptions {
-            v2_aes_key,
-            xor_key: wx_media::detect_xor_key(&account_root.join("msg/attach")),
-        },
-    )
-    .and_then(viewable_image)
-    .ok()?;
-    let extension = if decoded.ext.is_empty() {
-        "img".to_string()
-    } else {
-        decoded.ext
-    };
-    if !extension
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric())
-    {
+    let decoded = decode_image(account_root, source, &encrypted, v2_aes_key).ok()?;
+    let extension = decoded.ext;
+    if !matches!(
+        extension.as_str(),
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "heif" | "bmp"
+    ) {
         return None;
     }
     let output = cache.join(format!("{md5}.{extension}"));
-    fs::write(&output, &decoded.data).ok()?;
-    let mut permissions = fs::metadata(&output).ok()?.permissions();
-    permissions.set_mode(0o600);
-    fs::set_permissions(&output, permissions).ok()?;
+    let mut pending = tempfile::NamedTempFile::new_in(&cache).ok()?;
+    pending.write_all(&decoded.data).ok()?;
+    if let Err(error) = pending.persist_noclobber(&output) {
+        if error.error.kind() != std::io::ErrorKind::AlreadyExists
+            || open_bounded_media(&cache, &output, MAXIMUM_IMAGE_SOURCE_BYTES).is_none()
+        {
+            return None;
+        }
+    }
+
     Some(output)
 }
 
-fn media_cache_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let directory = PathBuf::from(home).join(".greenbubbles/cache/media/v2");
-    fs::create_dir_all(&directory).ok()?;
-    let mut permissions = fs::metadata(&directory).ok()?.permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(&directory, permissions).ok()?;
-    Some(directory)
+fn media_cache_dir(account_root: &Path) -> Option<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME")?)
+        .canonicalize()
+        .ok()?;
+    let account = hex::encode(Sha256::digest(
+        account_root
+            .canonicalize()
+            .ok()?
+            .as_os_str()
+            .as_encoded_bytes(),
+    ));
+    let mut directory = home.clone();
+    for part in [".greenbubbles", "cache", "media", "v2", &account] {
+        directory.push(part);
+        match fs::DirBuilder::new().mode(0o700).create(&directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return None,
+        }
+        validate_owned_directory_within(&home, &directory, "media cache").ok()?;
+    }
+    validate_owner_only_directory(&directory, "account media cache").ok()
 }
 
 #[cfg(test)]
@@ -2086,6 +2168,44 @@ mod tests {
 
     use super::*;
     use crate::live_query::{list_messages, QueryDatabaseAccess};
+
+    #[test]
+    fn media_format_probe_reads_only_the_selected_images_thumbnail() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let selected = root.join("selected");
+        let unrelated = root.join("unrelated");
+        fs::create_dir(&selected).unwrap();
+        fs::create_dir(&unrelated).unwrap();
+        let id = "0123456789abcdef0123456789abcdef";
+        let source = selected.join(format!("{id}.dat"));
+        let thumbnail = format!("{id}_t.dat");
+        let encoded = [0xa5, 0xff ^ 0xa5, 0xd9 ^ 0xa5];
+        fs::write(unrelated.join(&thumbnail), encoded).unwrap();
+        assert!(selected_image_xor_hint(&root, &source, &[0, 0]).is_none());
+        std::os::unix::fs::symlink(unrelated.join(&thumbnail), selected.join(&thumbnail)).unwrap();
+        assert!(selected_image_xor_hint(&root, &source, &[0, 0]).is_none());
+        fs::remove_file(selected.join(&thumbnail)).unwrap();
+        fs::write(selected.join(&thumbnail), encoded).unwrap();
+        assert_eq!(selected_image_xor_hint(&root, &source, &[0, 0]), Some(0xa5));
+    }
+
+    #[test]
+    fn wxgf_preserves_the_payload_format_without_launching_a_decoder() {
+        for (payload, ext) in [
+            (&b"\xff\xd8\xffsynthetic"[..], "jpg"),
+            (&b"\0\0\0\x01synthetic"[..], "hevc"),
+        ] {
+            let image = wx_media::DecodedImage {
+                data: [b"wxgf".as_slice(), payload].concat(),
+                ext: "wxgf".into(),
+                format: wx_media::DatFormat::V1,
+            };
+            let unpacked = unpack_image(image).unwrap();
+            assert_eq!(unpacked.ext, ext);
+            assert_eq!(&unpacked.data, payload);
+        }
+    }
 
     #[test]
     fn shared_documents_require_regular_bounded_files_inside_the_account() {
