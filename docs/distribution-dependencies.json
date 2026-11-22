@@ -23,8 +23,8 @@
         "licenseMetadata" : "MIT OR Apache-2.0",
         "name" : "argon2",
         "optional" : false,
-        "requirement" : "^0.5",
-        "resolvedVersion" : "0.5.3",
+        "requirement" : "^0.6",
+        "resolvedVersion" : "0.6.0",
         "source" : "registry+https://github.com/rust-lang/crates.io-index",
         "usesDefaultFeatures" : true
       },
