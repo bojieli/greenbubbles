@@ -19,7 +19,7 @@ public enum SecretOutputError: Error, Equatable, CustomStringConvertible {
 
 /// The only egress point for a captured passphrase: writes exactly 64
 /// lowercase hexadecimal characters plus a trailing newline to an
-/// owner-specified file. The parent directory is created or enforced to mode
+/// owner-specified file. A new parent directory is created with mode
 /// 0700, the file is mode 0600, and creation is exclusive (`O_CREAT | O_EXCL`,
 /// failing rather than overwriting) unless `overwrite` is set.
 public struct SecretOutputWriter: Sendable {
@@ -31,8 +31,8 @@ public struct SecretOutputWriter: Sendable {
     overwrite: Bool = false
   ) throws {
     let parent = url.standardizedFileURL.deletingLastPathComponent()
-    try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
-    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
+    try FileManager.default.createDirectory(
+      at: parent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
 
     var flags = O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW
     if overwrite {
