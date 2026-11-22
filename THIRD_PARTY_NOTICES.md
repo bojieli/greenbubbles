@@ -162,7 +162,7 @@ repository-level license checksum.
 - `base64 0.22.1` — `MIT OR Apache-2.0` — https://github.com/marshallpierce/rust-base64
 - `base64 0.23.1` — `MIT OR Apache-2.0` — https://github.com/marshallpierce/rust-base64
 - `base64ct 1.8.3` — `Apache-2.0 OR MIT` — https://github.com/RustCrypto/formats
-- `bip39 2.2.2` — `CC0-1.0` — https://github.com/rust-bitcoin/rust-bip39/
+- `bip39 3.0.0` — `CC0-1.0` — https://github.com/rust-bitcoin/rust-bip39/
 - `bitcoin_hashes 0.14.101` — `CC0-1.0` — https://github.com/rust-bitcoin/rust-bitcoin
 - `bitflags 2.13.1` — `MIT OR Apache-2.0` — https://github.com/bitflags/bitflags
 - `blake2 0.10.6` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/hashes
@@ -1085,7 +1085,7 @@ express Statement of Purpose.
 
 Used by:
 
-- `bip39 2.2.2`
+- `bip39 3.0.0`
 - `hex-conservative 0.2.2`
 
 ```text
