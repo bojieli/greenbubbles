@@ -48,18 +48,19 @@ struct SecretOutputWriterTests {
     PassphraseSecret.zeroize(&replacementBytes)
   }
 
-  @Test func enforcesPermissionsOnAPreExistingParentDirectory() throws {
+  @Test(arguments: [0o755, 0o1777])
+  func preservesPermissionsOnExistingParent(mode: Int) throws {
     let base = try makeTemporaryDirectory()
     defer { try? FileManager.default.removeItem(at: base) }
     let parent = base.appending(path: "loose", directoryHint: .isDirectory)
     try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
-    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: parent.path)
+    try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: parent.path)
 
     let secret = try PassphraseSecret(bytes: bytesFromHex(passphraseHex))
     let output = parent.appending(path: "passphrase.txt")
     try SecretOutputWriter().write(secret, to: output)
 
-    #expect(try posixMode(of: parent) == 0o700)
+    #expect(try posixMode(of: parent) == Int32(mode))
     #expect(try posixMode(of: output) == 0o600)
   }
 
@@ -77,7 +78,7 @@ struct SecretOutputWriterTests {
     guard Darwin.lstat(url.path, &metadata) == 0 else {
       throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
     }
-    return Int32(metadata.st_mode & 0o777)
+    return Int32(metadata.st_mode & 0o7777)
   }
 
   private func bytesFromHex(_ hex: String) -> [UInt8] {

@@ -957,6 +957,66 @@ fn unbounded_and_ambiguous_access_options_fail_closed() {
     }
 }
 
+#[test]
+fn empty_alternate_content_preserves_compressed_forwarded_messages() {
+    let fixture = Fixture::new(false);
+    let table = format!("Msg_{:x}", md5::compute(b"wxid_talker"));
+    let db = Connection::open(fixture.root.join("message/message_0.db")).unwrap();
+    let xml = "<msg><appmsg><type>19</type><title>Fixture history</title><recorditem><![CDATA[<recordinfo><datalist/></recordinfo>]]></recorditem></appmsg></msg>";
+    let compressed = zstd::stream::encode_all(xml.as_bytes(), 1).unwrap();
+    for (index, alternate) in ["NULL", "X''", "''"].iter().enumerate() {
+        db.execute(
+            &format!("INSERT INTO [{table}] (server_id,sort_seq,local_type,real_sender_id,create_time,status,message_content,WCDB_CT_message_content,compress_content) VALUES (?1,?1,?2,1,?1,0,?3,4,{alternate})"),
+            params![9000_i64 + index as i64, 49_i64 | (19_i64 << 32), &compressed],
+        ).unwrap();
+    }
+    drop(db);
+    let root = fixture.root.to_str().unwrap();
+    let listed = run(
+        &[
+            "messages",
+            "list",
+            root,
+            "--json",
+            "--decrypted",
+            "--conversation",
+            "wxid_talker",
+            "--limit",
+            "3",
+        ],
+        None,
+    );
+    assert_success(&listed);
+    let listing: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let items = listing["items"].as_array().unwrap();
+    assert_eq!(items.len(), 3);
+    for item in items {
+        let detail = run(
+            &[
+                "message",
+                "get",
+                root,
+                "--decrypted",
+                "--conversation",
+                "wxid_talker",
+                "--message",
+                item["id"].as_str().unwrap(),
+            ],
+            None,
+        );
+        assert_success(&detail);
+        let detail: Value = serde_json::from_slice(&detail.stdout).unwrap();
+        for message in [item, &detail["item"]] {
+            assert_eq!(message["contentDecodeState"], "complete");
+            assert_eq!(
+                message["content"]["MergedMessages"]["title"],
+                "Fixture history"
+            );
+            assert_eq!(message["content"]["MergedMessages"]["raw_xml"], xml);
+        }
+    }
+}
+
 struct Fixture {
     _directory: tempfile::TempDir,
     root: PathBuf,
