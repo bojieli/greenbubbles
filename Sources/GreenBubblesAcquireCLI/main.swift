@@ -10,7 +10,6 @@ enum CLIError: Error, CustomStringConvertible {
   case missingValue(String)
   case missingRequiredOption(String)
   case invalidInteger(option: String, value: String)
-  case noDatabaseRootDiscovered
   case verificationFailed(String)
 
   var description: String {
@@ -23,8 +22,6 @@ enum CLIError: Error, CustomStringConvertible {
       return "Missing required option: \(option)"
     case .invalidInteger(let option, let value):
       return "Expected a positive integer for \(option), got: \(value)"
-    case .noDatabaseRootDiscovered:
-      return "No WeChat database root was discovered; pass --db-root to select one"
     case .verificationFailed(let reason):
       return "Passphrase verification failed: \(reason)"
     }
@@ -118,7 +115,7 @@ private let usage = """
     --output <path>        Where capture writes the passphrase (default:
                            ~/.greenbubbles-acquire/passphrase.txt, mode 0600)
     --timeout-seconds <n>  Capture window in seconds (default: 300)
-    --db-root <path>       Override the auto-discovered active db_storage root
+    --db-root <path>       Select a db_storage root (required if several are found)
     --overwrite            Replace an existing passphrase output file
     --passphrase-stdin     Read the 32-byte passphrase from standard input
     --include-paths        Include sensitive filesystem paths in local output
@@ -231,43 +228,8 @@ private func resolveDatabaseRoot(_ option: URL?) throws -> URL {
   if let option {
     return option.standardizedFileURL
   }
-  let roots = WeChatAccountDiscovery(homeDirectory: invokingUserHomeDirectory())
-    .databaseRoots()
-  if roots.count == 1 { return roots[0] }
-  if roots.isEmpty { throw CLIError.noDatabaseRootDiscovered }
-  // Several accounts are present: the running client is logged into exactly
-  // one, and that account's databases are the ones being written to.
-  guard
-    let active = roots.max(by: { latestDatabaseModification($0) < latestDatabaseModification($1) })
-  else {
-    throw CLIError.noDatabaseRootDiscovered
-  }
-  return active
-}
-
-private func latestDatabaseModification(_ root: URL) -> Date {
-  var latest = Date.distantPast
-  guard
-    let enumerator = FileManager.default.enumerator(
-      at: root,
-      includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
-      options: [.skipsHiddenFiles]
-    )
-  else { return latest }
-  for case let url as URL in enumerator {
-    guard url.pathExtension == "db", !url.lastPathComponent.hasSuffix("-wal"),
-      !url.lastPathComponent.hasSuffix("-shm")
-    else { continue }
-    guard
-      let values = try? url.resourceValues(forKeys: [
-        .contentModificationDateKey, .isRegularFileKey,
-      ]),
-      values.isRegularFile == true,
-      let modified = values.contentModificationDate
-    else { continue }
-    if modified > latest { latest = modified }
-  }
-  return latest
+  return try WeChatAccountDiscovery(homeDirectory: invokingUserHomeDirectory())
+    .singleDatabaseRoot()
 }
 
 private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightResult {
