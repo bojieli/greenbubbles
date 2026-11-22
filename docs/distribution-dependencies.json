@@ -443,12 +443,17 @@
       {
         "licenseMetadata" : "MIT",
         "name" : "libsqlite3-sys",
-        "version" : "0.38.2"
+        "version" : "0.40.0"
       },
       {
         "licenseMetadata" : "MIT",
         "name" : "silk-rs",
         "version" : "0.2.0"
+      },
+      {
+        "licenseMetadata" : "MIT AND BSD-3-Clause AND blessing AND WTFPL",
+        "name" : "sqlcipher-src",
+        "version" : "420.0.0+sqlcipher-4.20.0-sqlite-3.54.1-libtomcrypt-1.18.2"
       },
       {
         "licenseMetadata" : "BSD-3-Clause AND BSD-2-Clause",

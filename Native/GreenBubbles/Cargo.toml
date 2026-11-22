@@ -42,3 +42,6 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std", "z
 
 [dev-dependencies]
 filetime = "0.2"
+
+[patch.crates-io]
+rusqlite = { path = "vendor/rusqlite" }
