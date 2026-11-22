@@ -388,11 +388,11 @@
 
         ],
         "kind" : "normal",
-        "licenseMetadata" : "MIT",
+        "licenseMetadata" : "BSD-3-Clause",
         "name" : "zstd",
         "optional" : false,
         "requirement" : "^0.13",
-        "resolvedVersion" : "0.13.3",
+        "resolvedVersion" : "0.13.5",
         "source" : "registry+https://github.com/rust-lang/crates.io-index",
         "usesDefaultFeatures" : true
       }
@@ -443,7 +443,7 @@
       {
         "licenseMetadata" : "MIT",
         "name" : "libsqlite3-sys",
-        "version" : "0.38.2"
+        "version" : "0.40.0"
       },
       {
         "licenseMetadata" : "MIT",
@@ -451,9 +451,14 @@
         "version" : "0.2.0"
       },
       {
-        "licenseMetadata" : "MIT/Apache-2.0",
+        "licenseMetadata" : "MIT AND BSD-3-Clause AND blessing AND WTFPL",
+        "name" : "sqlcipher-src",
+        "version" : "420.0.0+sqlcipher-4.20.0-sqlite-3.54.1-libtomcrypt-1.18.2"
+      },
+      {
+        "licenseMetadata" : "BSD-3-Clause AND BSD-2-Clause",
         "name" : "zstd-sys",
-        "version" : "2.0.16+zstd.1.5.7"
+        "version" : "2.1.3+zstd.1.5.7"
       }
     ],
     "package" : {

@@ -52,7 +52,7 @@ if ! grep -Fq "MIT License" LICENSE \
 fi
 
 for required_notice in \
-  "Copyright (c) 2008-2020 Zetetic LLC" \
+  "Copyright (c) 2025, ZETETIC LLC" \
   "Copyright (c) 2006-2012, Skype Limited" \
   "NO EXPRESS OR IMPLIED LICENSES TO ANY PARTY'S PATENT RIGHTS" \
   "Copyright (c) Meta Platforms, Inc. and affiliates" \
