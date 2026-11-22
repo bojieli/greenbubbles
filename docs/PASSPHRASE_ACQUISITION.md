@@ -111,9 +111,10 @@ path belongs to an earlier run.
 ## Where the key is saved
 
 The key is saved as 64 hexadecimal characters in
-`~/.greenbubbles-acquire/passphrase.txt`. The file can be read only by your
-account (mode `0600`, in a `0700` folder). It is not encrypted; those file
-permissions are what protect it. The key never appears on the command line, in
+`~/.greenbubbles-acquire/passphrase.txt`. The output file has mode `0600`.
+New output directories use mode `0700`. When you choose an existing directory,
+its original permissions are preserved. File permissions protect the unencrypted
+output. The key never appears on the command line, in
 a report, or in a log.
 
 To use a key saved somewhere else, or to read a second account or a backup,
