@@ -49,8 +49,8 @@
         "licenseMetadata" : "CC0-1.0",
         "name" : "bip39",
         "optional" : false,
-        "requirement" : "^2.2",
-        "resolvedVersion" : "2.2.2",
+        "requirement" : "^3.0",
+        "resolvedVersion" : "3.0.0",
         "source" : "registry+https://github.com/rust-lang/crates.io-index",
         "usesDefaultFeatures" : true
       },
