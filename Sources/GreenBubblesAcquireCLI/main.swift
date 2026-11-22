@@ -126,9 +126,8 @@ private let usage = """
   Capture requires root, lldb, a running WeChat, and an owner re-signed client
   without Hardened Runtime. When re-signing is required, preflight prints the
   exact command for the owner to run manually; this tool never automates it.
-  The capture mechanism breakpoints a system library function, so it works
-  with any WeChat build; the active account's database root is discovered
-  automatically.
+  Preflight checks prerequisites. Only successful database verification
+  permits an output file to be written.
   """
 
 private struct PreflightReport: Encodable {
@@ -432,7 +431,8 @@ do {
     let verifiedSaltCount = try verifyPassphrase(passphrase, inventory: inventory)
     guard verifiedSaltCount > 0 else {
       throw CLIError.verificationFailed(
-        "the captured bytes verified against no database; nothing was written"
+        "no match among \(inventory.distinctSalts.count) distinct database salts "
+          + "in \(inventory.entries.count) inventoried files. No output was created or replaced."
       )
     }
     try SecretOutputWriter().write(passphrase, to: output, overwrite: arguments.overwrite)

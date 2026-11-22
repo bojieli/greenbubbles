@@ -95,24 +95,28 @@ version it hasn't seen, but it has only been tested on WeChat 4.1.12 and 4.1.13.
 
 ## If something goes wrong
 
-The capture never saves a key it could not verify. If anything fails, you are
-left with no key file rather than a wrong one.
+A successful preflight checks prerequisites only. If database verification
+fails, the command exits with an error before creating or replacing the output
+file, even when `--overwrite` was requested. Any file already at the output
+path belongs to an earlier run.
 
 - **"Hardened Runtime is still active":** you haven't re-signed WeChat, or you
   didn't restart it after re-signing. macOS blocks the attach.
 - **Timed out:** you didn't log out and back in within the time limit. Run
   `capture` again. An idle, logged-in WeChat never reveals the key.
-- **Verification failed:** the captured value didn't open your databases, so
-  nothing was saved. Check that you logged back into the same account.
+- **Verification failed:** no database salt group matched the candidate. The
+  diagnostic reports the counts of groups and files examined. These counts do
+  not identify the cause or establish compatibility with the installed build.
 - **WeChat updated:** re-sign it and restart it before capturing again. A key
   you already saved keeps working as long as `verify` succeeds.
 
 ## Where the key is saved
 
 The key is saved as 64 hexadecimal characters in
-`~/.greenbubbles-acquire/passphrase.txt`. The file can be read only by your
-account (mode `0600`, in a `0700` folder). It is not encrypted; those file
-permissions are what protect it. The key never appears on the command line, in
+`~/.greenbubbles-acquire/passphrase.txt`. The output file has mode `0600`.
+New output directories use mode `0700`. When you choose an existing directory,
+its original permissions are preserved. File permissions protect the unencrypted
+output. The key never appears on the command line, in
 a report, or in a log.
 
 To use a key saved somewhere else, or to read a second account or a backup,
