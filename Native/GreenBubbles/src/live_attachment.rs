@@ -826,8 +826,7 @@ fn resolve_filesystem_message_candidates(
             .parent()
             .and_then(Path::parent)
             != Some(Path::new("msg/file"))
-            || read_file_candidate(candidate)
-                .is_ok_and(|bytes| format!("{:x}", md5::compute(bytes)) == source_md5)
+            || shared_document_matches(account_root, candidate_file_path(candidate), source_md5)
     });
     Ok(candidates)
 }
@@ -1014,8 +1013,9 @@ fn scan_scoped_filesystem_candidates(
     validate_path_segment(conversation, "conversation identifier")?;
     let conversation_hash = format!("{:x}", md5::compute(conversation.as_bytes()));
     let mut roots = Vec::<(PathBuf, Option<&'static str>)>::new();
-    if kind == AttachmentKind::Document {
-        roots.push((account_root.join("msg/file"), None));
+    let shared = account_root.join("msg/file");
+    if kind == AttachmentKind::Document && source_md5.is_some() {
+        roots.push((shared.clone(), None));
     }
     for segment in [conversation, conversation_hash.as_str()] {
         match kind {
@@ -1054,6 +1054,20 @@ fn scan_scoped_filesystem_candidates(
                 return Err(LiveAttachmentError::Unavailable(
                     "conversation media directory exceeds the bounded traversal limit".into(),
                 ));
+            }
+            if conversation_root == shared
+                && !month.file_name().to_str().is_some_and(|name| {
+                    let Some((year, month)) = name.split_once('-') else {
+                        return false;
+                    };
+                    year.len() == 4
+                        && year.bytes().all(|b| b.is_ascii_digit())
+                        && month.len() == 2
+                        && month.bytes().all(|b| b.is_ascii_digit())
+                        && ("01"..="12").contains(&month)
+                })
+            {
+                continue;
             }
             let file_type = month.file_type()?;
             if file_type.is_symlink() || !file_type.is_dir() {
@@ -1105,6 +1119,46 @@ fn scan_scoped_filesystem_candidates(
         }
     }
     Ok(())
+}
+
+fn shared_document_matches(account_root: &Path, path: &Path, expected: &str) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    if validate_owned_directory_within(account_root, parent, "shared document month").is_err() {
+        return false;
+    }
+    let Ok(file) = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    else {
+        return false;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    if !metadata.is_file()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.len() == 0
+        || metadata.len() > MAXIMUM_DOCUMENT_SOURCE_BYTES
+    {
+        return false;
+    }
+    let version = FileVersion::from_metadata(&metadata);
+    if validate_owned_directory_within(account_root, parent, "shared document month").is_err()
+        || !fs::symlink_metadata(path).is_ok_and(|before| version.matches(&before))
+    {
+        return false;
+    }
+    let mut digest = md5::Context::new();
+    let mut bounded = (&file).take(metadata.len() + 1);
+    if !std::io::copy(&mut bounded, &mut digest).is_ok_and(|count| count == metadata.len()) {
+        return false;
+    }
+    validate_owned_directory_within(account_root, parent, "shared document month").is_ok()
+        && fs::symlink_metadata(path).is_ok_and(|after| version.matches(&after))
+        && format!("{:x}", digest.finalize()).eq_ignore_ascii_case(expected)
 }
 
 fn candidate_filename_matches(
@@ -1819,14 +1873,23 @@ fn readable_media_path(
                             .join(month)
                             .join("File"),
                     ] {
+                        let shared = directory == account_root.join("msg/file").join(month);
+                        if shared
+                            && (md5.is_none()
+                                || validate_owned_directory_within(
+                                    account_root,
+                                    &directory,
+                                    "shared document month",
+                                )
+                                .is_err())
+                        {
+                            continue;
+                        }
                         for path in find_named_files(&directory, md5, title, listings) {
                             if !is_opaque_dat(&path)
-                                && (directory != account_root.join("msg/file").join(month)
+                                && (!shared
                                     || md5.is_some_and(|expected| {
-                                        fs::read(&path).is_ok_and(|bytes| {
-                                            format!("{:x}", md5::compute(bytes))
-                                                .eq_ignore_ascii_case(expected)
-                                        })
+                                        shared_document_matches(account_root, &path, expected)
                                     }))
                             {
                                 return Some(path);
@@ -2023,6 +2086,36 @@ mod tests {
 
     use super::*;
     use crate::live_query::{list_messages, QueryDatabaseAccess};
+
+    #[test]
+    fn shared_documents_require_regular_bounded_files_inside_the_account() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let account = root.join("account");
+        let month = account.join("msg/file/2026-08");
+        fs::create_dir_all(&month).unwrap();
+        let doc = month.join("document");
+        fs::write(&doc, b"sample").unwrap();
+        let md5 = format!("{:x}", md5::compute(b"sample"));
+        assert!(shared_document_matches(&account, &doc, &md5));
+        assert!(!shared_document_matches(&account, &doc, "bad digest"));
+        let alias = month.with_file_name("2026-09");
+        std::os::unix::fs::symlink(&month, &alias).unwrap();
+        assert!(!shared_document_matches(
+            &account,
+            &alias.join("document"),
+            &md5
+        ));
+        let oversized = File::create(month.join("large")).unwrap();
+        oversized
+            .set_len(MAXIMUM_DOCUMENT_SOURCE_BYTES + 1)
+            .unwrap();
+        assert!(!shared_document_matches(
+            &account,
+            &month.join("large"),
+            &md5
+        ));
+    }
 
     #[test]
     fn inspects_and_materializes_one_xor_image_without_releasing_source_path() {
