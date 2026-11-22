@@ -191,7 +191,7 @@ repository-level license checksum.
 - `crossbeam-utils 0.8.22` — `MIT OR Apache-2.0` — https://github.com/crossbeam-rs/crossbeam
 - `crypto-common 0.1.7` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/traits
 - `crypto-common 0.2.2` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/traits
-- `ctutils 0.4.2` — `Apache-2.0 OR MIT` — https://github.com/RustCrypto/utils
+- `ctutils 0.4.8` — `Apache-2.0 OR MIT` — https://github.com/RustCrypto/utils
 - `curve25519-dalek 4.1.3` — `BSD-3-Clause` — https://github.com/dalek-cryptography/curve25519-dalek/tree/main/curve25519-dalek
 - `dashmap 6.2.1` — `MIT` — https://github.com/xacrimon/dashmap
 - `digest 0.10.7` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/traits
@@ -277,9 +277,9 @@ repository-level license checksum.
 - `rusqlite 0.40.2` — `MIT` — https://github.com/rusqlite/rusqlite
 - `rust-stemmers 1.2.0` — `MIT OR BSD-3-Clause` — https://github.com/CurrySoftware/rust-stemmers
 - `rustix 1.1.4` — `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` — https://github.com/bytecodealliance/rustix
-- `rustls 0.23.45` — `Apache-2.0 OR ISC OR MIT` — https://github.com/rustls/rustls
+- `rustls 0.23.46` — `Apache-2.0 OR ISC OR MIT` — https://github.com/rustls/rustls
 - `rustls-pki-types 1.15.1` — `MIT OR Apache-2.0` — https://github.com/rustls/pki-types
-- `rustls-webpki 0.103.15` — `ISC` — https://github.com/rustls/webpki
+- `rustls-webpki 0.103.17` — `ISC` — https://github.com/rustls/webpki
 - `same-file 1.0.6` — `Unlicense OR MIT` — https://github.com/BurntSushi/same-file
 - `scopeguard 1.2.0` — `MIT OR Apache-2.0` — https://github.com/bluss/scopeguard
 - `serde 1.0.229` — `MIT OR Apache-2.0` — https://github.com/serde-rs/serde
@@ -326,7 +326,7 @@ repository-level license checksum.
 - `utf8_iter 1.0.4` — `Apache-2.0 OR MIT` — https://github.com/hsivonen/utf8_iter
 - `walkdir 2.5.0` — `Unlicense OR MIT` — https://github.com/BurntSushi/walkdir
 - `webpki-roots 0.26.11` — `CDLA-Permissive-2.0` — https://github.com/rustls/webpki-roots
-- `webpki-roots 1.0.9` — `CDLA-Permissive-2.0` — https://github.com/rustls/webpki-roots
+- `webpki-roots 1.0.12` — `CDLA-Permissive-2.0` — https://github.com/rustls/webpki-roots
 - `winnow 0.7.15` — `MIT` — https://github.com/winnow-rs/winnow
 - `winnow 1.0.4` — `MIT` — https://github.com/winnow-rs/winnow
 - `writeable 0.6.4` — `Unicode-3.0` — https://github.com/unicode-org/icu4x
@@ -346,9 +346,9 @@ repository-level license checksum.
 - `zerovec 0.11.8` — `Unicode-3.0` — https://github.com/unicode-org/icu4x
 - `zerovec-derive 0.11.6` — `Unicode-3.0` — https://github.com/unicode-org/icu4x
 - `zmij 1.0.23` — `MIT` — https://github.com/dtolnay/zmij
-- `zstd 0.13.3` — `MIT` — https://github.com/gyscos/zstd-rs
-- `zstd-safe 7.2.4` — `MIT OR Apache-2.0` — https://github.com/gyscos/zstd-rs
-- `zstd-sys 2.0.16+zstd.1.5.7` — `MIT OR Apache-2.0` — https://github.com/gyscos/zstd-rs
+- `zstd 0.13.5` — `BSD-3-Clause` — https://github.com/gyscos/zstd-rs
+- `zstd-safe 7.4.1` — `BSD-3-Clause` — https://github.com/gyscos/zstd-rs
+- `zstd-sys 2.1.3+zstd.1.5.7` — `BSD-3-Clause AND BSD-2-Clause` — https://github.com/gyscos/zstd-rs
 
 ## Rust license texts
 
@@ -852,6 +852,125 @@ limitations under the License.
 
 ```
 
+### BSD 2-Clause &quot;Simplified&quot; License
+
+Used by:
+
+- `zstd-sys 2.1.3+zstd.1.5.7`
+
+```text
+The decoders for legacy formats, in zstd/lib/legacy/, include code under the
+2-clause BSD license:
+
+BSD 2-Clause License
+
+Copyright (C) 2013-2016, Yann Collet.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+    * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+```
+
+### BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License
+
+Used by:
+
+- `zstd-safe 7.4.1`
+- `zstd-sys 2.1.3+zstd.1.5.7`
+- `zstd 0.13.5`
+
+```text
+BSD 3-Clause License
+
+Copyright (c) 2026, Alexandre Bury
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+```
+
+### BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License
+
+Used by:
+
+- `zstd-sys 2.1.3+zstd.1.5.7`
+
+```text
+BSD License
+
+For Zstandard software
+
+Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+ * Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+ * Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+ * Neither the name Facebook, nor Meta, nor the names of its contributors may
+   be used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+```
+
 ### BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License
 
 Used by:
@@ -947,6 +1066,48 @@ Redistribution and use in source and binary forms, with or without modification,
 3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote products derived from this software without specific prior written permission.
 
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+```
+
+### BSD 3-Clause &quot;New&quot; or &quot;Revised&quot; License
+
+Used by:
+
+- `zstd-sys 2.1.3+zstd.1.5.7`
+
+```text
+The auto-generated bindings are under the 3-clause BSD license:
+
+BSD License
+
+For Zstandard software
+
+Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+ * Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+ * Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+ * Neither the name Facebook, nor Meta, nor the names of its contributors may
+   be used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
 
@@ -1219,7 +1380,7 @@ express Statement of Purpose.
 Used by:
 
 - `webpki-roots 0.26.11`
-- `webpki-roots 1.0.9`
+- `webpki-roots 1.0.12`
 
 ```text
 # Community Data License Agreement - Permissive - Version 2.0
@@ -1865,7 +2026,7 @@ CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 Used by:
 
-- `rustls-webpki 0.103.15`
+- `rustls-webpki 0.103.17`
 
 ```text
 Except as otherwise noted, this project is licensed under the following
@@ -2622,7 +2783,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- `rustls 0.23.45`
+- `rustls 0.23.46`
 
 ```text
 Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>
@@ -4032,7 +4193,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- `ctutils 0.4.2`
+- `ctutils 0.4.8`
 
 ```text
 Copyright (c) 2025-2026 The RustCrypto Project Developers
@@ -5122,26 +5283,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
-
-```
-
-### MIT License
-
-Used by:
-
-- `zstd-safe 7.2.4`
-- `zstd-sys 2.0.16+zstd.1.5.7`
-- `zstd 0.13.3`
-
-```text
-The MIT License (MIT)
-Copyright (c) 2016 Alexandre Bury
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ```
 
