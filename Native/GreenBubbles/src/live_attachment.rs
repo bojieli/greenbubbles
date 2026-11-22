@@ -2012,6 +2012,15 @@ fn decode_image(
     bytes: &[u8],
     v2_aes_key: Option<[u8; 16]>,
 ) -> Result<wx_media::DecodedImage, wx_media::MediaError> {
+    decode_image_data(account_root, source, bytes, v2_aes_key).and_then(unpack_image)
+}
+
+pub(crate) fn decode_image_data(
+    account_root: &Path,
+    source: &Path,
+    bytes: &[u8],
+    v2_aes_key: Option<[u8; 16]>,
+) -> Result<wx_media::DecodedImage, wx_media::MediaError> {
     // The length of the encoded trailing segment occupies bytes 10..14 of V1/V2.
     let has_encoded_tail = wx_media::detect_dat_format(bytes).is_some()
         && bytes.get(10..14).is_some_and(|size| size != [0; 4]);
@@ -2030,7 +2039,6 @@ fn decode_image(
             xor_key,
         },
     )
-    .and_then(unpack_image)
 }
 
 // The upstream format detector scans a directory recursively. Give it a private
@@ -2176,6 +2184,26 @@ mod tests {
 
     use super::*;
     use crate::live_query::{list_messages, QueryDatabaseAccess};
+
+    #[test]
+    fn v2_decoding_verifies_the_complete_nondefault_trailer() {
+        let temp = tempfile::tempdir().unwrap();
+        let account = temp.path().canonicalize().unwrap();
+        let image = account.join("0123456789abcdef0123456789abcdef.dat");
+        // Synthetic V2 data encrypted with the fixture's all-zero AES key.
+        let mut bytes = hex::decode(
+            "0708563208070600000007000000000d5c379fb10b37df9452ea9029463c32efe3ece3a55a7c",
+        )
+        .unwrap();
+        let decoded = decode_image_data(&account, &image, &bytes, Some([0; 16])).unwrap();
+        assert_eq!(hex::encode(decoded.data), "ffd8ffe000104a46494600ffd9");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        assert!(matches!(
+            decode_image_data(&account, &image, &bytes, Some([0; 16])),
+            Err(wx_media::MediaError::XorKeyDetectionFailed)
+        ));
+    }
 
     #[test]
     fn media_format_probe_reads_only_the_selected_images_thumbnail() {

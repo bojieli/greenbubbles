@@ -40,8 +40,11 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
     let jpeg = [
         0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00, 0xff, 0xd9,
     ];
-    let xor_key = 0xa5;
-    let encrypted_image = jpeg.iter().map(|value| value ^ xor_key).collect::<Vec<_>>();
+    // A V1 fixture with a six-byte AES section and a non-default 0xa5 trailer.
+    // A guessed tail byte produces the same length and a plausible JPEG header.
+    let encrypted_image =
+        hex::decode("07085631080706000000070000000085ca6ba0c74c960fbe214097b597d28cefe3ece3a55a7c")
+            .unwrap();
     let image_path = attach.join(format!("{IMAGE_MD5}_h.dat"));
     fs::write(&image_path, encrypted_image).unwrap();
     let outside = fixture.path().join("outside.dat");
@@ -476,9 +479,8 @@ fn restores_ordered_multimodal_history_with_verified_local_paths() {
     let decoded_image = artifacts.iter().find(|artifact| {
         artifact["sourceLocalPath"] == fs::canonicalize(&image_path).unwrap().display().to_string()
     });
-    assert!(decoded_image
-        .and_then(|artifact| artifact["decodedLocalPath"].as_str())
-        .is_some_and(|path| Path::new(path).is_file()));
+    let decoded_path = decoded_image.unwrap()["decodedLocalPath"].as_str().unwrap();
+    assert_eq!(fs::read(decoded_path).unwrap(), jpeg);
     assert!(artifacts.iter().any(|artifact| {
         artifact["availability"] == "materializedFromDatabase"
             && artifact["detectedFormat"] == "tencent-silk-v3"
