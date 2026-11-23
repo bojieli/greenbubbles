@@ -29,7 +29,10 @@ greenbubbles messages list --help
 ```
 
 Version 0.10.0 adds nickname/remark/alias selection, `chats find`, and
-command-line `--query` search. If a local build shadows Homebrew, use `command -v
+command-line `--query` search. Version 0.11.0 makes `greenbubbles-acquire`
+follow query profiles and `config.toml`, write the key as the user who ran
+`sudo`, and attach to the WeChat copy that owns the data folder (`--pid` picks
+one explicitly). If a local build shadows Homebrew, use `command -v
 greenbubbles` to identify the selected binary before concluding an upgrade
 failed. A successful help check confirms syntax, not database access. Verify
 access with `source status` before reading messages. The setup check does not

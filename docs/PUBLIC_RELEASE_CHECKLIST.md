@@ -1,8 +1,37 @@
 # Public release checklist
 
-The latest published release is [v0.4.0](https://github.com/bojieli/greenbubbles/releases/tag/v0.4.0),
-verified on 2026-09-29. Earlier review sections below are historical records;
-their unchecked items describe the state at the time of those reviews.
+The latest published release is [v0.10.0](https://github.com/bojieli/greenbubbles/releases/tag/v0.10.0).
+The last publication with a verification record here is v0.4.0, verified on
+2026-09-29. Earlier review sections below are historical records; their
+unchecked items describe the state at the time of those reviews.
+
+## 0.11.0 publication
+
+The owner asked for a 0.11.0 minor release once the open issues and pull
+requests were resolved. Follow-up issues #48–#51 are not release blockers.
+
+No new distribution category is added. The acquisition changes (profile-aware
+capture, writing the key as the user who ran `sudo`, selecting the WeChat copy
+that owns the data folder, `--pid`) stay within "Passphrase acquisition":
+capture is still owner-run, requires root, and stays outside the AI boundary.
+Discovery of duplicated app containers is part of the existing CLI/tool set.
+The dependency and SQLCipher updates change no category; the inventory and
+notices were regenerated and are checked by CI.
+
+Passphrase capture against a live WeChat session was not re-tested for this
+release. The `sudo` privilege handling was verified 10/10 with
+`scripts/sudo-smoke-test-acquire.sh` on 2026-11-23.
+
+- [x] Cargo version, lockfile root package, and dependency inventory set to
+      `0.11.0`; CHANGELOG entry dated; setup skill notes updated.
+- [ ] Annotated tag `v0.11.0` on the merged release commit;
+      `bash scripts/check-public-release.sh v0.11.0` passes against it.
+- [ ] Release workflow passed CI, signing, and notarization.
+- [ ] Downloaded assets match every entry in `SHA256SUMS-0.11.0.txt`.
+- [ ] App, CLI, and DMG notarization logs report `Accepted`; the DMG's stapled
+      ticket validates.
+- [ ] `Update Homebrew` published the 0.11.0 formula; Homebrew installation
+      and CLI smoke tests pass, and the installed CLI signature verifies.
 
 ## 0.4.0 publication
 
