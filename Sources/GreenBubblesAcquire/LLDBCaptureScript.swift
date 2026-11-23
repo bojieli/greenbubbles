@@ -33,10 +33,14 @@ public enum LLDBTargetArchitecture: String, Sendable {
   }
 
   /// Register holding `CCKeyDerivationPBKDF`'s `algorithm` argument.
+  ///
+  /// `algorithm` is a 32-bit `CCPBKDFAlgorithm`. The ABI leaves the upper 32
+  /// bits of its 64-bit register unspecified, so the condition compares only
+  /// the 32-bit view.
   var algorithmRegister: String {
     switch self {
-    case .arm64: return "x0"
-    case .x86_64: return "rdi"
+    case .arm64: return "w0"
+    case .x86_64: return "edi"
     }
   }
 
@@ -49,24 +53,29 @@ public enum LLDBTargetArchitecture: String, Sendable {
   }
 
   /// Register holding `CCKeyDerivationPBKDF`'s `prf` argument.
+  ///
+  /// `prf` is a 32-bit `CCPseudoRandomAlgorithm`; only the 32-bit view is
+  /// compared.
   var prfRegister: String {
     switch self {
-    case .arm64: return "x5"
-    case .x86_64: return "r9"
+    case .arm64: return "w5"
+    case .x86_64: return "r9d"
     }
   }
 
   /// lldb expression for `rounds`.
   ///
   /// arm64 passes the first eight integer arguments in `x0`–`x7`, so `rounds`
-  /// (the 7th argument) is `x6`. x86_64's System V ABI has only six integer
-  /// registers (`rdi`, `rsi`, `rdx`, `rcx`, `r8`, `r9`); `rounds` is the first
-  /// stack argument. At the first instruction the return address is at
-  /// `(%rsp)` and that argument is at `8(%rsp)`. It is `unsigned` (4 bytes);
+  /// (the 7th argument) is in `x6`. It is a 32-bit `unsigned` and the upper
+  /// half of `x6` is unspecified, so the expression reads `w6`. x86_64's
+  /// System V ABI has only six integer registers (`rdi`, `rsi`, `rdx`, `rcx`,
+  /// `r8`, `r9`); `rounds` is the first stack argument. At the first
+  /// instruction the return address is at `(%rsp)` and that argument is at
+  /// `8(%rsp)`. It is `unsigned` (4 bytes);
   /// an 8-byte load would include the next stack slot.
   var roundsExpression: String {
     switch self {
-    case .arm64: return "$x6"
+    case .arm64: return "$w6"
     case .x86_64: return "*(unsigned int *)($rsp + 8)"
     }
   }

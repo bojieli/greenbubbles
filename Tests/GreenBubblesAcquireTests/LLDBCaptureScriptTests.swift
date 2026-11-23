@@ -19,7 +19,7 @@ struct LLDBCaptureScriptTests {
 
   @Test func arm64ScriptStopsOnlyOnTheSQLCipherDerivation() {
     let script = LLDBCaptureScript.script(processID: 4242, architecture: .arm64)
-    let condition = "$x0 == 2 && $x2 == 32 && $x4 == 16 && $x5 == 5 && $x6 == 256000"
+    let condition = "$w0 == 2 && $x2 == 32 && $x4 == 16 && $w5 == 5 && $w6 == 256000"
     #expect(
       script.contains("breakpoint set -n CCKeyDerivationPBKDF -c '\(condition)'")
     )
@@ -34,7 +34,7 @@ struct LLDBCaptureScriptTests {
   @Test func x86_64ScriptReadsRoundsFromTheEntryStackSlot() {
     let script = LLDBCaptureScript.script(processID: 4242, architecture: .x86_64)
     let condition =
-      "$rdi == 2 && $rdx == 32 && $r8 == 16 && $r9 == 5 && *(unsigned int *)($rsp + 8) == 256000"
+      "$edi == 2 && $rdx == 32 && $r8 == 16 && $r9d == 5 && *(unsigned int *)($rsp + 8) == 256000"
     #expect(
       script.contains("breakpoint set -n CCKeyDerivationPBKDF -c '\(condition)'")
     )
@@ -46,16 +46,16 @@ struct LLDBCaptureScriptTests {
   @Test func registersMatchTheCCKeyDerivationPBKDFABI() {
     #expect(LLDBTargetArchitecture.arm64.passwordRegister == "x1")
     #expect(LLDBTargetArchitecture.arm64.lengthRegister == "x2")
-    #expect(LLDBTargetArchitecture.arm64.algorithmRegister == "x0")
+    #expect(LLDBTargetArchitecture.arm64.algorithmRegister == "w0")
     #expect(LLDBTargetArchitecture.arm64.saltLengthRegister == "x4")
-    #expect(LLDBTargetArchitecture.arm64.prfRegister == "x5")
-    #expect(LLDBTargetArchitecture.arm64.roundsExpression == "$x6")
+    #expect(LLDBTargetArchitecture.arm64.prfRegister == "w5")
+    #expect(LLDBTargetArchitecture.arm64.roundsExpression == "$w6")
 
     #expect(LLDBTargetArchitecture.x86_64.passwordRegister == "rsi")
     #expect(LLDBTargetArchitecture.x86_64.lengthRegister == "rdx")
-    #expect(LLDBTargetArchitecture.x86_64.algorithmRegister == "rdi")
+    #expect(LLDBTargetArchitecture.x86_64.algorithmRegister == "edi")
     #expect(LLDBTargetArchitecture.x86_64.saltLengthRegister == "r8")
-    #expect(LLDBTargetArchitecture.x86_64.prfRegister == "r9")
+    #expect(LLDBTargetArchitecture.x86_64.prfRegister == "r9d")
     #expect(LLDBTargetArchitecture.x86_64.roundsExpression == "*(unsigned int *)($rsp + 8)")
   }
 
