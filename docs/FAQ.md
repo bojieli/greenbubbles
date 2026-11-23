@@ -45,6 +45,11 @@ The folder named `db_storage`, which contains `contact`, `session`, and
 ~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/<account>/db_storage
 ```
 
+A second copy of the WeChat app with a different bundle ID keeps its data in
+its own container, `~/Library/Containers/<bundle id>/Data/Documents/xwechat_files`.
+Discovery checks that path under every app container and reports the owning
+bundle ID as `containerBundleIdentifier`.
+
 Point at `db_storage` itself, not the folder above it and not a single `.db`
 file. To list your accounts and their folders:
 

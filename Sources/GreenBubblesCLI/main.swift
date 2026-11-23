@@ -195,11 +195,11 @@ do {
     }
   case .inventory:
     let discovery = WeChatDiscovery(includePaths: arguments.includePaths)
-    let roots: [(url: URL, kind: DataRootKind)]
+    let roots: [(url: URL, kind: DataRootKind, containerBundleIdentifier: String?)]
     if arguments.roots.isEmpty {
-      roots = discovery.accessibleDataRoots()
+      roots = discovery.accessibleDataRootsWithOwners()
     } else {
-      roots = arguments.roots.map { ($0, .supplied) }
+      roots = arguments.roots.map { ($0, .supplied, nil) }
     }
 
     let inventory = ArtifactInventory(
@@ -208,21 +208,32 @@ do {
         maxArtifacts: arguments.maxArtifacts,
         includePaths: arguments.includePaths
       ))
-    try printJSON(inventory.inventory(roots: roots))
+    try printJSON(inventory.inventory(ownedRoots: roots))
   case .notificationHints:
     try printJSON(NotificationHintAssessor().assess())
   case .snapshot:
     let clock = ContinuousClock()
     let totalStarted = clock.now
     let roots: [URL]
+    // Bundle IDs of the app containers that own auto-discovered accounts.
+    var rootOwners: [String?]?
     if arguments.roots.isEmpty {
-      roots = WeChatAccountDiscovery(includePaths: arguments.includePaths)
-        .databaseRoots(accountID: arguments.accountID)
+      let accountDiscovery = WeChatAccountDiscovery(includePaths: arguments.includePaths)
+      roots = accountDiscovery.databaseRoots(accountID: arguments.accountID)
+      rootOwners = accountDiscovery.containerBundleIdentifiers(accountID: arguments.accountID)
     } else {
       roots = arguments.roots
     }
     let sets = DatabaseSetPlanner().findDatabaseSets(in: roots, maxDepth: arguments.maxDepth)
-    let clientBuild = try WeChatClientBuildInspector().inspectDefaultInstallation()
+    var clientBuild = try WeChatClientBuildInspector().inspectDefaultInstallation()
+    // The default installation's build is recorded only when it is the app
+    // that owns every discovered account; otherwise (another app copy, or a
+    // group container whose owner can't be verified) provenance stays unset.
+    if let build = clientBuild, let rootOwners,
+      rootOwners.contains(where: { $0 != build.bundleIdentifier })
+    {
+      clientBuild = nil
+    }
     let previousManifest = try arguments.previousManifest.map(loadSnapshotManifest)
     let plan = try SnapshotAcquisitionPlanner(includeSourcePaths: arguments.includePaths).plan(
       sets: sets,
