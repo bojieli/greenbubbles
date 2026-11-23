@@ -24,13 +24,21 @@ public struct ArtifactInventory: Sendable {
   }
 
   public func inventory(roots: [(url: URL, kind: DataRootKind)]) -> InventoryReport {
+    inventory(ownedRoots: roots.map { ($0.url, $0.kind, nil) })
+  }
+
+  /// Same as `inventory(roots:)`, reporting each root's owning app container
+  /// bundle ID (nil when unknown, as for supplied roots).
+  public func inventory(
+    ownedRoots roots: [(url: URL, kind: DataRootKind, containerBundleIdentifier: String?)]
+  ) -> InventoryReport {
     let fileManager = FileManager.default
     var artifacts: [ArtifactMetadata] = []
     var issues: [InventoryIssue] = []
     var reachedLimit = false
     var reportedRoots: [CandidateDataRoot] = []
 
-    for (root, kind) in roots {
+    for (root, kind, containerBundleIdentifier) in roots {
       let standardizedRoot = root.standardizedFileURL
       let rootReference = privacy.reference(for: standardizedRoot)
       let readable = fileManager.isReadableFile(atPath: standardizedRoot.path)
@@ -38,7 +46,8 @@ public struct ArtifactInventory: Sendable {
         CandidateDataRoot(
           location: rootReference,
           kind: kind,
-          isReadable: readable
+          isReadable: readable,
+          containerBundleIdentifier: containerBundleIdentifier
         ))
 
       guard readable, !reachedLimit else { continue }

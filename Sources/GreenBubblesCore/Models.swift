@@ -39,11 +39,19 @@ public struct CandidateDataRoot: Codable, Equatable, Sendable {
   public let location: PathReference
   public let kind: DataRootKind
   public let isReadable: Bool
+  /// Bundle ID of the app container this root belongs to, when known.
+  public let containerBundleIdentifier: String?
 
-  public init(location: PathReference, kind: DataRootKind, isReadable: Bool) {
+  public init(
+    location: PathReference,
+    kind: DataRootKind,
+    isReadable: Bool,
+    containerBundleIdentifier: String? = nil
+  ) {
     self.location = location
     self.kind = kind
     self.isReadable = isReadable
+    self.containerBundleIdentifier = containerBundleIdentifier
   }
 }
 

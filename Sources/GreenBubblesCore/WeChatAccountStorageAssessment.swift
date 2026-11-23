@@ -141,7 +141,7 @@ public struct WeChatAccountStorageAssessor: Sendable {
 
   public func assess(accountID: String? = nil) -> WeChatAccountStorageAssessmentReport {
     let accounts = WeChatAccountDiscovery(homeDirectory: homeDirectory).resolvedAccounts()
-      .filter { accountID == nil || $0.report.accountID == accountID }
+      .filter { accountID == nil || $0.matches(accountID: accountID!) }
       .map(assess)
       .sorted { $0.accountID < $1.accountID }
     return WeChatAccountStorageAssessmentReport(
