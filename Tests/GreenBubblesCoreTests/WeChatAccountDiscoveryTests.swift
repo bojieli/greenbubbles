@@ -130,4 +130,54 @@ struct WeChatAccountDiscoveryTests {
     #expect(accounts.count == 1)
     #expect(accounts.first?.containerBundleIdentifier == nil)
   }
+
+  @Test func standardContainerSymlinkedToADuplicateIsNotCountedTwice() throws {
+    let fileManager = FileManager.default
+    for linkWholeContainer in [true, false] {
+      let home = fileManager.temporaryDirectory.appending(
+        path: "greenbubbles-account-tests-\(UUID().uuidString)",
+        directoryHint: .isDirectory
+      )
+      defer { try? fileManager.removeItem(at: home) }
+      let containers = home.appending(path: "Library/Containers", directoryHint: .isDirectory)
+      let duplicate = containers.appending(path: "com.example.WeChatCopy")
+      try fileManager.createDirectory(
+        at: duplicate.appending(path: "Data/Documents/xwechat_files/account/db_storage"),
+        withIntermediateDirectories: true
+      )
+      let standard = containers.appending(path: "com.tencent.xinWeChat")
+      if linkWholeContainer {
+        try fileManager.createSymbolicLink(at: standard, withDestinationURL: duplicate)
+      } else {
+        let documents = standard.appending(path: "Data/Documents")
+        try fileManager.createDirectory(at: documents, withIntermediateDirectories: true)
+        try fileManager.createSymbolicLink(
+          at: documents.appending(path: "xwechat_files"),
+          withDestinationURL: duplicate.appending(path: "Data/Documents/xwechat_files"))
+      }
+
+      let discovery = WeChatAccountDiscovery(homeDirectory: home)
+      #expect(discovery.discover().map(\.containerBundleIdentifier) == ["com.example.WeChatCopy"])
+      #expect(try discovery.singleDatabaseRoot().lastPathComponent == "db_storage")
+    }
+  }
+
+  @Test func differentlyCasedStandardContainerIsReportedOnceWithItsOnDiskName() throws {
+    let home = FileManager.default.temporaryDirectory.appending(
+      path: "greenbubbles-account-tests-\(UUID().uuidString)",
+      directoryHint: .isDirectory
+    )
+    defer { try? FileManager.default.removeItem(at: home) }
+    try FileManager.default.createDirectory(
+      at: home.appending(
+        path: "Library/Containers/com.tencent.xinwechat/Data/Documents/xwechat_files/a/db_storage"),
+      withIntermediateDirectories: true
+    )
+
+    // On a case-insensitive volume the hard-coded standard spelling also
+    // resolves to this directory; it must not add a second account.
+    let discovery = WeChatAccountDiscovery(homeDirectory: home)
+    #expect(discovery.discover().map(\.containerBundleIdentifier) == ["com.tencent.xinwechat"])
+    #expect(try discovery.singleDatabaseRoot().lastPathComponent == "db_storage")
+  }
 }

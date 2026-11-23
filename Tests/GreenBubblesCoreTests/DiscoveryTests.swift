@@ -60,9 +60,22 @@ struct DiscoveryTests {
       withIntermediateDirectories: true
     )
 
-    let report = WeChatDiscovery(homeDirectory: home, includePaths: true).discover()
-    let paths = report.dataRoots.compactMap(\.location.path)
-    #expect(paths.count == 1)
-    #expect(paths.first?.hasSuffix("/com.example.WeChatCopy") == true)
+    // Unrelated data beside xwechat_files in the copy's container.
+    try FileManager.default.createDirectory(
+      at: containers.appending(path: "com.example.WeChatCopy/Data/Library/Other"),
+      withIntermediateDirectories: true
+    )
+
+    let discovery = WeChatDiscovery(homeDirectory: home, includePaths: true)
+    let report = discovery.discover()
+    #expect(report.dataRoots.count == 1)
+    let root = try #require(report.dataRoots.first)
+    // Only the matched xwechat_files directory is a root, never the container.
+    #expect(
+      root.location.path?.hasSuffix("/com.example.WeChatCopy/Data/Documents/xwechat_files") == true)
+    #expect(root.containerBundleIdentifier == "com.example.WeChatCopy")
+    #expect(root.kind == .applicationContainer)
+    let accessible = discovery.accessibleDataRoots().map(\.url.lastPathComponent)
+    #expect(accessible == ["xwechat_files"])
   }
 }

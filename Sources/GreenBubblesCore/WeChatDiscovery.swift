@@ -23,11 +23,12 @@ public struct WeChatDiscovery: Sendable {
       .sorted { $0.location.opaqueID < $1.location.opaqueID }
 
     let roots = dataRootCandidates(fileManager: fileManager)
-      .map { url, kind in
+      .map { candidate in
         CandidateDataRoot(
-          location: privacy.reference(for: url),
-          kind: kind,
-          isReadable: fileManager.isReadableFile(atPath: url.path)
+          location: privacy.reference(for: candidate.url),
+          kind: candidate.kind,
+          isReadable: fileManager.isReadableFile(atPath: candidate.url.path),
+          containerBundleIdentifier: candidate.containerBundleIdentifier
         )
       }
       .sorted { $0.location.opaqueID < $1.location.opaqueID }
@@ -43,6 +44,7 @@ public struct WeChatDiscovery: Sendable {
     let fileManager = FileManager.default
     return dataRootCandidates(fileManager: fileManager)
       .filter { fileManager.isReadableFile(atPath: $0.url.path) }
+      .map { ($0.url, $0.kind) }
   }
 
   private func applicationCandidates() -> [URL] {
@@ -57,20 +59,27 @@ public struct WeChatDiscovery: Sendable {
     return uniqueURLs(candidates)
   }
 
-  private func dataRootCandidates(
-    fileManager: FileManager
-  ) -> [(url: URL, kind: DataRootKind)] {
+  private typealias DataRootCandidate = (
+    url: URL, kind: DataRootKind, containerBundleIdentifier: String?
+  )
+
+  private static let standardContainerNames = ["com.tencent.xinWeChat", "com.tencent.WeChat"]
+
+  private func dataRootCandidates(fileManager: FileManager) -> [DataRootCandidate] {
     let containers = homeDirectory.appending(path: "Library/Containers")
-    var candidates: [(URL, DataRootKind)] = [
-      (containers.appending(path: "com.tencent.xinWeChat"), .applicationContainer),
-      (containers.appending(path: "com.tencent.WeChat"), .applicationContainer),
-    ]
-    // Duplicated app copies get their own container; include those that hold
-    // WeChat 4.x data without looking inside any other app's container.
+    var candidates: [DataRootCandidate] = Self.standardContainerNames.map {
+      (containers.appending(path: $0), .applicationContainer, $0)
+    }
+    // Duplicated app copies get their own container. Only their
+    // xwechat_files directory is a data root, so automatic inventory never
+    // walks other data in that container.
     for container in WeChatAppContainerScanner(homeDirectory: homeDirectory)
       .containers(fileManager: fileManager)
-    {
-      candidates.append((container.containerRoot, .applicationContainer))
+    where !Self.standardContainerNames.contains(where: {
+      $0.caseInsensitiveCompare(container.bundleIdentifier) == .orderedSame
+    }) {
+      candidates.append(
+        (container.xwechatFilesRoot, .applicationContainer, container.bundleIdentifier))
     }
 
     let groupContainers = homeDirectory.appending(path: "Library/Group Containers")
@@ -82,13 +91,13 @@ public struct WeChatDiscovery: Sendable {
       )) ?? []
 
     for child in groupChildren where looksLikeWeChatGroupContainer(child) {
-      candidates.append((child, .groupContainer))
+      candidates.append((child, .groupContainer, nil))
     }
 
     var seen = Set<String>()
     return candidates.filter { candidate in
-      guard fileManager.fileExists(atPath: candidate.0.path) else { return false }
-      return seen.insert(candidate.0.standardizedFileURL.path).inserted
+      guard fileManager.fileExists(atPath: candidate.url.path) else { return false }
+      return seen.insert(candidate.url.standardizedFileURL.path).inserted
     }
   }
 

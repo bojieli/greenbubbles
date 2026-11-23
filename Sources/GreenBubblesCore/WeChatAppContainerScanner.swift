@@ -36,23 +36,43 @@ struct WeChatAppContainerScanner: Sendable {
   }
 
   /// The standard container first, then other app copies sorted by bundle ID.
+  ///
+  /// Names come from the directory listing, so the on-disk spelling is used;
+  /// the standard name is probed directly only when the listing has no entry
+  /// that matches it case-insensitively (for example when listing fails).
+  /// Every candidate gets the same no-symlink check, and candidates that
+  /// resolve to the same `xwechat_files` directory (device and inode) are
+  /// reported once, which also covers case-insensitive volumes.
   func containers(fileManager: FileManager = .default) -> [Container] {
-    let names =
-      (try? fileManager.contentsOfDirectory(atPath: containersRoot.path)) ?? []
-    let others =
-      names
-      .filter { !$0.hasPrefix(".") && $0 != Self.standardBundleIdentifier }
-      .sorted()
-      .compactMap { safeContainer(named: $0) }
-    return (standardContainer(fileManager: fileManager).map { [$0] } ?? []) + others
+    let names = ((try? fileManager.contentsOfDirectory(atPath: containersRoot.path)) ?? [])
+      .filter { !$0.hasPrefix(".") }
+    let isStandard = { (name: String) in
+      name.caseInsensitiveCompare(Self.standardBundleIdentifier) == .orderedSame
+    }
+    let standardNames = names.filter(isStandard).sorted()
+    let ordered =
+      (standardNames.isEmpty ? [Self.standardBundleIdentifier] : standardNames)
+      + names.filter { !isStandard($0) }.sorted()
+
+    var seen = Set<FileIdentity>()
+    return ordered.compactMap { name in
+      guard let container = safeContainer(named: name),
+        let identity = Self.fileIdentity(container.xwechatFilesRoot),
+        seen.insert(identity).inserted
+      else { return nil }
+      return container
+    }
   }
 
-  /// The standard container keeps its earlier existence check so current
-  /// installations are discovered exactly as before.
-  private func standardContainer(fileManager: FileManager) -> Container? {
-    let container = makeContainer(named: Self.standardBundleIdentifier)
-    guard fileManager.fileExists(atPath: container.xwechatFilesRoot.path) else { return nil }
-    return container
+  struct FileIdentity: Hashable {
+    let device: dev_t
+    let inode: ino_t
+  }
+
+  static func fileIdentity(_ url: URL) -> FileIdentity? {
+    var metadata = stat()
+    guard Darwin.lstat(url.path, &metadata) == 0 else { return nil }
+    return FileIdentity(device: metadata.st_dev, inode: metadata.st_ino)
   }
 
   private func safeContainer(named name: String) -> Container? {
