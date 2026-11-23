@@ -289,30 +289,56 @@ struct WeChatProcessSelectionTests {
       requestedProcessID: 61,
       candidate: second,
       userID: Self.user,
-      owner: .application(bundleIdentifier: Self.standard)
+      owner: .application(bundleIdentifier: Self.standard),
+      runningCandidates: [first, second, Self.duplicateProcess]
     )
+    #expect(selected.excludedProcessIDs == [60])
     // The first attach keeps the chosen PID in either listing order.
     for candidates in [[first, second], [second, first]] {
       #expect(
         try WeChatProcessSelector.reselect(candidates: candidates, following: selected)?
           .processID == 61)
     }
-    // After it exits, a single replacement is followed...
-    let replacement = Self.candidate(70, app: Self.standardApp, bundle: Self.standard)
-    #expect(
-      try WeChatProcessSelector.reselect(candidates: [replacement], following: selected)?
-        .processID == 70)
-    // ...but with another instance still running, it is ambiguous.
-    #expect(
-      throws: ProcessSelectionError.multipleProcessesForTarget(
-        bundleIdentifier: Self.standard, count: 2)
-    ) {
-      try WeChatProcessSelector.reselect(candidates: [first, replacement], following: selected)
-    }
     // A reused PID now running another copy is not the selected process.
     let reused = Self.candidate(61, app: Self.duplicateApp, bundle: Self.duplicate)
     #expect(
       try WeChatProcessSelector.reselect(candidates: [reused], following: selected) == nil)
+  }
+
+  @Test func preexistingSiblingIsNeverTakenAsTheReplacement() throws {
+    let sibling = Self.candidate(60, app: Self.standardApp, bundle: Self.standard)
+    let chosen = Self.candidate(61, app: Self.standardApp, bundle: Self.standard)
+    let selected = try WeChatProcessSelector.validate(
+      requestedProcessID: 61,
+      candidate: chosen,
+      userID: Self.user,
+      owner: .application(bundleIdentifier: Self.standard),
+      runningCandidates: [sibling, chosen]
+    )
+    // The chosen instance exited during logout; only the original, unselected
+    // sibling remains. Keep waiting instead of attaching to it.
+    #expect(try WeChatProcessSelector.reselect(candidates: [sibling], following: selected) == nil)
+    // A new process of the same app is the replacement, in either order.
+    let replacement = Self.candidate(70, app: Self.standardApp, bundle: Self.standard)
+    for candidates in [[sibling, replacement], [replacement, sibling]] {
+      let next = try WeChatProcessSelector.reselect(candidates: candidates, following: selected)
+      #expect(next?.processID == 70)
+      #expect(next?.excludedProcessIDs == [60])
+    }
+    // The exclusion carries over: if the replacement exits too, the sibling
+    // is still not taken.
+    let followed = try #require(
+      try WeChatProcessSelector.reselect(candidates: [sibling, replacement], following: selected))
+    #expect(try WeChatProcessSelector.reselect(candidates: [sibling], following: followed) == nil)
+    // Two new processes of the same app are ambiguous.
+    let another = Self.candidate(71, app: Self.standardApp, bundle: Self.standard)
+    #expect(
+      throws: ProcessSelectionError.multipleProcessesForTarget(
+        bundleIdentifier: Self.standard, count: 2)
+    ) {
+      try WeChatProcessSelector.reselect(
+        candidates: [sibling, replacement, another], following: selected)
+    }
   }
 
   // MARK: - Helpers

@@ -35,12 +35,37 @@ public struct WeChatProcessTarget: Equatable, Sendable {
   public let userID: uid_t
   public let applicationPath: String
   public let bundleIdentifier: String
+  /// Other processes of the same app that were already running when this
+  /// one was selected. They are never taken as its replacement.
+  public let excludedProcessIDs: Set<pid_t>
 
-  public init(processID: pid_t, userID: uid_t, applicationPath: String, bundleIdentifier: String) {
+  public init(
+    processID: pid_t,
+    userID: uid_t,
+    applicationPath: String,
+    bundleIdentifier: String,
+    excludedProcessIDs: Set<pid_t> = []
+  ) {
     self.processID = processID
     self.userID = userID
     self.applicationPath = applicationPath
     self.bundleIdentifier = bundleIdentifier
+    self.excludedProcessIDs = excludedProcessIDs.subtracting([processID])
+  }
+
+  func replaced(by processID: pid_t) -> WeChatProcessTarget {
+    WeChatProcessTarget(
+      processID: processID,
+      userID: userID,
+      applicationPath: applicationPath,
+      bundleIdentifier: bundleIdentifier,
+      excludedProcessIDs: excludedProcessIDs
+    )
+  }
+
+  func runsSameApp(as other: WeChatProcessTarget) -> Bool {
+    userID == other.userID && applicationPath == other.applicationPath
+      && bundleIdentifier == other.bundleIdentifier
   }
 }
 
@@ -140,11 +165,15 @@ public enum WeChatProcessSelector {
   /// Validates a process the owner chose with `--pid`: it must belong to the
   /// invoking user, run a WeChat app bundle, and that app must own the
   /// database root when the owner can be told from the path.
+  /// `runningCandidates` are the user's WeChat processes at selection time;
+  /// other instances of the same app among them are recorded so a capture
+  /// never mistakes one for the chosen process's replacement.
   public static func validate(
     requestedProcessID: pid_t,
     candidate: WeChatProcessCandidate?,
     userID: uid_t,
-    owner: DatabaseRootOwner
+    owner: DatabaseRootOwner,
+    runningCandidates: [WeChatProcessCandidate] = []
   ) throws -> WeChatProcessTarget {
     guard let candidate, candidate.processID == requestedProcessID else {
       throw ProcessSelectionError.processNotFound(requestedProcessID)
@@ -164,32 +193,41 @@ public enum WeChatProcessSelector {
         ownerBundleIdentifier: ownerBundle
       )
     }
-    return target
+    let siblings = runningCandidates.compactMap { Self.target(for: $0, userID: userID) }
+      .filter { $0.runsSameApp(as: target) }
+      .map(\.processID)
+    return WeChatProcessTarget(
+      processID: target.processID,
+      userID: userID,
+      applicationPath: target.applicationPath,
+      bundleIdentifier: target.bundleIdentifier,
+      excludedProcessIDs: Set(siblings)
+    )
   }
 
   /// Finds the process now running the selected app, for attaching and for
   /// re-attaching after WeChat restarts. The selected process is kept while
   /// it still runs that app, even if another instance of the same app runs
-  /// too (so an explicit `--pid` disambiguates). Once it is gone, exactly
-  /// one replacement must run the same app; other app copies never match.
-  /// Returns nil while the app is not running.
+  /// too (so an explicit `--pid` disambiguates). Once it is gone, a
+  /// replacement must be a process of the same app that was not already
+  /// running at selection time; exactly one may qualify. Other app copies and
+  /// pre-existing instances never match. Returns nil while none qualifies,
+  /// so the capture keeps waiting until its timeout.
   public static func reselect(
     candidates: [WeChatProcessCandidate],
     following selected: WeChatProcessTarget
   ) throws -> WeChatProcessTarget? {
     let matches = candidates.compactMap { target(for: $0, userID: selected.userID) }
-      .filter {
-        $0.applicationPath == selected.applicationPath
-          && $0.bundleIdentifier == selected.bundleIdentifier
-      }
-    if let same = matches.first(where: { $0.processID == selected.processID }) {
-      return same
+      .filter { $0.runsSameApp(as: selected) }
+    if matches.contains(where: { $0.processID == selected.processID }) {
+      return selected
     }
-    guard matches.count <= 1 else {
+    let replacements = matches.filter { !selected.excludedProcessIDs.contains($0.processID) }
+    guard replacements.count <= 1 else {
       throw ProcessSelectionError.multipleProcessesForTarget(
-        bundleIdentifier: selected.bundleIdentifier, count: matches.count)
+        bundleIdentifier: selected.bundleIdentifier, count: replacements.count)
     }
-    return matches.first
+    return replacements.first.map { selected.replaced(by: $0.processID) }
   }
 
   /// The `.app` bundle that contains a main executable at

@@ -122,8 +122,7 @@ private func resignRemediation(applicationPath: String?, includePaths: Bool) -> 
     return "sudo codesign --force --deep --sign - <selected WeChat app> "
       + "(re-run preflight with --include-paths to show its path)"
   }
-  let quoted = "'" + applicationPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
-  return "sudo codesign --force --deep --sign - \(quoted)"
+  return "sudo codesign --force --deep --sign - \(shellQuoted(applicationPath))"
 }
 
 private let usage = """
@@ -199,6 +198,31 @@ private struct PreflightResult {
   let target: WeChatProcessTarget?
   /// The database root resolved once for this run; set whenever `report.ready`.
   let databaseRoot: URL?
+  /// The capture command to run next, carrying the explicit selections.
+  let nextCommand: String
+}
+
+private func shellQuoted(_ value: String) -> String {
+  "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+}
+
+/// `sudo greenbubbles-acquire capture` with the options that chose the data
+/// and process, so the capture targets the same account and app copy. The
+/// database path is shown only with `--include-paths`.
+private func captureCommand(dbRootOption: URL?, processIDOption: pid_t?, includePaths: Bool)
+  -> String
+{
+  var command = "sudo greenbubbles-acquire capture"
+  if let dbRootOption {
+    command +=
+      includePaths
+      ? " --db-root \(shellQuoted(dbRootOption.standardizedFileURL.path))"
+      : " --db-root <the same --db-root>"
+  }
+  if let processIDOption {
+    command += " --pid \(processIDOption)"
+  }
+  return command
 }
 
 private func printJSON<T: Encodable>(_ value: T) throws {
@@ -239,7 +263,7 @@ private func printPreflight(_ result: PreflightResult) {
   let failed = result.checks.filter { !$0.ok }.count
   if result.report.ready {
     print("Ready to capture.")
-    print("Next: sudo greenbubbles-acquire capture")
+    print("Next: \(result.nextCommand)")
   } else {
     print("Not ready — \(failed) \(failed == 1 ? "problem" : "problems") to fix (see above).")
   }
@@ -289,7 +313,8 @@ private func selectProcess(
         requestedProcessID: processIDOption,
         candidate: WeChatProcessLocator.candidate(forProcessID: processIDOption),
         userID: locator.userID,
-        owner: owner ?? .unknown
+        owner: owner ?? .unknown,
+        runningCandidates: try locator.candidates()
       )
       selection.target = target
     } else if let owner {
@@ -496,7 +521,12 @@ private func runPreflight(
     report: report,
     checks: checks,
     target: selection.target,
-    databaseRoot: try? resolvedRoot.get()
+    databaseRoot: try? resolvedRoot.get(),
+    nextCommand: captureCommand(
+      dbRootOption: dbRootOption,
+      processIDOption: processIDOption,
+      includePaths: includePaths
+    )
   )
 }
 

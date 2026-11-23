@@ -100,8 +100,12 @@ greenbubbles-acquire verify --passphrase-stdin [--db-root <path>]
   process, running a WeChat app's main executable, and when the data folder is
   in an app container that app must own it. You need it when the data folder
   is in a group container or anywhere else outside an app container, because
-  then the owning app can't be told from the path. To list the running copies
-  and their apps: `pgrep -lf /Contents/MacOS/WeChat`.
+  then the owning app can't be told from the path. It also picks one of two
+  instances of the same app; the capture then keeps that process and, if it
+  restarts at logout, follows only a new process, never the other instance.
+  After a successful preflight, the suggested capture command repeats your
+  `--pid` and `--db-root` (the path only with `--include-paths`). To list the
+  running copies and their apps: `pgrep -lf /Contents/MacOS/WeChat`.
 
 The WeChat version is shown for information only. The tool does not refuse a
 version it hasn't seen, but it has only been tested on WeChat 4.1.12 and 4.1.13.
