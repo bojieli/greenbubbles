@@ -4,67 +4,94 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.11.0 - 2026-11-23
+
+Passphrase capture against a live WeChat session was not re-tested for this
+release. The privilege handling under `sudo` was verified with
+`scripts/sudo-smoke-test-acquire.sh` on synthetic data; a live capture needs a
+running WeChat.
 
 ### Added
 
-- `greenbubbles-acquire` picks the WeChat process whose app owns the selected
-  data folder, instead of refusing or guessing when two app copies run. A
-  folder in `~/Library/Containers/<bundle id>` belongs to that bundle ID; the
-  tool reads each running `WeChat` process's app bundle and attaches only to
-  the one match. No match or several matches stop preflight. The capture
-  re-attaches only to the same app copy after a logout restarts WeChat.
-  Version and Hardened Runtime details come from the selected process's own
-  app. Only the invoking user's processes count (`SUDO_UID` under sudo).
-- `greenbubbles-acquire --pid <n>` chooses the WeChat process explicitly. It
-  is required for data outside an app container, such as a group container,
-  and is rejected when it names another user's process, a non-WeChat process,
-  or a copy that doesn't own the data folder (#34).
-
-### Security
-
-- Update the `cookie` crate to 0.18.3 for RUSTSEC-2026-0594 (private cookie
-  nonces can repeat in processes that fork).
+- `greenbubbles-acquire` attaches to the WeChat copy whose app owns the
+  selected data folder (`~/Library/Containers/<bundle id>`), and re-attaches
+  only to that copy after a logout restarts WeChat. No match or several
+  matches stop preflight instead of guessing. Version and Hardened Runtime
+  checks use the selected copy's own app. Only the invoking user's processes
+  count (`SUDO_UID` under `sudo`).
+- `greenbubbles-acquire --pid <n>` chooses the WeChat process explicitly. It is
+  required for data outside an app container, such as a group container, and
+  is rejected for another user's process, a non-WeChat process, or a copy that
+  doesn't own the data folder (#34).
+- Account discovery finds data kept by a duplicated WeChat app copy in its own
+  container, and reports the bundle ID that holds each account. It does not
+  read inside other apps' containers and skips symbolic links.
+- `scripts/sudo-smoke-test-acquire.sh` checks, on synthetic data, that capture
+  output under `sudo` ends up owned by the invoking user.
 
 ### Changed
 
 - `greenbubbles-acquire capture`, `verify`, and `preflight` follow query
-  profiles. `--profile <name>` takes the profile's `sourceRoot` and
+  profiles. `--profile <name>` uses that profile's `sourceRoot` and
   `credentialFile`. With no flags, the tool picks the same source as an
   ordinary query: the `defaultProfile` of `~/.greenbubbles/query-profiles.json`,
   otherwise `profile.default`, `source.root`, and `source.passphrase_file` from
   `~/.greenbubbles/config.toml`. Explicit `--output` and `--db-root` still win.
-  Both files are read with the Rust CLI's rules: schema, `formatVersion` 1, no
-  unknown fields, valid profile names, and an owner-only, single-link file of
-  at most 64 KiB in an owner-only folder.
+  Both files are parsed with the Rust CLI's rules (schema, `formatVersion` 1,
+  no unknown fields, owner-only file of at most 64 KiB in an owner-only
+  folder).
+- When several accounts are discovered, `greenbubbles-acquire` asks for
+  `--db-root` instead of silently picking the most recently modified one.
+- A failed verification reports how many database salts and files were
+  checked, and states that no output was created or replaced. Help and the
+  troubleshooting guide separate a passing preflight from a passing
+  verification.
+- The macOS build uses SQLCipher 4.20.0 with SQLite 3.54.1. Databases written
+  by either version read with the other.
+- Dependency updates: `rustls` 0.23.46, `ureq` 3.4 (the bounded Gemini request
+  was migrated), `argon2` 0.6, `bip39` 3.0, `toml` 1.1, `zstd` 0.14, and `url`
+  2.5.9. Distribution inventory and notices were regenerated.
+- Decoded media previews use a new per-account cache under
+  `~/.greenbubbles/cache/media/v2/`. Files in the old cache are no longer used
+  and can be deleted.
 
 ### Fixed
 
 - `greenbubbles-acquire capture` no longer stops on the first unrelated
   32-byte `CCKeyDerivationPBKDF` call. The breakpoint matches the SQLCipher
   account-key derivation (PBKDF2, 32-byte password, 16-byte salt, HMAC-SHA512,
-  256,000 rounds). A candidate that does not verify is ignored until one does,
-  or the timeout expires. Nothing is written when no candidate verifies.
+  256,000 rounds), and a candidate that does not verify is skipped until one
+  does or the timeout expires. Nothing is written when no candidate verifies
+  (#20).
+- Under `sudo`, `capture` reads profile files and writes the key as the user
+  who ran `sudo`, so the key file and any folder it creates belong to that
+  user and the user's own `greenbubbles` can read them. Before, both were
+  owned by root. No `chown` is used.
+- Writing the key leaves the permissions of existing parent folders unchanged,
+  and an existing output file is checked before it is changed: symbolic links,
+  hard-linked files, and FIFOs are refused without touching their contents or
+  permissions.
+- Live image attachments decode with the account's XOR key and convert WXGF
+  to a viewable format, instead of returning corrupted images. Media probes
+  are bounded, and HEVC payloads are exported as HEVC without starting a
+  transcoder.
+- Restored image artifacts use the same bounded decoder and fail closed when
+  the image tail cannot be established, instead of recording a corrupt copy
+  as verified.
+- Downloaded documents in shared monthly folders are found and checked
+  against the message's MD5, within the account's own folders. Empty
+  alternate compressed content no longer hides document metadata or quoted
+  replies.
 - `snapshot create` and `snapshot verify` work on real WeChat 4.x accounts.
-  They failed every time with "SQLite integrity_check did not return ok",
-  because the FTS5 check of the contact search index cannot pass with
-  GreenBubbles' tokenizer, which lacks pinyin. That one FTS5 row is now
-  allowed; every other integrity row still fails the snapshot.
-- Under `sudo`, `capture` now reads its profile files and writes the key with
-  the rights of the user who ran `sudo` (`SUDO_USER`, checked against
-  `SUDO_UID`), so the key file and every folder it creates belong to that user.
-  Before, both stayed owned by root, so the user's own `greenbubbles` could not
-  read the key. No `chown` is involved: a path from a user-editable profile
-  cannot make root create, replace, or hand over a file the user could not
-  already write.
-- Account discovery finds the data of a duplicated WeChat app copy. It checks
-  `Data/Documents/xwechat_files` under every `~/Library/Containers/<bundle id>`
-  without reading other apps' data, and skips symbolic links. Each account
-  reports the bundle ID of the container that holds it. With a second copy's
-  account present, `greenbubbles-acquire` asks for `--db-root` instead of
-  silently using the first account (#34). Inventory reports the owning
-  bundle ID of each automatic root, and `snapshot` leaves the client build
-  unset when the default installation doesn't own every discovered account.
+  They failed with "SQLite integrity_check did not return ok" because the FTS5
+  check of the two contact search indexes cannot pass without pinyin
+  tokenization. Only those rows in the contact search database are allowed;
+  any other integrity row still fails the snapshot.
+
+### Security
+
+- Update the `cookie` crate to 0.18.3 for RUSTSEC-2026-0594 (private cookie
+  nonces can repeat in processes that fork).
 
 ## 0.10.0 - 2026-10-01
 
