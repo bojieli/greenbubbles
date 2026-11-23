@@ -23,11 +23,12 @@ public struct WeChatDiscovery: Sendable {
       .sorted { $0.location.opaqueID < $1.location.opaqueID }
 
     let roots = dataRootCandidates(fileManager: fileManager)
-      .map { url, kind in
+      .map { candidate in
         CandidateDataRoot(
-          location: privacy.reference(for: url),
-          kind: kind,
-          isReadable: fileManager.isReadableFile(atPath: url.path)
+          location: privacy.reference(for: candidate.url),
+          kind: candidate.kind,
+          isReadable: fileManager.isReadableFile(atPath: candidate.url.path),
+          containerBundleIdentifier: candidate.containerBundleIdentifier
         )
       }
       .sorted { $0.location.opaqueID < $1.location.opaqueID }
@@ -40,6 +41,14 @@ public struct WeChatDiscovery: Sendable {
   }
 
   public func accessibleDataRoots() -> [(url: URL, kind: DataRootKind)] {
+    accessibleDataRootsWithOwners().map { ($0.url, $0.kind) }
+  }
+
+  /// Readable automatic data roots with the bundle ID of the app container
+  /// each belongs to, for inventory reports.
+  public func accessibleDataRootsWithOwners()
+    -> [(url: URL, kind: DataRootKind, containerBundleIdentifier: String?)]
+  {
     let fileManager = FileManager.default
     return dataRootCandidates(fileManager: fileManager)
       .filter { fileManager.isReadableFile(atPath: $0.url.path) }
@@ -57,14 +66,47 @@ public struct WeChatDiscovery: Sendable {
     return uniqueURLs(candidates)
   }
 
-  private func dataRootCandidates(
-    fileManager: FileManager
-  ) -> [(url: URL, kind: DataRootKind)] {
+  private typealias DataRootCandidate = (
+    url: URL, kind: DataRootKind, containerBundleIdentifier: String?
+  )
+
+  private static let standardContainerNames = ["com.tencent.xinWeChat", "com.tencent.WeChat"]
+
+  private func dataRootCandidates(fileManager: FileManager) -> [DataRootCandidate] {
     let containers = homeDirectory.appending(path: "Library/Containers")
-    var candidates: [(URL, DataRootKind)] = [
-      (containers.appending(path: "com.tencent.xinWeChat"), .applicationContainer),
-      (containers.appending(path: "com.tencent.WeChat"), .applicationContainer),
-    ]
+    let scanned = WeChatAppContainerScanner(homeDirectory: homeDirectory)
+      .containers(fileManager: fileManager)
+    var coveredByStandard = Set<WeChatAppContainerScanner.FileIdentity>()
+    var candidates: [DataRootCandidate] = Self.standardContainerNames.map { name in
+      let container = containers.appending(path: name)
+      // Report the on-disk spelling when a scanned container is this one.
+      var bundleIdentifier = name
+      // Only a standard path made of real directories covers a scanned root:
+      // inventory does not follow symbolic links, so a linked standard path
+      // would leave the real directory unvisited.
+      let files = container.appending(path: "Data/Documents/xwechat_files")
+      let reachable = [
+        container, container.appending(path: "Data"),
+        container.appending(path: "Data/Documents"), files,
+      ].allSatisfy(WeChatAppContainerScanner.isRealDirectory)
+      if reachable, let identity = WeChatAppContainerScanner.targetIdentity(files) {
+        coveredByStandard.insert(identity)
+        if let match = scanned.first(where: { $0.identity == identity }) {
+          bundleIdentifier = match.bundleIdentifier
+        }
+      }
+      return (container, .applicationContainer, bundleIdentifier)
+    }
+    // Other app containers holding WeChat data, such as duplicated app
+    // copies. Only their xwechat_files directory is a data root, so automatic
+    // inventory never walks other data in that container. A scanned container
+    // is skipped only when an existing standard container is the same
+    // directory.
+    for container in scanned {
+      if coveredByStandard.contains(container.identity) { continue }
+      candidates.append(
+        (container.xwechatFilesRoot, .applicationContainer, container.bundleIdentifier))
+    }
 
     let groupContainers = homeDirectory.appending(path: "Library/Group Containers")
     let groupChildren =
@@ -75,13 +117,13 @@ public struct WeChatDiscovery: Sendable {
       )) ?? []
 
     for child in groupChildren where looksLikeWeChatGroupContainer(child) {
-      candidates.append((child, .groupContainer))
+      candidates.append((child, .groupContainer, nil))
     }
 
     var seen = Set<String>()
     return candidates.filter { candidate in
-      guard fileManager.fileExists(atPath: candidate.0.path) else { return false }
-      return seen.insert(candidate.0.standardizedFileURL.path).inserted
+      guard fileManager.fileExists(atPath: candidate.url.path) else { return false }
+      return seen.insert(candidate.url.standardizedFileURL.path).inserted
     }
   }
 
