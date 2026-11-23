@@ -112,10 +112,15 @@ struct Arguments {
 private let resignRemediation = "sudo codesign --force --deep --sign - /Applications/WeChat.app"
 
 /// The re-sign command for the selected app copy; the default copy keeps the
-/// documented command.
-private func resignRemediation(applicationPath: String?) -> String {
+/// documented command. Another copy's path can name the user's account (for
+/// example `~/Applications`), so it is shown only with `--include-paths`.
+private func resignRemediation(applicationPath: String?, includePaths: Bool) -> String {
   guard let applicationPath, applicationPath != "/Applications/WeChat.app" else {
     return resignRemediation
+  }
+  guard includePaths else {
+    return "sudo codesign --force --deep --sign - <selected WeChat app> "
+      + "(re-run preflight with --include-paths to show its path)"
   }
   let quoted = "'" + applicationPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
   return "sudo codesign --force --deep --sign - \(quoted)"
@@ -192,6 +197,8 @@ private struct PreflightResult {
   let checks: [PreflightCheck]
   /// The WeChat app copy capture attaches to; set whenever `report.ready`.
   let target: WeChatProcessTarget?
+  /// The database root resolved once for this run; set whenever `report.ready`.
+  let databaseRoot: URL?
 }
 
 private func printJSON<T: Encodable>(_ value: T) throws {
@@ -357,9 +364,13 @@ private func runPreflight(
       hint: runningAsRoot ? nil : "capture needs to attach to WeChat; re-run with sudo"
     ))
 
+  // Resolve the database root once: process selection, the inventory and
+  // the capture all use this same root (and its error, if any).
+  let resolvedRoot = Result { try resolveDatabaseRoot(dbRootOption) }
+
   // Choose the process first: version and signing are read from the app
   // bundle of the selected process, not from a default install location.
-  let databaseRootOwner = (try? resolveDatabaseRoot(dbRootOption)).map {
+  let databaseRootOwner = (try? resolvedRoot.get()).map {
     DatabaseRootOwner.resolve(databaseRoot: $0, homeDirectory: homeDirectory)
   }
   let selection = selectProcess(processIDOption: processIDOption, owner: databaseRootOwner)
@@ -405,7 +416,8 @@ private func runPreflight(
     let suffix = " (pid \(processID)\(app)\(version.isEmpty ? "" : ", \(version)"))"
     switch status {
     case .hardened:
-      let command = resignRemediation(applicationPath: selection.applicationPath)
+      let command = resignRemediation(
+        applicationPath: selection.applicationPath, includePaths: includePaths)
       processLabel = "WeChat is running\(suffix), but Hardened Runtime is still active"
       processHint = "re-sign the app, then restart WeChat:\n    \(command)"
       remediation = command
@@ -432,7 +444,7 @@ private func runPreflight(
   var databaseHint: String? = "log into WeChat once so it creates its databases"
   var databasesOK = false
   do {
-    let root = try resolveDatabaseRoot(dbRootOption)
+    let root = try resolvedRoot.get()
     databaseRootReference = PathPrivacy(includePaths: includePaths).reference(for: root)
     let inventory = try DatabaseSaltInventory(root: root)
     databaseCount = inventory.entries.count
@@ -480,7 +492,12 @@ private func runPreflight(
     databaseCount: databaseCount,
     distinctSaltCount: distinctSaltCount
   )
-  return PreflightResult(report: report, checks: checks, target: selection.target)
+  return PreflightResult(
+    report: report,
+    checks: checks,
+    target: selection.target,
+    databaseRoot: try? resolvedRoot.get()
+  )
 }
 
 private func verifyPassphrase(
@@ -531,7 +548,9 @@ do {
       processIDOption: arguments.processID,
       includePaths: arguments.includePaths
     )
-    guard preflight.report.ready, let target = preflight.target else {
+    guard preflight.report.ready, let target = preflight.target,
+      let root = preflight.databaseRoot
+    else {
       if arguments.json {
         try printJSON(preflight.report)
       } else {
@@ -539,7 +558,6 @@ do {
       }
       exit(1)
     }
-    let root = try resolveDatabaseRoot(arguments.dbRoot)
     let inventory = try DatabaseSaltInventory(root: root)
     printNote(
       "why this step: the passphrase only crosses the system key-derivation "

@@ -117,7 +117,7 @@ path belongs to an earlier run.
   didn't restart it after re-signing. macOS blocks the attach. Preflight checks
   the selected process and reads the version and signature from that process's
   own app, so for a duplicated copy it prints the re-sign command for that
-  copy.
+  copy. Add `--include-paths` to show that copy's path in the command.
 - **"The WeChat app that owns the database root … is not running":** another
   WeChat copy is running, but the selected account belongs to a different
   copy. Start that copy and log in, or pick another account with `--db-root`.

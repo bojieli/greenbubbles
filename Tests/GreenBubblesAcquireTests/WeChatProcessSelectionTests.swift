@@ -282,6 +282,39 @@ struct WeChatProcessSelectionTests {
     }
   }
 
+  @Test func explicitPIDDisambiguatesTwoInstancesOfTheSameApp() throws {
+    let first = Self.candidate(60, app: Self.standardApp, bundle: Self.standard)
+    let second = Self.candidate(61, app: Self.standardApp, bundle: Self.standard)
+    let selected = try WeChatProcessSelector.validate(
+      requestedProcessID: 61,
+      candidate: second,
+      userID: Self.user,
+      owner: .application(bundleIdentifier: Self.standard)
+    )
+    // The first attach keeps the chosen PID in either listing order.
+    for candidates in [[first, second], [second, first]] {
+      #expect(
+        try WeChatProcessSelector.reselect(candidates: candidates, following: selected)?
+          .processID == 61)
+    }
+    // After it exits, a single replacement is followed...
+    let replacement = Self.candidate(70, app: Self.standardApp, bundle: Self.standard)
+    #expect(
+      try WeChatProcessSelector.reselect(candidates: [replacement], following: selected)?
+        .processID == 70)
+    // ...but with another instance still running, it is ambiguous.
+    #expect(
+      throws: ProcessSelectionError.multipleProcessesForTarget(
+        bundleIdentifier: Self.standard, count: 2)
+    ) {
+      try WeChatProcessSelector.reselect(candidates: [first, replacement], following: selected)
+    }
+    // A reused PID now running another copy is not the selected process.
+    let reused = Self.candidate(61, app: Self.duplicateApp, bundle: Self.duplicate)
+    #expect(
+      try WeChatProcessSelector.reselect(candidates: [reused], following: selected) == nil)
+  }
+
   // MARK: - Helpers
 
   @Test func findsTheAppBundleOfAMainExecutableOnly() {

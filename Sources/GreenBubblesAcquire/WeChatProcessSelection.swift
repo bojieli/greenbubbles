@@ -167,9 +167,12 @@ public enum WeChatProcessSelector {
     return target
   }
 
-  /// Finds the process now running the selected app, for re-attaching after
-  /// WeChat restarts. Other app copies never match. Returns nil while the app
-  /// is not running.
+  /// Finds the process now running the selected app, for attaching and for
+  /// re-attaching after WeChat restarts. The selected process is kept while
+  /// it still runs that app, even if another instance of the same app runs
+  /// too (so an explicit `--pid` disambiguates). Once it is gone, exactly
+  /// one replacement must run the same app; other app copies never match.
+  /// Returns nil while the app is not running.
   public static func reselect(
     candidates: [WeChatProcessCandidate],
     following selected: WeChatProcessTarget
@@ -179,6 +182,9 @@ public enum WeChatProcessSelector {
         $0.applicationPath == selected.applicationPath
           && $0.bundleIdentifier == selected.bundleIdentifier
       }
+    if let same = matches.first(where: { $0.processID == selected.processID }) {
+      return same
+    }
     guard matches.count <= 1 else {
       throw ProcessSelectionError.multipleProcessesForTarget(
         bundleIdentifier: selected.bundleIdentifier, count: matches.count)

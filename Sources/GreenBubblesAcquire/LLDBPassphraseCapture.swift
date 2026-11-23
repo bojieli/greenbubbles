@@ -78,12 +78,20 @@ public struct LLDBPassphraseCapture: Sendable {
     outputHandler?(message)
   }
 
-  private func currentTargetProcessID() throws -> pid_t? {
-    guard let target else { return try WeChatProcessLocator().uniqueProcessID() }
-    return try WeChatProcessSelector.reselect(
-      candidates: WeChatProcessLocator(userID: target.userID).candidates(),
-      following: target
-    )?.processID
+  /// The process to attach to next. `followed` starts as `target` and moves
+  /// to each replacement process, so the selected PID is used while it runs.
+  private func currentTargetProcessID(following followed: inout WeChatProcessTarget?) throws
+    -> pid_t?
+  {
+    guard let current = followed else { return try WeChatProcessLocator().uniqueProcessID() }
+    guard
+      let next = try WeChatProcessSelector.reselect(
+        candidates: WeChatProcessLocator(userID: current.userID).candidates(),
+        following: current
+      )
+    else { return nil }
+    followed = next
+    return next.processID
   }
 
   /// Resolves the WeChat process itself and re-attaches if the target exits
@@ -94,8 +102,9 @@ public struct LLDBPassphraseCapture: Sendable {
   ) throws -> PassphraseSecret {
     guard lldbAvailable else { throw CaptureError.lldbUnavailable }
     let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
+    var followed = target
     while true {
-      guard let processID = try currentTargetProcessID() else {
+      guard let processID = try currentTargetProcessID(following: &followed) else {
         if Date() < deadline {
           Thread.sleep(forTimeInterval: 1)
           continue
