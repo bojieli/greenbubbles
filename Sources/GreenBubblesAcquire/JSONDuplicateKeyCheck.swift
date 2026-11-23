@@ -32,9 +32,8 @@ enum JSONDuplicateKeyCheck {
     var index = 0
 
     init(bytes: [UInt8]) {
+      // A byte-order mark is rejected before this runs, as in Rust.
       self.bytes = bytes
-      // Skip a UTF-8 byte-order mark, which JSONSerialization accepts.
-      if bytes.starts(with: [0xEF, 0xBB, 0xBF]) { index = 3 }
     }
 
     mutating func value() throws {

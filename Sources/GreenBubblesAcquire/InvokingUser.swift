@@ -138,7 +138,7 @@ public struct InvokingUser: Equatable, Sendable {
   /// terminates instead of continuing with mixed credentials.
   public func perform<T>(_ body: () throws -> T) throws -> T {
     guard switchesCredentials else { return try body() }
-    let saved = SavedCredentials.capture()
+    let saved = try SavedCredentials.capture()
     if initgroups(name, Int32(bitPattern: gid)) != 0 {
       let code = errno
       saved.restoreOrTerminate()
@@ -170,20 +170,35 @@ public struct InvokingUser: Equatable, Sendable {
     let egid: gid_t
     let groups: [gid_t]
 
-    static func capture() -> SavedCredentials {
+    // Fails before anything is switched when the current group list cannot
+    // be saved exactly, or could not be set back with setgroups.
+    static func capture() throws -> SavedCredentials {
       let count = getgroups(0, nil)
-      var groups = [gid_t](repeating: 0, count: Int(max(count, 0)))
-      let filled = groups.isEmpty ? 0 : getgroups(Int32(groups.count), &groups)
-      return SavedCredentials(egid: getegid(), groups: Array(groups.prefix(Int(max(filled, 0)))))
+      guard count >= 0 else {
+        throw InvokingUserError.privilegeChangeFailed(
+          operation: "save the current group list", code: errno)
+      }
+      guard count <= NGROUPS_MAX else {
+        throw InvokingUserError.privilegeChangeFailed(
+          operation: "save the current group list", code: EINVAL)
+      }
+      var groups = [gid_t](repeating: 0, count: Int(count))
+      if count > 0 {
+        let filled = getgroups(count, &groups)
+        guard filled == count else {
+          throw InvokingUserError.privilegeChangeFailed(
+            operation: "save the current group list", code: filled < 0 ? errno : EAGAIN)
+        }
+      }
+      return SavedCredentials(egid: getegid(), groups: groups)
     }
 
-    // Root first: changing the group or the group list needs it.
+    // Root first: changing the group or the group list needs it. Restores
+    // exactly what was saved, or terminates.
     func restoreOrTerminate() {
       guard seteuid(0) == 0 else { terminate("restore the root user") }
       guard setegid(egid) == 0 else { terminate("restore the root group") }
-      if setgroups(Int32(groups.count), groups) != 0,
-        initgroups("root", Int32(bitPattern: egid)) != 0
-      {
+      guard setgroups(Int32(groups.count), groups) == 0 else {
         terminate("restore the root group list")
       }
     }

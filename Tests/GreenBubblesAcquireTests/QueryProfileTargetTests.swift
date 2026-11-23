@@ -141,6 +141,58 @@ struct QueryProfileTargetTests {
       target.originConflicting(withDatabaseRoot: URL(fileURLWithPath: "/example/other")) != nil)
   }
 
+  @Test func configuredKeyFileWithoutARootNeedsExplicitOutputForAnyDbRoot() throws {
+    let home = try TemporaryHome()
+    try home.writeSettings("[source]\npassphrase_file = \"/example/keys/settings-key\"\n")
+    let target = try home.resolve(nil)
+    #expect(target.sourceRoot == nil)
+    #expect(target.credentialFile?.path == "/example/keys/settings-key")
+    #expect(
+      target.originConflicting(withDatabaseRoot: URL(fileURLWithPath: "/example/any")) != nil)
+    #expect(target.originConflicting(withDatabaseRoot: nil) == nil)
+  }
+
+  @Test func tomlWhitespaceIsOnlySpaceAndTab() throws {
+    let home = try TemporaryHome()
+    try home.writeSettings("\t[source]  \n \troot\t=  \"/example/tabs\"\t# ok\n")
+    #expect(try home.resolve(nil).sourceRoot?.path == "/example/tabs")
+    for text in [
+      "\u{00A0}[source]\nroot = \"/example/x\"\n",
+      "[source]\n\u{00A0}root = \"/example/x\"\n",
+      "[source]\nroot\u{00A0}= \"/example/x\"\n",
+      "[\u{2003}source]\nroot = \"/example/x\"\n",
+      "[source]\nroot = \"/example/x\"\u{00A0}# c\n",
+      "\u{3000}# comment\n",
+    ] {
+      try home.writeSettings(text)
+      #expect(throws: QueryProfileError.self) { try home.resolve(nil) }
+    }
+  }
+
+  @Test func byteOrderMarkMatchesRust() throws {
+    let bom = Data([0xEF, 0xBB, 0xBF])
+    // serde_json::from_slice rejects a BOM and non-UTF-8 encodings.
+    let json = Data(
+      #"{"schema": "greenbubbles.query-profiles.v1", "formatVersion": 1, "profiles": {"a": {"sourceRoot": "/s", "access": {"mode": "decrypted"}}}}"#
+        .utf8)
+    _ = try QueryProfileTarget.ProfileStore.parse(json)
+    #expect(throws: QueryProfileError.self) {
+      try QueryProfileTarget.ProfileStore.parse(bom + json)
+    }
+    let utf16 = String(decoding: json, as: UTF8.self).data(using: .utf16)!
+    #expect(throws: QueryProfileError.self) { try QueryProfileTarget.ProfileStore.parse(utf16) }
+
+    // The toml crate's lexer skips exactly one leading BOM.
+    let toml = Data("[source]\nroot = \"/example/bom\"\n".utf8)
+    #expect(try QueryProfileTarget.Settings.parse(bom + toml).sourceRoot == "/example/bom")
+    #expect(throws: QueryProfileError.self) {
+      try QueryProfileTarget.Settings.parse(bom + bom + toml)
+    }
+    #expect(throws: QueryProfileError.self) {
+      try QueryProfileTarget.Settings.parse(Data([0x23, 0xFF, 0x0A]))
+    }
+  }
+
   @Test func duplicateFieldsAreRefusedLikeRust() throws {
     let duplicates = [
       #"{"schema": "greenbubbles.query-profiles.v1", "formatVersion": 1, "profiles": {"a": {"sourceRoot": "/s", "access": {"mode": "liveWeChatKeyFile", "credentialFile": "/home/me/key", "credentialFile": "/etc/key"}}}}"#,

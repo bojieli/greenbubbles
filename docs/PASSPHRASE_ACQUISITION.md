@@ -105,7 +105,8 @@ greenbubbles-acquire verify --passphrase-stdin [--profile <name>] [--db-root <pa
   when a profile or `config.toml` sets the data folder, `capture` refuses a
   different `--db-root` unless you also pass `--output`, so one account's key
   never replaces the key file another account's queries read (including the
-  default file when `config.toml` sets only `source.root`). Both files are read with the same rules as the
+  default file when `config.toml` sets only `source.root`). When `config.toml`
+  sets only `source.passphrase_file`, any `--db-root` needs `--output` too. Both files are read with the same rules as the
   `greenbubbles` CLI (owner-only file in an owner-only folder, no symbolic
   links, at most 64 KiB, `formatVersion` 1, no unknown fields).
   `GREENBUBBLES_QUERY_PROFILES_FILE` and `GREENBUBBLES_CONFIG_FILE` must be
@@ -142,9 +143,10 @@ path belongs to an earlier run.
 If you use [query profiles](QUERY_PROFILES.md), the key goes to the profile's
 `credentialFile` instead (see `--profile` above).
 
-Although `capture` runs with `sudo`, it reads the profile files and writes the
-key with the rights of the account that ran `sudo` (checked against
-`SUDO_UID`), not as root. The key file and any folders it creates therefore
+Although `capture` runs with `sudo`, it reads the profile files, finds and
+reads the databases, and writes the key with the rights of the account that
+ran `sudo` (checked against `SUDO_UID`); only the debugger attach uses root.
+The key file and any folders it creates therefore
 belong to you, and the tool cannot create or replace a file anywhere you could
 not write yourself. It refuses an existing file that belongs to someone else, a
 key path containing `.` or `..`, and an output folder that is a symbolic link

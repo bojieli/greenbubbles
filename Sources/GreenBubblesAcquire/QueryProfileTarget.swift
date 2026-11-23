@@ -65,11 +65,15 @@ public struct AcquireTarget: Equatable, Sendable {
   /// When capture would write to the key file queries read for this target
   /// (its configured file, or the default file when only a root is
   /// configured), an explicit database root for a different account would
-  /// put the wrong key there. Returns how this target's root was chosen when
-  /// `databaseRoot` differs from it, else nil. The caller then requires an
-  /// explicit `--output`.
+  /// put the wrong key there. Returns how this target's root is chosen when
+  /// `databaseRoot` differs from it — or may differ, when a key file is
+  /// configured but its root is auto-discovered — else nil. The caller then
+  /// requires an explicit `--output` (fail closed).
   public func originConflicting(withDatabaseRoot databaseRoot: URL?) -> String? {
-    guard let databaseRoot, let sourceRoot else { return nil }
+    guard let databaseRoot else { return nil }
+    guard let sourceRoot else {
+      return credentialFile == nil ? nil : "auto-discovered for the configured key file"
+    }
     guard databaseRoot.standardizedFileURL.path != sourceRoot.standardizedFileURL.path else {
       return nil
     }
@@ -260,6 +264,12 @@ public enum QueryProfileTarget {
     let profiles: [String: Profile]
 
     static func parse(_ data: Data) throws -> ProfileStore {
+      // serde_json::from_slice reads UTF-8 only and rejects a byte-order
+      // mark; JSONSerialization would accept both, so check first.
+      let bytes = [UInt8](data)
+      guard !bytes.starts(with: utf8ByteOrderMark), strictUTF8(bytes) != nil else {
+        throw QueryProfileError.malformed("the file must be UTF-8 JSON without a byte-order mark")
+      }
       let object: Any
       do {
         object = try JSONSerialization.jsonObject(with: data, options: [])
@@ -375,7 +385,10 @@ public enum QueryProfileTarget {
     var defaultProfile: String?
 
     static func parse(_ data: Data) throws -> Settings {
-      guard let decoded = String(data: data, encoding: .utf8) else {
+      // Rust's toml parser skips one leading UTF-8 byte-order mark.
+      var bytes = [UInt8](data)
+      if bytes.starts(with: utf8ByteOrderMark) { bytes.removeFirst(utf8ByteOrderMark.count) }
+      guard let decoded = strictUTF8(bytes) else {
         throw QueryProfileError.invalidSettings("the file is not UTF-8")
       }
       // TOML (and Rust's toml crate) accepts LF and CRLF line endings, and
@@ -393,14 +406,13 @@ public enum QueryProfileTarget {
       var values: [String: [String: String]] = [:]
       var current: String?
       for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        let trimmed = tomlTrim(line)
         if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
         if trimmed.hasPrefix("[") {
           guard !trimmed.hasPrefix("[["), let close = trimmed.firstIndex(of: "]") else {
             throw unsupported()
           }
-          let name = trimmed[trimmed.index(after: trimmed.startIndex)..<close]
-            .trimmingCharacters(in: .whitespaces)
+          let name = String(tomlTrim(trimmed[trimmed.index(after: trimmed.startIndex)..<close]))
           try requireComment(trimmed[trimmed.index(after: close)...])
           guard allowed[name] != nil else {
             throw QueryProfileError.invalidSettings(
@@ -414,7 +426,7 @@ public enum QueryProfileTarget {
           continue
         }
         guard let equals = trimmed.firstIndex(of: "=") else { throw unsupported() }
-        let key = trimmed[..<equals].trimmingCharacters(in: .whitespaces)
+        let key = String(tomlTrim(trimmed[..<equals]))
         guard !key.isEmpty,
           key.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") })
         else { throw unsupported() }
@@ -463,13 +475,23 @@ public enum QueryProfileTarget {
       return settings
     }
 
+    // TOML whitespace is only space and tab; Foundation's .whitespaces would
+    // also accept NBSP and other Unicode spaces that Rust rejects.
+    private static func tomlTrim(_ text: Substring) -> Substring {
+      let isBlank: (Character) -> Bool = { $0 == " " || $0 == "\t" }
+      guard let start = text.firstIndex(where: { !isBlank($0) }),
+        let end = text.lastIndex(where: { !isBlank($0) })
+      else { return text[text.endIndex...] }
+      return text[start...end]
+    }
+
     private static func unsupported() -> QueryProfileError {
       QueryProfileError.invalidSettings(
         "greenbubbles-acquire reads only [table] headers and key = \"string\" lines")
     }
 
     private static func requireComment(_ rest: Substring) throws {
-      let trimmed = rest.trimmingCharacters(in: .whitespaces)
+      let trimmed = tomlTrim(rest)
       guard trimmed.isEmpty || trimmed.hasPrefix("#") else { throw unsupported() }
     }
 
@@ -518,4 +540,13 @@ public enum QueryProfileTarget {
       throw unsupported()
     }
   }
+}
+
+let utf8ByteOrderMark: [UInt8] = [0xEF, 0xBB, 0xBF]
+
+/// Decodes UTF-8 without repairs or byte-order-mark handling: nil unless the
+/// bytes are valid UTF-8, so the text matches exactly what Rust would read.
+func strictUTF8(_ bytes: [UInt8]) -> String? {
+  let text = String(decoding: bytes, as: UTF8.self)
+  return Array(text.utf8) == bytes ? text : nil
 }

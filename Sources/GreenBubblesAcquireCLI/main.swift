@@ -27,8 +27,9 @@ enum CLIError: Error, CustomStringConvertible {
       return "Passphrase verification failed: \(reason)"
     case .rootConflictsWithTarget(let origin):
       return
-        "--db-root differs from the root \(origin), whose key file capture would write; "
-        + "pass --output as well, or select that account's profile with --profile"
+        "--db-root may name a different account than the root \(origin), whose key file "
+        + "capture would write; pass --output as well, or select that account's profile "
+        + "with --profile"
     }
   }
 }
@@ -373,9 +374,10 @@ private func runPreflight(
   var databaseHint: String? = "log into WeChat once so it creates its databases"
   var databasesOK = false
   do {
-    let root = try resolveDatabaseRoot(dbRootOption)
+    // As the invoking user: a root their own queries can't read must fail here.
+    let root = try invokingUser.perform { try resolveDatabaseRoot(dbRootOption) }
     databaseRootReference = PathPrivacy(includePaths: includePaths).reference(for: root)
-    let inventory = try DatabaseSaltInventory(root: root)
+    let inventory = try invokingUser.perform { try DatabaseSaltInventory(root: root) }
     databaseCount = inventory.entries.count
     distinctSaltCount = inventory.distinctSalts.count
     let origin = dbRootOption == nil ? "auto-discovered" : rootOrigin
@@ -484,8 +486,9 @@ do {
       }
       exit(1)
     }
-    let root = try resolveDatabaseRoot(dbRoot)
-    let inventory = try DatabaseSaltInventory(root: root)
+    // Only the debugger attach needs root; read the databases as the user.
+    let root = try invokingUser.perform { try resolveDatabaseRoot(dbRoot) }
+    let inventory = try invokingUser.perform { try DatabaseSaltInventory(root: root) }
     printNote(
       "why this step: the passphrase only crosses the system key-derivation "
         + "function while WeChat opens its databases at login, so a fresh "
@@ -555,8 +558,10 @@ do {
     }
     let passphrase = try PassphraseSecret.readFromStandardInput()
     let target = try resolveTarget(arguments, needsOutput: false)
-    let root = try resolveDatabaseRoot(arguments.dbRoot ?? target.sourceRoot)
-    let inventory = try DatabaseSaltInventory(root: root)
+    let root = try invokingUser.perform {
+      try resolveDatabaseRoot(arguments.dbRoot ?? target.sourceRoot)
+    }
+    let inventory = try invokingUser.perform { try DatabaseSaltInventory(root: root) }
     let verifiedSaltCount = try verifyPassphrase(passphrase, inventory: inventory)
     let distinctSaltCount = inventory.distinctSalts.count
     let allVerified = distinctSaltCount > 0 && verifiedSaltCount == distinctSaltCount
