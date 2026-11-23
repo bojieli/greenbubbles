@@ -100,7 +100,7 @@ public struct LLDBPassphraseCapture: Sendable {
     let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
     var rejectedCandidateCount = 0
     while true {
-      guard let processID = try? WeChatProcessLocator().processIDs().first else {
+      guard let processID = try WeChatProcessLocator().uniqueProcessID() else {
         if Date() < deadline {
           Thread.sleep(forTimeInterval: 1)
           continue

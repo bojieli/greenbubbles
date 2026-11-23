@@ -13,6 +13,11 @@ Notable changes to GreenBubbles are documented here. The project follows
   account-key derivation (PBKDF2, 32-byte password, 16-byte salt, HMAC-SHA512,
   256,000 rounds). A candidate that does not verify is ignored until one does,
   or the timeout expires. Nothing is written when no candidate verifies.
+- `snapshot create` and `snapshot verify` work on real WeChat 4.x accounts.
+  They failed every time with "SQLite integrity_check did not return ok",
+  because the FTS5 check of the contact search index cannot pass with
+  GreenBubbles' tokenizer, which lacks pinyin. That one FTS5 row is now
+  allowed; every other integrity row still fails the snapshot.
 
 ## 0.10.0 - 2026-10-01
 

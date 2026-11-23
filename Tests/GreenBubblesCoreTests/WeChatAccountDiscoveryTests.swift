@@ -35,5 +35,14 @@ struct WeChatAccountDiscoveryTests {
     #expect(accounts[0].databaseRoot.path == nil)
     #expect(accounts[0].attachmentRoot?.path == nil)
     #expect(discovery.databaseRoots(accountID: accounts[0].accountID).count == 1)
+
+    #expect(try discovery.singleDatabaseRoot() == discovery.databaseRoots()[0])
+
+    try FileManager.default.createDirectory(
+      at: xwechat.appending(path: "account-two/db_storage"), withIntermediateDirectories: true
+    )
+    #expect(throws: DatabaseRootSelectionError.ambiguous) {
+      try discovery.singleDatabaseRoot()
+    }
   }
 }

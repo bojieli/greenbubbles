@@ -79,10 +79,10 @@ families are:
 | `sha2` | 0.10.9 | MIT OR Apache-2.0 | integrity digests |
 | `tempfile` | 3.27.0 | MIT OR Apache-2.0 | private temporary workspaces |
 | `thiserror` | 2.0.20 | MIT OR Apache-2.0 | errors |
-| `ureq` | 2.12.1 | MIT OR Apache-2.0 | in-process TLS/HTTP transport for the explicit Gemini summary command; API keys never enter subprocess arguments |
+| `ureq` | 3.4.2 | MIT OR Apache-2.0 | in-process TLS/HTTP transport for the explicit Gemini summary command; API keys never enter subprocess arguments |
 | `walkdir` | 2.5.0 | Unlicense/MIT | bounded media traversal |
 | `zeroize` | 1.9.0 | Apache-2.0 OR MIT | secret cleanup |
-| `zstd` | 0.13.3 | MIT | compressed private restoration-ordering spool |
+| `zstd` | 0.14.4 | BSD-3-Clause | compressed private restoration-ordering spool |
 | `wx-context`, `wx-db`, `wx-decrypt`, `wx-media` | 0.7.4 at the revision below | absent on package records | pinned decoder primitives |
 | `filetime` (development only) | 0.2.29 | MIT/Apache-2.0 | timestamp tests |
 
@@ -135,8 +135,14 @@ The native build compiles more than Rust source:
 
 The direct `rusqlite` dependency enables `backup` and `bundled-sqlcipher`.
 Selected upstream crates also enable `rusqlite`'s `bundled` feature. Cargo
-feature unification therefore selects `libsqlite3-sys` 0.38.2 with bundled and
-bundled-SQLCipher build features.
+feature unification selects the bundled SQLCipher build. The pinned wx-cli
+crates require rusqlite 0.40. `Native/GreenBubbles/vendor/rusqlite` contains
+the source of the published `rusqlite-0.40.2.crate` (SHA-256
+`23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3`). Its only code or manifest change is to use
+`libsqlite3-sys` 0.40.0 for native and wasm builds. This brings
+SQLCipher 4.20.0 and SQLite 3.54.1 into the encrypted database build,
+including the fix for CVE-2026-119375. Remove this Cargo patch when the pinned
+wx-cli packages accept a rusqlite release with this SQLCipher fix.
 
 - `rusqlite` and `libsqlite3-sys` report MIT.
 - The vendored SQLCipher source carries Zetetic's BSD-style license. Its terms
@@ -167,8 +173,8 @@ inventory makes no patent or distribution conclusion.
 
 `wx-db` already selected `zstd`; GreenBubbles now also declares it directly for
 the private, ephemeral restoration-ordering spool. The resolved Rust wrappers
-report MIT (`zstd`) and MIT OR Apache-2.0 (`zstd-safe`), while `zstd-sys`
-reports MIT/Apache-2.0 and compiles bundled Zstandard 1.5.7 C sources. Those
+both report BSD-3-Clause, while `zstd-sys`
+reports BSD-3-Clause AND BSD-2-Clause and compiles bundled Zstandard 1.5.7 C sources. Those
 sources carry Meta's BSD license and require the copyright, conditions, and
 disclaimer to accompany source or binary redistribution. The fail-closed
 dependency inventory now tracks `zstd-sys` explicitly; a binary notice bundle

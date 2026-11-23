@@ -865,24 +865,26 @@ fn call_gemini(api_key: &str, model: &str, request_bytes: &[u8]) -> Result<Value
     }
     let endpoint =
         format!("https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent");
-    let agent = ureq::AgentBuilder::new()
-        .timeout(GEMINI_REQUEST_TIMEOUT)
-        .build();
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(GEMINI_REQUEST_TIMEOUT))
+        .build()
+        .new_agent();
     let response = agent
         .post(&endpoint)
-        .set("content-type", "application/json")
-        .set("x-goog-api-key", api_key)
-        .send_bytes(request_bytes)
+        .header("content-type", "application/json")
+        .header("x-goog-api-key", api_key)
+        .send(request_bytes)
         .map_err(|error| match error {
-            ureq::Error::Status(status, _) => RestoreError::Integrity(format!(
+            ureq::Error::StatusCode(status) => RestoreError::Integrity(format!(
                 "Gemini summary request failed with HTTP status {status}"
             )),
-            ureq::Error::Transport(_) => RestoreError::Integrity(
+            _ => RestoreError::Integrity(
                 "Gemini summary request failed at the transport layer".into(),
             ),
         })?;
     let mut bytes = Vec::new();
     response
+        .into_body()
         .into_reader()
         .take(MAXIMUM_MODEL_RESPONSE_BYTES.saturating_add(1))
         .read_to_end(&mut bytes)?;

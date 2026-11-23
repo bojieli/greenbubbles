@@ -22,6 +22,20 @@ public struct WeChatAccountLocation: Codable, Equatable, Sendable {
   }
 }
 
+public enum DatabaseRootSelectionError: Error, CustomStringConvertible {
+  case none
+  case ambiguous
+
+  public var description: String {
+    switch self {
+    case .none:
+      return "No WeChat database root was discovered; pass --db-root to select one"
+    case .ambiguous:
+      return "Multiple WeChat database roots were found; select the intended account with --db-root"
+    }
+  }
+}
+
 public struct WeChatAccountDiscovery: Sendable {
   private let homeDirectory: URL
   private let privacy: PathPrivacy
@@ -42,6 +56,13 @@ public struct WeChatAccountDiscovery: Sendable {
     resolvedAccounts()
       .filter { accountID == nil || $0.report.accountID == accountID }
       .map(\.databaseRoot)
+  }
+
+  public func singleDatabaseRoot() throws -> URL {
+    let roots = databaseRoots()
+    guard let first = roots.first else { throw DatabaseRootSelectionError.none }
+    guard roots.count == 1 else { throw DatabaseRootSelectionError.ambiguous }
+    return first
   }
 
   public func accountRoot(accountID: String) -> URL? {
