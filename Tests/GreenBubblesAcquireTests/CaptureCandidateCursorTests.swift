@@ -80,6 +80,34 @@ struct CaptureCandidateCursorTests {
     #expect(decision.deadlineReached)
   }
 
+  @Test func verificationStopsBetweenSaltsOnceTheDeadlinePasses() {
+    // Each salt takes "10 seconds" on the injected clock; the deadline is 15.
+    var clock = 0.0
+    var checked: [Int] = []
+    let count = DatabaseSaltInventory.countVerified(
+      [1, 2, 3],
+      shouldStop: { clock >= 15 },
+      verify: { salt in
+        checked.append(salt)
+        clock += 10
+        return true
+      }
+    )
+    #expect(checked == [1, 2])
+    #expect(count == 2)
+  }
+
+  @Test func accumulatorCloseWipesUntakenOutputAndIgnoresLateAppends() {
+    let accumulator = LLDBPassphraseCapture.OutputAccumulator()
+    accumulator.append(Data(Self.hexdump(of: account, at: 0x1000).utf8))
+    #expect(!accumulator.isEmpty)
+    accumulator.close()
+    #expect(accumulator.isEmpty)
+    accumulator.append(Data(Self.hexdump(of: account, at: 0x2000).utf8))
+    #expect(accumulator.isEmpty)
+    #expect(accumulator.take().isEmpty)
+  }
+
   @Test func rejectedCandidateIsNotOfferedAgain() throws {
     var stream = LLDBMemoryReadStream()
     var offered: [[UInt8]] = []

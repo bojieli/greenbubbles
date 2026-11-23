@@ -176,6 +176,13 @@ struct LLDBMemoryReadStream {
     return drained
   }
 
+  /// Wipes any unfinished line and short read without producing a candidate.
+  mutating func discard() {
+    PassphraseSecret.zeroize(&pendingLine)
+    pendingLine.removeAll(keepingCapacity: true)
+    discardCurrentRead()
+  }
+
   private mutating func processLine(_ drained: inout Drained) {
     defer {
       PassphraseSecret.zeroize(&pendingLine)

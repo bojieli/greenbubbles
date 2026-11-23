@@ -163,6 +163,15 @@ struct LLDBOutputParserTests {
     #expect(stream.consume(&next).candidates == [expectedBytes])
   }
 
+  @Test func discardDropsAnUnterminatedCompleteReadWithoutACandidate() {
+    var stream = LLDBMemoryReadStream()
+    // The chunk ends after the last hex digit, before the newline.
+    var chunk = Array(hexdumpLines.utf8)
+    #expect(stream.consume(&chunk).candidates.isEmpty)
+    stream.discard()
+    #expect(stream.finish().candidates.isEmpty)
+  }
+
   @Test func streamReportsAttachFailureAndExitPerLine() {
     var stream = LLDBMemoryReadStream()
     var chunk = Array(

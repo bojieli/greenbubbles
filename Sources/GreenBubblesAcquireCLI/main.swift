@@ -366,26 +366,6 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
   return PreflightResult(report: report, checks: checks)
 }
 
-private func verifyPassphrase(
-  _ passphrase: PassphraseSecret,
-  inventory: DatabaseSaltInventory
-) throws -> Int {
-  var verifiedSaltCount = 0
-  for sample in inventory.saltVerificationSamples {
-    var encryptionKey = try SQLCipherKeyVerifier.deriveEncryptionKey(
-      passphrase: passphrase,
-      salt: sample.salt
-    )
-    let verified = try SQLCipherKeyVerifier.verify(
-      encryptionKey: encryptionKey,
-      page1: sample.page1
-    )
-    PassphraseSecret.zeroize(&encryptionKey)
-    if verified { verifiedSaltCount += 1 }
-  }
-  return verifiedSaltCount
-}
-
 do {
   let arguments = try Arguments(Array(CommandLine.arguments.dropFirst()))
   switch arguments.command {
@@ -438,11 +418,17 @@ do {
       FileHandle.standardError.write(Data("note: \(message)\n".utf8))
     }
     let started = Date()
+    // Matches the capture's own deadline. Verification stops between salts
+    // once it passes, so a candidate that arrives late cannot keep lldb
+    // attached for a full pass over every salt.
+    let deadline = started.addingTimeInterval(TimeInterval(arguments.timeoutSeconds))
     var verifiedSaltCount = 0
     let passphrase: PassphraseSecret
     do {
       passphrase = try capture.capture(timeoutSeconds: arguments.timeoutSeconds) { secret in
-        verifiedSaltCount = try verifyPassphrase(secret, inventory: inventory)
+        verifiedSaltCount = try inventory.verifiedSaltCount(for: secret) {
+          Date() >= deadline
+        }
         return verifiedSaltCount > 0
       }
     } catch CaptureError.noAcceptableCandidate {
@@ -489,7 +475,7 @@ do {
     let passphrase = try PassphraseSecret.readFromStandardInput()
     let root = try resolveDatabaseRoot(arguments.dbRoot)
     let inventory = try DatabaseSaltInventory(root: root)
-    let verifiedSaltCount = try verifyPassphrase(passphrase, inventory: inventory)
+    let verifiedSaltCount = try inventory.verifiedSaltCount(for: passphrase)
     let distinctSaltCount = inventory.distinctSalts.count
     let allVerified = distinctSaltCount > 0 && verifiedSaltCount == distinctSaltCount
     if arguments.json {

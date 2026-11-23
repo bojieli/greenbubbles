@@ -182,6 +182,9 @@ public struct LLDBPassphraseCapture: Sendable {
     }
     defer {
       output.fileHandleForReading.readabilityHandler = nil
+      // lldb keeps running while `accept` verifies, so output can arrive
+      // after the last poll. Wipe it; later appends are dropped.
+      accumulator.close()
       verboseRelay?.flush()
       // Only ever terminate the child spawned here. The breakpoint command
       // continues instead of quitting, so lldb is still attached when a
@@ -204,7 +207,7 @@ public struct LLDBPassphraseCapture: Sendable {
     input.fileHandleForWriting.write(Data(script.utf8))
 
     var stream = LLDBMemoryReadStream()
-    defer { _ = stream.finish() }
+    defer { stream.discard() }
     while true {
       let running = process.isRunning
       if !running {
@@ -259,18 +262,41 @@ public struct LLDBPassphraseCapture: Sendable {
 
   /// Bytes received from lldb and not yet handed to the parser. `take`
   /// moves them out, so output is held here only until the next poll.
-  private final class OutputAccumulator: @unchecked Sendable {
+  final class OutputAccumulator: @unchecked Sendable {
     private let lock = NSLock()
     private var buffer: [UInt8] = []
+    private var closed = false
 
     init() {
       buffer.reserveCapacity(64 * 1024)
     }
 
+    deinit {
+      PassphraseSecret.zeroize(&buffer)
+    }
+
     func append(_ data: Data) {
       lock.lock()
+      defer { lock.unlock() }
+      guard !closed else { return }
       buffer.append(contentsOf: data)
-      lock.unlock()
+    }
+
+    /// Wipes output that was never taken. A readability handler still in
+    /// flight may call `append` afterwards; that output is ignored.
+    func close() {
+      lock.lock()
+      defer { lock.unlock() }
+      closed = true
+      PassphraseSecret.zeroize(&buffer)
+      buffer.removeAll()
+    }
+
+    /// Whether nothing is buffered (for tests).
+    var isEmpty: Bool {
+      lock.lock()
+      defer { lock.unlock() }
+      return buffer.isEmpty
     }
 
     func take() -> [UInt8] {
@@ -361,6 +387,9 @@ enum CaptureCandidateCursor {
       }
       defer { PassphraseSecret.zeroize(&candidates[index]) }
       let secret = try PassphraseSecret(bytes: candidates[index])
+      // `accept` may cross the deadline. The CLI's verifier stops between
+      // salts once it does; a candidate it already verified is still a
+      // verified key, so it is accepted rather than discarded.
       if try accept(secret) {
         return Decision(secret: secret, newlyRejected: newlyRejected)
       }
