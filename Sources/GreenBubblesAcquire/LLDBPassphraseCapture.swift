@@ -88,8 +88,35 @@ public struct LLDBPassphraseCapture: Sendable {
   /// arbitrarily; intended for diagnosing a stalled capture).
   public var verbose = false
 
+  /// The WeChat app copy to capture from. When set, every attach and
+  /// re-attach uses the process now running this app bundle (same path and
+  /// bundle ID, same user), so a restart during logout never switches to
+  /// another copy. When nil, the single running WeChat process is used.
+  public var target: WeChatProcessTarget?
+
+  /// Lists processes while following `target`; by default, that target's
+  /// user's processes with metadata read by the current process.
+  public var processLocator: WeChatProcessLocator?
+
   private func emit(_ message: String) {
     outputHandler?(message)
+  }
+
+  /// The process to attach to next. `followed` starts as `target`; it keeps
+  /// the selected process while it runs and moves only to a process of the
+  /// same app that started after the previous one was seen to exit.
+  private func currentTargetProcessID(following followed: inout WeChatProcessTarget?) throws
+    -> pid_t?
+  {
+    guard var current = followed else { return try WeChatProcessLocator().uniqueProcessID() }
+    let locator = processLocator ?? WeChatProcessLocator(userID: current.userID)
+    let next = try WeChatProcessSelector.reselect(
+      listing: Result { try locator.candidates() },
+      following: &current,
+      nowMicroseconds: WeChatProcessTarget.microseconds(Date())
+    )
+    followed = current
+    return next?.processID
   }
 
   /// Resolves the WeChat process itself and re-attaches if the target exits
@@ -112,9 +139,11 @@ public struct LLDBPassphraseCapture: Sendable {
   ) throws -> PassphraseSecret {
     guard lldbAvailable else { throw CaptureError.lldbUnavailable }
     let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
+    var followed = target
     var rejectedCandidateCount = 0
+    var exitObservedAt: UInt64?
     while true {
-      guard let processID = try WeChatProcessLocator().uniqueProcessID() else {
+      guard let processID = try currentTargetProcessID(following: &followed) else {
         if Date() < deadline {
           Thread.sleep(forTimeInterval: 1)
           continue
@@ -129,9 +158,17 @@ public struct LLDBPassphraseCapture: Sendable {
           architecture: architecture,
           deadline: deadline,
           accept: accept,
-          rejectedCandidateCount: &rejectedCandidateCount
+          rejectedCandidateCount: &rejectedCandidateCount,
+          exitObservedAt: &exitObservedAt
         )
       } catch CaptureError.targetExited {
+        // The time lldb's exit report was read, not the time cleanup ended:
+        // a replacement may start while lldb is being shut down.
+        if followed?.processID == processID, followed?.exitObservedMicroseconds == nil {
+          followed?.exitObservedMicroseconds =
+            exitObservedAt ?? WeChatProcessTarget.microseconds(Date())
+        }
+        exitObservedAt = nil
         guard Date() < deadline else { throw deadlineError(rejectedCandidateCount) }
         emit("WeChat process \(processID) exited; waiting to re-attach to the new process")
         Thread.sleep(forTimeInterval: 1)
@@ -148,7 +185,8 @@ public struct LLDBPassphraseCapture: Sendable {
     architecture: LLDBTargetArchitecture,
     deadline: Date,
     accept: (PassphraseSecret) throws -> Bool,
-    rejectedCandidateCount: inout Int
+    rejectedCandidateCount: inout Int,
+    exitObservedAt: inout UInt64?
   ) throws -> PassphraseSecret {
     let script = LLDBCaptureScript.script(processID: processID, architecture: architecture)
 
@@ -223,6 +261,11 @@ public struct LLDBPassphraseCapture: Sendable {
         drained.targetExited = drained.targetExited || last.targetExited
       }
       defer { Self.zeroizeCandidates(&drained.candidates) }
+      // Time the exit as soon as it is known, before verifying any candidate
+      // from the same batch (verification can take a while).
+      if drained.targetExited, exitObservedAt == nil {
+        exitObservedAt = WeChatProcessTarget.microseconds(Date())
+      }
       let decision = try CaptureCandidateCursor.decide(
         among: &drained.candidates,
         deadline: deadline,

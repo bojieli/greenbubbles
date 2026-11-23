@@ -6,6 +6,21 @@ Notable changes to GreenBubbles are documented here. The project follows
 
 ## Unreleased
 
+### Added
+
+- `greenbubbles-acquire` picks the WeChat process whose app owns the selected
+  data folder, instead of refusing or guessing when two app copies run. A
+  folder in `~/Library/Containers/<bundle id>` belongs to that bundle ID; the
+  tool reads each running `WeChat` process's app bundle and attaches only to
+  the one match. No match or several matches stop preflight. The capture
+  re-attaches only to the same app copy after a logout restarts WeChat.
+  Version and Hardened Runtime details come from the selected process's own
+  app. Only the invoking user's processes count (`SUDO_UID` under sudo).
+- `greenbubbles-acquire --pid <n>` chooses the WeChat process explicitly. It
+  is required for data outside an app container, such as a group container,
+  and is rejected when it names another user's process, a non-WeChat process,
+  or a copy that doesn't own the data folder (#34).
+
 ### Security
 
 - Update the `cookie` crate to 0.18.3 for RUSTSEC-2026-0594 (private cookie
