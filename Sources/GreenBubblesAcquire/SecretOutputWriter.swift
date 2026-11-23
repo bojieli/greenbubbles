@@ -5,12 +5,15 @@ import Foundation
 
 public enum SecretOutputError: Error, Equatable, CustomStringConvertible {
   case outputExists
+  case unsafeOutputFile
   case posix(operation: String, code: Int32)
 
   public var description: String {
     switch self {
     case .outputExists:
       return "The passphrase output file already exists; pass --overwrite to replace it"
+    case .unsafeOutputFile:
+      return "Passphrase output must be a regular file with a single hard link"
     case .posix(let operation, let code):
       return "\(operation) failed with POSIX error \(code)"
     }
@@ -34,10 +37,8 @@ public struct SecretOutputWriter: Sendable {
     try FileManager.default.createDirectory(
       at: parent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
 
-    var flags = O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW
-    if overwrite {
-      flags |= O_TRUNC
-    } else {
+    var flags = O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+    if !overwrite {
       flags |= O_EXCL
     }
     let descriptor = Darwin.open(url.path, flags, 0o600)
@@ -46,8 +47,20 @@ public struct SecretOutputWriter: Sendable {
       throw SecretOutputError.posix(operation: "open passphrase output", code: errno)
     }
     defer { Darwin.close(descriptor) }
+    // Check the open descriptor before changing permissions or contents.
+    var metadata = stat()
+    guard Darwin.fstat(descriptor, &metadata) == 0 else {
+      throw SecretOutputError.posix(operation: "inspect passphrase output", code: errno)
+    }
+    guard (metadata.st_mode & S_IFMT) == S_IFREG, metadata.st_nlink == 1 else {
+      throw SecretOutputError.unsafeOutputFile
+    }
     guard Darwin.fchmod(descriptor, 0o600) == 0 else {
       throw SecretOutputError.posix(operation: "restrict passphrase output", code: errno)
+    }
+
+    if overwrite && Darwin.ftruncate(descriptor, 0) != 0 {
+      throw SecretOutputError.posix(operation: "truncate passphrase output", code: errno)
     }
 
     var payload = Self.hexPayload(of: secret)
