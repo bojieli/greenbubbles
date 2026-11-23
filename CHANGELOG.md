@@ -6,6 +6,11 @@ Notable changes to GreenBubbles are documented here. The project follows
 
 ## Unreleased
 
+### Security
+
+- Update the `cookie` crate to 0.18.3 for RUSTSEC-2026-0594 (private cookie
+  nonces can repeat in processes that fork).
+
 ### Fixed
 
 - `greenbubbles-acquire capture` no longer stops on the first unrelated
