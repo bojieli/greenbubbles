@@ -30,10 +30,23 @@ public enum CaptureError: Error, Equatable, CustomStringConvertible {
         "No passphrase was captured before the timeout; log out of WeChat and log back in while the capture is armed"
     case .noAcceptableCandidate:
       return
-        "captured candidates were rejected before the timeout; nothing was written"
+        "every captured candidate was rejected before the timeout. No output was created or replaced."
     case .exitedWithoutCapture:
       return "lldb exited before a passphrase was captured"
     }
+  }
+
+  /// Diagnostic for a capture whose candidates all failed verification.
+  ///
+  /// `capture` reports `noAcceptableCandidate` with the counts of distinct
+  /// salts and database files that were inventoried. The counts describe what
+  /// was examined; they do not identify the cause.
+  public static func verificationFailureDiagnostic(
+    distinctSaltCount: Int,
+    databaseCount: Int
+  ) -> String {
+    "no match among \(distinctSaltCount) distinct database salts "
+      + "in \(databaseCount) inventoried files. No output was created or replaced."
   }
 }
 

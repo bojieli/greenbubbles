@@ -60,7 +60,16 @@ struct CaptureCandidateCursorTests {
 
   @Test func noAcceptableCandidateWritesNothing() {
     #expect(
-      CaptureError.noAcceptableCandidate.description.contains("nothing was written")
+      CaptureError.noAcceptableCandidate.description.contains(
+        "No output was created or replaced.")
+    )
+  }
+
+  @Test func verificationFailureDiagnosticReportsInventoryCounts() {
+    #expect(
+      CaptureError.verificationFailureDiagnostic(distinctSaltCount: 3, databaseCount: 7)
+        == "no match among 3 distinct database salts in 7 inventoried files. "
+        + "No output was created or replaced."
     )
   }
 }

@@ -447,16 +447,15 @@ do {
       }
     } catch CaptureError.noAcceptableCandidate {
       throw CLIError.verificationFailed(
-        "the captured bytes verified against no database; nothing was written"
+        CaptureError.verificationFailureDiagnostic(
+          distinctSaltCount: inventory.distinctSalts.count,
+          databaseCount: inventory.entries.count
+        )
       )
     }
     let captureDurationSeconds = Date().timeIntervalSince(started)
-    guard verifiedSaltCount > 0 else {
-      throw CLIError.verificationFailed(
-        "no match among \(inventory.distinctSalts.count) distinct database salts "
-          + "in \(inventory.entries.count) inventoried files. No output was created or replaced."
-      )
-    }
+    // `capture` returns only a candidate the closure accepted.
+    assert(verifiedSaltCount > 0)
     try SecretOutputWriter().write(passphrase, to: output, overwrite: arguments.overwrite)
     if arguments.json {
       try printJSON(
