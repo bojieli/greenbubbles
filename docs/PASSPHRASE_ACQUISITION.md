@@ -68,10 +68,10 @@ greenbubbles chats --limit 20
 ## Command options
 
 ```sh
-greenbubbles-acquire preflight [--json] [--db-root <path>]
-greenbubbles-acquire capture [--output <path>] [--timeout-seconds 300] \
-  [--db-root <path>] [--overwrite]
-greenbubbles-acquire verify --passphrase-stdin [--db-root <path>]
+greenbubbles-acquire preflight [--json] [--profile <name>] [--db-root <path>]
+greenbubbles-acquire capture [--profile <name>] [--output <path>] \
+  [--timeout-seconds 300] [--db-root <path>] [--overwrite]
+greenbubbles-acquire verify --passphrase-stdin [--profile <name>] [--db-root <path>]
 ```
 
 - **`preflight`** checks that WeChat is installed and running, whether it has
@@ -85,6 +85,39 @@ greenbubbles-acquire verify --passphrase-stdin [--db-root <path>]
 - **`verify`** checks a saved key against your databases without touching
   WeChat. Pipe the key file into it. Use it after WeChat creates new database
   files; the same key opens them, so you don't need to capture again.
+- **`--profile`** uses a live [query profile](QUERY_PROFILES.md): its
+  `sourceRoot` is the data folder and its `credentialFile` is where `capture`
+  writes the key. Without `--profile`, the tool picks the same source as an
+  ordinary `greenbubbles` query:
+  1. When `~/.greenbubbles/query-profiles.json` exists, its `defaultProfile`.
+     A file with no `defaultProfile` is an error; pass `--profile`. A file
+     whose only profile still has the `/ABSOLUTE/...` template path counts as
+     no file.
+  2. Otherwise `~/.greenbubbles/config.toml`: `profile.default`, or
+     `source.root` and `source.passphrase_file`. The tool reads only plain
+     `[table]` headers and `key = "string"` lines there.
+  3. Otherwise the discovered data folder and
+     `~/.greenbubbles-acquire/passphrase.txt`.
+
+  The profile must use `liveWeChatKeyFile` access; a snapshot or decrypted
+  profile is an error unless you give both `--db-root` and `--output`.
+  `--output` overrides the key file. `--db-root` overrides the data folder;
+  when a profile or `config.toml` sets the data folder, `capture` refuses a
+  different `--db-root` unless you also pass `--output`, so one account's key
+  never replaces the key file another account's queries read (including the
+  default file when `config.toml` sets only `source.root`). When `config.toml`
+  sets only `source.passphrase_file`, any `--db-root` needs `--output` too.
+  Roots are compared after resolving symbolic links, and a data folder path
+  (`--db-root`, `sourceRoot`, `source.root`) may not contain `..`.
+  `preflight` applies the same checks, so it reports ready only for a
+  target `capture` would accept, and its suggested command keeps
+  `--profile`, `--db-root`, `--output`, and any `--preserve-env` you need. Both files are read with the same rules as the
+  `greenbubbles` CLI (owner-only file in an owner-only folder, no symbolic
+  links, at most 64 KiB, `formatVersion` 1, no unknown fields).
+  `GREENBUBBLES_QUERY_PROFILES_FILE` and `GREENBUBBLES_CONFIG_FILE` must be
+  absolute paths (the second is checked only when `config.toml` is used). `sudo` removes them from the environment by default; keep
+  them with `sudo --preserve-env=GREENBUBBLES_QUERY_PROFILES_FILE,GREENBUBBLES_CONFIG_FILE`
+  or the tool reads the files in your home folder.
 - **`--db-root`** points at a specific WeChat data folder. The tool selects a root
   automatically only when discovery finds exactly one. With several accounts,
   choose the intended directory explicitly. This option selects data on disk.
@@ -115,6 +148,24 @@ path belongs to an earlier run.
   you already saved keeps working as long as `verify` succeeds.
 
 ## Where the key is saved
+
+If you use [query profiles](QUERY_PROFILES.md), the key goes to the profile's
+`credentialFile` instead (see `--profile` above).
+
+Although `capture` runs with `sudo`, it reads the profile files, finds and
+reads the databases, and writes the key with the rights of the account that
+ran `sudo` (checked against `SUDO_UID`); only the debugger attach uses root.
+The key file and any folders it creates therefore
+belong to you, and the tool cannot create or replace a file anywhere you could
+not write yourself. It refuses an existing file that belongs to someone else, a
+key path containing `.` or `..`, and an output folder that is a symbolic link
+(use `/private/tmp`, not `/tmp`). `greenbubbles` reads a key only from a folder
+you own with mode `700`; `capture` prints a note when the folder is wider.
+
+The data folder must be a real folder you own, not a symbolic link, as the
+`greenbubbles` CLI requires. To check this behaviour on your Mac with
+synthetic data only, run `scripts/sudo-smoke-test-acquire.sh` from a checkout
+(as yourself; it calls `sudo` for the privileged steps).
 
 The key is saved as 64 hexadecimal characters in
 `~/.greenbubbles-acquire/passphrase.txt`. The output file has mode `0600`.
