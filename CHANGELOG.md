@@ -21,6 +21,11 @@ Notable changes to GreenBubbles are documented here. The project follows
   and is rejected when it names another user's process, a non-WeChat process,
   or a copy that doesn't own the data folder (#34).
 
+### Security
+
+- Update the `cookie` crate to 0.18.3 for RUSTSEC-2026-0594 (private cookie
+  nonces can repeat in processes that fork).
+
 ### Fixed
 
 - `snapshot create` and `snapshot verify` work on real WeChat 4.x accounts.
