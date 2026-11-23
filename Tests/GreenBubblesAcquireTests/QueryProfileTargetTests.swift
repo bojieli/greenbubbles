@@ -339,6 +339,33 @@ struct QueryProfileTargetTests {
     #expect(JSONDuplicateKeyCheck.problem(in: Data((json + "x").utf8)) == .malformed)
   }
 
+  @Test func liveSourceRootChecksMatchRustOnThePathAsGiven() throws {
+    let home = try TemporaryHome()
+    let root = home.directory.appending(path: "account/db_storage")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    try QueryProfileTarget.checkLiveSourceRoot(root, ownerUID: getuid())
+
+    // A symbolic link to a valid root is refused even though it resolves.
+    let link = home.directory.appending(path: "linked-db_storage")
+    #expect(symlink(root.path, link.path) == 0)
+    #expect(throws: QueryProfileError.self) {
+      try QueryProfileTarget.checkLiveSourceRoot(link, ownerUID: getuid())
+    }
+    // Owned by someone else, missing, or not a directory.
+    #expect(throws: QueryProfileError.self) {
+      try QueryProfileTarget.checkLiveSourceRoot(root, ownerUID: getuid() &+ 1)
+    }
+    #expect(throws: QueryProfileError.self) {
+      try QueryProfileTarget.checkLiveSourceRoot(
+        home.directory.appending(path: "missing"), ownerUID: getuid())
+    }
+    let file = home.directory.appending(path: "file")
+    try Data("x".utf8).write(to: file)
+    #expect(throws: QueryProfileError.self) {
+      try QueryProfileTarget.checkLiveSourceRoot(file, ownerUID: getuid())
+    }
+  }
+
   @Test func duplicateFieldsAreRefusedLikeRust() throws {
     let duplicates = [
       #"{"schema": "greenbubbles.query-profiles.v1", "formatVersion": 1, "profiles": {"a": {"sourceRoot": "/s", "access": {"mode": "liveWeChatKeyFile", "credentialFile": "/home/me/key", "credentialFile": "/etc/key"}}}}"#,

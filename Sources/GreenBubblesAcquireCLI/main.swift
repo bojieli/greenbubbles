@@ -297,6 +297,8 @@ private func userDatabaseRoot(_ option: URL?) throws -> URL {
   }
   return try invokingUser.perform {
     let root = try resolveDatabaseRoot(option)
+    // Rust's LiveQuerySource::open checks the path as given, then resolves it.
+    try QueryProfileTarget.checkLiveSourceRoot(root, ownerUID: invokingUser.uid)
     return QueryProfileTarget.canonicalPath(root) ?? root
   }
 }
@@ -309,17 +311,22 @@ private func resolveDatabaseRoot(_ option: URL?) throws -> URL {
     .singleDatabaseRoot()
 }
 
+// A path as one shell word: plain when safe, otherwise single-quoted.
+private func shellQuoted(_ text: String) -> String {
+  let plain =
+    !text.isEmpty
+    && text.unicodeScalars.allSatisfy {
+      CharacterSet.alphanumerics.contains($0) && $0.isASCII
+        || "/._-+,:@".unicodeScalars.contains($0)
+    }
+  return plain ? text : "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
+}
+
 // The capture command that reproduces this preflight's target. Private paths
 // become placeholders unless --include-paths was given.
 private func captureCommand(_ arguments: Arguments) -> [String] {
   func path(_ url: URL, placeholder: String) -> String {
-    guard arguments.includePaths else { return placeholder }
-    let text = url.path
-    let plain = text.unicodeScalars.allSatisfy {
-      CharacterSet.alphanumerics.contains($0) && $0.isASCII
-        || "/._-+,:@".unicodeScalars.contains($0)
-    }
-    return plain ? text : "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    arguments.includePaths ? shellQuoted(url.path) : placeholder
   }
   // sudo drops these unless told to keep them (names only, never values).
   let preserved = [
@@ -616,7 +623,8 @@ do {
       if let name = target.profileName, arguments.output == nil {
         print("Use it with:  greenbubbles <args> --profile \(name)")
       } else {
-        print("Use it with:  cat \(output.path) | greenbubbles <args> --passphrase-stdin")
+        print(
+          "Use it with:  cat \(shellQuoted(output.path)) | greenbubbles <args> --passphrase-stdin")
       }
     }
   case .verify:

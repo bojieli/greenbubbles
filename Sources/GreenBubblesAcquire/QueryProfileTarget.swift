@@ -10,6 +10,7 @@ public enum QueryProfileError: Error, Equatable, CustomStringConvertible {
   case noDefaultProfile
   case notLiveProfile(name: String, mode: String)
   case invalidEnvironment(String)
+  case unsafeSourceRoot(String)
 
   public var description: String {
     switch self {
@@ -29,6 +30,8 @@ public enum QueryProfileError: Error, Equatable, CustomStringConvertible {
       return
         "Query profile \(name) uses \(mode) access, not liveWeChatKeyFile; pass --profile "
         + "with a live profile, or give both --db-root and --output"
+    case .unsafeSourceRoot(let reason):
+      return "The database root is not usable: \(reason)"
     case .invalidEnvironment(let variable):
       return "\(variable) must be an absolute, non-root path"
     }
@@ -264,6 +267,25 @@ public enum QueryProfileTarget {
     guard let resolved = realpath(url.path, nil) else { return nil }
     defer { free(resolved) }
     return URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
+  }
+
+  /// The checks Rust's `LiveQuerySource::open` applies to the root exactly as
+  /// given, before canonicalising it: `symlink_metadata` must succeed, the
+  /// path must be a real directory (not a symbolic link), and it must be
+  /// owned by the user running the query. Call inside
+  /// `InvokingUser.perform(_:)` with that user's uid.
+  public static func checkLiveSourceRoot(_ url: URL, ownerUID: uid_t) throws {
+    var info = stat()
+    guard lstat(url.path, &info) == 0 else {
+      throw QueryProfileError.unsafeSourceRoot("database root is unavailable")
+    }
+    guard info.st_mode & S_IFMT == S_IFDIR else {
+      throw QueryProfileError.unsafeSourceRoot(
+        "database root must be a real directory, not a symbolic link")
+    }
+    guard info.st_uid == ownerUID else {
+      throw QueryProfileError.unsafeSourceRoot("database root must be owned by the current user")
+    }
   }
 
   /// A database root may not contain `..`: Rust resolves it through the

@@ -162,6 +162,11 @@ key path containing `.` or `..`, and an output folder that is a symbolic link
 (use `/private/tmp`, not `/tmp`). `greenbubbles` reads a key only from a folder
 you own with mode `700`; `capture` prints a note when the folder is wider.
 
+The data folder must be a real folder you own, not a symbolic link, as the
+`greenbubbles` CLI requires. To check this behaviour on your Mac with
+synthetic data only, run `scripts/sudo-smoke-test-acquire.sh` from a checkout
+(as yourself; it calls `sudo` for the privileged steps).
+
 The key is saved as 64 hexadecimal characters in
 `~/.greenbubbles-acquire/passphrase.txt`. The output file has mode `0600`.
 New output directories use mode `0700`. When you choose an existing directory,
