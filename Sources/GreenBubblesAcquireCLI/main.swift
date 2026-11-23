@@ -40,6 +40,7 @@ struct Arguments {
   var output: URL?
   var timeoutSeconds = LLDBPassphraseCapture.defaultTimeoutSeconds
   var dbRoot: URL?
+  var processID: pid_t?
   var overwrite = false
   var passphraseStdin = false
   var includePaths = false
@@ -80,6 +81,14 @@ struct Arguments {
         index += 1
         guard index < arguments.count else { throw CLIError.missingValue(option) }
         dbRoot = URL(fileURLWithPath: arguments[index])
+      case "--pid":
+        index += 1
+        guard index < arguments.count else { throw CLIError.missingValue(option) }
+        let value = arguments[index]
+        guard let number = pid_t(value), number > 0 else {
+          throw CLIError.invalidInteger(option: option, value: value)
+        }
+        processID = number
       case "--overwrite":
         overwrite = true
       case "--passphrase-stdin":
@@ -102,6 +111,16 @@ struct Arguments {
 
 private let resignRemediation = "sudo codesign --force --deep --sign - /Applications/WeChat.app"
 
+/// The re-sign command for the selected app copy; the default copy keeps the
+/// documented command.
+private func resignRemediation(applicationPath: String?) -> String {
+  guard let applicationPath, applicationPath != "/Applications/WeChat.app" else {
+    return resignRemediation
+  }
+  let quoted = "'" + applicationPath.replacingOccurrences(of: "'", with: "'\\''") + "'"
+  return "sudo codesign --force --deep --sign - \(quoted)"
+}
+
 private let usage = """
   Usage: greenbubbles-acquire <command> [options]
 
@@ -116,6 +135,8 @@ private let usage = """
                            ~/.greenbubbles-acquire/passphrase.txt, mode 0600)
     --timeout-seconds <n>  Capture window in seconds (default: 300)
     --db-root <path>       Select a db_storage root (required if several are found)
+    --pid <n>              Select the WeChat process (required when the root is
+                           not in an app container or several copies match)
     --overwrite            Replace an existing passphrase output file
     --passphrase-stdin     Read the 32-byte passphrase from standard input
     --include-paths        Include sensitive filesystem paths in local output
@@ -143,6 +164,9 @@ private struct PreflightReport: Encodable {
   let clientReSigned: Bool
   let clientMarketingVersion: String?
   let clientBuildVersion: String?
+  let selectedProcessID: pid_t?
+  let selectedApplicationBundleIdentifier: String?
+  let databaseRootApplicationBundleIdentifier: String?
   let databaseRoot: PathReference?
   let databaseRootAutoDiscovered: Bool
   let databaseCount: Int?
@@ -166,6 +190,8 @@ private struct PreflightCheck {
 private struct PreflightResult {
   let report: PreflightReport
   let checks: [PreflightCheck]
+  /// The WeChat app copy capture attaches to; set whenever `report.ready`.
+  let target: WeChatProcessTarget?
 }
 
 private func printJSON<T: Encodable>(_ value: T) throws {
@@ -231,9 +257,89 @@ private func resolveDatabaseRoot(_ option: URL?) throws -> URL {
     .singleDatabaseRoot()
 }
 
-private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightResult {
+private let listProcessesHint =
+  "list WeChat processes and their apps with: pgrep -lf /Contents/MacOS/WeChat"
+
+private struct ProcessSelection {
+  var target: WeChatProcessTarget?
+  var processID: pid_t?
+  var applicationPath: String?
+  var running = false
+  var failure: (label: String, hint: String?)?
+}
+
+/// Selects the WeChat process whose app owns the database root (or validates
+/// `--pid`). Without a database root it only reports whether one WeChat runs.
+private func selectProcess(
+  processIDOption: pid_t?,
+  owner: DatabaseRootOwner?
+) -> ProcessSelection {
+  let locator = WeChatProcessLocator()
+  var selection = ProcessSelection()
+  do {
+    if let processIDOption {
+      let target = try WeChatProcessSelector.validate(
+        requestedProcessID: processIDOption,
+        candidate: WeChatProcessLocator.candidate(forProcessID: processIDOption),
+        userID: locator.userID,
+        owner: owner ?? .unknown
+      )
+      selection.target = target
+    } else if let owner {
+      selection.target = try WeChatProcessSelector.select(
+        candidates: locator.candidates(),
+        userID: locator.userID,
+        owner: owner
+      )
+    } else if let processID = try locator.uniqueProcessID() {
+      // No database root to match against; the database check blocks capture.
+      selection.processID = processID
+      selection.applicationPath =
+        WeChatProcessLocator.candidate(forProcessID: processID)?
+        .applicationPath
+      selection.running = true
+    }
+    if let target = selection.target {
+      selection.processID = target.processID
+      selection.applicationPath = target.applicationPath
+      selection.running = true
+    }
+  } catch let error as ProcessSelectionError {
+    selection.running = (try? locator.processIDs().isEmpty == false) ?? false
+    let hint: String?
+    switch error {
+    case .noProcessForDatabaseRoot:
+      hint = "start the WeChat copy that owns this data and log in"
+    case .multipleProcessesForDatabaseRoot, .multipleProcessesForTarget:
+      hint = "quit the extra instances, or choose one with --pid"
+    case .databaseRootNotInAppContainer:
+      hint = "choose the WeChat process that uses this data with --pid <n>; \(listProcessesHint)"
+    case .processDoesNotOwnDatabaseRoot:
+      hint = "choose the process of the WeChat copy that owns this data, or a matching --db-root"
+    case .processNotFound, .processOwnedByAnotherUser, .processNotWeChat:
+      hint = listProcessesHint
+    }
+    selection.failure = (error.description, hint)
+  } catch ProcessLocatorError.multipleProcesses {
+    selection.running = true
+    selection.failure = (
+      ProcessLocatorError.multipleProcesses.description,
+      "quit the other copies, or choose one with --pid"
+    )
+  } catch {
+    selection.failure = (String(describing: error), nil)
+  }
+  return selection
+}
+
+private func runPreflight(
+  dbRootOption: URL?,
+  processIDOption: pid_t?,
+  includePaths: Bool
+) -> PreflightResult {
   var checks: [PreflightCheck] = []
   var remediation: String?
+  let homeDirectory = invokingUserHomeDirectory()
 
   let lldbAvailable = LLDBPassphraseCapture().lldbAvailable
   checks.append(
@@ -251,6 +357,13 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
       hint: runningAsRoot ? nil : "capture needs to attach to WeChat; re-run with sudo"
     ))
 
+  // Choose the process first: version and signing are read from the app
+  // bundle of the selected process, not from a default install location.
+  let databaseRootOwner = (try? resolveDatabaseRoot(dbRootOption)).map {
+    DatabaseRootOwner.resolve(databaseRoot: $0, homeDirectory: homeDirectory)
+  }
+  let selection = selectProcess(processIDOption: processIDOption, owner: databaseRootOwner)
+
   // The capture mechanism breakpoints a system CommonCrypto symbol, so it is
   // build-agnostic: client version and signing state are reported for the
   // owner's information only and never gate the capture.
@@ -258,8 +371,10 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
   var clientReSigned = false
   var clientMarketingVersion: String?
   var clientBuildVersion: String?
-  let buildInspector = WeChatClientBuildInspector(homeDirectory: invokingUserHomeDirectory())
-  if let application = buildInspector.defaultApplicationURL() {
+  let buildInspector = WeChatClientBuildInspector(homeDirectory: homeDirectory)
+  if let application = selection.applicationPath.map({ URL(fileURLWithPath: $0) })
+    ?? buildInspector.defaultApplicationURL()
+  {
     clientInstalled = true
     if let build = try? buildInspector.inspect(application: application) {
       clientMarketingVersion = build.marketingVersion
@@ -274,42 +389,38 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
       hint: clientInstalled ? nil : "install WeChat for macOS first"
     ))
 
-  var wechatProcessRunning = false
+  let wechatProcessRunning = selection.running
   var processHardeningStatus: ProcessHardeningStatus? = nil
   var processLabel = "WeChat is not running"
   var processHint: String? = "start WeChat and log in before capturing"
-  do {
-    if let processID = try WeChatProcessLocator().uniqueProcessID() {
-      wechatProcessRunning = true
-      let status = RuntimeHardeningProbe.status(forProcessID: processID)
-      processHardeningStatus = status
-      let version = [clientMarketingVersion, clientBuildVersion.map { "build \($0)" }]
-        .compactMap { $0 }.joined(separator: ", ")
-      let suffix = version.isEmpty ? "" : " (\(version))"
-      switch status {
-      case .hardened:
-        processLabel = "WeChat is running\(suffix), but Hardened Runtime is still active"
-        processHint = "re-sign the app, then restart WeChat:\n    \(resignRemediation)"
-        remediation = resignRemediation
-      case .notHardened:
-        processLabel = "WeChat is running\(suffix), Hardened Runtime removed"
-        processHint = nil
-      case .unknown:
-        processLabel = "WeChat is running\(suffix), hardening status unknown (proceeding)"
-        processHint = nil
-      }
+  if let failure = selection.failure {
+    processLabel = failure.label
+    processHint = failure.hint
+  } else if let processID = selection.processID {
+    let status = RuntimeHardeningProbe.status(forProcessID: processID)
+    processHardeningStatus = status
+    let version = [clientMarketingVersion, clientBuildVersion.map { "build \($0)" }]
+      .compactMap { $0 }.joined(separator: ", ")
+    let app = selection.target.map { ", \($0.bundleIdentifier)" } ?? ""
+    let suffix = " (pid \(processID)\(app)\(version.isEmpty ? "" : ", \(version)"))"
+    switch status {
+    case .hardened:
+      let command = resignRemediation(applicationPath: selection.applicationPath)
+      processLabel = "WeChat is running\(suffix), but Hardened Runtime is still active"
+      processHint = "re-sign the app, then restart WeChat:\n    \(command)"
+      remediation = command
+    case .notHardened:
+      processLabel = "WeChat is running\(suffix), Hardened Runtime removed"
+      processHint = nil
+    case .unknown:
+      processLabel = "WeChat is running\(suffix), hardening status unknown (proceeding)"
+      processHint = nil
     }
-  } catch ProcessLocatorError.multipleProcesses {
-    wechatProcessRunning = true
-    processLabel = ProcessLocatorError.multipleProcesses.description
-    processHint = "quit the other copies before continuing"
-  } catch {
-    processLabel = String(describing: error)
-    processHint = nil
   }
   checks.append(
     PreflightCheck(
-      ok: processHardeningStatus != nil && processHardeningStatus != .hardened,
+      ok: selection.failure == nil && processHardeningStatus != nil
+        && processHardeningStatus != .hardened,
       label: processLabel,
       hint: processHint
     ))
@@ -358,12 +469,18 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
     clientReSigned: clientReSigned,
     clientMarketingVersion: clientMarketingVersion,
     clientBuildVersion: clientBuildVersion,
+    selectedProcessID: selection.target?.processID,
+    selectedApplicationBundleIdentifier: selection.target?.bundleIdentifier,
+    databaseRootApplicationBundleIdentifier: {
+      if case .application(let bundleIdentifier) = databaseRootOwner { return bundleIdentifier }
+      return nil
+    }(),
     databaseRoot: databaseRootReference,
     databaseRootAutoDiscovered: dbRootOption == nil,
     databaseCount: databaseCount,
     distinctSaltCount: distinctSaltCount
   )
-  return PreflightResult(report: report, checks: checks)
+  return PreflightResult(report: report, checks: checks, target: selection.target)
 }
 
 private func verifyPassphrase(
@@ -394,6 +511,7 @@ do {
   case .preflight:
     let result = runPreflight(
       dbRootOption: arguments.dbRoot,
+      processIDOption: arguments.processID,
       includePaths: arguments.includePaths
     )
     if arguments.json {
@@ -410,9 +528,10 @@ do {
       .appending(path: "passphrase.txt")
     let preflight = runPreflight(
       dbRootOption: arguments.dbRoot,
+      processIDOption: arguments.processID,
       includePaths: arguments.includePaths
     )
-    guard preflight.report.ready else {
+    guard preflight.report.ready, let target = preflight.target else {
       if arguments.json {
         try printJSON(preflight.report)
       } else {
@@ -430,6 +549,7 @@ do {
     printNote("in WeChat, log out of the account (not just quit the app), then log back in")
     printNote("waiting up to \(arguments.timeoutSeconds) seconds for the login")
     var capture = LLDBPassphraseCapture()
+    capture.target = target
     capture.verbose = arguments.verbose
     capture.outputHandler = { message in
       FileHandle.standardError.write(Data("note: \(message)\n".utf8))

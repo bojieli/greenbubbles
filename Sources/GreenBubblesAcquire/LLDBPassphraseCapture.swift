@@ -68,8 +68,22 @@ public struct LLDBPassphraseCapture: Sendable {
   /// arbitrarily; intended for diagnosing a stalled capture).
   public var verbose = false
 
+  /// The WeChat app copy to capture from. When set, every attach and
+  /// re-attach uses the process now running this app bundle (same path and
+  /// bundle ID, same user), so a restart during logout never switches to
+  /// another copy. When nil, the single running WeChat process is used.
+  public var target: WeChatProcessTarget?
+
   private func emit(_ message: String) {
     outputHandler?(message)
+  }
+
+  private func currentTargetProcessID() throws -> pid_t? {
+    guard let target else { return try WeChatProcessLocator().uniqueProcessID() }
+    return try WeChatProcessSelector.reselect(
+      candidates: WeChatProcessLocator(userID: target.userID).candidates(),
+      following: target
+    )?.processID
   }
 
   /// Resolves the WeChat process itself and re-attaches if the target exits
@@ -81,7 +95,7 @@ public struct LLDBPassphraseCapture: Sendable {
     guard lldbAvailable else { throw CaptureError.lldbUnavailable }
     let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
     while true {
-      guard let processID = try WeChatProcessLocator().uniqueProcessID() else {
+      guard let processID = try currentTargetProcessID() else {
         if Date() < deadline {
           Thread.sleep(forTimeInterval: 1)
           continue

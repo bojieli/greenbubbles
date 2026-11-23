@@ -68,9 +68,9 @@ greenbubbles chats --limit 20
 ## Command options
 
 ```sh
-greenbubbles-acquire preflight [--json] [--db-root <path>]
+greenbubbles-acquire preflight [--json] [--db-root <path>] [--pid <n>]
 greenbubbles-acquire capture [--output <path>] [--timeout-seconds 300] \
-  [--db-root <path>] [--overwrite]
+  [--db-root <path>] [--pid <n>] [--overwrite]
 greenbubbles-acquire verify --passphrase-stdin [--db-root <path>]
 ```
 
@@ -87,8 +87,21 @@ greenbubbles-acquire verify --passphrase-stdin [--db-root <path>]
   files; the same key opens them, so you don't need to capture again.
 - **`--db-root`** points at a specific WeChat data folder. The tool selects a root
   automatically only when discovery finds exactly one. With several accounts,
-  choose the intended directory explicitly. This option selects data on disk.
-  It does not select a running application copy.
+  choose the intended directory explicitly.
+- **Which WeChat process is used:** the tool attaches to your own WeChat
+  process whose app owns the data folder. A folder inside
+  `~/Library/Containers/<bundle id>/` belongs to the app with that bundle ID,
+  so with two copies of WeChat running (for example a duplicate made to run a
+  second account), the copy that owns the selected account is chosen whatever
+  its process ID. Preflight shows the chosen process ID and bundle ID. If that
+  copy isn't running, or several of its processes are, preflight stops instead
+  of guessing. WeChat processes of other macOS users are never considered.
+- **`--pid`** chooses the WeChat process yourself. It must be your own
+  process, running a WeChat app's main executable, and when the data folder is
+  in an app container that app must own it. You need it when the data folder
+  is in a group container or anywhere else outside an app container, because
+  then the owning app can't be told from the path. To list the running copies
+  and their apps: `pgrep -lf /Contents/MacOS/WeChat`.
 
 The WeChat version is shown for information only. The tool does not refuse a
 version it hasn't seen, but it has only been tested on WeChat 4.1.12 and 4.1.13.
@@ -101,7 +114,21 @@ file, even when `--overwrite` was requested. Any file already at the output
 path belongs to an earlier run.
 
 - **"Hardened Runtime is still active":** you haven't re-signed WeChat, or you
-  didn't restart it after re-signing. macOS blocks the attach.
+  didn't restart it after re-signing. macOS blocks the attach. Preflight checks
+  the selected process and reads the version and signature from that process's
+  own app, so for a duplicated copy it prints the re-sign command for that
+  copy.
+- **"The WeChat app that owns the database root … is not running":** another
+  WeChat copy is running, but the selected account belongs to a different
+  copy. Start that copy and log in, or pick another account with `--db-root`.
+- **"… WeChat processes belong to …" or "Multiple WeChat processes":** more
+  than one process could be the target. Quit the extras, or choose one with
+  `--pid`.
+- **"The database root is not inside a WeChat app container":** the data
+  folder is in a group container or another location. Choose the process with
+  `--pid`.
+- **"Process … runs …, but the database root belongs to …":** the `--pid`
+  process is a different copy of WeChat from the one that owns the data.
 - **Timed out:** you didn't log out and back in within the time limit. Run
   `capture` again. An idle, logged-in WeChat never reveals the key.
 - **Verification failed:** no database salt group matched the candidate. The
@@ -157,7 +184,8 @@ it is why you have to log out and back in.
    changes nothing in WeChat. Because it pauses on a macOS function rather than
    on WeChat's own code, it does not depend on a particular WeChat version.
 3. On WeChat 4.1.13, logging out ends the WeChat process and logging in starts
-   a new one. The tool notices and follows the new process.
+   a new one. The tool notices and follows the new process of the same app
+   copy (same app path and bundle ID), never another copy that is running.
 4. For each database file, it computes the file's key on your Mac
    (PBKDF2-HMAC-SHA512, 256,000 rounds, with that file's 16-byte salt).
 5. It proves each computed key is correct by checking SQLCipher 4's
