@@ -70,6 +70,38 @@ public struct DatabaseSaltInventory: Sendable {
     return samples
   }
 
+  /// Counts the distinct salts whose first page `passphrase` opens.
+  ///
+  /// Each salt costs a 256,000-round PBKDF. `shouldStop` is checked before
+  /// each one, so a caller with a deadline can stop early; the count then
+  /// covers only the salts already checked.
+  public func verifiedSaltCount(
+    for passphrase: PassphraseSecret,
+    shouldStop: () -> Bool = { false }
+  ) throws -> Int {
+    try Self.countVerified(saltVerificationSamples, shouldStop: shouldStop) { sample in
+      var encryptionKey = try SQLCipherKeyVerifier.deriveEncryptionKey(
+        passphrase: passphrase,
+        salt: sample.salt
+      )
+      defer { PassphraseSecret.zeroize(&encryptionKey) }
+      return try SQLCipherKeyVerifier.verify(encryptionKey: encryptionKey, page1: sample.page1)
+    }
+  }
+
+  static func countVerified<Sample>(
+    _ samples: [Sample],
+    shouldStop: () -> Bool,
+    verify: (Sample) throws -> Bool
+  ) rethrows -> Int {
+    var verifiedCount = 0
+    for sample in samples {
+      if shouldStop() { break }
+      if try verify(sample) { verifiedCount += 1 }
+    }
+    return verifiedCount
+  }
+
   private struct Collector {
     let root: URL
     var entries: [DatabaseSaltEntry] = []
