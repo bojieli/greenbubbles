@@ -1040,7 +1040,9 @@ fn project_message(
         raw.packed_info.as_deref(),
         raw.status,
         raw.compression_type,
-        raw.compressed_content.as_deref(),
+        raw.compressed_content
+            .as_deref()
+            .filter(|content| !content.is_empty()),
         wx_db::is_group_chat(conversation),
     );
     let (decoded_sender, mut content, decode_state, content_decode_failed) = match decoded {

@@ -1507,7 +1507,7 @@ fn copy_database_logically(
              PRAGMA journal_mode = DELETE;
              PRAGMA synchronous = FULL;",
         )?;
-        verify_sqlite_integrity(&destination)?;
+        verify_sqlite_integrity(&destination, logical_path)?;
         drop(destination);
         fs::set_permissions(destination_path, fs::Permissions::from_mode(0o600))?;
         reject_sqlite_sidecars(destination_path)?;
@@ -1543,7 +1543,7 @@ fn verify_one_database(
 
     let connection = open_snapshot_database_read_only(&path, snapshot_key)
         .map_err(|error| database_failure(&logical_path, &safe_database_reason(&error)))?;
-    verify_sqlite_integrity(&connection)
+    verify_sqlite_integrity(&connection, &logical_path)
         .map_err(|error| database_failure(&logical_path, &safe_database_reason(&error)))?;
     let page_count = connection
         .pragma_query_value(None, "page_count", |row| row.get::<_, i64>(0))
@@ -1623,17 +1623,37 @@ fn open_snapshot_database_read_only(
     Ok(connection)
 }
 
-fn verify_sqlite_integrity(connection: &Connection) -> Result<(), RecoverableSnapshotError> {
+fn verify_sqlite_integrity(
+    connection: &Connection,
+    logical_path: &str,
+) -> Result<(), RecoverableSnapshotError> {
     let mut statement = connection.prepare("PRAGMA integrity_check")?;
     let results = statement
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    if results.as_slice() != ["ok"] {
+    if !integrity_rows_pass(logical_path, &results) {
         return Err(RecoverableSnapshotError::Integrity(
             "SQLite integrity_check did not return ok".into(),
         ));
     }
     Ok(())
+}
+
+/// FTS5's inverted-index check re-tokenizes every row. The reimplemented
+/// MMFtsTokenizer does not emit WeChat's pinyin tokens, so WeChat's contact
+/// indexes always fail that one check. The index is derived data; every
+/// B-tree check, FTS5 shadow tables included, must still report nothing.
+fn integrity_rows_pass(logical_path: &str, rows: &[String]) -> bool {
+    rows == ["ok"]
+        || (logical_path == "contact/contact_fts.db"
+            && !rows.is_empty()
+            && rows.iter().all(|row| {
+                matches!(
+                    row.as_str(),
+                    "malformed inverted index for FTS5 table main.contact_fts_v5"
+                        | "malformed inverted index for FTS5 table main.chatroom_member_fts_v3"
+                )
+            }))
 }
 
 fn validate_new_output_directory(
@@ -2107,5 +2127,46 @@ fn safe_database_reason(error: &RecoverableSnapshotError) -> String {
         }
         RecoverableSnapshotError::Io(_) => "database storage operation failed".into(),
         _ => "database recovery operation failed".into(),
+    }
+}
+
+#[cfg(test)]
+mod integrity_tests {
+    use super::integrity_rows_pass;
+
+    fn rows(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn allows_only_known_indexes_in_the_contact_search_database() {
+        let indexes = rows(&[
+            "malformed inverted index for FTS5 table main.contact_fts_v5",
+            "malformed inverted index for FTS5 table main.chatroom_member_fts_v3",
+        ]);
+        assert!(integrity_rows_pass("contact/contact_fts.db", &indexes));
+        assert!(!integrity_rows_pass("message/message_fts.db", &indexes));
+        assert!(!integrity_rows_pass(
+            "contact/contact_fts.db",
+            &rows(&["malformed inverted index for FTS5 table main.other_index",])
+        ));
+    }
+
+    // The CLI cannot reach these: verify rejects a damaged file by its manifest
+    // hash first, and create rewrites every page through the backup API.
+    #[test]
+    fn rejects_btree_damage_even_next_to_an_fts5_row() {
+        assert!(!integrity_rows_pass("contact/contact_fts.db", &rows(&[])));
+        assert!(!integrity_rows_pass(
+            "contact/contact_fts.db",
+            &rows(&["*** in database main ***\nPage 7: btreeInitPage() returns error code 11"])
+        ));
+        assert!(!integrity_rows_pass(
+            "contact/contact_fts.db",
+            &rows(&[
+                "malformed inverted index for FTS5 table main.contact_fts_v5",
+                "row 3 missing from index contact_name_idx",
+            ])
+        ));
     }
 }

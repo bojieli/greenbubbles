@@ -23,8 +23,8 @@
         "licenseMetadata" : "MIT OR Apache-2.0",
         "name" : "argon2",
         "optional" : false,
-        "requirement" : "^0.5",
-        "resolvedVersion" : "0.5.3",
+        "requirement" : "^0.6",
+        "resolvedVersion" : "0.6.0",
         "source" : "registry+https://github.com/rust-lang/crates.io-index",
         "usesDefaultFeatures" : true
       },
@@ -49,8 +49,8 @@
         "licenseMetadata" : "CC0-1.0",
         "name" : "bip39",
         "optional" : false,
-        "requirement" : "^2.2",
-        "resolvedVersion" : "2.2.2",
+        "requirement" : "^3.0",
+        "resolvedVersion" : "3.0.0",
         "source" : "registry+https://github.com/rust-lang/crates.io-index",
         "usesDefaultFeatures" : true
       },
@@ -287,8 +287,8 @@
         "licenseMetadata" : "MIT OR Apache-2.0",
         "name" : "toml",
         "optional" : false,
-        "requirement" : "^0.9",
-        "resolvedVersion" : "0.9.12+spec-1.1.0",
+        "requirement" : "^1.1",
+        "resolvedVersion" : "1.1.4+spec-1.1.0",
         "source" : "registry+https://github.com/rust-lang/crates.io-index",
         "usesDefaultFeatures" : true
       },
@@ -300,8 +300,8 @@
         "licenseMetadata" : "MIT OR Apache-2.0",
         "name" : "ureq",
         "optional" : false,
-        "requirement" : "^2.12",
-        "resolvedVersion" : "2.12.1",
+        "requirement" : "^3.4",
+        "resolvedVersion" : "3.4.2",
         "source" : "registry+https://github.com/rust-lang/crates.io-index",
         "usesDefaultFeatures" : true
       },
@@ -388,11 +388,11 @@
 
         ],
         "kind" : "normal",
-        "licenseMetadata" : "MIT",
+        "licenseMetadata" : "BSD-3-Clause",
         "name" : "zstd",
         "optional" : false,
-        "requirement" : "^0.13",
-        "resolvedVersion" : "0.13.3",
+        "requirement" : "^0.14",
+        "resolvedVersion" : "0.14.4",
         "source" : "registry+https://github.com/rust-lang/crates.io-index",
         "usesDefaultFeatures" : true
       }
@@ -443,7 +443,7 @@
       {
         "licenseMetadata" : "MIT",
         "name" : "libsqlite3-sys",
-        "version" : "0.38.2"
+        "version" : "0.40.0"
       },
       {
         "licenseMetadata" : "MIT",
@@ -451,9 +451,14 @@
         "version" : "0.2.0"
       },
       {
-        "licenseMetadata" : "MIT/Apache-2.0",
+        "licenseMetadata" : "MIT AND BSD-3-Clause AND blessing AND WTFPL",
+        "name" : "sqlcipher-src",
+        "version" : "420.0.0+sqlcipher-4.20.0-sqlite-3.54.1-libtomcrypt-1.18.2"
+      },
+      {
+        "licenseMetadata" : "BSD-3-Clause AND BSD-2-Clause",
         "name" : "zstd-sys",
-        "version" : "2.0.16+zstd.1.5.7"
+        "version" : "2.1.3+zstd.1.5.7"
       }
     ],
     "package" : {

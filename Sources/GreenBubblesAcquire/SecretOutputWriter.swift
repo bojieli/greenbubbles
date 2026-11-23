@@ -5,12 +5,15 @@ import Foundation
 
 public enum SecretOutputError: Error, Equatable, CustomStringConvertible {
   case outputExists
+  case unsafeOutputFile
   case posix(operation: String, code: Int32)
 
   public var description: String {
     switch self {
     case .outputExists:
       return "The passphrase output file already exists; pass --overwrite to replace it"
+    case .unsafeOutputFile:
+      return "Passphrase output must be a regular file with a single hard link"
     case .posix(let operation, let code):
       return "\(operation) failed with POSIX error \(code)"
     }
@@ -19,7 +22,7 @@ public enum SecretOutputError: Error, Equatable, CustomStringConvertible {
 
 /// The only egress point for a captured passphrase: writes exactly 64
 /// lowercase hexadecimal characters plus a trailing newline to an
-/// owner-specified file. The parent directory is created or enforced to mode
+/// owner-specified file. A new parent directory is created with mode
 /// 0700, the file is mode 0600, and creation is exclusive (`O_CREAT | O_EXCL`,
 /// failing rather than overwriting) unless `overwrite` is set. With `owner`,
 /// the file and a parent folder created here are handed to that user.
@@ -34,18 +37,16 @@ public struct SecretOutputWriter: Sendable {
   ) throws {
     let parent = url.standardizedFileURL.deletingLastPathComponent()
     let parentExisted = FileManager.default.fileExists(atPath: parent.path)
-    try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
-    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
+    try FileManager.default.createDirectory(
+      at: parent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     // Capture runs under sudo; without this, a folder it creates in the
     // user's home stays root-owned and the user's own CLI cannot read the key.
     if let owner, !parentExisted, Darwin.chown(parent.path, owner.uid, owner.gid) != 0 {
       throw SecretOutputError.posix(operation: "hand passphrase folder to the user", code: errno)
     }
 
-    var flags = O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW
-    if overwrite {
-      flags |= O_TRUNC
-    } else {
+    var flags = O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
+    if !overwrite {
       flags |= O_EXCL
     }
     let descriptor = Darwin.open(url.path, flags, 0o600)
@@ -54,11 +55,23 @@ public struct SecretOutputWriter: Sendable {
       throw SecretOutputError.posix(operation: "open passphrase output", code: errno)
     }
     defer { Darwin.close(descriptor) }
+    // Check the open descriptor before changing permissions or contents.
+    var metadata = stat()
+    guard Darwin.fstat(descriptor, &metadata) == 0 else {
+      throw SecretOutputError.posix(operation: "inspect passphrase output", code: errno)
+    }
+    guard (metadata.st_mode & S_IFMT) == S_IFREG, metadata.st_nlink == 1 else {
+      throw SecretOutputError.unsafeOutputFile
+    }
     guard Darwin.fchmod(descriptor, 0o600) == 0 else {
       throw SecretOutputError.posix(operation: "restrict passphrase output", code: errno)
     }
     if let owner, Darwin.fchown(descriptor, owner.uid, owner.gid) != 0 {
       throw SecretOutputError.posix(operation: "hand passphrase output to the user", code: errno)
+    }
+
+    if overwrite && Darwin.ftruncate(descriptor, 0) != 0 {
+      throw SecretOutputError.posix(operation: "truncate passphrase output", code: errno)
     }
 
     var payload = Self.hexPayload(of: secret)

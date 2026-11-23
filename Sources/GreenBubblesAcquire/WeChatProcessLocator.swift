@@ -4,9 +4,12 @@ import Foundation
 
 public enum ProcessLocatorError: Error, Equatable, CustomStringConvertible {
   case commandFailed(String)
+  case multipleProcesses
 
   public var description: String {
     switch self {
+    case .multipleProcesses:
+      return "Multiple WeChat processes are running; cannot identify a unique process."
     case .commandFailed(let command):
       return "Process locator command failed: \(command)"
     }
@@ -17,6 +20,15 @@ public enum ProcessLocatorError: Error, Equatable, CustomStringConvertible {
 /// subprocess style of `WeChatClientBuildInspector`.
 public struct WeChatProcessLocator: Sendable {
   public init() {}
+
+  public func uniqueProcessID() throws -> pid_t? {
+    try Self.uniqueProcessID(in: processIDs())
+  }
+
+  static func uniqueProcessID(in matches: [pid_t]) throws -> pid_t? {
+    guard matches.count <= 1 else { throw ProcessLocatorError.multipleProcesses }
+    return matches.first
+  }
 
   public func processIDs() throws -> [pid_t] {
     let process = Process()

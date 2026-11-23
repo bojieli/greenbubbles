@@ -16,6 +16,11 @@ Notable changes to GreenBubbles are documented here. The project follows
 
 ### Fixed
 
+- `snapshot create` and `snapshot verify` work on real WeChat 4.x accounts.
+  They failed every time with "SQLite integrity_check did not return ok",
+  because the FTS5 check of the contact search index cannot pass with
+  GreenBubbles' tokenizer, which lacks pinyin. That one FTS5 row is now
+  allowed; every other integrity row still fails the snapshot.
 - Under `sudo`, `capture` now hands the key file, and a folder it creates, to
   the user who ran `sudo`. Before, both stayed owned by root, so the user's own
   `greenbubbles` could not read the key.

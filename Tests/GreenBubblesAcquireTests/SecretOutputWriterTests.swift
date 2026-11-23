@@ -52,6 +52,7 @@ struct SecretOutputWriterTests {
       try writer.write(secret, to: output)
     }
 
+    try Data(repeating: 0, count: 128).write(to: output)
     var replacementBytes = [UInt8](repeating: 0x5A, count: 32)
     let replacement = try PassphraseSecret(bytes: replacementBytes)
     try writer.write(replacement, to: output, overwrite: true)
@@ -64,18 +65,59 @@ struct SecretOutputWriterTests {
     PassphraseSecret.zeroize(&replacementBytes)
   }
 
-  @Test func enforcesPermissionsOnAPreExistingParentDirectory() throws {
+  @Test(arguments: [false, true])
+  func refusesLinkedOutputsWithoutChangingTheTarget(symbolic: Bool) throws {
+    let base = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let target = base.appending(path: "fixture.txt")
+    let output = base.appending(path: "linked-output.txt")
+    let original = Data("unchanged test content".utf8)
+    try original.write(to: target)
+    try FileManager.default.setAttributes([.posixPermissions: 0o640], ofItemAtPath: target.path)
+    if symbolic {
+      try FileManager.default.createSymbolicLink(at: output, withDestinationURL: target)
+    } else {
+      try FileManager.default.linkItem(at: target, to: output)
+    }
+
+    let secret = try PassphraseSecret(bytes: bytesFromHex(passphraseHex))
+    #expect(throws: SecretOutputError.self) {
+      try SecretOutputWriter().write(secret, to: output, overwrite: true)
+    }
+    #expect(try Data(contentsOf: target) == original)
+    #expect(try posixMode(of: target) == 0o640)
+  }
+
+  @Test func refusesAnOpenFIFO() throws {
+    let base = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let output = base.appending(path: "fixture.fifo")
+    guard Darwin.mkfifo(output.path, 0o600) == 0 else {
+      throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+    let reader = Darwin.open(output.path, O_RDONLY | O_NONBLOCK)
+    guard reader >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+    defer { Darwin.close(reader) }
+
+    let secret = try PassphraseSecret(bytes: bytesFromHex(passphraseHex))
+    #expect(throws: SecretOutputError.unsafeOutputFile) {
+      try SecretOutputWriter().write(secret, to: output, overwrite: true)
+    }
+  }
+
+  @Test(arguments: [0o755, 0o1777])
+  func preservesPermissionsOnExistingParent(mode: Int) throws {
     let base = try makeTemporaryDirectory()
     defer { try? FileManager.default.removeItem(at: base) }
     let parent = base.appending(path: "loose", directoryHint: .isDirectory)
     try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: false)
-    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: parent.path)
+    try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: parent.path)
 
     let secret = try PassphraseSecret(bytes: bytesFromHex(passphraseHex))
     let output = parent.appending(path: "passphrase.txt")
     try SecretOutputWriter().write(secret, to: output)
 
-    #expect(try posixMode(of: parent) == 0o700)
+    #expect(try posixMode(of: parent) == Int32(mode))
     #expect(try posixMode(of: output) == 0o600)
   }
 
@@ -93,7 +135,7 @@ struct SecretOutputWriterTests {
     guard Darwin.lstat(url.path, &metadata) == 0 else {
       throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
     }
-    return Int32(metadata.st_mode & 0o777)
+    return Int32(metadata.st_mode & 0o7777)
   }
 
   private func bytesFromHex(_ hex: String) -> [UInt8] {

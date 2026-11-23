@@ -10,7 +10,6 @@ enum CLIError: Error, CustomStringConvertible {
   case missingValue(String)
   case missingRequiredOption(String)
   case invalidInteger(option: String, value: String)
-  case noDatabaseRootDiscovered
   case verificationFailed(String)
 
   var description: String {
@@ -23,8 +22,6 @@ enum CLIError: Error, CustomStringConvertible {
       return "Missing required option: \(option)"
     case .invalidInteger(let option, let value):
       return "Expected a positive integer for \(option), got: \(value)"
-    case .noDatabaseRootDiscovered:
-      return "No WeChat database root was discovered; pass --db-root to select one"
     case .verificationFailed(let reason):
       return "Passphrase verification failed: \(reason)"
     }
@@ -124,7 +121,8 @@ private let usage = """
                            query profile's credentialFile, else
                            ~/.greenbubbles-acquire/passphrase.txt; mode 0600)
     --timeout-seconds <n>  Capture window in seconds (default: 300)
-    --db-root <path>       Override the profile's or auto-discovered db_storage root
+    --db-root <path>       Select a db_storage root (overrides the profile's
+                           sourceRoot; required if several roots are found)
     --profile <name>       Use this live query profile's sourceRoot and
                            credentialFile (default: the file's defaultProfile)
     --overwrite            Replace an existing passphrase output file
@@ -137,9 +135,8 @@ private let usage = """
   Capture requires root, lldb, a running WeChat, and an owner re-signed client
   without Hardened Runtime. When re-signing is required, preflight prints the
   exact command for the owner to run manually; this tool never automates it.
-  The capture mechanism breakpoints a system library function, so it works
-  with any WeChat build; the active account's database root is discovered
-  automatically.
+  Preflight checks prerequisites. Only successful database verification
+  permits an output file to be written.
   """
 
 private struct PreflightReport: Encodable {
@@ -273,43 +270,8 @@ private func resolveDatabaseRoot(_ option: URL?) throws -> URL {
   if let option {
     return option.standardizedFileURL
   }
-  let roots = WeChatAccountDiscovery(homeDirectory: invokingUserHomeDirectory())
-    .databaseRoots()
-  if roots.count == 1 { return roots[0] }
-  if roots.isEmpty { throw CLIError.noDatabaseRootDiscovered }
-  // Several accounts are present: the running client is logged into exactly
-  // one, and that account's databases are the ones being written to.
-  guard
-    let active = roots.max(by: { latestDatabaseModification($0) < latestDatabaseModification($1) })
-  else {
-    throw CLIError.noDatabaseRootDiscovered
-  }
-  return active
-}
-
-private func latestDatabaseModification(_ root: URL) -> Date {
-  var latest = Date.distantPast
-  guard
-    let enumerator = FileManager.default.enumerator(
-      at: root,
-      includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
-      options: [.skipsHiddenFiles]
-    )
-  else { return latest }
-  for case let url as URL in enumerator {
-    guard url.pathExtension == "db", !url.lastPathComponent.hasSuffix("-wal"),
-      !url.lastPathComponent.hasSuffix("-shm")
-    else { continue }
-    guard
-      let values = try? url.resourceValues(forKeys: [
-        .contentModificationDateKey, .isRegularFileKey,
-      ]),
-      values.isRegularFile == true,
-      let modified = values.contentModificationDate
-    else { continue }
-    if modified > latest { latest = modified }
-  }
-  return latest
+  return try WeChatAccountDiscovery(homeDirectory: invokingUserHomeDirectory())
+    .singleDatabaseRoot()
 }
 
 private func runPreflight(
@@ -363,29 +325,38 @@ private func runPreflight(
   var processHardeningStatus: ProcessHardeningStatus? = nil
   var processLabel = "WeChat is not running"
   var processHint: String? = "start WeChat and log in before capturing"
-  if let processIDs = try? WeChatProcessLocator().processIDs(), let first = processIDs.first {
-    wechatProcessRunning = true
-    let status = RuntimeHardeningProbe.status(forProcessID: first)
-    processHardeningStatus = status
-    let version = [clientMarketingVersion, clientBuildVersion.map { "build \($0)" }]
-      .compactMap { $0 }.joined(separator: ", ")
-    let suffix = version.isEmpty ? "" : " (\(version))"
-    switch status {
-    case .hardened:
-      processLabel = "WeChat is running\(suffix), but Hardened Runtime is still active"
-      processHint = "re-sign the app, then restart WeChat:\n    \(resignRemediation)"
-      remediation = resignRemediation
-    case .notHardened:
-      processLabel = "WeChat is running\(suffix), Hardened Runtime removed"
-      processHint = nil
-    case .unknown:
-      processLabel = "WeChat is running\(suffix), hardening status unknown (proceeding)"
-      processHint = nil
+  do {
+    if let processID = try WeChatProcessLocator().uniqueProcessID() {
+      wechatProcessRunning = true
+      let status = RuntimeHardeningProbe.status(forProcessID: processID)
+      processHardeningStatus = status
+      let version = [clientMarketingVersion, clientBuildVersion.map { "build \($0)" }]
+        .compactMap { $0 }.joined(separator: ", ")
+      let suffix = version.isEmpty ? "" : " (\(version))"
+      switch status {
+      case .hardened:
+        processLabel = "WeChat is running\(suffix), but Hardened Runtime is still active"
+        processHint = "re-sign the app, then restart WeChat:\n    \(resignRemediation)"
+        remediation = resignRemediation
+      case .notHardened:
+        processLabel = "WeChat is running\(suffix), Hardened Runtime removed"
+        processHint = nil
+      case .unknown:
+        processLabel = "WeChat is running\(suffix), hardening status unknown (proceeding)"
+        processHint = nil
+      }
     }
+  } catch ProcessLocatorError.multipleProcesses {
+    wechatProcessRunning = true
+    processLabel = ProcessLocatorError.multipleProcesses.description
+    processHint = "quit the other copies before continuing"
+  } catch {
+    processLabel = String(describing: error)
+    processHint = nil
   }
   checks.append(
     PreflightCheck(
-      ok: wechatProcessRunning && processHardeningStatus != .hardened,
+      ok: processHardeningStatus != nil && processHardeningStatus != .hardened,
       label: processLabel,
       hint: processHint
     ))
@@ -527,7 +498,8 @@ do {
     let verifiedSaltCount = try verifyPassphrase(passphrase, inventory: inventory)
     guard verifiedSaltCount > 0 else {
       throw CLIError.verificationFailed(
-        "the captured bytes verified against no database; nothing was written"
+        "no match among \(inventory.distinctSalts.count) distinct database salts "
+          + "in \(inventory.entries.count) inventoried files. No output was created or replaced."
       )
     }
     try SecretOutputWriter().write(

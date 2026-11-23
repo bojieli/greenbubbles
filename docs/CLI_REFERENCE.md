@@ -170,8 +170,11 @@ Both print JSON Lines by default: one header line, then one line per message.
 - `at`: local time as `YYYY-MM-DD HH:MM`, in the header's timezone.
 - `text`: the message text.
 - `file` (list only): a local path for an image, video, or document.
-  Encrypted images are decoded into `~/.greenbubbles/cache/media`. The path is
-  left out when the file can't be opened. Don't copy a `file` path into notes.
+  Decoded previews use a per-account directory under `~/.greenbubbles/cache/media/v2/`.
+  Earlier cache entries stay on disk and are ignored. For V2 images with an
+  encoded tail, decoding needs format evidence from the selected image or its
+  matching thumbnail. When decoding fails, the list omits the preview path.
+  Restoration records a decode gap and retains the encrypted source. Don't copy a `file` path into notes.
 - `chat` (search only): the chat's display name. A chat with no display name
   gets `conversationId` instead.
   Search lines have no `file`; open the chat
