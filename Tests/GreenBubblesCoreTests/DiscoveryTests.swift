@@ -98,4 +98,34 @@ struct DiscoveryTests {
     #expect(roots.first?.containerBundleIdentifier == "com.tencent.xinwechat")
     #expect(discovery.accessibleDataRoots().count == 1)
   }
+
+  @Test func linkedStandardFilesDoNotHideTheRealDuplicateRoot() throws {
+    let fileManager = FileManager.default
+    let home = fileManager.temporaryDirectory
+      .appending(path: "greenbubbles-discovery-\(UUID().uuidString)", directoryHint: .isDirectory)
+    defer { try? fileManager.removeItem(at: home) }
+    let containers = home.appending(path: "Library/Containers", directoryHint: .isDirectory)
+    let duplicateFiles = containers.appending(
+      path: "com.example.WeChatCopy/Data/Documents/xwechat_files")
+    try fileManager.createDirectory(at: duplicateFiles, withIntermediateDirectories: true)
+    let standardDocuments = containers.appending(path: "com.tencent.xinWeChat/Data/Documents")
+    try fileManager.createDirectory(at: standardDocuments, withIntermediateDirectories: true)
+    try fileManager.createSymbolicLink(
+      at: standardDocuments.appending(path: "xwechat_files"), withDestinationURL: duplicateFiles)
+
+    // Inventory skips symbolic links, so the real duplicate directory must
+    // remain a root of its own.
+    let discovery = WeChatDiscovery(homeDirectory: home, includePaths: true)
+    let roots = discovery.discover().dataRoots
+    #expect(
+      roots.contains {
+        $0.containerBundleIdentifier == "com.example.WeChatCopy"
+          && $0.location.path?.hasSuffix("/com.example.WeChatCopy/Data/Documents/xwechat_files")
+            == true
+      })
+    #expect(
+      discovery.accessibleDataRoots().contains {
+        $0.url.standardizedFileURL.path == duplicateFiles.standardizedFileURL.path
+      })
+  }
 }

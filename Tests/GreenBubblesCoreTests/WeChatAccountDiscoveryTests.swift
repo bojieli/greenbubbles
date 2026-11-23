@@ -207,17 +207,60 @@ struct WeChatAccountDiscoveryTests {
       directoryHint: .isDirectory
     )
     defer { try? fileManager.removeItem(at: home) }
-    let appFiles = home.appending(
-      path: "Library/Containers/com.example.WeChatCopy/Data/Documents/xwechat_files")
+    let appDocuments = home.appending(
+      path: "Library/Containers/com.example.WeChatCopy/Data/Documents")
     try fileManager.createDirectory(
-      at: appFiles.appending(path: "account/db_storage"), withIntermediateDirectories: true)
-    let group = home.appending(path: "Library/Group Containers/ABC.com.tencent.xinWeChat")
-    try fileManager.createDirectory(at: group, withIntermediateDirectories: true)
+      at: appDocuments.appending(path: "xwechat_files/account/db_storage"),
+      withIntermediateDirectories: true)
+    let groups = home.appending(path: "Library/Group Containers")
+    try fileManager.createDirectory(at: groups, withIntermediateDirectories: true)
+    // The group container is a link to the app's Documents, so the account is
+    // also listed as <group>/xwechat_files/account.
+    let group = groups.appending(path: "ABC.com.tencent.xinWeChat")
+    try fileManager.createSymbolicLink(at: group, withDestinationURL: appDocuments)
+    // A second group whose xwechat_files itself is a link to the same data.
+    let linkedFiles = groups.appending(path: "DEF.com.tencent.xinWeChat")
+    try fileManager.createDirectory(at: linkedFiles, withIntermediateDirectories: true)
     try fileManager.createSymbolicLink(
-      at: group.appending(path: "xwechat_files"), withDestinationURL: appFiles)
+      at: linkedFiles.appending(path: "xwechat_files"),
+      withDestinationURL: appDocuments.appending(path: "xwechat_files"))
 
     let discovery = WeChatAccountDiscovery(homeDirectory: home)
     #expect(discovery.discover().map(\.containerBundleIdentifier) == ["com.example.WeChatCopy"])
     #expect(try discovery.singleDatabaseRoot().path.contains("/Library/Containers/"))
+
+    // An ID saved from the group path (what earlier versions reported for
+    // this account) still selects it. Current Foundation lists a linked
+    // directory under its resolved path, so the two IDs may already agree;
+    // aliases cover the case where they do not.
+    let groupAccount = try #require(
+      try fileManager.contentsOfDirectory(
+        at: group.appending(path: "xwechat_files", directoryHint: .isDirectory),
+        includingPropertiesForKeys: nil
+      ).first)
+    let savedID = PathPrivacy().reference(for: groupAccount).opaqueID
+    #expect(discovery.databaseRoots(accountID: savedID) == discovery.databaseRoots())
+    #expect(discovery.accountRoot(accountID: savedID) != nil)
+    #expect(
+      WeChatAccountStorageAssessor(homeDirectory: home).assess(accountID: savedID).accounts.count
+        == 1)
+  }
+
+  @Test func aliasAccountIDsSelectTheSameAccount() {
+    let path = URL(fileURLWithPath: "/synthetic/xwechat_files/account")
+    let reference = PathPrivacy().reference(for: path)
+    let account = WeChatAccountDiscovery.ResolvedAccount(
+      report: WeChatAccountLocation(
+        accountID: reference.opaqueID, root: reference, databaseRoot: reference,
+        attachmentRoot: nil, isReadable: true),
+      root: path,
+      databaseRoot: path,
+      attachmentRoot: nil,
+      containerBundleIdentifier: "com.example.WeChatCopy",
+      aliasAccountIDs: ["group-path-id"]
+    )
+    #expect(account.matches(accountID: reference.opaqueID))
+    #expect(account.matches(accountID: "group-path-id"))
+    #expect(!account.matches(accountID: "other"))
   }
 }

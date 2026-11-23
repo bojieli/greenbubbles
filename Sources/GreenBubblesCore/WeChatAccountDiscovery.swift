@@ -59,7 +59,7 @@ public struct WeChatAccountDiscovery: Sendable {
 
   public func databaseRoots(accountID: String? = nil) -> [URL] {
     resolvedAccounts()
-      .filter { accountID == nil || $0.report.accountID == accountID }
+      .filter { accountID == nil || $0.matches(accountID: accountID!) }
       .map(\.databaseRoot)
   }
 
@@ -71,7 +71,7 @@ public struct WeChatAccountDiscovery: Sendable {
   }
 
   public func accountRoot(accountID: String) -> URL? {
-    resolvedAccounts().first { $0.report.accountID == accountID }?.root
+    resolvedAccounts().first { $0.matches(accountID: accountID) }?.root
   }
 
   struct ResolvedAccount: Sendable {
@@ -81,18 +81,38 @@ public struct WeChatAccountDiscovery: Sendable {
     let attachmentRoot: URL?
     /// Bundle ID of the owning app container; nil for a group container.
     let containerBundleIdentifier: String?
+    /// IDs of the same account reached through another path, such as a group
+    /// container linked to this app container's data. Earlier versions may
+    /// have reported one of these, so a saved ID keeps selecting the account.
+    var aliasAccountIDs: [String] = []
+
+    func matches(accountID: String) -> Bool {
+      report.accountID == accountID || aliasAccountIDs.contains(accountID)
+    }
   }
 
   func resolvedAccounts() -> [ResolvedAccount] {
     let fileManager = FileManager.default
     var accounts: [ResolvedAccount] = []
-    for (xwechatRoot, containerBundleIdentifier) in xwechatFileRoots(fileManager: fileManager) {
+    for (xwechatRoot, containerBundleIdentifier, aliases) in xwechatFileRoots(
+      fileManager: fileManager)
+    {
       let children =
         (try? fileManager.contentsOfDirectory(
           at: xwechatRoot,
           includingPropertiesForKeys: [.isDirectoryKey],
           options: [.skipsHiddenFiles]
         )) ?? []
+      // Account paths as listed through each alias, keyed by account name.
+      var aliasChildren: [String: [URL]] = [:]
+      for alias in aliases {
+        let listed =
+          (try? fileManager.contentsOfDirectory(
+            at: alias, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        for child in listed {
+          aliasChildren[child.lastPathComponent, default: []].append(child)
+        }
+      }
       for root in children {
         guard
           let values = try? root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
@@ -119,7 +139,10 @@ public struct WeChatAccountDiscovery: Sendable {
             root: root.standardizedFileURL,
             databaseRoot: databaseRoot.standardizedFileURL,
             attachmentRoot: attachmentRoot,
-            containerBundleIdentifier: containerBundleIdentifier
+            containerBundleIdentifier: containerBundleIdentifier,
+            aliasAccountIDs: (aliasChildren[root.lastPathComponent] ?? [])
+              .map { privacy.reference(for: $0).opaqueID }
+              .filter { $0 != rootReference.opaqueID }
           ))
       }
     }
@@ -131,9 +154,10 @@ public struct WeChatAccountDiscovery: Sendable {
   }
 
   /// `xwechat_files` roots with the bundle ID of the app container that owns
-  /// each one (nil for a group container). App containers come from
-  /// `WeChatAppContainerScanner`, which covers duplicated app copies.
-  private func xwechatFileRoots(fileManager: FileManager) -> [(URL, String?)] {
+  /// each one (nil for a group container) and the other paths that reach the
+  /// same directory. App containers come from `WeChatAppContainerScanner`,
+  /// which covers duplicated app copies.
+  private func xwechatFileRoots(fileManager: FileManager) -> [(URL, String?, [URL])] {
     var candidates: [(URL, String?)] = WeChatAppContainerScanner(homeDirectory: homeDirectory)
       .containers(fileManager: fileManager)
       .map { ($0.xwechatFilesRoot, $0.bundleIdentifier) }
@@ -156,16 +180,23 @@ public struct WeChatAccountDiscovery: Sendable {
 
     // App containers come first, so when a group container's xwechat_files
     // leads to the same directory (for example through a symbolic link), the
-    // app candidate and its owner metadata are kept.
+    // app candidate and its owner metadata are kept and the group path is
+    // recorded as an alias.
     var seenPaths = Set<String>()
-    var seenTargets = Set<WeChatAppContainerScanner.FileIdentity>()
-    return candidates.filter { candidate in
-      guard seenPaths.insert(candidate.0.standardizedFileURL.path).inserted else { return false }
-      guard let identity = WeChatAppContainerScanner.targetIdentity(candidate.0) else {
-        return true
+    var indexByTarget: [WeChatAppContainerScanner.FileIdentity: Int] = [:]
+    var roots: [(URL, String?, [URL])] = []
+    for (url, owner) in candidates {
+      guard seenPaths.insert(url.standardizedFileURL.path).inserted else { continue }
+      if let identity = WeChatAppContainerScanner.targetIdentity(url) {
+        if let index = indexByTarget[identity] {
+          roots[index].2.append(url)
+          continue
+        }
+        indexByTarget[identity] = roots.count
       }
-      return seenTargets.insert(identity).inserted
+      roots.append((url, owner, []))
     }
+    return roots
   }
 
   private func safeDirectory(_ url: URL) -> Bool {

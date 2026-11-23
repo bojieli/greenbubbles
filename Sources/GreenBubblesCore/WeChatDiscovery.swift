@@ -74,9 +74,15 @@ public struct WeChatDiscovery: Sendable {
       let container = containers.appending(path: name)
       // Report the on-disk spelling when a scanned container is this one.
       var bundleIdentifier = name
-      if let identity = WeChatAppContainerScanner.targetIdentity(
-        container.appending(path: "Data/Documents/xwechat_files"))
-      {
+      // Only a standard path made of real directories covers a scanned root:
+      // inventory does not follow symbolic links, so a linked standard path
+      // would leave the real directory unvisited.
+      let files = container.appending(path: "Data/Documents/xwechat_files")
+      let reachable = [
+        container, container.appending(path: "Data"),
+        container.appending(path: "Data/Documents"), files,
+      ].allSatisfy(WeChatAppContainerScanner.isRealDirectory)
+      if reachable, let identity = WeChatAppContainerScanner.targetIdentity(files) {
         coveredByStandard.insert(identity)
         if let match = scanned.first(where: {
           WeChatAppContainerScanner.targetIdentity($0.xwechatFilesRoot) == identity
