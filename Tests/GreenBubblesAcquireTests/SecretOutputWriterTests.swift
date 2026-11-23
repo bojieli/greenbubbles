@@ -113,6 +113,17 @@ struct SecretOutputWriterTests {
     #expect(!outcome.parentIsPrivate)
   }
 
+  @Test func refusesDotComponentsBeforeTouchingTheDisk() throws {
+    let base = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let secret = try PassphraseSecret(bytes: bytesFromHex(passphraseHex))
+    let dotted = URL(fileURLWithPath: base.path + "/new/../passphrase.txt")
+    #expect(throws: SecretOutputError.dotComponents) {
+      try SecretOutputWriter().write(secret, to: dotted)
+    }
+    #expect(try FileManager.default.contentsOfDirectory(atPath: base.path).isEmpty)
+  }
+
   @Test func refusesARelativePath() throws {
     let secret = try PassphraseSecret(bytes: bytesFromHex(passphraseHex))
     #expect(throws: SecretOutputError.relativePath) {

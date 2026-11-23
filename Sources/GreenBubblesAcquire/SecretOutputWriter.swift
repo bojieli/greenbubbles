@@ -8,6 +8,7 @@ public enum SecretOutputError: Error, Equatable, CustomStringConvertible {
   case unsafeOutputFile
   case notOwnedByUser
   case relativePath
+  case dotComponents
   case symbolicLinkParent
   case posix(operation: String, code: Int32)
 
@@ -21,6 +22,10 @@ public enum SecretOutputError: Error, Equatable, CustomStringConvertible {
       return "The existing passphrase output file belongs to another user; it was not changed"
     case .relativePath:
       return "The passphrase output path must be absolute"
+    case .dotComponents:
+      return
+        "The passphrase output path must not contain '.' or '..' components; "
+        + "give the plain path (a profile's credentialFile or --output)"
     case .symbolicLinkParent:
       return
         "The folder that would hold the passphrase output is a symbolic link; "
@@ -51,6 +56,18 @@ public struct SecretOutputWriter: Sendable {
 
   public init() {}
 
+  /// The write-path policy, checked by `write` and, before any capture
+  /// starts, by the CLI: an absolute path with no `.` or `..` components, so
+  /// the path means the same to the kernel and to anyone reading it.
+  public static func checkDestination(_ url: URL) throws {
+    let path = url.path
+    guard path.hasPrefix("/") else { throw SecretOutputError.relativePath }
+    let components = path.split(separator: "/", omittingEmptySubsequences: true)
+    guard !components.isEmpty, !components.contains(where: { $0 == "." || $0 == ".." }) else {
+      throw SecretOutputError.dotComponents
+    }
+  }
+
   @discardableResult
   public func write(
     _ secret: PassphraseSecret,
@@ -58,6 +75,7 @@ public struct SecretOutputWriter: Sendable {
     overwrite: Bool = false,
     as user: InvokingUser? = nil
   ) throws -> Outcome {
+    try Self.checkDestination(url)
     let user = try user ?? InvokingUser.current()
     return try user.perform {
       try writeAsUser(secret, to: url.path, overwrite: overwrite, ownerUID: user.uid)

@@ -102,13 +102,14 @@ greenbubbles-acquire verify --passphrase-stdin [--profile <name>] [--db-root <pa
   The profile must use `liveWeChatKeyFile` access; a snapshot or decrypted
   profile is an error unless you give both `--db-root` and `--output`.
   `--output` overrides the key file. `--db-root` overrides the data folder;
-  when the key file comes from a profile or `config.toml`, `capture` refuses a
+  when a profile or `config.toml` sets the data folder, `capture` refuses a
   different `--db-root` unless you also pass `--output`, so one account's key
-  never replaces another's. Both files are read with the same rules as the
+  never replaces the key file another account's queries read (including the
+  default file when `config.toml` sets only `source.root`). Both files are read with the same rules as the
   `greenbubbles` CLI (owner-only file in an owner-only folder, no symbolic
   links, at most 64 KiB, `formatVersion` 1, no unknown fields).
   `GREENBUBBLES_QUERY_PROFILES_FILE` and `GREENBUBBLES_CONFIG_FILE` must be
-  absolute paths. `sudo` removes them from the environment by default; keep
+  absolute paths (the second is checked only when `config.toml` is used). `sudo` removes them from the environment by default; keep
   them with `sudo --preserve-env=GREENBUBBLES_QUERY_PROFILES_FILE,GREENBUBBLES_CONFIG_FILE`
   or the tool reads the files in your home folder.
 - **`--db-root`** points at a specific WeChat data folder. The tool selects a root

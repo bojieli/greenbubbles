@@ -91,16 +91,74 @@ struct QueryProfileTargetTests {
     #expect(throws: QueryProfileError.self) { try home.resolve(nil) }
   }
 
-  @Test func credentialFileWithDotDotIsRefused() throws {
+  @Test func dottedCredentialFileIsReadButNotWritten() throws {
+    // The reader accepts what Rust accepts (so preflight and verify work);
+    // the write-path policy applies to the selected output instead.
     let home = try TemporaryHome()
     try home.writeProfiles(profiles)
-    #expect(throws: QueryProfileError.self) { try home.resolve("dotted") }
+    let target = try home.resolve("dotted")
+    #expect(target.credentialFile?.path == "/Users/x/../../etc/key")
+    #expect(throws: SecretOutputError.dotComponents) {
+      try SecretOutputWriter.checkDestination(target.credentialFile!)
+    }
     for path in ["/a/./key", "/a/b/../key", "/..", "/"] {
-      #expect(throws: QueryProfileError.self) {
-        try QueryProfileTarget.requireSafeCredentialPath(path, field: "test")
+      #expect(throws: SecretOutputError.self) {
+        try SecretOutputWriter.checkDestination(URL(fileURLWithPath: path))
       }
     }
-    try QueryProfileTarget.requireSafeCredentialPath("/Users/x/.greenbubbles/key", field: "test")
+    try SecretOutputWriter.checkDestination(URL(fileURLWithPath: "/Users/x/.greenbubbles/key"))
+  }
+
+  @Test func explicitRootMustMatchTheConfiguredRootWhoseKeyCaptureWrites() {
+    let root = URL(fileURLWithPath: "/example/settings/db_storage")
+    let other = URL(fileURLWithPath: "/example/other/db_storage")
+    // config.toml with only source.root: queries read the default key file.
+    let settingsRootOnly = AcquireTarget(
+      sourceRoot: root, sourceRootOrigin: "from config.toml source.root")
+    #expect(
+      settingsRootOnly.originConflicting(withDatabaseRoot: other)
+        == "from config.toml source.root")
+    #expect(settingsRootOnly.originConflicting(withDatabaseRoot: root) == nil)
+    #expect(
+      settingsRootOnly.originConflicting(
+        withDatabaseRoot: URL(fileURLWithPath: "/example/settings/./db_storage")) == nil)
+    #expect(settingsRootOnly.originConflicting(withDatabaseRoot: nil) == nil)
+    let profile = AcquireTarget(
+      profileName: "main", sourceRoot: root,
+      credentialFile: URL(fileURLWithPath: "/example/keys/main"),
+      sourceRootOrigin: "from query profile main")
+    #expect(profile.originConflicting(withDatabaseRoot: other) == "from query profile main")
+    // Nothing configured: --db-root is how a root is chosen at all.
+    #expect(AcquireTarget.none.originConflicting(withDatabaseRoot: other) == nil)
+  }
+
+  @Test func settingsRootOnlyIsAConfiguredRoot() throws {
+    let home = try TemporaryHome()
+    try home.writeSettings("[source]\nroot = \"/example/settings/db_storage\"\n")
+    let target = try home.resolve(nil)
+    #expect(target.credentialFile == nil)
+    #expect(
+      target.originConflicting(withDatabaseRoot: URL(fileURLWithPath: "/example/other")) != nil)
+  }
+
+  @Test func duplicateFieldsAreRefusedLikeRust() throws {
+    let duplicates = [
+      #"{"schema": "greenbubbles.query-profiles.v1", "formatVersion": 1, "profiles": {"a": {"sourceRoot": "/s", "access": {"mode": "liveWeChatKeyFile", "credentialFile": "/home/me/key", "credentialFile": "/etc/key"}}}}"#,
+      #"{"schema": "greenbubbles.query-profiles.v1", "formatVersion": 1, "profiles": {"a": {"sourceRoot": "/s", "access": {"mode": "liveWeChatKeyFile", "credentialFile": "/home/me/key", "\u0063redentialFile": "/etc/key"}}}}"#,
+      #"{"schema": "greenbubbles.query-profiles.v1", "formatVersion": 1, "formatVersion": 1, "profiles": {"a": {"sourceRoot": "/s", "access": {"mode": "decrypted"}}}}"#,
+      #"{"schema": "greenbubbles.query-profiles.v1", "formatVersion": 1, "profiles": {"a": {"sourceRoot": "/s", "sourceRoot": "/t", "access": {"mode": "decrypted"}}}}"#,
+      #"{"schema": "greenbubbles.query-profiles.v1", "formatVersion": 1, "profiles": {"a": {"sourceRoot": "/s", "access": {"mode": "decrypted"}}, "a": {"sourceRoot": "/t", "access": {"mode": "decrypted"}}}}"#,
+    ]
+    for json in duplicates {
+      #expect(throws: QueryProfileError.self) {
+        try QueryProfileTarget.ProfileStore.parse(Data(json.utf8))
+      }
+    }
+    let distinct =
+      #"{"a": {"k": 1}, "b": {"k": [1, "x\"y", {"k": null}]}, "\uD83D\uDE00": true, "😀x": 2}"#
+    #expect(JSONDuplicateKeyCheck.firstDuplicateKey(in: Data(distinct.utf8)) == nil)
+    let surrogateDuplicate = #"{"\uD83D\uDE00": 1, "😀": 2}"#
+    #expect(JSONDuplicateKeyCheck.firstDuplicateKey(in: Data(surrogateDuplicate.utf8)) != nil)
   }
 
   @Test func untouchedPlaceholderTemplateCountsAsNoProfile() throws {
@@ -220,7 +278,7 @@ struct QueryProfileTargetTests {
     let home = URL(fileURLWithPath: "/example/home")
     let defaults = try QueryProfileTarget.locations(environment: [:], home: home)
     #expect(defaults.profilesFile.path == "/example/home/.greenbubbles/query-profiles.json")
-    #expect(defaults.settingsFile.path == "/example/home/.greenbubbles/config.toml")
+    #expect(try defaults.settingsFile().path == "/example/home/.greenbubbles/config.toml")
     let custom = try QueryProfileTarget.locations(
       environment: ["GREENBUBBLES_QUERY_PROFILES_FILE": "/elsewhere/p.json"], home: home)
     #expect(custom.profilesFile.path == "/elsewhere/p.json")
@@ -229,11 +287,82 @@ struct QueryProfileTargetTests {
         try QueryProfileTarget.locations(
           environment: ["GREENBUBBLES_QUERY_PROFILES_FILE": value], home: home)
       }
+      // Checked only when config.toml is consulted, as in Rust.
+      let settingsOverride = try QueryProfileTarget.locations(
+        environment: ["GREENBUBBLES_CONFIG_FILE": value], home: home)
+      #expect(throws: QueryProfileError.self) { try settingsOverride.settingsFile() }
+    }
+  }
+
+  @Test func badSettingsOverrideDoesNotBreakASelectedProfile() throws {
+    let home = try TemporaryHome()
+    try home.writeProfiles(profiles)
+    for value in ["", "relative.toml", "/"] {
+      let locations = try QueryProfileTarget.locations(
+        environment: ["GREENBUBBLES_CONFIG_FILE": value], home: home.directory)
+      let target = try QueryProfileTarget.resolve(
+        requestedProfile: nil, locations: locations, ownerUID: getuid())
+      #expect(target.profileName == "main")
+      // Without a profile file, the override is consulted and must be valid.
+      let noProfiles = try QueryProfileTarget.locations(
+        environment: [
+          "GREENBUBBLES_CONFIG_FILE": value,
+          "GREENBUBBLES_QUERY_PROFILES_FILE": home.directory.appending(path: "none.json").path,
+        ], home: home.directory)
       #expect(throws: QueryProfileError.self) {
-        try QueryProfileTarget.locations(
-          environment: ["GREENBUBBLES_CONFIG_FILE": value], home: home)
+        try QueryProfileTarget.resolve(
+          requestedProfile: nil, locations: noProfiles, ownerUID: getuid())
       }
     }
+  }
+
+  @Test func missingSettingsFileIsAbsentEvenInAnOpenFolder() throws {
+    let home = try TemporaryHome()
+    let open = home.directory.appending(path: "open", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: open, withIntermediateDirectories: false)
+    chmod(open.path, 0o755)
+    let locations = try QueryProfileTarget.locations(
+      environment: ["GREENBUBBLES_CONFIG_FILE": open.appending(path: "config.toml").path],
+      home: home.directory)
+    #expect(
+      try QueryProfileTarget.resolve(
+        requestedProfile: nil, locations: locations, ownerUID: getuid())
+        == .none)
+  }
+
+  @Test func unreadableSettingsFileIsAnErrorNotAbsent() throws {
+    guard geteuid() != 0 else { return }
+    let home = try TemporaryHome()
+    let locked = home.directory.appending(path: "locked", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: false)
+    let settings = locked.appending(path: "config.toml")
+    try Data("[source]\nroot = \"/r\"\n".utf8).write(to: settings)
+    chmod(settings.path, 0o600)
+    chmod(locked.path, 0o000)
+    defer { chmod(locked.path, 0o700) }
+    let locations = try QueryProfileTarget.locations(
+      environment: ["GREENBUBBLES_CONFIG_FILE": settings.path], home: home.directory)
+    #expect(throws: QueryProfileError.self) {
+      try QueryProfileTarget.resolve(
+        requestedProfile: nil, locations: locations, ownerUID: getuid())
+    }
+  }
+
+  @Test func crlfSettingsAreReadLikeRust() throws {
+    let home = try TemporaryHome()
+    try home.writeSettings(
+      "# leading comment\r\n[source]\r\nroot = \"/example/crlf/db_storage\"\r\n"
+        + "passphrase_file = \"/example/keys/crlf-key\" # note\r\n")
+    let target = try home.resolve(nil)
+    #expect(target.sourceRoot?.path == "/example/crlf/db_storage")
+    #expect(target.credentialFile?.path == "/example/keys/crlf-key")
+
+    try home.writeSettings("[source]\r\npassphrase_file = \"/example/keys/k\"\r\n")
+    #expect(try home.resolve(nil).credentialFile?.path == "/example/keys/k")
+
+    // A lone carriage return is not a TOML line ending.
+    try home.writeSettings("# comment\r[source]\nroot = \"/example/x\"\n")
+    #expect(throws: QueryProfileError.self) { try home.resolve(nil) }
   }
 
   // MARK: config.toml
@@ -293,7 +422,6 @@ struct QueryProfileTargetTests {
     "[source]\nroot = \"/r\"\nroot = \"/s\"\n",
     "source.root = \"/r\"\n",
     "[source]\nroot = \"\"\"/r\"\"\"\n",
-    "[source]\npassphrase_file = \"/a/../key\"\n",
     "[source]\nroot = 5\n",
   ])
   func refusesSettingsRustRefusesOrThisReaderCannotRead(text: String) throws {
@@ -305,7 +433,7 @@ struct QueryProfileTargetTests {
   @Test func unsafeSettingsFileIsRefused() throws {
     let home = try TemporaryHome()
     try home.writeSettings("[source]\nroot = \"/r\"\n")
-    chmod(home.locations.settingsFile.path, 0o644)
+    chmod(try home.locations.settingsFile().path, 0o644)
     #expect(throws: QueryProfileError.self) { try home.resolve(nil) }
   }
 }
@@ -332,7 +460,7 @@ private final class TemporaryHome {
   }
 
   func writeProfiles(_ text: String) throws { try write(text, to: locations.profilesFile) }
-  func writeSettings(_ text: String) throws { try write(text, to: locations.settingsFile) }
+  func writeSettings(_ text: String) throws { try write(text, to: locations.settingsFile()) }
 
   func resolve(_ name: String?, ownerUID: uid_t = getuid()) throws -> AcquireTarget {
     try QueryProfileTarget.resolve(requestedProfile: name, locations: locations, ownerUID: ownerUID)

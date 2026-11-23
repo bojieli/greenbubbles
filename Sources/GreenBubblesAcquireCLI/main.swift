@@ -263,12 +263,10 @@ private func resolveTarget(_ arguments: Arguments, needsOutput: Bool) throws -> 
     )
   }
   if let name = target.profileName { printNote("using query profile \(name)") }
-  // Don't write one account's key into the file another account's queries read.
-  if needsOutput, arguments.output == nil, target.credentialFile != nil,
-    let dbRoot = arguments.dbRoot, let targetRoot = target.sourceRoot,
-    dbRoot.standardizedFileURL.path != targetRoot.standardizedFileURL.path
+  if needsOutput, arguments.output == nil,
+    let origin = target.originConflicting(withDatabaseRoot: arguments.dbRoot)
   {
-    throw CLIError.rootConflictsWithTarget(target.sourceRootOrigin ?? "configured")
+    throw CLIError.rootConflictsWithTarget(origin)
   }
   return target
 }
@@ -472,6 +470,7 @@ do {
       ?? invokingUserHomeDirectory()
       .appending(path: ".greenbubbles-acquire", directoryHint: .isDirectory)
       .appending(path: "passphrase.txt")
+    try SecretOutputWriter.checkDestination(output)
     let preflight = runPreflight(
       dbRootOption: dbRoot,
       rootOrigin: rootOrigin(arguments, target),

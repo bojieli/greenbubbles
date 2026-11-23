@@ -9,7 +9,6 @@ public enum QueryProfileError: Error, Equatable, CustomStringConvertible {
   case unknownProfile(String)
   case noDefaultProfile
   case notLiveProfile(name: String, mode: String)
-  case unsafeCredentialPath(String)
   case invalidEnvironment(String)
 
   public var description: String {
@@ -30,10 +29,6 @@ public enum QueryProfileError: Error, Equatable, CustomStringConvertible {
       return
         "Query profile \(name) uses \(mode) access, not liveWeChatKeyFile; pass --profile "
         + "with a live profile, or give both --db-root and --output"
-    case .unsafeCredentialPath(let field):
-      return
-        "\(field) must be an absolute path without '.' or '..' components; "
-        + "greenbubbles-acquire will not write a key through it"
     case .invalidEnvironment(let variable):
       return "\(variable) must be an absolute, non-root path"
     }
@@ -66,6 +61,20 @@ public struct AcquireTarget: Equatable, Sendable {
   }
 
   public static let none = AcquireTarget()
+
+  /// When capture would write to the key file queries read for this target
+  /// (its configured file, or the default file when only a root is
+  /// configured), an explicit database root for a different account would
+  /// put the wrong key there. Returns how this target's root was chosen when
+  /// `databaseRoot` differs from it, else nil. The caller then requires an
+  /// explicit `--output`.
+  public func originConflicting(withDatabaseRoot databaseRoot: URL?) -> String? {
+    guard let databaseRoot, let sourceRoot else { return nil }
+    guard databaseRoot.standardizedFileURL.path != sourceRoot.standardizedFileURL.path else {
+      return nil
+    }
+    return sourceRootOrigin ?? "configured"
+  }
 }
 
 /// Mirrors the Rust CLI (`Native/GreenBubbles/src/query_profile.rs` and
@@ -97,25 +106,41 @@ public enum QueryProfileTarget {
 
   public struct Locations: Equatable, Sendable {
     public let profilesFile: URL
-    public let settingsFile: URL
+    let settingsOverride: String?
+    let home: URL
+
+    /// `config.toml`. Like the Rust CLI, `GREENBUBBLES_CONFIG_FILE` is
+    /// checked only when the settings file is actually consulted, so a bad
+    /// value never breaks a selected profile.
+    public func settingsFile() throws -> URL {
+      try QueryProfileTarget.location(
+        override: settingsOverride, variable: settingsEnvironmentVariable,
+        home: home, fileName: "config.toml")
+    }
   }
 
   /// Applies the Rust location rules: the environment variables win and must
   /// be absolute non-root paths; otherwise `~/.greenbubbles/...`.
   public static func locations(environment: [String: String], home: URL) throws -> Locations {
-    func location(_ variable: String, _ fileName: String) throws -> URL {
-      if let value = environment[variable] {
-        guard isAbsoluteNonRoot(value) else {
-          throw QueryProfileError.invalidEnvironment(variable)
-        }
-        return URL(fileURLWithPath: value)
-      }
-      return home.appending(path: ".greenbubbles").appending(path: fileName)
-    }
-    return Locations(
-      profilesFile: try location(profilesEnvironmentVariable, "query-profiles.json"),
-      settingsFile: try location(settingsEnvironmentVariable, "config.toml")
+    Locations(
+      profilesFile: try location(
+        override: environment[profilesEnvironmentVariable], variable: profilesEnvironmentVariable,
+        home: home, fileName: "query-profiles.json"),
+      settingsOverride: environment[settingsEnvironmentVariable],
+      home: home
     )
+  }
+
+  static func location(override: String?, variable: String, home: URL, fileName: String) throws
+    -> URL
+  {
+    if let value = override {
+      guard isAbsoluteNonRoot(value) else {
+        throw QueryProfileError.invalidEnvironment(variable)
+      }
+      return URL(fileURLWithPath: value)
+    }
+    return home.appending(path: ".greenbubbles").appending(path: fileName)
   }
 
   /// Resolves the target. Run inside `InvokingUser.perform(_:)` with
@@ -146,13 +171,22 @@ public enum QueryProfileTarget {
 
   private static func implicitTarget(locations: Locations, ownerUID: uid_t) throws -> AcquireTarget
   {
-    let settings: Settings
-    switch try PrivateConfigurationFile.read(
-      locations.settingsFile, ownerUID: ownerUID, description: "settings file (config.toml)")
-    {
-    case .absent: return .none
-    case .contents(let data): settings = try Settings.parse(data)
+    // Rust's load_query_settings: only a missing file means "no settings";
+    // any other failure to inspect it is an error, checked before the
+    // folder rules so a missing file in any folder is simply absent.
+    let settingsFile = try locations.settingsFile()
+    var info = stat()
+    if lstat(settingsFile.path, &info) != 0 {
+      if errno == ENOENT { return .none }
+      throw QueryProfileError.unsafeFile("the settings file (config.toml) is unavailable")
     }
+    guard
+      case .contents(let data) = try PrivateConfigurationFile.read(
+        settingsFile, ownerUID: ownerUID, description: "settings file (config.toml)")
+    else {
+      throw QueryProfileError.unsafeFile("the settings file (config.toml) is unavailable")
+    }
+    let settings = try Settings.parse(data)
     if let profileName = settings.defaultProfile {
       guard settings.sourceRoot == nil, settings.passphraseFile == nil else {
         throw QueryProfileError.invalidSettings(
@@ -169,9 +203,6 @@ public enum QueryProfileTarget {
       let (name, profile) = try store.select(profileName)
       return try target(for: profile, named: name)
     }
-    if let passphraseFile = settings.passphraseFile {
-      try requireSafeCredentialPath(passphraseFile, field: "source.passphrase_file")
-    }
     return AcquireTarget(
       sourceRoot: settings.sourceRoot.map { URL(fileURLWithPath: $0) },
       credentialFile: settings.passphraseFile.map { URL(fileURLWithPath: $0) },
@@ -185,23 +216,12 @@ public enum QueryProfileTarget {
     guard profile.mode == liveMode, let credential = profile.credentialFile else {
       throw QueryProfileError.notLiveProfile(name: name, mode: profile.mode)
     }
-    try requireSafeCredentialPath(credential, field: "credentialFile of query profile \(name)")
     return AcquireTarget(
       profileName: name,
       sourceRoot: URL(fileURLWithPath: profile.sourceRoot),
       credentialFile: URL(fileURLWithPath: credential),
       sourceRootOrigin: "from query profile \(name)"
     )
-  }
-
-  // Stricter than the Rust reader: the key is written here, so the path must
-  // mean the same thing to the kernel and to a reader of the file.
-  static func requireSafeCredentialPath(_ path: String, field: String) throws {
-    let components = path.split(separator: "/", omittingEmptySubsequences: true)
-    guard isAbsoluteNonRoot(path), !components.contains(where: { $0 == "." || $0 == ".." })
-    else {
-      throw QueryProfileError.unsafeCredentialPath(field)
-    }
   }
 
   static func isAbsoluteNonRoot(_ path: String) -> Bool {
@@ -245,6 +265,9 @@ public enum QueryProfileTarget {
         object = try JSONSerialization.jsonObject(with: data, options: [])
       } catch {
         throw QueryProfileError.malformed("the file is not JSON")
+      }
+      if let key = JSONDuplicateKeyCheck.firstDuplicateKey(in: data) {
+        throw QueryProfileError.malformed("the field \(key) appears twice in one object")
       }
       let top = try table(object, "the file")
       try onlyKeys(top, ["schema", "formatVersion", "defaultProfile", "profiles"], "the file")
@@ -352,8 +375,15 @@ public enum QueryProfileTarget {
     var defaultProfile: String?
 
     static func parse(_ data: Data) throws -> Settings {
-      guard let text = String(data: data, encoding: .utf8) else {
+      guard let decoded = String(data: data, encoding: .utf8) else {
         throw QueryProfileError.invalidSettings("the file is not UTF-8")
+      }
+      // TOML (and Rust's toml crate) accepts LF and CRLF line endings, and
+      // nothing else. Swift treats "\r\n" as one Character, so normalise
+      // on scalars before splitting into lines.
+      let text = decoded.replacingOccurrences(of: "\r\n", with: "\n")
+      guard !text.unicodeScalars.contains("\r") else {
+        throw QueryProfileError.invalidSettings("a carriage return is not a TOML line ending")
       }
       let allowed: [String: Set<String>] = [
         "source": ["root", "passphrase_file"],
@@ -362,9 +392,7 @@ public enum QueryProfileTarget {
       ]
       var values: [String: [String: String]] = [:]
       var current: String?
-      for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
-        var line = Substring(rawLine)
-        if line.hasSuffix("\r") { line = line.dropLast() }
+      for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
         if trimmed.hasPrefix("[") {
