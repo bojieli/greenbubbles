@@ -37,12 +37,17 @@ struct WeChatAppContainerScanner: Sendable {
 
   /// The standard container first, then other app copies sorted by bundle ID.
   ///
-  /// Names come from the directory listing, so the on-disk spelling is used;
-  /// the standard name is probed directly only when the listing has no entry
-  /// that matches it case-insensitively (for example when listing fails).
-  /// Every candidate gets the same no-symlink check, and candidates that
-  /// resolve to the same `xwechat_files` directory (device and inode) are
-  /// reported once, which also covers case-insensitive volumes.
+  /// Names come from the directory listing, so `bundleIdentifier` is the
+  /// on-disk spelling; the standard name is probed directly only when the
+  /// listing has no entry that matches it case-insensitively (for example
+  /// when listing fails). Every candidate gets the same no-symlink check, and
+  /// candidates that resolve to the same `xwechat_files` directory (device and
+  /// inode) are reported once, which also covers case-insensitive volumes.
+  ///
+  /// When a differently cased standard entry is the same directory as the
+  /// hard-coded standard path, the hard-coded path is kept for the URLs, as
+  /// earlier versions used, so path-derived account IDs do not change; only
+  /// `bundleIdentifier` takes the on-disk spelling.
   func containers(fileManager: FileManager = .default) -> [Container] {
     let names = ((try? fileManager.contentsOfDirectory(atPath: containersRoot.path)) ?? [])
       .filter { !$0.hasPrefix(".") }
@@ -53,6 +58,8 @@ struct WeChatAppContainerScanner: Sendable {
     let ordered =
       (standardNames.isEmpty ? [Self.standardBundleIdentifier] : standardNames)
       + names.filter { !isStandard($0) }.sorted()
+    let canonicalStandard = safeContainer(named: Self.standardBundleIdentifier)
+    let canonicalIdentity = canonicalStandard.flatMap { Self.fileIdentity($0.xwechatFilesRoot) }
 
     var seen = Set<FileIdentity>()
     return ordered.compactMap { name in
@@ -60,6 +67,13 @@ struct WeChatAppContainerScanner: Sendable {
         let identity = Self.fileIdentity(container.xwechatFilesRoot),
         seen.insert(identity).inserted
       else { return nil }
+      if let canonicalStandard, identity == canonicalIdentity {
+        return Container(
+          bundleIdentifier: container.bundleIdentifier,
+          containerRoot: canonicalStandard.containerRoot,
+          xwechatFilesRoot: canonicalStandard.xwechatFilesRoot
+        )
+      }
       return container
     }
   }
@@ -69,9 +83,17 @@ struct WeChatAppContainerScanner: Sendable {
     let inode: ino_t
   }
 
+  /// Identity of the entry itself (`lstat`); a symbolic link is its own entry.
   static func fileIdentity(_ url: URL) -> FileIdentity? {
     var metadata = stat()
     guard Darwin.lstat(url.path, &metadata) == 0 else { return nil }
+    return FileIdentity(device: metadata.st_dev, inode: metadata.st_ino)
+  }
+
+  /// Identity of the directory a path resolves to (`stat`, following links).
+  static func targetIdentity(_ url: URL) -> FileIdentity? {
+    var metadata = stat()
+    guard fstatat(AT_FDCWD, url.path, &metadata, 0) == 0 else { return nil }
     return FileIdentity(device: metadata.st_dev, inode: metadata.st_ino)
   }
 

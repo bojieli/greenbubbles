@@ -78,4 +78,24 @@ struct DiscoveryTests {
     let accessible = discovery.accessibleDataRoots().map(\.url.lastPathComponent)
     #expect(accessible == ["xwechat_files"])
   }
+
+  @Test func differentlyCasedStandardContainerIsStillReported() throws {
+    let home = FileManager.default.temporaryDirectory
+      .appending(path: "greenbubbles-discovery-\(UUID().uuidString)", directoryHint: .isDirectory)
+    defer { try? FileManager.default.removeItem(at: home) }
+    let containers = home.appending(path: "Library/Containers", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(
+      at: containers.appending(path: "com.tencent.xinwechat/Data/Documents/xwechat_files"),
+      withIntermediateDirectories: true
+    )
+
+    let discovery = WeChatDiscovery(homeDirectory: home, includePaths: true)
+    let roots = discovery.discover().dataRoots
+    // Case-insensitive volume: the standard container path is this directory
+    // and is reported once. Case-sensitive volume: the hard-coded spelling
+    // does not exist, so the scanned xwechat_files root is reported.
+    #expect(roots.count == 1)
+    #expect(roots.first?.containerBundleIdentifier == "com.tencent.xinwechat")
+    #expect(discovery.accessibleDataRoots().count == 1)
+  }
 }

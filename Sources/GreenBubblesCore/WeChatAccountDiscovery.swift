@@ -154,8 +154,18 @@ public struct WeChatAccountDiscovery: Sendable {
       candidates.append((root, nil))
     }
 
-    var seen = Set<String>()
-    return candidates.filter { seen.insert($0.0.standardizedFileURL.path).inserted }
+    // App containers come first, so when a group container's xwechat_files
+    // leads to the same directory (for example through a symbolic link), the
+    // app candidate and its owner metadata are kept.
+    var seenPaths = Set<String>()
+    var seenTargets = Set<WeChatAppContainerScanner.FileIdentity>()
+    return candidates.filter { candidate in
+      guard seenPaths.insert(candidate.0.standardizedFileURL.path).inserted else { return false }
+      guard let identity = WeChatAppContainerScanner.targetIdentity(candidate.0) else {
+        return true
+      }
+      return seenTargets.insert(identity).inserted
+    }
   }
 
   private func safeDirectory(_ url: URL) -> Bool {

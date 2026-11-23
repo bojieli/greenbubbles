@@ -177,7 +177,47 @@ struct WeChatAccountDiscoveryTests {
     // On a case-insensitive volume the hard-coded standard spelling also
     // resolves to this directory; it must not add a second account.
     let discovery = WeChatAccountDiscovery(homeDirectory: home)
-    #expect(discovery.discover().map(\.containerBundleIdentifier) == ["com.tencent.xinwechat"])
+    let accounts = discovery.discover()
+    #expect(accounts.map(\.containerBundleIdentifier) == ["com.tencent.xinwechat"])
     #expect(try discovery.singleDatabaseRoot().lastPathComponent == "db_storage")
+
+    // The account ID is a hash of the account path. Earlier versions listed
+    // the hard-coded standard xwechat_files path; derive the ID the same way
+    // where that path resolves (case-insensitive volume), so a saved
+    // --account-id keeps matching after the upgrade.
+    let canonicalFiles = home.appending(
+      path: "Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files")
+    let onDisk = home.appending(
+      path: "Library/Containers/com.tencent.xinwechat/Data/Documents/xwechat_files/a")
+    let earlierRoot =
+      FileManager.default.fileExists(atPath: canonicalFiles.path)
+      ? try #require(
+        try FileManager.default.contentsOfDirectory(
+          at: canonicalFiles, includingPropertiesForKeys: [.isDirectoryKey],
+          options: [.skipsHiddenFiles]
+        ).first)
+      : onDisk
+    #expect(accounts.first?.accountID == PathPrivacy().reference(for: earlierRoot).opaqueID)
+  }
+
+  @Test func groupContainerLinkedToAnAppContainerIsOneAccount() throws {
+    let fileManager = FileManager.default
+    let home = fileManager.temporaryDirectory.appending(
+      path: "greenbubbles-account-tests-\(UUID().uuidString)",
+      directoryHint: .isDirectory
+    )
+    defer { try? fileManager.removeItem(at: home) }
+    let appFiles = home.appending(
+      path: "Library/Containers/com.example.WeChatCopy/Data/Documents/xwechat_files")
+    try fileManager.createDirectory(
+      at: appFiles.appending(path: "account/db_storage"), withIntermediateDirectories: true)
+    let group = home.appending(path: "Library/Group Containers/ABC.com.tencent.xinWeChat")
+    try fileManager.createDirectory(at: group, withIntermediateDirectories: true)
+    try fileManager.createSymbolicLink(
+      at: group.appending(path: "xwechat_files"), withDestinationURL: appFiles)
+
+    let discovery = WeChatAccountDiscovery(homeDirectory: home)
+    #expect(discovery.discover().map(\.containerBundleIdentifier) == ["com.example.WeChatCopy"])
+    #expect(try discovery.singleDatabaseRoot().path.contains("/Library/Containers/"))
   }
 }

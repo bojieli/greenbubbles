@@ -67,17 +67,36 @@ public struct WeChatDiscovery: Sendable {
 
   private func dataRootCandidates(fileManager: FileManager) -> [DataRootCandidate] {
     let containers = homeDirectory.appending(path: "Library/Containers")
-    var candidates: [DataRootCandidate] = Self.standardContainerNames.map {
-      (containers.appending(path: $0), .applicationContainer, $0)
-    }
-    // Duplicated app copies get their own container. Only their
-    // xwechat_files directory is a data root, so automatic inventory never
-    // walks other data in that container.
-    for container in WeChatAppContainerScanner(homeDirectory: homeDirectory)
+    let scanned = WeChatAppContainerScanner(homeDirectory: homeDirectory)
       .containers(fileManager: fileManager)
-    where !Self.standardContainerNames.contains(where: {
-      $0.caseInsensitiveCompare(container.bundleIdentifier) == .orderedSame
-    }) {
+    var coveredByStandard = Set<WeChatAppContainerScanner.FileIdentity>()
+    var candidates: [DataRootCandidate] = Self.standardContainerNames.map { name in
+      let container = containers.appending(path: name)
+      // Report the on-disk spelling when a scanned container is this one.
+      var bundleIdentifier = name
+      if let identity = WeChatAppContainerScanner.targetIdentity(
+        container.appending(path: "Data/Documents/xwechat_files"))
+      {
+        coveredByStandard.insert(identity)
+        if let match = scanned.first(where: {
+          WeChatAppContainerScanner.targetIdentity($0.xwechatFilesRoot) == identity
+        }) {
+          bundleIdentifier = match.bundleIdentifier
+        }
+      }
+      return (container, .applicationContainer, bundleIdentifier)
+    }
+    // Other app containers holding WeChat data, such as duplicated app
+    // copies. Only their xwechat_files directory is a data root, so automatic
+    // inventory never walks other data in that container. A scanned container
+    // is skipped only when an existing standard container is the same
+    // directory.
+    for container in scanned {
+      if let identity = WeChatAppContainerScanner.targetIdentity(container.xwechatFilesRoot),
+        coveredByStandard.contains(identity)
+      {
+        continue
+      }
       candidates.append(
         (container.xwechatFilesRoot, .applicationContainer, container.bundleIdentifier))
     }
