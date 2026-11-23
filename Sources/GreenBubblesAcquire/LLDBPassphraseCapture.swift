@@ -256,6 +256,11 @@ public struct LLDBPassphraseCapture: Sendable {
         drained.targetExited = drained.targetExited || last.targetExited
       }
       defer { Self.zeroizeCandidates(&drained.candidates) }
+      // Time the exit as soon as it is known, before verifying any candidate
+      // from the same batch (verification can take a while).
+      if drained.targetExited, exitObservedAt == nil {
+        exitObservedAt = WeChatProcessTarget.microseconds(Date())
+      }
       let decision = try CaptureCandidateCursor.decide(
         among: &drained.candidates,
         deadline: deadline,
@@ -276,7 +281,6 @@ public struct LLDBPassphraseCapture: Sendable {
         throw CaptureError.attachFailed(detail)
       }
       if drained.targetExited {
-        exitObservedAt = WeChatProcessTarget.microseconds(Date())
         throw CaptureError.targetExited
       }
       if !running {

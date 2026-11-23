@@ -106,20 +106,19 @@ public struct WeChatProcessLocator: Sendable {
 
     let applicationPath = executablePath.flatMap(
       WeChatProcessSelector.applicationPath(forExecutablePath:))
-    let bundleIdentifier = applicationPath.flatMap { application in
-      executablePath.flatMap {
-        bundleIdentifier(
-          applicationPath: application,
-          executableName: ($0 as NSString).lastPathComponent
-        )
-      }
+    var bundleID: String?
+    if let applicationPath, let executablePath {
+      bundleID = Self.bundleIdentifier(
+        applicationPath: applicationPath,
+        executableName: (executablePath as NSString).lastPathComponent
+      )
     }
     return WeChatProcessCandidate(
       processID: processID,
       userID: userID,
       executablePath: executablePath,
       applicationPath: applicationPath,
-      bundleIdentifier: bundleIdentifier,
+      bundleIdentifier: bundleID,
       startMicroseconds: startMicroseconds
     )
   }

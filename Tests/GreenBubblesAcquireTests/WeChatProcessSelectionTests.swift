@@ -145,12 +145,9 @@ struct WeChatProcessSelectionTests {
         owner: .application(bundleIdentifier: Self.duplicate)
       )
     }
-    // A process whose bundle could not be read never matches.
+    // A process whose bundle could not be read can't be ruled out.
     let unreadable = Self.candidate(44, app: Self.duplicateApp, bundle: nil)
-    #expect(
-      throws: ProcessSelectionError.noProcessForDatabaseRoot(
-        bundleIdentifier: Self.duplicate, otherProcessCount: 1)
-    ) {
+    #expect(throws: ProcessSelectionError.unclassifiedProcesses(count: 1)) {
       try WeChatProcessSelector.select(
         candidates: [unreadable],
         userID: Self.user,
@@ -189,10 +186,29 @@ struct WeChatProcessSelectionTests {
     let unknownUser = WeChatProcessCandidate(
       processID: 41, userID: nil, executablePath: nil, applicationPath: Self.standardApp,
       bundleIdentifier: Self.standard)
-    #expect(
+    // A listed process whose user can't be read may be the user's own.
+    #expect(throws: ProcessSelectionError.unclassifiedProcesses(count: 1)) {
       try WeChatProcessSelector.select(
-        candidates: [unknownUser, Self.standardProcess], userID: Self.user, owner: owner)?
-        .processID == 42)
+        candidates: [unknownUser, Self.standardProcess], userID: Self.user, owner: owner)
+    }
+  }
+
+  @Test func unclassifiableLiveProcessBlocksAutomaticSelection() {
+    // The readable process matches, but the unreadable one might be the copy
+    // that owns the root; in either listing order, ask for --pid.
+    let unreadable = WeChatProcessCandidate(
+      processID: 44, userID: Self.user,
+      executablePath: Self.duplicateApp + "/Contents/MacOS/WeChat",
+      applicationPath: Self.duplicateApp, bundleIdentifier: nil, startMicroseconds: 1_000)
+    for candidates in [[Self.standardProcess, unreadable], [unreadable, Self.standardProcess]] {
+      #expect(throws: ProcessSelectionError.unclassifiedProcesses(count: 1)) {
+        try WeChatProcessSelector.select(
+          candidates: candidates,
+          userID: Self.user,
+          owner: .application(bundleIdentifier: Self.standard)
+        )
+      }
+    }
   }
 
   @Test func requiresAnExplicitProcessWhenTheRootOwnerIsUnknown() throws {
@@ -482,6 +498,52 @@ struct WeChatProcessSelectionTests {
     #expect(try Self.reselect([], &selected) == nil)
     let reused = Self.candidate(60, app: Self.standardApp, bundle: Self.standard, start: 6_000)
     #expect(try Self.reselect([reused], &selected, now: 7_000) == 60)
+  }
+
+  @Test func replacementWaitsForAConclusiveProcessList() throws {
+    var selected = try #require(
+      try WeChatProcessSelector.select(
+        candidates: [Self.standardProcess],
+        userID: Self.user,
+        owner: .application(bundleIdentifier: Self.standard)
+      ))
+    let replacement = Self.candidate(90, app: Self.standardApp, bundle: Self.standard, start: 6_000)
+    let unreadable = WeChatProcessCandidate(
+      processID: 91, userID: Self.user, executablePath: nil, applicationPath: nil,
+      bundleIdentifier: nil, startMicroseconds: 6_500)
+    // The selected process is seen gone at 5_000.
+    #expect(try Self.reselect([], &selected) == nil)
+    #expect(selected.exitObservedMicroseconds == Self.exitSeen)
+    // Another live process can't be classified: it might be the real
+    // replacement, so wait.
+    #expect(try Self.reselect([replacement, unreadable], &selected, now: 7_000) == nil)
+    #expect(selected.exitObservedMicroseconds == Self.exitSeen)
+    // Once the list is conclusive, the replacement is followed.
+    #expect(try Self.reselect([replacement], &selected, now: 8_000) == 90)
+  }
+
+  @Test func unverifiableSelectedPIDIsNotAnExit() throws {
+    let original = try #require(
+      try WeChatProcessSelector.select(
+        candidates: [Self.standardProcess],
+        userID: Self.user,
+        owner: .application(bundleIdentifier: Self.standard)
+      ))
+    var selected = original
+    // proc_pidinfo failed for this poll: user and start time are unknown,
+    // although the executable path was read.
+    let unverified = WeChatProcessCandidate(
+      processID: 42, userID: nil, executablePath: Self.standardApp + "/Contents/MacOS/WeChat",
+      applicationPath: Self.standardApp, bundleIdentifier: Self.standard,
+      startMicroseconds: nil)
+    #expect(try Self.reselect([unverified], &selected) == nil)
+    #expect(selected.exitObservedMicroseconds == nil)
+    #expect(try Self.reselect([Self.standardProcess], &selected, now: 9_000) == 42)
+    #expect(selected == original)
+    // Proven different (another start time): that is an exit.
+    let reused = Self.candidate(42, app: Self.standardApp, bundle: Self.standard, start: 4_000)
+    #expect(try Self.reselect([reused], &selected, now: 9_500) == nil)
+    #expect(selected.exitObservedMicroseconds == 9_500)
   }
 
   // MARK: - Helpers

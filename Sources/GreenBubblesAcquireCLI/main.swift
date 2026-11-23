@@ -342,6 +342,8 @@ private func selectProcess(
     switch error {
     case .noProcessForDatabaseRoot:
       hint = "start the WeChat copy that owns this data and log in"
+    case .unclassifiedProcesses:
+      hint = "choose the WeChat process with --pid <n>; \(listProcessesHint)"
     case .multipleProcessesForDatabaseRoot, .multipleProcessesForTarget:
       hint = "quit the extra instances, or choose one with --pid"
     case .databaseRootNotInAppContainer:

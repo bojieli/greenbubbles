@@ -172,6 +172,7 @@ public enum ProcessSelectionError: Error, Equatable, CustomStringConvertible {
   case processDoesNotOwnDatabaseRoot(
     processID: pid_t, processBundleIdentifier: String, ownerBundleIdentifier: String)
   case multipleProcessesForTarget(bundleIdentifier: String, count: Int)
+  case unclassifiedProcesses(count: Int)
 
   public var description: String {
     switch self {
@@ -197,6 +198,10 @@ public enum ProcessSelectionError: Error, Equatable, CustomStringConvertible {
     case .processDoesNotOwnDatabaseRoot(let processID, let processBundle, let ownerBundle):
       return
         "Process \(processID) runs \(processBundle), but the database root belongs to \(ownerBundle)"
+    case .unclassifiedProcesses(let count):
+      return
+        "\(count) WeChat \(count == 1 ? "process" : "processes") could not be identified "
+        + "(user, app bundle or start time unreadable); cannot choose a process automatically"
     case .multipleProcessesForTarget(let bundleIdentifier, let count):
       return
         "\(count) WeChat processes run the selected app (\(bundleIdentifier)); cannot follow one"
@@ -215,10 +220,17 @@ public enum WeChatProcessSelector {
     userID: uid_t,
     owner: DatabaseRootOwner
   ) throws -> WeChatProcessTarget? {
-    let own = candidates.filter { $0.userID == userID }
+    // A listed process whose user is unknown may still be the user's own.
+    let own = candidates.filter { $0.userID == userID || $0.userID == nil }
     guard !own.isEmpty else { return nil }
     guard case .application(let ownerBundle) = owner else {
       throw ProcessSelectionError.databaseRootNotInAppContainer(processCount: own.count)
+    }
+    // A live process that can't be classified could be the one that owns the
+    // root, so choosing among the others would be a guess.
+    let unclassified = own.filter { !isClassified($0, userID: userID) }
+    guard unclassified.isEmpty else {
+      throw ProcessSelectionError.unclassifiedProcesses(count: unclassified.count)
     }
     let matches = own.compactMap { target(for: $0, userID: userID) }
       .filter { $0.bundleIdentifier == ownerBundle }
@@ -300,20 +312,19 @@ public enum WeChatProcessSelector {
       if matches.contains(where: { $0.isSameProcess(as: selected) }) {
         return selected
       }
-      // The selected process (same PID and start time) is still listed but
-      // its app metadata could not be read this time: don't attach now, and
-      // don't take this as evidence that it exited.
-      let stillListed = candidates.contains { candidate in
-        candidate.processID == selected.processID
-          && candidate.userID == selected.userID
-          && candidate.startMicroseconds == selected.startMicroseconds
-          && (candidate.applicationPath == nil || candidate.bundleIdentifier == nil)
-      }
-      if stillListed { return nil }
-    }
-    if selected.exitObservedMicroseconds == nil {
+      // The selected PID is still listed but its identity or app could not
+      // be verified this time (unreadable user, start time or Info.plist):
+      // don't attach now, and don't take this as evidence that it exited.
+      if candidates.contains(where: { mayBeSelected($0, selected) }) { return nil }
       selected.exitObservedMicroseconds = nowMicroseconds
     }
+    // Choose a replacement only from a conclusive process list: a live
+    // process of this user that can't be classified might be the real one.
+    let unclassified = candidates.filter {
+      ($0.userID == nil || $0.userID == selected.userID)
+        && (!isClassified($0, userID: selected.userID) || $0.startMicroseconds == nil)
+    }
+    if !unclassified.isEmpty { return nil }
     let exitObserved = selected.exitObservedMicroseconds ?? nowMicroseconds
     let replacements = matches.filter { match in
       guard let start = match.startMicroseconds else { return false }
@@ -342,6 +353,32 @@ public enum WeChatProcessSelector {
       components[count - 4].count > ".app".count
     else { return nil }
     return NSString.path(withComponents: Array(components.prefix(count - 3)))
+  }
+
+  /// User, app bundle and bundle ID are all known.
+  private static func isClassified(_ candidate: WeChatProcessCandidate, userID: uid_t) -> Bool {
+    candidate.userID == userID && candidate.applicationPath != nil
+      && candidate.bundleIdentifier?.isEmpty == false
+  }
+
+  /// The candidate has the selected PID and nothing read about it proves it
+  /// is a different process (another user, start time or app).
+  private static func mayBeSelected(
+    _ candidate: WeChatProcessCandidate,
+    _ selected: WeChatProcessTarget
+  ) -> Bool {
+    guard candidate.processID == selected.processID else { return false }
+    if let user = candidate.userID, user != selected.userID { return false }
+    if let start = candidate.startMicroseconds, let selectedStart = selected.startMicroseconds,
+      start != selectedStart
+    {
+      return false
+    }
+    if let path = candidate.applicationPath, path != selected.applicationPath { return false }
+    if let bundle = candidate.bundleIdentifier, bundle != selected.bundleIdentifier {
+      return false
+    }
+    return true
   }
 
   private static func target(
