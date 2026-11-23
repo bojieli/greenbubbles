@@ -228,9 +228,22 @@ public enum QueryProfileTarget {
     )
   }
 
+  /// Rust's `validate_absolute_non_root_path` requires an absolute path with
+  /// a parent. Rust drops `.` and repeated `/` when finding the parent, so
+  /// "/", "//", and "/." have none; this also rejects any path that resolves
+  /// lexically to the root, such as "/.." or "/a/..", which would make a
+  /// database root walk the whole filesystem.
   static func isAbsoluteNonRoot(_ path: String) -> Bool {
-    path.hasPrefix("/") && !path.contains("\0")
-      && path.contains(where: { $0 != "/" })
+    guard path.hasPrefix("/"), !path.contains("\0") else { return false }
+    var depth = 0
+    for component in path.split(separator: "/", omittingEmptySubsequences: true) {
+      switch component {
+      case ".": continue
+      case "..": depth = max(depth - 1, 0)
+      default: depth += 1
+      }
+    }
+    return depth > 0
   }
 
   static func validateProfileName(_ name: String) throws {
@@ -276,8 +289,13 @@ public enum QueryProfileTarget {
       } catch {
         throw QueryProfileError.malformed("the file is not JSON")
       }
-      if let key = JSONDuplicateKeyCheck.firstDuplicateKey(in: data) {
+      switch JSONDuplicateKeyCheck.problem(in: data) {
+      case .duplicate(let key)?:
         throw QueryProfileError.malformed("the field \(key) appears twice in one object")
+      case .malformed?:
+        throw QueryProfileError.malformed(
+          "the file has a string or nesting that the greenbubbles CLI rejects")
+      case nil: break
       }
       let top = try table(object, "the file")
       try onlyKeys(top, ["schema", "formatVersion", "defaultProfile", "profiles"], "the file")
@@ -391,13 +409,10 @@ public enum QueryProfileTarget {
       guard let decoded = strictUTF8(bytes) else {
         throw QueryProfileError.invalidSettings("the file is not UTF-8")
       }
-      // TOML (and Rust's toml crate) accepts LF and CRLF line endings, and
-      // nothing else. Swift treats "\r\n" as one Character, so normalise
-      // on scalars before splitting into lines.
-      let text = decoded.replacingOccurrences(of: "\r\n", with: "\n")
-      guard !text.unicodeScalars.contains("\r") else {
-        throw QueryProfileError.invalidSettings("a carriage return is not a TOML line ending")
-      }
+      // Everything below works on Unicode scalars, as the TOML grammar does;
+      // Swift Characters would merge "\r\n" or a quote with a following
+      // combining mark into one unit.
+      let lines = try splitLines(Array(decoded.unicodeScalars))
       let allowed: [String: Set<String>] = [
         "source": ["root", "passphrase_file"],
         "profile": ["default"],
@@ -405,31 +420,38 @@ public enum QueryProfileTarget {
       ]
       var values: [String: [String: String]] = [:]
       var current: String?
-      for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
-        let trimmed = tomlTrim(line)
-        if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
-        if trimmed.hasPrefix("[") {
-          guard !trimmed.hasPrefix("[["), let close = trimmed.firstIndex(of: "]") else {
+      for line in lines {
+        let trimmed = trimBlanks(line[...])
+        guard let first = trimmed.first else { continue }
+        if first == "#" {
+          try validateComment(trimmed)
+          continue
+        }
+        if first == "[" {
+          guard trimmed.dropFirst().first != "[", let close = trimmed.firstIndex(of: "]") else {
             throw unsupported()
           }
-          let name = String(tomlTrim(trimmed[trimmed.index(after: trimmed.startIndex)..<close]))
-          try requireComment(trimmed[trimmed.index(after: close)...])
-          guard allowed[name] != nil else {
+          let name = trimBlanks(trimmed[(trimmed.startIndex + 1)..<close])
+          guard isBareKey(name) else { throw unsupported() }
+          try requireEndOfLine(trimmed[(close + 1)...])
+          let table = String(String.UnicodeScalarView(name))
+          guard allowed[table] != nil else {
             throw QueryProfileError.invalidSettings(
               "settings file only accepts [source], [profile], and [output]")
           }
-          guard values[name] == nil else {
+          guard values[table] == nil else {
             throw QueryProfileError.invalidSettings("duplicate table")
           }
-          values[name] = [:]
-          current = name
+          values[table] = [:]
+          current = table
           continue
         }
-        guard let equals = trimmed.firstIndex(of: "=") else { throw unsupported() }
-        let key = String(tomlTrim(trimmed[..<equals]))
-        guard !key.isEmpty,
-          key.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "_" || $0 == "-") })
-        else { throw unsupported() }
+        let keyEnd = trimmed.firstIndex(where: { !isBareKeyScalar($0) }) ?? trimmed.endIndex
+        let keyScalars = trimmed[trimmed.startIndex..<keyEnd]
+        guard !keyScalars.isEmpty else { throw unsupported() }
+        let afterKey = trimBlanks(trimmed[keyEnd...])
+        guard afterKey.first == "=" else { throw unsupported() }
+        let key = String(String.UnicodeScalarView(keyScalars))
         guard let table = current else {
           throw QueryProfileError.invalidSettings(
             "settings file only accepts [source], [profile], and [output]")
@@ -437,9 +459,9 @@ public enum QueryProfileTarget {
         guard allowed[table]!.contains(key) else {
           throw QueryProfileError.invalidSettings("[\(table)] does not accept \(key)")
         }
-        let rest = trimmed[trimmed.index(after: equals)...].drop(while: { $0 == " " || $0 == "\t" })
-        let (value, remainder) = try parseString(rest, field: "\(table).\(key)")
-        try requireComment(remainder)
+        let (value, remainder) = try parseString(
+          trimBlanks(afterKey.dropFirst()), field: "\(table).\(key)")
+        try requireEndOfLine(remainder)
         guard values[table]![key] == nil else {
           throw QueryProfileError.invalidSettings("duplicate key")
         }
@@ -475,14 +497,66 @@ public enum QueryProfileTarget {
       return settings
     }
 
-    // TOML whitespace is only space and tab; Foundation's .whitespaces would
-    // also accept NBSP and other Unicode spaces that Rust rejects.
-    private static func tomlTrim(_ text: Substring) -> Substring {
-      let isBlank: (Character) -> Bool = { $0 == " " || $0 == "\t" }
+    private typealias Scalars = ArraySlice<Unicode.Scalar>
+
+    // TOML newlines are LF and CRLF only; a lone CR is an error.
+    private static func splitLines(_ scalars: [Unicode.Scalar]) throws -> [[Unicode.Scalar]] {
+      var lines: [[Unicode.Scalar]] = []
+      var line: [Unicode.Scalar] = []
+      var index = 0
+      while index < scalars.count {
+        let scalar = scalars[index]
+        if scalar == "\r" {
+          guard index + 1 < scalars.count, scalars[index + 1] == "\n" else {
+            throw QueryProfileError.invalidSettings("a carriage return is not a TOML line ending")
+          }
+          index += 1
+          continue
+        }
+        if scalar == "\n" {
+          lines.append(line)
+          line = []
+        } else {
+          line.append(scalar)
+        }
+        index += 1
+      }
+      lines.append(line)
+      return lines
+    }
+
+    // TOML whitespace is only space and tab.
+    private static func trimBlanks(_ text: Scalars) -> Scalars {
+      let isBlank: (Unicode.Scalar) -> Bool = { $0 == " " || $0 == "\t" }
       guard let start = text.firstIndex(where: { !isBlank($0) }),
         let end = text.lastIndex(where: { !isBlank($0) })
       else { return text[text.endIndex...] }
       return text[start...end]
+    }
+
+    // unquoted-key = 1*( ALPHA / DIGIT / "-" / "_" )
+    private static func isBareKeyScalar(_ scalar: Unicode.Scalar) -> Bool {
+      switch scalar.value {
+      case 0x41...0x5A, 0x61...0x7A, 0x30...0x39, 0x2D, 0x5F: return true
+      default: return false
+      }
+    }
+
+    private static func isBareKey(_ text: Scalars) -> Bool {
+      !text.isEmpty && text.allSatisfy(isBareKeyScalar)
+    }
+
+    // non-ascii = %x80-D7FF / %xE000-10FFFF (Swift scalars exclude surrogates)
+    private static func isNonASCII(_ value: UInt32) -> Bool { value >= 0x80 }
+
+    // comment = "#" *non-eol; non-eol = %x09 / %x20-7E / non-ascii
+    private static func validateComment(_ text: Scalars) throws {
+      for scalar in text.dropFirst() {
+        let value = scalar.value
+        guard value == 0x09 || (0x20...0x7E).contains(value) || isNonASCII(value) else {
+          throw QueryProfileError.invalidSettings("a comment contains a control character")
+        }
+      }
     }
 
     private static func unsupported() -> QueryProfileError {
@@ -490,54 +564,87 @@ public enum QueryProfileTarget {
         "greenbubbles-acquire reads only [table] headers and key = \"string\" lines")
     }
 
-    private static func requireComment(_ rest: Substring) throws {
-      let trimmed = tomlTrim(rest)
-      guard trimmed.isEmpty || trimmed.hasPrefix("#") else { throw unsupported() }
+    private static func requireEndOfLine(_ rest: Scalars) throws {
+      let trimmed = trimBlanks(rest)
+      guard let first = trimmed.first else { return }
+      guard first == "#" else { throw unsupported() }
+      try validateComment(trimmed)
     }
 
-    // A TOML basic ("...") or literal ('...') single-line string.
-    private static func parseString(_ text: Substring, field: String) throws -> (String, Substring)
-    {
+    // A TOML 1.1 basic ("...") or literal ('...') single-line string, with
+    // the toml crate's character rules:
+    //   basic-unescaped = wschar / %x21 / %x23-5B / %x5D-7E / non-ascii
+    //   literal-char    = %x09 / %x20-26 / %x28-7E / non-ascii
+    //   escapes         = \" \\ \b \e \f \n \r \t \xHH \uHHHH \UHHHHHHHH
+    private static func parseString(_ text: Scalars, field: String) throws -> (String, Scalars) {
       guard let quote = text.first, quote == "\"" || quote == "'" else {
         throw QueryProfileError.invalidSettings("\(field) must be a non-empty string")
       }
-      if text.hasPrefix("\"\"\"") || text.hasPrefix("'''") { throw unsupported() }
-      var result = ""
-      var index = text.index(after: text.startIndex)
+      if text.starts(with: [quote, quote, quote]) { throw unsupported() }
+      var result = String.UnicodeScalarView()
+      var index = text.startIndex + 1
       while index < text.endIndex {
-        let character = text[index]
-        if character == quote {
-          return (result, text[text.index(after: index)...])
+        let scalar = text[index]
+        let value = scalar.value
+        if scalar == quote {
+          return (String(result), text[(index + 1)...])
         }
-        if quote == "\"", character == "\\" {
-          index = text.index(after: index)
+        if quote == "'" {
+          guard value == 0x09 || (0x20...0x7E).contains(value) || isNonASCII(value) else {
+            throw QueryProfileError.invalidSettings("\(field) contains a control character")
+          }
+          result.append(scalar)
+          index += 1
+          continue
+        }
+        if scalar == "\\" {
+          index += 1
           guard index < text.endIndex else { break }
-          switch text[index] {
+          let escape = text[index]
+          index += 1
+          switch escape {
           case "\"": result.append("\"")
           case "\\": result.append("\\")
           case "b": result.append("\u{08}")
-          case "t": result.append("\t")
-          case "n": result.append("\n")
+          case "e": result.append("\u{1B}")
           case "f": result.append("\u{0C}")
+          case "n": result.append("\n")
           case "r": result.append("\r")
-          case "u", "U":
-            let length = text[index] == "u" ? 4 : 8
-            let start = text.index(after: index)
-            guard let end = text.index(start, offsetBy: length, limitedBy: text.endIndex),
-              let scalarValue = UInt32(text[start..<end], radix: 16),
-              let scalar = Unicode.Scalar(scalarValue)
-            else { throw unsupported() }
-            result.unicodeScalars.append(scalar)
-            index = text.index(before: end)
+          case "t": result.append("\t")
+          case "x", "u", "U":
+            let length = escape == "x" ? 2 : escape == "u" ? 4 : 8
+            guard index + length <= text.endIndex else { throw unsupported() }
+            var code: UInt32 = 0
+            for digit in text[index..<(index + length)] {
+              guard let nibble = hexValue(digit) else { throw unsupported() }
+              code = code << 4 | nibble
+            }
+            guard let decoded = Unicode.Scalar(code) else { throw unsupported() }
+            result.append(decoded)
+            index += length
           default: throw unsupported()
           }
-        } else {
-          guard character != "\n" else { break }
-          result.append(character)
+          continue
         }
-        index = text.index(after: index)
+        guard
+          value == 0x09 || value == 0x20 || value == 0x21 || (0x23...0x5B).contains(value)
+            || (0x5D...0x7E).contains(value) || isNonASCII(value)
+        else {
+          throw QueryProfileError.invalidSettings("\(field) contains a control character")
+        }
+        result.append(scalar)
+        index += 1
       }
       throw unsupported()
+    }
+
+    private static func hexValue(_ scalar: Unicode.Scalar) -> UInt32? {
+      switch scalar.value {
+      case 0x30...0x39: return scalar.value - 0x30
+      case 0x41...0x46: return scalar.value - 0x41 + 10
+      case 0x61...0x66: return scalar.value - 0x61 + 10
+      default: return nil
+      }
     }
   }
 }

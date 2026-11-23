@@ -193,6 +193,82 @@ struct QueryProfileTargetTests {
     }
   }
 
+  @Test func rootEquivalentPathsAreRefused() throws {
+    for path in ["/", "/.", "//", "/./.", "/..", "/a/..", "/./../", "", "relative", "/a\0b"] {
+      #expect(!QueryProfileTarget.isAbsoluteNonRoot(path), "\(path)")
+    }
+    for path in ["/a", "/a/../b", "//a", "/./a/."] {
+      #expect(QueryProfileTarget.isAbsoluteNonRoot(path), "\(path)")
+    }
+    for root in ["/", "/.", "//", "/./.", "/.."] {
+      let json = """
+        {"schema": "greenbubbles.query-profiles.v1", "formatVersion": 1, "defaultProfile": "a",
+         "profiles": {"a": {"sourceRoot": "\(root)",
+           "access": {"mode": "liveWeChatKeyFile", "credentialFile": "/k/key"}}}}
+        """
+      #expect(throws: QueryProfileError.self) {
+        try QueryProfileTarget.ProfileStore.parse(Data(json.utf8))
+      }
+      #expect(throws: QueryProfileError.self) {
+        try QueryProfileTarget.Settings.parse(Data("[source]\nroot = \"\(root)\"\n".utf8))
+      }
+      #expect(throws: QueryProfileError.self) {
+        try QueryProfileTarget.locations(
+          environment: ["GREENBUBBLES_QUERY_PROFILES_FILE": root],
+          home: URL(fileURLWithPath: "/example"))
+      }
+    }
+  }
+
+  @Test(arguments: [
+    "[source]\nroot = \"/a\u{1B}b\"\n",  // raw ESC in a basic string
+    "[source]\nroot = \"/a\u{7F}b\"\n",  // raw DEL
+    "[source]\nroot = \"/a\u{01}b\"\n",
+    "[source]\nroot = \"/a\u{00}b\"\n",
+    "[source]\nroot = '/a\u{1B}b'\n",  // raw ESC in a literal string
+    "[source]\nroot = '/a\u{7F}b'\n",
+    "[source]\nroot = '/a\u{0C}b'\n",
+    "# comment with \u{1B} escape\n",
+    "[source] # \u{7F}\n",
+    "[source]\nroot = \"/a\" # \u{01}\n",
+    "[source]\nroot = \"/a\\x4\"\n",  // short \x escape
+    "[source]\nroot = \"/a\\u+041\"\n",  // sign is not a hex digit
+    "[source]\nroot = \"/a\\uD800\"\n",  // surrogate is not a scalar
+    "[source]\nroot = \"/a\\q\"\n",
+    "[source]\nroot = \"/a\"\u{301}\n",  // combining mark after the closing quote
+  ])
+  func tomlControlCharactersAreRefusedBeforeSelection(text: String) throws {
+    #expect(throws: QueryProfileError.self) {
+      try QueryProfileTarget.Settings.parse(Data(text.utf8))
+    }
+    let home = try TemporaryHome()
+    try home.writeSettings(text)
+    #expect(throws: QueryProfileError.self) { try home.resolve(nil) }
+  }
+
+  @Test func tomlStringsAcceptWhatTheTomlCrateAccepts() throws {
+    let parsed = try QueryProfileTarget.Settings.parse(
+      Data(
+        "[source]\nroot = \"/a\tb\\x41\\u0042\\U00000043\\e\\\"\"\npassphrase_file = '/k\tey\\n' # é\n"
+          .utf8))
+    #expect(parsed.sourceRoot == "/a\tbABC\u{1B}\"")
+    #expect(parsed.passphraseFile == "/k\tey\\n")
+  }
+
+  @Test func jsonStringRulesMatchSerde() {
+    let base =
+      #"{"schema": "greenbubbles.query-profiles.v1", "formatVersion": 1, "profiles": {"a": {"sourceRoot": "SOURCE", "access": {"mode": "decrypted"}}}}"#
+    let loneSurrogate = base.replacingOccurrences(of: "SOURCE", with: #"/a\uD800"#)
+    #expect(throws: QueryProfileError.self) {
+      try QueryProfileTarget.ProfileStore.parse(Data(loneSurrogate.utf8))
+    }
+    let pair = base.replacingOccurrences(of: "SOURCE", with: #"/a😀"#)
+    #expect(throws: Never.self) { try QueryProfileTarget.ProfileStore.parse(Data(pair.utf8)) }
+    let deep = String(repeating: "[", count: 200) + String(repeating: "]", count: 200)
+    #expect(JSONDuplicateKeyCheck.problem(in: Data(deep.utf8)) == .malformed)
+    #expect(JSONDuplicateKeyCheck.problem(in: Data("{\"a\u{01}\": 1}".utf8)) == .malformed)
+  }
+
   @Test func duplicateFieldsAreRefusedLikeRust() throws {
     let duplicates = [
       #"{"schema": "greenbubbles.query-profiles.v1", "formatVersion": 1, "profiles": {"a": {"sourceRoot": "/s", "access": {"mode": "liveWeChatKeyFile", "credentialFile": "/home/me/key", "credentialFile": "/etc/key"}}}}"#,

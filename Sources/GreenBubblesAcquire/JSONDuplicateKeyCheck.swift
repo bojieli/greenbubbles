@@ -11,21 +11,34 @@ enum JSONDuplicateKeyCheck {
   /// Returns the first duplicated key, or nil when every object's keys are
   /// distinct after decoding escapes.
   static func firstDuplicateKey(in data: Data) -> String? {
-    var scanner = Scanner(bytes: Array(data))
-    do {
-      try scanner.value()
-      return nil
-    } catch Failure.duplicate(let key) {
-      return key
-    } catch {
-      return "(unreadable)"
+    switch problem(in: data) {
+    case .duplicate(let key)?: return key
+    case .malformed?: return "(unreadable)"
+    case nil: return nil
     }
   }
 
-  private enum Failure: Error {
+  /// Every rule serde_json applies that JSONSerialization may not: no
+  /// duplicate fields, no unpaired UTF-16 surrogate escapes, no raw control
+  /// characters in strings, and nesting no deeper than serde_json's 128.
+  static func problem(in data: Data) -> Failure? {
+    var scanner = Scanner(bytes: Array(data))
+    do {
+      try scanner.value(depth: 0)
+      return nil
+    } catch let failure as Failure {
+      return failure
+    } catch {
+      return .malformed
+    }
+  }
+
+  enum Failure: Error, Equatable {
     case duplicate(String)
     case malformed
   }
+
+  static let maximumDepth = 128
 
   private struct Scanner {
     let bytes: [UInt8]
@@ -36,11 +49,12 @@ enum JSONDuplicateKeyCheck {
       self.bytes = bytes
     }
 
-    mutating func value() throws {
+    mutating func value(depth: Int) throws {
       skipWhitespace()
       guard index < bytes.count else { throw Failure.malformed }
       switch bytes[index] {
       case UInt8(ascii: "{"):
+        guard depth < JSONDuplicateKeyCheck.maximumDepth else { throw Failure.malformed }
         index += 1
         var keys = Set<String>()
         skipWhitespace()
@@ -55,7 +69,7 @@ enum JSONDuplicateKeyCheck {
           skipWhitespace()
           guard peek(UInt8(ascii: ":")) else { throw Failure.malformed }
           index += 1
-          try value()
+          try value(depth: depth + 1)
           skipWhitespace()
           if peek(UInt8(ascii: ",")) {
             index += 1
@@ -66,6 +80,7 @@ enum JSONDuplicateKeyCheck {
           return
         }
       case UInt8(ascii: "["):
+        guard depth < JSONDuplicateKeyCheck.maximumDepth else { throw Failure.malformed }
         index += 1
         skipWhitespace()
         if peek(UInt8(ascii: "]")) {
@@ -73,7 +88,7 @@ enum JSONDuplicateKeyCheck {
           return
         }
         while true {
-          try value()
+          try value(depth: depth + 1)
           skipWhitespace()
           if peek(UInt8(ascii: ",")) {
             index += 1
@@ -122,8 +137,12 @@ enum JSONDuplicateKeyCheck {
         index += 1
         if byte == UInt8(ascii: "\"") {
           flushRaw()
-          return String(decoding: units, as: UTF16.self)
+          let text = String(decoding: units, as: UTF16.self)
+          // An unpaired surrogate escape decodes to U+FFFD; serde_json rejects it.
+          guard Array(text.utf16) == units else { throw Failure.malformed }
+          return text
         }
+        guard byte >= 0x20 else { throw Failure.malformed }
         guard byte == UInt8(ascii: "\\") else {
           raw.append(byte)
           continue

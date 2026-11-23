@@ -212,7 +212,10 @@ private func statusMark(_ ok: Bool) -> String {
 }
 
 // Human-readable rendering: one line per check, then a plain verdict.
-private func printPreflight(_ result: PreflightResult) {
+private func printPreflight(
+  _ result: PreflightResult,
+  captureCommand: [String] = ["sudo", "greenbubbles-acquire", "capture"]
+) {
   for check in result.checks {
     print("\(statusMark(check.ok)) \(check.label)")
     if !check.ok, let hint = check.hint {
@@ -223,7 +226,7 @@ private func printPreflight(_ result: PreflightResult) {
   let failed = result.checks.filter { !$0.ok }.count
   if result.report.ready {
     print("Ready to capture.")
-    print("Next: sudo greenbubbles-acquire capture")
+    print("Next: \(captureCommand.joined(separator: " "))")
   } else {
     print("Not ready — \(failed) \(failed == 1 ? "problem" : "problems") to fix (see above).")
   }
@@ -280,10 +283,38 @@ private func resolveDatabaseRoot(_ option: URL?) throws -> URL {
     .singleDatabaseRoot()
 }
 
+// The capture command that reproduces this preflight's target. Private paths
+// become placeholders unless --include-paths was given.
+private func captureCommand(_ arguments: Arguments) -> [String] {
+  func path(_ url: URL, placeholder: String) -> String {
+    guard arguments.includePaths else { return placeholder }
+    let text = url.path
+    let plain = text.unicodeScalars.allSatisfy {
+      CharacterSet.alphanumerics.contains($0) && $0.isASCII
+        || "/._-+,:@".unicodeScalars.contains($0)
+    }
+    return plain ? text : "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
+  }
+  var command = ["sudo", "greenbubbles-acquire", "capture"]
+  if let profile = arguments.profile { command += ["--profile", profile] }
+  if let dbRoot = arguments.dbRoot {
+    command += ["--db-root", path(dbRoot, placeholder: "<db_storage-path>")]
+  }
+  if let output = arguments.output {
+    command += ["--output", path(output, placeholder: "<key-file-path>")]
+  }
+  return command
+}
+
+private struct TargetResolutionFailure: Error, CustomStringConvertible {
+  let description: String
+}
+
 private func runPreflight(
   dbRootOption: URL?,
   rootOrigin: String = "from --db-root",
-  includePaths: Bool
+  includePaths: Bool,
+  targetError: String? = nil
 ) -> PreflightResult {
   var checks: [PreflightCheck] = []
   var remediation: String?
@@ -374,6 +405,8 @@ private func runPreflight(
   var databaseHint: String? = "log into WeChat once so it creates its databases"
   var databasesOK = false
   do {
+    // A profile or config.toml problem fails this check instead of the run.
+    if let targetError { throw TargetResolutionFailure(description: targetError) }
     // As the invoking user: a root their own queries can't read must fail here.
     let root = try invokingUser.perform { try resolveDatabaseRoot(dbRootOption) }
     databaseRootReference = PathPrivacy(includePaths: includePaths).reference(for: root)
@@ -451,16 +484,23 @@ do {
   case .help:
     print(usage)
   case .preflight:
-    let target = try resolveTarget(arguments, needsOutput: false)
+    var target = AcquireTarget.none
+    var targetError: String?
+    do {
+      target = try resolveTarget(arguments, needsOutput: false)
+    } catch {
+      targetError = String(describing: error)
+    }
     let result = runPreflight(
       dbRootOption: arguments.dbRoot ?? target.sourceRoot,
       rootOrigin: rootOrigin(arguments, target),
-      includePaths: arguments.includePaths
+      includePaths: arguments.includePaths,
+      targetError: targetError
     )
     if arguments.json {
       try printJSON(result.report)
     } else {
-      printPreflight(result)
+      printPreflight(result, captureCommand: captureCommand(arguments))
     }
     if !result.report.ready { exit(1) }
   case .capture:
