@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// A running process named `WeChat`, described by the app bundle it was
@@ -12,19 +13,25 @@ public struct WeChatProcessCandidate: Equatable, Sendable {
   /// `CFBundleIdentifier` of that bundle, set only when the bundle's
   /// `CFBundleExecutable` is the running executable.
   public let bundleIdentifier: String?
+  /// Process start time in microseconds since 1970 (`pbi_start_tvsec` and
+  /// `pbi_start_tvusec`). Together with the PID it identifies one process,
+  /// which guards against PID reuse.
+  public let startMicroseconds: UInt64?
 
   public init(
     processID: pid_t,
     userID: uid_t?,
     executablePath: String?,
     applicationPath: String?,
-    bundleIdentifier: String?
+    bundleIdentifier: String?,
+    startMicroseconds: UInt64? = nil
   ) {
     self.processID = processID
     self.userID = userID
     self.executablePath = executablePath
     self.applicationPath = applicationPath
     self.bundleIdentifier = bundleIdentifier
+    self.startMicroseconds = startMicroseconds
   }
 }
 
@@ -35,30 +42,40 @@ public struct WeChatProcessTarget: Equatable, Sendable {
   public let userID: uid_t
   public let applicationPath: String
   public let bundleIdentifier: String
+  /// Start time of the selected process, when it could be read.
+  public let startMicroseconds: UInt64?
   /// Other processes of the same app that were already running when this
   /// one was selected. They are never taken as its replacement.
   public let excludedProcessIDs: Set<pid_t>
+  /// When the capture first saw this process gone (microseconds since 1970).
+  /// A replacement must have started after this moment.
+  public var exitObservedMicroseconds: UInt64?
 
   public init(
     processID: pid_t,
     userID: uid_t,
     applicationPath: String,
     bundleIdentifier: String,
-    excludedProcessIDs: Set<pid_t> = []
+    startMicroseconds: UInt64? = nil,
+    excludedProcessIDs: Set<pid_t> = [],
+    exitObservedMicroseconds: UInt64? = nil
   ) {
     self.processID = processID
     self.userID = userID
     self.applicationPath = applicationPath
     self.bundleIdentifier = bundleIdentifier
+    self.startMicroseconds = startMicroseconds
     self.excludedProcessIDs = excludedProcessIDs.subtracting([processID])
+    self.exitObservedMicroseconds = exitObservedMicroseconds
   }
 
-  func replaced(by processID: pid_t) -> WeChatProcessTarget {
+  func replaced(by replacement: WeChatProcessTarget) -> WeChatProcessTarget {
     WeChatProcessTarget(
-      processID: processID,
+      processID: replacement.processID,
       userID: userID,
       applicationPath: applicationPath,
       bundleIdentifier: bundleIdentifier,
+      startMicroseconds: replacement.startMicroseconds,
       excludedProcessIDs: excludedProcessIDs
     )
   }
@@ -66,6 +83,20 @@ public struct WeChatProcessTarget: Equatable, Sendable {
   func runsSameApp(as other: WeChatProcessTarget) -> Bool {
     userID == other.userID && applicationPath == other.applicationPath
       && bundleIdentifier == other.bundleIdentifier
+  }
+
+  /// Same PID and, when both are known, the same start time.
+  func isSameProcess(as other: WeChatProcessTarget) -> Bool {
+    guard processID == other.processID else { return false }
+    guard let start = startMicroseconds, let otherStart = other.startMicroseconds else {
+      return startMicroseconds == nil && other.startMicroseconds == nil
+    }
+    return start == otherStart
+  }
+
+  /// Microseconds since 1970 for `date`, the clock process start times use.
+  public static func microseconds(_ date: Date) -> UInt64 {
+    UInt64(max(0, date.timeIntervalSince1970 * 1_000_000))
   }
 }
 
@@ -78,9 +109,12 @@ public enum DatabaseRootOwner: Equatable, Sendable {
   /// cannot be told from the path, so the process must be chosen with `--pid`.
   case unknown
 
+  /// Both paths are first canonicalized, so a root given in another letter
+  /// case on a case-insensitive volume (or through a link) still maps to its
+  /// container, using the container's on-disk name.
   public static func resolve(databaseRoot: URL, homeDirectory: URL) -> DatabaseRootOwner {
-    let root = databaseRoot.standardizedFileURL.resolvingSymlinksInPath().pathComponents
-    let home = homeDirectory.standardizedFileURL.resolvingSymlinksInPath().pathComponents
+    let root = canonicalURL(databaseRoot).pathComponents
+    let home = canonicalURL(homeDirectory).pathComponents
     let prefix = home + ["Library", "Containers"]
     guard root.count >= prefix.count + 2, Array(root.prefix(prefix.count)) == prefix else {
       return .unknown
@@ -88,6 +122,23 @@ public enum DatabaseRootOwner: Equatable, Sendable {
     let bundleIdentifier = root[prefix.count]
     guard !bundleIdentifier.isEmpty, root[prefix.count + 1] == "Data" else { return .unknown }
     return .application(bundleIdentifier: bundleIdentifier)
+  }
+
+  /// The path the file system reports for an existing directory (`F_GETPATH`
+  /// on a descriptor opened only for its path: links resolved, on-disk
+  /// letter case). Paths that cannot be opened fall back to a lexical form.
+  static func canonicalURL(_ url: URL) -> URL {
+    let standardized = url.standardizedFileURL
+    let descriptor = open(standardized.path, O_EVTONLY | O_CLOEXEC)
+    guard descriptor >= 0 else { return standardized.resolvingSymlinksInPath() }
+    defer { close(descriptor) }
+    var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+    guard fcntl(descriptor, F_GETPATH, &buffer) != -1 else {
+      return standardized.resolvingSymlinksInPath()
+    }
+    let path = String(
+      decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    return URL(fileURLWithPath: path).standardizedFileURL
   }
 }
 
@@ -201,33 +252,50 @@ public enum WeChatProcessSelector {
       userID: userID,
       applicationPath: target.applicationPath,
       bundleIdentifier: target.bundleIdentifier,
+      startMicroseconds: target.startMicroseconds,
       excludedProcessIDs: Set(siblings)
     )
   }
 
-  /// Finds the process now running the selected app, for attaching and for
-  /// re-attaching after WeChat restarts. The selected process is kept while
-  /// it still runs that app, even if another instance of the same app runs
-  /// too (so an explicit `--pid` disambiguates). Once it is gone, a
-  /// replacement must be a process of the same app that was not already
-  /// running at selection time; exactly one may qualify. Other app copies and
-  /// pre-existing instances never match. Returns nil while none qualifies,
-  /// so the capture keeps waiting until its timeout.
+  /// Finds the process to attach to for the selected app, for the first
+  /// attach and after WeChat restarts.
+  ///
+  /// The selected process is kept while it still runs (same PID and start
+  /// time), even if other instances of the same app run too. Once it is
+  /// gone, the first call records `now` as the moment its exit was observed.
+  /// A replacement must run the same app, must have started strictly after
+  /// that moment, and must not be an instance recorded at selection; exactly
+  /// one may qualify. An instance that started while the selected process
+  /// was still running, a reused PID, a process whose start time is unknown,
+  /// or another app copy never qualifies. Returns nil while none qualifies,
+  /// so the capture keeps waiting until its timeout (fail closed).
   public static func reselect(
     candidates: [WeChatProcessCandidate],
-    following selected: WeChatProcessTarget
+    following selected: inout WeChatProcessTarget,
+    nowMicroseconds: UInt64
   ) throws -> WeChatProcessTarget? {
     let matches = candidates.compactMap { target(for: $0, userID: selected.userID) }
       .filter { $0.runsSameApp(as: selected) }
-    if matches.contains(where: { $0.processID == selected.processID }) {
+    if selected.exitObservedMicroseconds == nil,
+      matches.contains(where: { $0.isSameProcess(as: selected) })
+    {
       return selected
     }
-    let replacements = matches.filter { !selected.excludedProcessIDs.contains($0.processID) }
+    if selected.exitObservedMicroseconds == nil {
+      selected.exitObservedMicroseconds = nowMicroseconds
+    }
+    let exitObserved = selected.exitObservedMicroseconds ?? nowMicroseconds
+    let replacements = matches.filter { match in
+      guard let start = match.startMicroseconds else { return false }
+      return start > exitObserved && !selected.excludedProcessIDs.contains(match.processID)
+    }
     guard replacements.count <= 1 else {
       throw ProcessSelectionError.multipleProcessesForTarget(
         bundleIdentifier: selected.bundleIdentifier, count: replacements.count)
     }
-    return replacements.first.map { selected.replaced(by: $0.processID) }
+    guard let replacement = replacements.first else { return nil }
+    selected = selected.replaced(by: replacement)
+    return selected
   }
 
   /// The `.app` bundle that contains a main executable at
@@ -260,7 +328,8 @@ public enum WeChatProcessSelector {
       processID: candidate.processID,
       userID: userID,
       applicationPath: applicationPath,
-      bundleIdentifier: bundleIdentifier
+      bundleIdentifier: bundleIdentifier,
+      startMicroseconds: candidate.startMicroseconds
     )
   }
 }

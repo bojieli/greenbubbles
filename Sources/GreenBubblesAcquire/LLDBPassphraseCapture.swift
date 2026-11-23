@@ -78,20 +78,20 @@ public struct LLDBPassphraseCapture: Sendable {
     outputHandler?(message)
   }
 
-  /// The process to attach to next. `followed` starts as `target` and moves
-  /// to each replacement process, so the selected PID is used while it runs.
+  /// The process to attach to next. `followed` starts as `target`; it keeps
+  /// the selected process while it runs and moves only to a process of the
+  /// same app that started after the previous one was seen to exit.
   private func currentTargetProcessID(following followed: inout WeChatProcessTarget?) throws
     -> pid_t?
   {
-    guard let current = followed else { return try WeChatProcessLocator().uniqueProcessID() }
-    guard
-      let next = try WeChatProcessSelector.reselect(
-        candidates: WeChatProcessLocator(userID: current.userID).candidates(),
-        following: current
-      )
-    else { return nil }
-    followed = next
-    return next.processID
+    guard var current = followed else { return try WeChatProcessLocator().uniqueProcessID() }
+    let next = try WeChatProcessSelector.reselect(
+      candidates: WeChatProcessLocator(userID: current.userID).candidates(),
+      following: &current,
+      nowMicroseconds: WeChatProcessTarget.microseconds(Date())
+    )
+    followed = current
+    return next?.processID
   }
 
   /// Resolves the WeChat process itself and re-attaches if the target exits
@@ -119,6 +119,9 @@ public struct LLDBPassphraseCapture: Sendable {
           deadline: deadline
         )
       } catch CaptureError.targetExited {
+        if followed?.processID == processID, followed?.exitObservedMicroseconds == nil {
+          followed?.exitObservedMicroseconds = WeChatProcessTarget.microseconds(Date())
+        }
         guard Date() < deadline else { throw CaptureError.timedOut }
         emit("WeChat process \(processID) exited; waiting to re-attach to the new process")
         Thread.sleep(forTimeInterval: 1)

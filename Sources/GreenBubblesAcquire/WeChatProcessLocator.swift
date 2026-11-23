@@ -84,15 +84,17 @@ public struct WeChatProcessLocator: Sendable {
     }
   }
 
-  /// Describes a live process: its real UID (`proc_pidinfo`), executable
+  /// Describes a live process: its real UID and start time (`proc_pidinfo`), executable
   /// (`proc_pidpath`), enclosing app bundle, and that bundle's identifier.
   /// Returns nil when the process does not exist.
   public static func candidate(forProcessID processID: pid_t) -> WeChatProcessCandidate? {
     guard processID > 0 else { return nil }
     var info = proc_bsdinfo()
     let size = Int32(MemoryLayout<proc_bsdinfo>.size)
-    let userID: uid_t? =
-      proc_pidinfo(processID, PROC_PIDTBSDINFO, 0, &info, size) == size ? info.pbi_ruid : nil
+    let haveInfo = proc_pidinfo(processID, PROC_PIDTBSDINFO, 0, &info, size) == size
+    let userID: uid_t? = haveInfo ? info.pbi_ruid : nil
+    let startMicroseconds: UInt64? =
+      haveInfo ? info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec : nil
 
     var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
     let length = proc_pidpath(processID, &buffer, UInt32(buffer.count))
@@ -117,7 +119,8 @@ public struct WeChatProcessLocator: Sendable {
       userID: userID,
       executablePath: executablePath,
       applicationPath: applicationPath,
-      bundleIdentifier: bundleIdentifier
+      bundleIdentifier: bundleIdentifier,
+      startMicroseconds: startMicroseconds
     )
   }
 

@@ -190,6 +190,9 @@ it is why you have to log out and back in.
 3. On WeChat 4.1.13, logging out ends the WeChat process and logging in starts
    a new one. The tool notices and follows the new process of the same app
    copy (same app path and bundle ID), never another copy that is running.
+   It only accepts a process that started after it saw the old one exit, so
+   another instance that was already running is never taken for the new one.
+   If none qualifies, it keeps waiting until the time limit.
 4. For each database file, it computes the file's key on your Mac
    (PBKDF2-HMAC-SHA512, 256,000 rounds, with that file's 16-byte salt).
 5. It proves each computed key is correct by checking SQLCipher 4's

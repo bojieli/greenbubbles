@@ -17,14 +17,16 @@ struct WeChatProcessSelectionTests {
     _ processID: pid_t,
     app: String,
     bundle: String?,
-    user: uid_t = WeChatProcessSelectionTests.user
+    user: uid_t = WeChatProcessSelectionTests.user,
+    start: UInt64? = 1_000
   ) -> WeChatProcessCandidate {
     WeChatProcessCandidate(
       processID: processID,
       userID: user,
       executablePath: app + "/Contents/MacOS/WeChat",
       applicationPath: app,
-      bundleIdentifier: bundle
+      bundleIdentifier: bundle,
+      startMicroseconds: start
     )
   }
 
@@ -52,6 +54,34 @@ struct WeChatProcessSelectionTests {
     #expect(
       DatabaseRootOwner.resolve(databaseRoot: dotted, homeDirectory: Self.home)
         == .application(bundleIdentifier: Self.duplicate))
+  }
+
+  @Test func canonicalizesTheRootBeforeMappingItsOwner() throws {
+    let fileManager = FileManager.default
+    let base = fileManager.temporaryDirectory.appending(
+      path: "greenbubbles-owner-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+    defer { try? fileManager.removeItem(at: base) }
+    let home = base.appending(path: "home", directoryHint: .isDirectory)
+    let root = home.appending(
+      path: "Library/Containers/\(Self.duplicate)/Data/Documents/xwechat_files/a/db_storage")
+    try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+    let expected = DatabaseRootOwner.application(bundleIdentifier: Self.duplicate)
+    #expect(DatabaseRootOwner.resolve(databaseRoot: root, homeDirectory: home) == expected)
+
+    // Reached through a link elsewhere.
+    let link = base.appending(path: "link")
+    try fileManager.createSymbolicLink(at: link, withDestinationURL: root)
+    #expect(DatabaseRootOwner.resolve(databaseRoot: link, homeDirectory: home) == expected)
+
+    // Typed in another letter case; only meaningful on a case-insensitive
+    // volume, where this path exists.
+    let otherCase = home.appending(
+      path:
+        "library/containers/\(Self.duplicate.lowercased())/data/documents/xwechat_files/a/db_storage"
+    )
+    if fileManager.fileExists(atPath: otherCase.path) {
+      #expect(DatabaseRootOwner.resolve(databaseRoot: otherCase, homeDirectory: home) == expected)
+    }
   }
 
   @Test func rootsOutsideAnAppContainerHaveNoKnownOwner() {
@@ -240,75 +270,88 @@ struct WeChatProcessSelectionTests {
 
   // MARK: - Re-attach after a restart
 
+  /// Times in these tests: processes selected at start 1_000, the selected
+  /// process seen to exit at 5_000, replacements started at 6_000 or later.
+  static let exitSeen: UInt64 = 5_000
+
+  static func reselect(
+    _ candidates: [WeChatProcessCandidate],
+    _ selected: inout WeChatProcessTarget,
+    now: UInt64 = WeChatProcessSelectionTests.exitSeen
+  ) throws -> pid_t? {
+    try WeChatProcessSelector.reselect(
+      candidates: candidates, following: &selected, nowMicroseconds: now)?.processID
+  }
+
   @Test func reattachFollowsTheSameAppAcrossPIDChanges() throws {
-    let selected = try #require(
+    let original = try #require(
       try WeChatProcessSelector.select(
         candidates: [Self.duplicateProcess, Self.standardProcess],
         userID: Self.user,
         owner: .application(bundleIdentifier: Self.duplicate)
       ))
-    let restarted = Self.candidate(90, app: Self.duplicateApp, bundle: Self.duplicate)
-    // The other copy is running with a lower PID; it must never be chosen.
+    var selected = original
+    // While it runs, the selected process is kept.
+    #expect(try Self.reselect([Self.standardProcess, Self.duplicateProcess], &selected) == 43)
+    #expect(selected == original)
+    // Gone: the exit is recorded and, with only the other copy running
+    // (lower PID), the capture keeps waiting.
+    #expect(try Self.reselect([Self.standardProcess], &selected) == nil)
+    #expect(selected.exitObservedMicroseconds == Self.exitSeen)
+    let restarted = Self.candidate(90, app: Self.duplicateApp, bundle: Self.duplicate, start: 6_000)
     for candidates in [[Self.standardProcess, restarted], [restarted, Self.standardProcess]] {
-      let next = try WeChatProcessSelector.reselect(candidates: candidates, following: selected)
-      #expect(next?.processID == 90)
+      var following = selected
+      #expect(try Self.reselect(candidates, &following, now: 7_000) == 90)
+      #expect(following.processID == 90)
+      #expect(following.startMicroseconds == 6_000)
+      #expect(following.exitObservedMicroseconds == nil)
     }
-    // While only the other copy runs, the capture keeps waiting.
-    #expect(
-      try WeChatProcessSelector.reselect(candidates: [Self.standardProcess], following: selected)
-        == nil)
   }
 
   @Test func reattachIgnoresSameBundleElsewhereAndOtherUsers() throws {
-    let selected = WeChatProcessTarget(
+    var selected = WeChatProcessTarget(
       processID: 42, userID: Self.user, applicationPath: Self.standardApp,
-      bundleIdentifier: Self.standard)
+      bundleIdentifier: Self.standard, startMicroseconds: 1_000)
     let movedCopy = Self.candidate(
-      50, app: "/Users/synthetic-owner/Applications/WeChat.app", bundle: Self.standard)
+      50, app: "/Users/synthetic-owner/Applications/WeChat.app", bundle: Self.standard,
+      start: 6_000)
     let foreign = Self.candidate(
-      51, app: Self.standardApp, bundle: Self.standard, user: Self.otherUser)
-    #expect(
-      try WeChatProcessSelector.reselect(candidates: [movedCopy, foreign], following: selected)
-        == nil)
+      51, app: Self.standardApp, bundle: Self.standard, user: Self.otherUser, start: 6_000)
+    #expect(try Self.reselect([movedCopy, foreign], &selected) == nil)
     let twice = [
-      Self.candidate(60, app: Self.standardApp, bundle: Self.standard),
-      Self.candidate(61, app: Self.standardApp, bundle: Self.standard),
+      Self.candidate(60, app: Self.standardApp, bundle: Self.standard, start: 6_000),
+      Self.candidate(61, app: Self.standardApp, bundle: Self.standard, start: 6_001),
     ]
     #expect(
       throws: ProcessSelectionError.multipleProcessesForTarget(
         bundleIdentifier: Self.standard, count: 2)
     ) {
-      try WeChatProcessSelector.reselect(candidates: twice, following: selected)
+      try Self.reselect(twice, &selected, now: 7_000)
     }
   }
 
   @Test func explicitPIDDisambiguatesTwoInstancesOfTheSameApp() throws {
     let first = Self.candidate(60, app: Self.standardApp, bundle: Self.standard)
     let second = Self.candidate(61, app: Self.standardApp, bundle: Self.standard)
-    let selected = try WeChatProcessSelector.validate(
+    let original = try WeChatProcessSelector.validate(
       requestedProcessID: 61,
       candidate: second,
       userID: Self.user,
       owner: .application(bundleIdentifier: Self.standard),
       runningCandidates: [first, second, Self.duplicateProcess]
     )
-    #expect(selected.excludedProcessIDs == [60])
+    #expect(original.excludedProcessIDs == [60])
     // The first attach keeps the chosen PID in either listing order.
     for candidates in [[first, second], [second, first]] {
-      #expect(
-        try WeChatProcessSelector.reselect(candidates: candidates, following: selected)?
-          .processID == 61)
+      var selected = original
+      #expect(try Self.reselect(candidates, &selected) == 61)
     }
-    // A reused PID now running another copy is not the selected process.
-    let reused = Self.candidate(61, app: Self.duplicateApp, bundle: Self.duplicate)
-    #expect(
-      try WeChatProcessSelector.reselect(candidates: [reused], following: selected) == nil)
   }
 
   @Test func preexistingSiblingIsNeverTakenAsTheReplacement() throws {
     let sibling = Self.candidate(60, app: Self.standardApp, bundle: Self.standard)
     let chosen = Self.candidate(61, app: Self.standardApp, bundle: Self.standard)
-    let selected = try WeChatProcessSelector.validate(
+    var selected = try WeChatProcessSelector.validate(
       requestedProcessID: 61,
       candidate: chosen,
       userID: Self.user,
@@ -317,28 +360,77 @@ struct WeChatProcessSelectionTests {
     )
     // The chosen instance exited during logout; only the original, unselected
     // sibling remains. Keep waiting instead of attaching to it.
-    #expect(try WeChatProcessSelector.reselect(candidates: [sibling], following: selected) == nil)
-    // A new process of the same app is the replacement, in either order.
-    let replacement = Self.candidate(70, app: Self.standardApp, bundle: Self.standard)
+    #expect(try Self.reselect([sibling], &selected) == nil)
+    // A process started after the exit is the replacement, in either order.
+    let replacement = Self.candidate(70, app: Self.standardApp, bundle: Self.standard, start: 6_000)
     for candidates in [[sibling, replacement], [replacement, sibling]] {
-      let next = try WeChatProcessSelector.reselect(candidates: candidates, following: selected)
-      #expect(next?.processID == 70)
-      #expect(next?.excludedProcessIDs == [60])
+      var following = selected
+      #expect(try Self.reselect(candidates, &following, now: 7_000) == 70)
+      #expect(following.excludedProcessIDs == [60])
     }
-    // The exclusion carries over: if the replacement exits too, the sibling
-    // is still not taken.
-    let followed = try #require(
-      try WeChatProcessSelector.reselect(candidates: [sibling, replacement], following: selected))
-    #expect(try WeChatProcessSelector.reselect(candidates: [sibling], following: followed) == nil)
-    // Two new processes of the same app are ambiguous.
-    let another = Self.candidate(71, app: Self.standardApp, bundle: Self.standard)
-    #expect(
-      throws: ProcessSelectionError.multipleProcessesForTarget(
-        bundleIdentifier: Self.standard, count: 2)
-    ) {
-      try WeChatProcessSelector.reselect(
-        candidates: [sibling, replacement, another], following: selected)
-    }
+  }
+
+  @Test func siblingStartedAfterSelectionIsNotTheReplacement() throws {
+    var selected = try #require(
+      try WeChatProcessSelector.select(
+        candidates: [Self.standardProcess],
+        userID: Self.user,
+        owner: .application(bundleIdentifier: Self.standard)
+      ))
+    // A second instance of the same app starts after selection, while the
+    // selected process still runs; it is not recorded as a sibling.
+    let lateSibling = Self.candidate(
+      80, app: Self.standardApp, bundle: Self.standard, start: 3_000)
+    #expect(try Self.reselect([Self.standardProcess, lateSibling], &selected, now: 3_500) == 42)
+    // The selected process exits at logout; the late sibling survives and is
+    // not attached, because it started before the exit was observed.
+    #expect(try Self.reselect([lateSibling], &selected) == nil)
+    #expect(try Self.reselect([lateSibling], &selected, now: 9_000) == nil)
+    // A process that starts after the exit is still followed.
+    let replacement = Self.candidate(
+      81, app: Self.standardApp, bundle: Self.standard, start: 6_000)
+    #expect(try Self.reselect([lateSibling, replacement], &selected, now: 9_000) == 81)
+  }
+
+  @Test func reusedPIDsAndUnknownStartTimesAreNotTheSelectedProcess() throws {
+    var selected = try #require(
+      try WeChatProcessSelector.select(
+        candidates: [Self.standardProcess],
+        userID: Self.user,
+        owner: .application(bundleIdentifier: Self.standard)
+      ))
+    // Same PID, different start time: another process now has that PID.
+    let reusedEarly = Self.candidate(42, app: Self.standardApp, bundle: Self.standard, start: 4_000)
+    #expect(try Self.reselect([reusedEarly], &selected) == nil)
+    // A replacement whose start time can't be read never qualifies.
+    let unknownStart = Self.candidate(43, app: Self.standardApp, bundle: Self.standard, start: nil)
+    #expect(try Self.reselect([unknownStart], &selected, now: 9_000) == nil)
+    // A reused PID that started after the exit is a genuine new process.
+    let reusedLate = Self.candidate(42, app: Self.standardApp, bundle: Self.standard, start: 6_000)
+    #expect(try Self.reselect([reusedLate], &selected, now: 9_000) == 42)
+    #expect(selected.startMicroseconds == 6_000)
+    // A PID that now runs another copy is never the selected process.
+    var other = try #require(
+      try WeChatProcessSelector.select(
+        candidates: [Self.standardProcess],
+        userID: Self.user,
+        owner: .application(bundleIdentifier: Self.standard)
+      ))
+    let otherCopy = Self.candidate(42, app: Self.duplicateApp, bundle: Self.duplicate, start: 1_000)
+    #expect(try Self.reselect([otherCopy], &other) == nil)
+  }
+
+  @Test func exitReportedByTheCaptureIsTrustedOverAStaleListing() throws {
+    var selected = try #require(
+      try WeChatProcessSelector.select(
+        candidates: [Self.standardProcess],
+        userID: Self.user,
+        owner: .application(bundleIdentifier: Self.standard)
+      ))
+    // lldb reported the exit; a process list taken a moment later can still
+    // show the old process. It is not attached again.
+    selected.exitObservedMicroseconds = Self.exitSeen
+    #expect(try Self.reselect([Self.standardProcess], &selected, now: 5_100) == nil)
   }
 
   // MARK: - Helpers
