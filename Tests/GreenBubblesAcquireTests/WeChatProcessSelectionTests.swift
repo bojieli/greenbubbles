@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 
@@ -271,11 +272,12 @@ struct WeChatProcessSelectionTests {
     let notWeChat = WeChatProcessCandidate(
       processID: 42, userID: Self.user,
       executablePath: "/Applications/Other.app/Contents/MacOS/Other",
-      applicationPath: "/Applications/Other.app", bundleIdentifier: "com.example.Other")
+      applicationPath: "/Applications/Other.app", bundleIdentifier: "com.example.Other",
+      startMicroseconds: 1_000)
     let helper = WeChatProcessCandidate(
       processID: 42, userID: Self.user,
       executablePath: "/usr/local/bin/WeChat", applicationPath: nil,
-      bundleIdentifier: nil)
+      bundleIdentifier: nil, startMicroseconds: 1_000)
     for candidate in [notWeChat, helper] {
       #expect(throws: ProcessSelectionError.processNotWeChat(42)) {
         try WeChatProcessSelector.validate(
@@ -794,5 +796,37 @@ struct WeChatProcessSelectionTests {
       try WeChatProcessSelector.reselect(
         listing: .success([replacement]), following: &selected, nowMicroseconds: 9_000)?.processID
         == 90)
+  }
+
+  @Test func processWithoutAStartTimeIsNeverSelectable() {
+    let noStart = Self.candidate(42, app: Self.standardApp, bundle: Self.standard, start: nil)
+    // Automatic selection rejects it explicitly (asks for --pid).
+    #expect(throws: ProcessSelectionError.unclassifiedProcesses(count: 1)) {
+      try WeChatProcessSelector.select(
+        candidates: [noStart],
+        userID: Self.user,
+        owner: .application(bundleIdentifier: Self.standard)
+      )
+    }
+    // An explicit --pid is rejected too.
+    #expect(throws: ProcessSelectionError.processIdentityUnavailable(42)) {
+      try WeChatProcessSelector.validate(
+        requestedProcessID: 42, candidate: noStart, userID: Self.user,
+        owner: .application(bundleIdentifier: Self.standard))
+    }
+  }
+
+  @Test func infoPlistFIFOIsRejectedWithoutBlocking() throws {
+    let fileManager = FileManager.default
+    let base = fileManager.temporaryDirectory.appending(
+      path: "greenbubbles-process-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+    defer { try? fileManager.removeItem(at: base) }
+    let contents = base.appending(path: "Fifo.app/Contents", directoryHint: .isDirectory)
+    try fileManager.createDirectory(at: contents, withIntermediateDirectories: true)
+    #expect(mkfifo(contents.appending(path: "Info.plist").path, 0o600) == 0)
+    // No writer ever opens this FIFO; a blocking open would hang here.
+    #expect(
+      WeChatProcessLocator.readInfoPlist(applicationPath: contents.deletingLastPathComponent().path)
+        == nil)
   }
 }

@@ -39,9 +39,9 @@ public struct WeChatProcessCandidate: Equatable, Sendable {
 /// that reuses the PID is a different identity.
 public struct ProcessIdentity: Hashable, Sendable {
   public let processID: pid_t
-  public let startMicroseconds: UInt64?
+  public let startMicroseconds: UInt64
 
-  public init(processID: pid_t, startMicroseconds: UInt64?) {
+  public init(processID: pid_t, startMicroseconds: UInt64) {
     self.processID = processID
     self.startMicroseconds = startMicroseconds
   }
@@ -54,8 +54,9 @@ public struct WeChatProcessTarget: Equatable, Sendable {
   public let userID: uid_t
   public let applicationPath: String
   public let bundleIdentifier: String
-  /// Start time of the selected process, when it could be read.
-  public let startMicroseconds: UInt64?
+  /// Start time of the selected process; a process is only selectable when
+  /// it can be read.
+  public let startMicroseconds: UInt64
   /// Other processes of the same app that were already running when this
   /// one was selected (PID and start time). They are never taken as its
   /// replacement; a later process that reuses one of those PIDs is not
@@ -70,7 +71,7 @@ public struct WeChatProcessTarget: Equatable, Sendable {
     userID: uid_t,
     applicationPath: String,
     bundleIdentifier: String,
-    startMicroseconds: UInt64? = nil,
+    startMicroseconds: UInt64,
     excludedProcesses: Set<ProcessIdentity> = [],
     exitObservedMicroseconds: UInt64? = nil
   ) {
@@ -105,13 +106,9 @@ public struct WeChatProcessTarget: Equatable, Sendable {
       && bundleIdentifier == other.bundleIdentifier
   }
 
-  /// Same PID and, when both are known, the same start time.
+  /// Same PID and the same start time.
   func isSameProcess(as other: WeChatProcessTarget) -> Bool {
-    guard processID == other.processID else { return false }
-    guard let start = startMicroseconds, let otherStart = other.startMicroseconds else {
-      return startMicroseconds == nil && other.startMicroseconds == nil
-    }
-    return start == otherStart
+    processID == other.processID && startMicroseconds == other.startMicroseconds
   }
 
   /// Microseconds since 1970 for `date`, the clock process start times use.
@@ -173,6 +170,7 @@ public enum ProcessSelectionError: Error, Equatable, CustomStringConvertible {
     processID: pid_t, processBundleIdentifier: String, ownerBundleIdentifier: String)
   case multipleProcessesForTarget(bundleIdentifier: String, count: Int)
   case unclassifiedProcesses(count: Int)
+  case processIdentityUnavailable(pid_t)
 
   public var description: String {
     switch self {
@@ -189,6 +187,8 @@ public enum ProcessSelectionError: Error, Equatable, CustomStringConvertible {
       return
         "The database root is not inside a WeChat app container, so the app that owns it is unknown "
         + "(\(count) WeChat \(count == 1 ? "process is" : "processes are") running)"
+    case .processIdentityUnavailable(let processID):
+      return "The user and start time of process \(processID) could not be read"
     case .processNotFound(let processID):
       return "Process \(processID) was not found"
     case .processOwnedByAnotherUser(let processID):
@@ -261,7 +261,10 @@ public enum WeChatProcessSelector {
     guard let candidate, candidate.processID == requestedProcessID else {
       throw ProcessSelectionError.processNotFound(requestedProcessID)
     }
-    guard candidate.userID == userID else {
+    guard let candidateUser = candidate.userID, candidate.startMicroseconds != nil else {
+      throw ProcessSelectionError.processIdentityUnavailable(requestedProcessID)
+    }
+    guard candidateUser == userID else {
       throw ProcessSelectionError.processOwnedByAnotherUser(requestedProcessID)
     }
     guard
@@ -329,8 +332,8 @@ public enum WeChatProcessSelector {
     if !unclassified.isEmpty { return nil }
     let exitObserved = selected.exitObservedMicroseconds ?? nowMicroseconds
     let replacements = matches.filter { match in
-      guard let start = match.startMicroseconds else { return false }
-      return start > exitObserved && !selected.excludedProcesses.contains(match.identity)
+      match.startMicroseconds > exitObserved
+        && !selected.excludedProcesses.contains(match.identity)
     }
     guard replacements.count <= 1 else {
       throw ProcessSelectionError.multipleProcessesForTarget(
@@ -376,10 +379,10 @@ public enum WeChatProcessSelector {
     lhs.caseInsensitiveCompare(rhs) == .orderedSame
   }
 
-  /// User, app bundle and bundle ID are all known.
+  /// User, start time, app bundle and bundle ID are all known.
   private static func isClassified(_ candidate: WeChatProcessCandidate, userID: uid_t) -> Bool {
-    candidate.userID == userID && candidate.applicationPath != nil
-      && candidate.bundleIdentifier?.isEmpty == false
+    candidate.userID == userID && candidate.startMicroseconds != nil
+      && candidate.applicationPath != nil && candidate.bundleIdentifier?.isEmpty == false
   }
 
   /// The candidate has the selected PID and nothing read about it proves it
@@ -390,9 +393,7 @@ public enum WeChatProcessSelector {
   ) -> Bool {
     guard candidate.processID == selected.processID else { return false }
     if let user = candidate.userID, user != selected.userID { return false }
-    if let start = candidate.startMicroseconds, let selectedStart = selected.startMicroseconds,
-      start != selectedStart
-    {
+    if let start = candidate.startMicroseconds, start != selected.startMicroseconds {
       return false
     }
     if let path = candidate.applicationPath, path != selected.applicationPath { return false }
@@ -406,8 +407,10 @@ public enum WeChatProcessSelector {
     for candidate: WeChatProcessCandidate,
     userID: uid_t
   ) -> WeChatProcessTarget? {
+    // An incomplete candidate (no start time) is never a target.
     guard
       candidate.userID == userID,
+      let startMicroseconds = candidate.startMicroseconds,
       let applicationPath = candidate.applicationPath,
       let bundleIdentifier = candidate.bundleIdentifier,
       !bundleIdentifier.isEmpty
@@ -417,7 +420,7 @@ public enum WeChatProcessSelector {
       userID: userID,
       applicationPath: applicationPath,
       bundleIdentifier: bundleIdentifier,
-      startMicroseconds: candidate.startMicroseconds
+      startMicroseconds: startMicroseconds
     )
   }
 }

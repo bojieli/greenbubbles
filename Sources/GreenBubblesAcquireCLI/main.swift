@@ -467,7 +467,8 @@ private func selectProcess(
       hint = "choose the WeChat process that uses this data with --pid <n>; \(listProcessesHint)"
     case .processDoesNotOwnDatabaseRoot:
       hint = "choose the process of the WeChat copy that owns this data, or a matching --db-root"
-    case .processNotFound, .processOwnedByAnotherUser, .processNotWeChat:
+    case .processNotFound, .processOwnedByAnotherUser, .processNotWeChat,
+      .processIdentityUnavailable:
       hint = listProcessesHint
     }
     selection.failure = (error.description, hint)

@@ -201,14 +201,15 @@ public struct WeChatProcessLocator: Sendable {
   static let maximumInfoPlistBytes = 1 << 20
 
   /// Reads `<app>/Contents/Info.plist` without following a link at the final
-  /// component, and only when the opened file is a regular file that really
-  /// lies inside the resolved app's `Contents` folder.
+  /// component and without blocking on a FIFO or device, and only when the
+  /// opened file is a regular file that really lies inside the resolved
+  /// app's `Contents` folder.
   static func readInfoPlist(applicationPath: String) -> Data? {
     guard let resolvedApplication = realpath(applicationPath, nil) else { return nil }
     let applicationRoot = String(cString: resolvedApplication)
     free(resolvedApplication)
     let descriptor = open(
-      applicationRoot + "/Contents/Info.plist", O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+      applicationRoot + "/Contents/Info.plist", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
     guard descriptor >= 0 else { return nil }
     let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
     var metadata = stat()
