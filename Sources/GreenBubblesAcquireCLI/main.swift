@@ -394,21 +394,38 @@ private struct ProcessSelection {
   var failure: (label: String, hint: String?)?
 }
 
+private func processLocator() -> WeChatProcessLocator {
+  WeChatProcessLocator(userID: invokingUser.uid, readingAs: invokingUser)
+}
+
 /// Selects the WeChat process whose app owns the database root (or validates
 /// `--pid`). Without a database root it only reports whether one WeChat runs.
 private func selectProcess(
   processIDOption: pid_t?,
-  owner: DatabaseRootOwner?
+  owner: DatabaseRootOwner?,
+  ownerLookupError: String? = nil
 ) -> ProcessSelection {
   // The invoking user the privilege switch uses (SUDO_USER checked against
-  // SUDO_UID); only their WeChat processes count.
-  let locator = WeChatProcessLocator(userID: invokingUser.uid)
+  // SUDO_UID); only their WeChat processes count, and app metadata is read
+  // with their permissions.
+  let locator = processLocator()
   var selection = ProcessSelection()
+  if let ownerLookupError {
+    // Not knowing the owner is different from a root outside any container:
+    // block instead of skipping the ownership requirement.
+    selection.running = (try? locator.processIDs().isEmpty == false) ?? false
+    selection.failure = (
+      "could not determine which app owns the database root: \(ownerLookupError)", nil
+    )
+    return selection
+  }
   do {
     if let processIDOption {
       let target = try WeChatProcessSelector.validate(
         requestedProcessID: processIDOption,
-        candidate: WeChatProcessLocator.candidate(forProcessID: processIDOption),
+        candidate: WeChatProcessLocator.candidate(
+          forProcessID: processIDOption, expectedUserID: invokingUser.uid,
+          readingAs: invokingUser),
         userID: locator.userID,
         owner: owner ?? .unknown,
         runningCandidates: try locator.candidates()
@@ -423,9 +440,12 @@ private func selectProcess(
     } else if let processID = try locator.uniqueProcessID() {
       // No database root to match against; the database check blocks capture.
       selection.processID = processID
-      selection.applicationPath =
-        WeChatProcessLocator.candidate(forProcessID: processID)?
-        .applicationPath
+      if let candidate = WeChatProcessLocator.candidate(
+        forProcessID: processID, expectedUserID: invokingUser.uid, readingAs: invokingUser),
+        candidate.userID == invokingUser.uid
+      {
+        selection.applicationPath = candidate.applicationPath
+      }
       selection.running = true
     }
     if let target = selection.target {
@@ -501,12 +521,20 @@ private func runPreflight(
 
   // Choose the process first: version and signing are read from the app
   // bundle of the selected process, not from a default install location.
-  let databaseRootOwner = (try? resolvedRoot.get()).flatMap { root in
-    try? invokingUser.perform {
-      DatabaseRootOwner.resolve(databaseRoot: root, homeDirectory: homeDirectory)
+  var databaseRootOwner: DatabaseRootOwner?
+  var ownerLookupError: String?
+  if let root = try? resolvedRoot.get() {
+    do {
+      databaseRootOwner = try invokingUser.perform {
+        DatabaseRootOwner.resolve(databaseRoot: root, homeDirectory: homeDirectory)
+      }
+    } catch {
+      ownerLookupError = String(describing: error)
     }
   }
-  let selection = selectProcess(processIDOption: processIDOption, owner: databaseRootOwner)
+  let selection = selectProcess(
+    processIDOption: processIDOption, owner: databaseRootOwner,
+    ownerLookupError: ownerLookupError)
 
   // The capture mechanism breakpoints a system CommonCrypto symbol, so it is
   // build-agnostic: client version and signing state are reported for the
@@ -516,9 +544,18 @@ private func runPreflight(
   var clientMarketingVersion: String?
   var clientBuildVersion: String?
   let buildInspector = WeChatClientBuildInspector(homeDirectory: homeDirectory)
-  if let application = selection.applicationPath.map({ URL(fileURLWithPath: $0) })
-    ?? buildInspector.defaultApplicationURL()
-  {
+  if let selectedApplication = selection.applicationPath.map({ URL(fileURLWithPath: $0) }) {
+    // The selected process's app may sit in a folder the user controls, so
+    // inspect it with the invoking user's permissions.
+    clientInstalled = true
+    if let build = try? invokingUser.perform({
+      try buildInspector.inspect(application: selectedApplication)
+    }) {
+      clientMarketingVersion = build.marketingVersion
+      clientBuildVersion = build.buildVersion
+      clientReSigned = !build.hardenedRuntime
+    }
+  } else if let application = buildInspector.defaultApplicationURL() {
     clientInstalled = true
     if let build = try? buildInspector.inspect(application: application) {
       clientMarketingVersion = build.marketingVersion
@@ -702,6 +739,7 @@ do {
     )
     var capture = LLDBPassphraseCapture()
     capture.target = processTarget
+    capture.processLocator = processLocator()
     capture.verbose = arguments.verbose
     capture.outputHandler = { message in
       FileHandle.standardError.write(Data("note: \(message)\n".utf8))

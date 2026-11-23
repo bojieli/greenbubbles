@@ -702,4 +702,97 @@ struct WeChatProcessSelectionTests {
         applicationPath: app.deletingLastPathComponent().appending(path: "Missing.app").path,
         executableName: "WeChat") == nil)
   }
+
+  @Test func infoPlistIsReadOnlyFromInsideTheResolvedApp() throws {
+    let fileManager = FileManager.default
+    let base = fileManager.temporaryDirectory.appending(
+      path: "greenbubbles-process-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+    defer { try? fileManager.removeItem(at: base) }
+    let info: [String: String] = [
+      "CFBundleIdentifier": Self.duplicate, "CFBundleExecutable": "WeChat",
+    ]
+    let plist = try PropertyListSerialization.data(
+      fromPropertyList: info, format: .xml, options: 0)
+    let elsewhere = base.appending(path: "elsewhere", directoryHint: .isDirectory)
+    try fileManager.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+    try plist.write(to: elsewhere.appending(path: "Info.plist"))
+
+    // Info.plist itself is a symbolic link.
+    let linkedPlist = base.appending(path: "LinkedPlist.app/Contents", directoryHint: .isDirectory)
+    try fileManager.createDirectory(at: linkedPlist, withIntermediateDirectories: true)
+    try fileManager.createSymbolicLink(
+      at: linkedPlist.appending(path: "Info.plist"),
+      withDestinationURL: elsewhere.appending(path: "Info.plist"))
+    // Contents is a symbolic link out of the bundle.
+    let linkedContents = base.appending(path: "LinkedContents.app", directoryHint: .isDirectory)
+    try fileManager.createDirectory(at: linkedContents, withIntermediateDirectories: true)
+    try fileManager.createSymbolicLink(
+      at: linkedContents.appending(path: "Contents"), withDestinationURL: elsewhere)
+    for app in [linkedPlist.deletingLastPathComponent(), linkedContents] {
+      #expect(WeChatProcessLocator.readInfoPlist(applicationPath: app.path) == nil)
+      #expect(
+        WeChatProcessLocator.bundleIdentifier(applicationPath: app.path, executableName: "WeChat")
+          == nil)
+    }
+    // A real file inside the bundle is read.
+    let real = base.appending(path: "Real.app/Contents", directoryHint: .isDirectory)
+    try fileManager.createDirectory(at: real, withIntermediateDirectories: true)
+    try plist.write(to: real.appending(path: "Info.plist"))
+    #expect(
+      WeChatProcessLocator.readInfoPlist(applicationPath: real.deletingLastPathComponent().path)
+        == plist)
+  }
+
+  @Test func bundleIsNotReadForAnotherUsersProcess() throws {
+    // The test runner itself: its user and start time come from the kernel.
+    let own = try #require(
+      WeChatProcessLocator.candidate(forProcessID: getpid(), expectedUserID: getuid()))
+    #expect(own.userID == getuid())
+    #expect(own.startMicroseconds != nil)
+    let foreign = try #require(
+      WeChatProcessLocator.candidate(forProcessID: getpid(), expectedUserID: getuid() &+ 1))
+    #expect(foreign.bundleIdentifier == nil)
+  }
+
+  @Test func pgrepErrorsAreNotAnEmptyListing() throws {
+    #expect(
+      try WeChatProcessLocator.parsePgrep(status: 0, output: Data("42\n43\n".utf8)) == [42, 43])
+    #expect(try WeChatProcessLocator.parsePgrep(status: 1, output: Data()) == [])
+    for status: Int32 in [2, 3] {
+      #expect(throws: ProcessLocatorError.commandFailed("pgrep")) {
+        try WeChatProcessLocator.parsePgrep(status: status, output: Data())
+      }
+    }
+  }
+
+  @Test func failedListingSkipsThePollWithoutChangingExitState() throws {
+    let original = try #require(
+      try WeChatProcessSelector.select(
+        candidates: [Self.standardProcess],
+        userID: Self.user,
+        owner: .application(bundleIdentifier: Self.standard)
+      ))
+    var selected = original
+    let failed = Result<[WeChatProcessCandidate], Error> {
+      throw ProcessLocatorError.commandFailed("pgrep")
+    }
+    #expect(
+      try WeChatProcessSelector.reselect(
+        listing: failed, following: &selected, nowMicroseconds: Self.exitSeen) == nil)
+    #expect(selected == original)
+    // After an exit was recorded, a failed listing keeps it and picks nothing.
+    selected.exitObservedMicroseconds = Self.exitSeen
+    let recorded = selected
+    #expect(
+      try WeChatProcessSelector.reselect(
+        listing: failed, following: &selected, nowMicroseconds: 9_000)
+        == nil)
+    #expect(selected == recorded)
+    // A successful listing still works.
+    let replacement = Self.candidate(90, app: Self.standardApp, bundle: Self.standard, start: 6_000)
+    #expect(
+      try WeChatProcessSelector.reselect(
+        listing: .success([replacement]), following: &selected, nowMicroseconds: 9_000)?.processID
+        == 90)
+  }
 }

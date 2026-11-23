@@ -341,6 +341,19 @@ public enum WeChatProcessSelector {
     return selected
   }
 
+  /// `reselect` for one poll's process listing. When the listing itself
+  /// failed (for example pgrep exiting with an error), the poll is skipped:
+  /// nothing is attached and the exit state is left unchanged.
+  public static func reselect(
+    listing: Result<[WeChatProcessCandidate], Error>,
+    following selected: inout WeChatProcessTarget,
+    nowMicroseconds: UInt64
+  ) throws -> WeChatProcessTarget? {
+    guard case .success(let candidates) = listing else { return nil }
+    return try reselect(
+      candidates: candidates, following: &selected, nowMicroseconds: nowMicroseconds)
+  }
+
   /// The `.app` bundle that contains a main executable at
   /// `<name>.app/Contents/MacOS/<executable>`. Helper executables nested
   /// deeper are not main executables and return nil.

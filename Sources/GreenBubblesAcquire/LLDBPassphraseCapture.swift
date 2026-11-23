@@ -94,6 +94,10 @@ public struct LLDBPassphraseCapture: Sendable {
   /// another copy. When nil, the single running WeChat process is used.
   public var target: WeChatProcessTarget?
 
+  /// Lists processes while following `target`; by default, that target's
+  /// user's processes with metadata read by the current process.
+  public var processLocator: WeChatProcessLocator?
+
   private func emit(_ message: String) {
     outputHandler?(message)
   }
@@ -105,8 +109,9 @@ public struct LLDBPassphraseCapture: Sendable {
     -> pid_t?
   {
     guard var current = followed else { return try WeChatProcessLocator().uniqueProcessID() }
+    let locator = processLocator ?? WeChatProcessLocator(userID: current.userID)
     let next = try WeChatProcessSelector.reselect(
-      candidates: WeChatProcessLocator(userID: current.userID).candidates(),
+      listing: Result { try locator.candidates() },
       following: &current,
       nowMicroseconds: WeChatProcessTarget.microseconds(Date())
     )
