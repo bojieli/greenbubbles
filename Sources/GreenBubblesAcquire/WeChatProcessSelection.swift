@@ -233,7 +233,7 @@ public enum WeChatProcessSelector {
       throw ProcessSelectionError.unclassifiedProcesses(count: unclassified.count)
     }
     let matches = own.compactMap { target(for: $0, userID: userID) }
-      .filter { $0.bundleIdentifier == ownerBundle }
+      .filter { sameBundleIdentifier($0.bundleIdentifier, ownerBundle) }
     guard matches.count <= 1 else {
       throw ProcessSelectionError.multipleProcessesForDatabaseRoot(
         bundleIdentifier: ownerBundle, count: matches.count)
@@ -269,7 +269,9 @@ public enum WeChatProcessSelector {
       (executablePath as NSString).lastPathComponent == WeChatProcessLocator.executableName,
       let target = target(for: candidate, userID: userID)
     else { throw ProcessSelectionError.processNotWeChat(requestedProcessID) }
-    if case .application(let ownerBundle) = owner, target.bundleIdentifier != ownerBundle {
+    if case .application(let ownerBundle) = owner,
+      !sameBundleIdentifier(target.bundleIdentifier, ownerBundle)
+    {
       throw ProcessSelectionError.processDoesNotOwnDatabaseRoot(
         processID: requestedProcessID,
         processBundleIdentifier: target.bundleIdentifier,
@@ -353,6 +355,12 @@ public enum WeChatProcessSelector {
       components[count - 4].count > ".app".count
     else { return nil }
     return NSString.path(withComponents: Array(components.prefix(count - 3)))
+  }
+
+  /// Bundle IDs are case-insensitive, and a container's name may differ in
+  /// case from the app's `CFBundleIdentifier`.
+  static func sameBundleIdentifier(_ lhs: String, _ rhs: String) -> Bool {
+    lhs.caseInsensitiveCompare(rhs) == .orderedSame
   }
 
   /// User, app bundle and bundle ID are all known.

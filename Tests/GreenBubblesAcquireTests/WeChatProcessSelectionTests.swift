@@ -546,6 +546,99 @@ struct WeChatProcessSelectionTests {
     #expect(selected.exitObservedMicroseconds == 9_500)
   }
 
+  // MARK: - Listed PIDs that can't be described
+
+  /// A locator stub: PID 44 is listed by pgrep, but neither proc_pidinfo nor
+  /// proc_pidpath returns anything for it, and it is not confirmed gone.
+  static func stubCandidates(_ listed: [pid_t], gone: Set<pid_t> = []) -> [WeChatProcessCandidate] {
+    WeChatProcessLocator.candidates(
+      processIDs: listed,
+      describe: { processID in
+        [Self.standardProcess, Self.duplicateProcess].first { $0.processID == processID }
+      },
+      isGone: { gone.contains($0) }
+    )
+  }
+
+  @Test func unreadableListedPIDStaysAnUnclassifiedCandidate() {
+    let candidates = Self.stubCandidates([42, 44])
+    #expect(candidates.map(\.processID) == [42, 44])
+    #expect(candidates.last?.userID == nil)
+    #expect(candidates.last?.bundleIdentifier == nil)
+    // Confirmed gone (ESRCH): dropped.
+    #expect(Self.stubCandidates([42, 44], gone: [44]).map(\.processID) == [42])
+  }
+
+  @Test func unreadableListedPIDBlocksSelectionAndReattach() throws {
+    // Preflight: require --pid.
+    #expect(throws: ProcessSelectionError.unclassifiedProcesses(count: 1)) {
+      try WeChatProcessSelector.select(
+        candidates: Self.stubCandidates([42, 44]),
+        userID: Self.user,
+        owner: .application(bundleIdentifier: Self.standard)
+      )
+    }
+    var selected = try #require(
+      try WeChatProcessSelector.select(
+        candidates: Self.stubCandidates([42]),
+        userID: Self.user,
+        owner: .application(bundleIdentifier: Self.standard)
+      ))
+    // Selected PID listed but unreadable: skip the poll, no exit recorded.
+    let unreadableSelected = WeChatProcessLocator.candidates(
+      processIDs: [42], describe: { _ in nil }, isGone: { _ in false })
+    #expect(try Self.reselect(unreadableSelected, &selected) == nil)
+    #expect(selected.exitObservedMicroseconds == nil)
+    // Selected gone; a replacement and an unreadable PID: keep waiting.
+    #expect(try Self.reselect([], &selected) == nil)
+    let replacement = Self.candidate(90, app: Self.standardApp, bundle: Self.standard, start: 6_000)
+    let withUnreadable =
+      [replacement]
+      + WeChatProcessLocator.candidates(
+        processIDs: [44], describe: { _ in nil }, isGone: { _ in false })
+    #expect(try Self.reselect(withUnreadable, &selected, now: 7_000) == nil)
+    #expect(try Self.reselect([replacement], &selected, now: 8_000) == 90)
+  }
+
+  // MARK: - Bundle ID case
+
+  @Test func bundleIdentifiersMatchCaseInsensitively() throws {
+    let lowerOwner = DatabaseRootOwner.application(bundleIdentifier: Self.standard.lowercased())
+    let target = try WeChatProcessSelector.select(
+      candidates: [Self.standardProcess, Self.duplicateProcess],
+      userID: Self.user,
+      owner: lowerOwner
+    )
+    #expect(target?.processID == 42)
+    let explicit = try WeChatProcessSelector.validate(
+      requestedProcessID: 42,
+      candidate: Self.standardProcess,
+      userID: Self.user,
+      owner: lowerOwner
+    )
+    #expect(explicit.processID == 42)
+    // Another copy still doesn't match, in any case.
+    #expect(
+      throws: ProcessSelectionError.processDoesNotOwnDatabaseRoot(
+        processID: 43, processBundleIdentifier: Self.duplicate,
+        ownerBundleIdentifier: Self.standard.lowercased())
+    ) {
+      try WeChatProcessSelector.validate(
+        requestedProcessID: 43, candidate: Self.duplicateProcess, userID: Self.user,
+        owner: lowerOwner)
+    }
+    // Two processes whose bundle IDs differ only in case are still ambiguous.
+    let upper = Self.candidate(
+      45, app: "/Users/synthetic-owner/Applications/WeChat.app", bundle: Self.standard.uppercased())
+    #expect(
+      throws: ProcessSelectionError.multipleProcessesForDatabaseRoot(
+        bundleIdentifier: Self.standard.lowercased(), count: 2)
+    ) {
+      try WeChatProcessSelector.select(
+        candidates: [Self.standardProcess, upper], userID: Self.user, owner: lowerOwner)
+    }
+  }
+
   // MARK: - Helpers
 
   @Test func findsTheAppBundleOfAMainExecutableOnly() {

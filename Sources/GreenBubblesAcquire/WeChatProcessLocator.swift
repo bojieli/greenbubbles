@@ -54,7 +54,37 @@ public struct WeChatProcessLocator: Sendable {
 
   /// The user's WeChat processes, each described by its app bundle.
   public func candidates() throws -> [WeChatProcessCandidate] {
-    try processIDs().compactMap(Self.candidate(forProcessID:))
+    Self.candidates(
+      processIDs: try processIDs(),
+      describe: Self.candidate(forProcessID:),
+      isGone: Self.processIsGone
+    )
+  }
+
+  /// Every listed PID stays a candidate. One that can't be described is kept
+  /// with no details (unclassified), so selection treats it as unresolved,
+  /// unless the process is confirmed gone.
+  static func candidates(
+    processIDs: [pid_t],
+    describe: (pid_t) -> WeChatProcessCandidate?,
+    isGone: (pid_t) -> Bool
+  ) -> [WeChatProcessCandidate] {
+    processIDs.compactMap { processID in
+      if let candidate = describe(processID) { return candidate }
+      if isGone(processID) { return nil }
+      return WeChatProcessCandidate(
+        processID: processID,
+        userID: nil,
+        executablePath: nil,
+        applicationPath: nil,
+        bundleIdentifier: nil
+      )
+    }
+  }
+
+  /// True only when the kernel reports that no such process exists.
+  static func processIsGone(_ processID: pid_t) -> Bool {
+    kill(processID, 0) != 0 && errno == ESRCH
   }
 
   public func processIDs() throws -> [pid_t] {
