@@ -35,6 +35,18 @@ public struct WeChatProcessCandidate: Equatable, Sendable {
   }
 }
 
+/// One process: its PID together with its start time, so a later process
+/// that reuses the PID is a different identity.
+public struct ProcessIdentity: Hashable, Sendable {
+  public let processID: pid_t
+  public let startMicroseconds: UInt64?
+
+  public init(processID: pid_t, startMicroseconds: UInt64?) {
+    self.processID = processID
+    self.startMicroseconds = startMicroseconds
+  }
+}
+
 /// The WeChat process chosen for a capture. The capture follows this app
 /// bundle (path and bundle ID) when WeChat restarts during logout and login.
 public struct WeChatProcessTarget: Equatable, Sendable {
@@ -45,8 +57,10 @@ public struct WeChatProcessTarget: Equatable, Sendable {
   /// Start time of the selected process, when it could be read.
   public let startMicroseconds: UInt64?
   /// Other processes of the same app that were already running when this
-  /// one was selected. They are never taken as its replacement.
-  public let excludedProcessIDs: Set<pid_t>
+  /// one was selected (PID and start time). They are never taken as its
+  /// replacement; a later process that reuses one of those PIDs is not
+  /// excluded.
+  public let excludedProcesses: Set<ProcessIdentity>
   /// When the capture first saw this process gone (microseconds since 1970).
   /// A replacement must have started after this moment.
   public var exitObservedMicroseconds: UInt64?
@@ -57,7 +71,7 @@ public struct WeChatProcessTarget: Equatable, Sendable {
     applicationPath: String,
     bundleIdentifier: String,
     startMicroseconds: UInt64? = nil,
-    excludedProcessIDs: Set<pid_t> = [],
+    excludedProcesses: Set<ProcessIdentity> = [],
     exitObservedMicroseconds: UInt64? = nil
   ) {
     self.processID = processID
@@ -65,7 +79,9 @@ public struct WeChatProcessTarget: Equatable, Sendable {
     self.applicationPath = applicationPath
     self.bundleIdentifier = bundleIdentifier
     self.startMicroseconds = startMicroseconds
-    self.excludedProcessIDs = excludedProcessIDs.subtracting([processID])
+    self.excludedProcesses = excludedProcesses.subtracting([
+      ProcessIdentity(processID: processID, startMicroseconds: startMicroseconds)
+    ])
     self.exitObservedMicroseconds = exitObservedMicroseconds
   }
 
@@ -76,8 +92,12 @@ public struct WeChatProcessTarget: Equatable, Sendable {
       applicationPath: applicationPath,
       bundleIdentifier: bundleIdentifier,
       startMicroseconds: replacement.startMicroseconds,
-      excludedProcessIDs: excludedProcessIDs
+      excludedProcesses: excludedProcesses
     )
+  }
+
+  var identity: ProcessIdentity {
+    ProcessIdentity(processID: processID, startMicroseconds: startMicroseconds)
   }
 
   func runsSameApp(as other: WeChatProcessTarget) -> Bool {
@@ -246,14 +266,14 @@ public enum WeChatProcessSelector {
     }
     let siblings = runningCandidates.compactMap { Self.target(for: $0, userID: userID) }
       .filter { $0.runsSameApp(as: target) }
-      .map(\.processID)
+      .map(\.identity)
     return WeChatProcessTarget(
       processID: target.processID,
       userID: userID,
       applicationPath: target.applicationPath,
       bundleIdentifier: target.bundleIdentifier,
       startMicroseconds: target.startMicroseconds,
-      excludedProcessIDs: Set(siblings)
+      excludedProcesses: Set(siblings)
     )
   }
 
@@ -276,10 +296,20 @@ public enum WeChatProcessSelector {
   ) throws -> WeChatProcessTarget? {
     let matches = candidates.compactMap { target(for: $0, userID: selected.userID) }
       .filter { $0.runsSameApp(as: selected) }
-    if selected.exitObservedMicroseconds == nil,
-      matches.contains(where: { $0.isSameProcess(as: selected) })
-    {
-      return selected
+    if selected.exitObservedMicroseconds == nil {
+      if matches.contains(where: { $0.isSameProcess(as: selected) }) {
+        return selected
+      }
+      // The selected process (same PID and start time) is still listed but
+      // its app metadata could not be read this time: don't attach now, and
+      // don't take this as evidence that it exited.
+      let stillListed = candidates.contains { candidate in
+        candidate.processID == selected.processID
+          && candidate.userID == selected.userID
+          && candidate.startMicroseconds == selected.startMicroseconds
+          && (candidate.applicationPath == nil || candidate.bundleIdentifier == nil)
+      }
+      if stillListed { return nil }
     }
     if selected.exitObservedMicroseconds == nil {
       selected.exitObservedMicroseconds = nowMicroseconds
@@ -287,7 +317,7 @@ public enum WeChatProcessSelector {
     let exitObserved = selected.exitObservedMicroseconds ?? nowMicroseconds
     let replacements = matches.filter { match in
       guard let start = match.startMicroseconds else { return false }
-      return start > exitObserved && !selected.excludedProcessIDs.contains(match.processID)
+      return start > exitObserved && !selected.excludedProcesses.contains(match.identity)
     }
     guard replacements.count <= 1 else {
       throw ProcessSelectionError.multipleProcessesForTarget(

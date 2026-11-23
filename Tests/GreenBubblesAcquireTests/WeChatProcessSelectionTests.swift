@@ -340,7 +340,8 @@ struct WeChatProcessSelectionTests {
       owner: .application(bundleIdentifier: Self.standard),
       runningCandidates: [first, second, Self.duplicateProcess]
     )
-    #expect(original.excludedProcessIDs == [60])
+    #expect(
+      original.excludedProcesses == [ProcessIdentity(processID: 60, startMicroseconds: 1_000)])
     // The first attach keeps the chosen PID in either listing order.
     for candidates in [[first, second], [second, first]] {
       var selected = original
@@ -366,7 +367,8 @@ struct WeChatProcessSelectionTests {
     for candidates in [[sibling, replacement], [replacement, sibling]] {
       var following = selected
       #expect(try Self.reselect(candidates, &following, now: 7_000) == 70)
-      #expect(following.excludedProcessIDs == [60])
+      #expect(
+        following.excludedProcesses == [ProcessIdentity(processID: 60, startMicroseconds: 1_000)])
     }
   }
 
@@ -431,6 +433,55 @@ struct WeChatProcessSelectionTests {
     // show the old process. It is not attached again.
     selected.exitObservedMicroseconds = Self.exitSeen
     #expect(try Self.reselect([Self.standardProcess], &selected, now: 5_100) == nil)
+  }
+
+  @Test func replacementStartedDuringCleanupIsAccepted() throws {
+    var selected = try #require(
+      try WeChatProcessSelector.select(
+        candidates: [Self.standardProcess],
+        userID: Self.user,
+        owner: .application(bundleIdentifier: Self.standard)
+      ))
+    // The capture recorded the exit when it read lldb's report (5_000); lldb
+    // cleanup then took a while, and WeChat restarted meanwhile (5_500).
+    selected.exitObservedMicroseconds = Self.exitSeen
+    let replacement = Self.candidate(
+      90, app: Self.standardApp, bundle: Self.standard, start: 5_500)
+    #expect(try Self.reselect([replacement], &selected, now: 8_000) == 90)
+  }
+
+  @Test func unreadableMetadataOfTheSelectedProcessIsNotAnExit() throws {
+    let original = try #require(
+      try WeChatProcessSelector.select(
+        candidates: [Self.standardProcess],
+        userID: Self.user,
+        owner: .application(bundleIdentifier: Self.standard)
+      ))
+    var selected = original
+    // Same PID and start time, but its Info.plist could not be read.
+    let unreadable = Self.candidate(42, app: Self.standardApp, bundle: nil)
+    #expect(try Self.reselect([unreadable], &selected) == nil)
+    #expect(selected.exitObservedMicroseconds == nil)
+    // Once the metadata is readable again, the same process is attached.
+    #expect(try Self.reselect([Self.standardProcess], &selected, now: 9_000) == 42)
+    #expect(selected == original)
+  }
+
+  @Test func reusedPIDOfAnExcludedSiblingCanBeTheReplacement() throws {
+    let sibling = Self.candidate(60, app: Self.standardApp, bundle: Self.standard)
+    let chosen = Self.candidate(61, app: Self.standardApp, bundle: Self.standard)
+    var selected = try WeChatProcessSelector.validate(
+      requestedProcessID: 61,
+      candidate: chosen,
+      userID: Self.user,
+      owner: .application(bundleIdentifier: Self.standard),
+      runningCandidates: [sibling, chosen]
+    )
+    // The sibling and the chosen process are gone; a new process that got
+    // the sibling's PID starts after the exit.
+    #expect(try Self.reselect([], &selected) == nil)
+    let reused = Self.candidate(60, app: Self.standardApp, bundle: Self.standard, start: 6_000)
+    #expect(try Self.reselect([reused], &selected, now: 7_000) == 60)
   }
 
   // MARK: - Helpers

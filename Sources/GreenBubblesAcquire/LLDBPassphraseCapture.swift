@@ -136,6 +136,7 @@ public struct LLDBPassphraseCapture: Sendable {
     let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
     var followed = target
     var rejectedCandidateCount = 0
+    var exitObservedAt: UInt64?
     while true {
       guard let processID = try currentTargetProcessID(following: &followed) else {
         if Date() < deadline {
@@ -152,12 +153,17 @@ public struct LLDBPassphraseCapture: Sendable {
           architecture: architecture,
           deadline: deadline,
           accept: accept,
-          rejectedCandidateCount: &rejectedCandidateCount
+          rejectedCandidateCount: &rejectedCandidateCount,
+          exitObservedAt: &exitObservedAt
         )
       } catch CaptureError.targetExited {
+        // The time lldb's exit report was read, not the time cleanup ended:
+        // a replacement may start while lldb is being shut down.
         if followed?.processID == processID, followed?.exitObservedMicroseconds == nil {
-          followed?.exitObservedMicroseconds = WeChatProcessTarget.microseconds(Date())
+          followed?.exitObservedMicroseconds =
+            exitObservedAt ?? WeChatProcessTarget.microseconds(Date())
         }
+        exitObservedAt = nil
         guard Date() < deadline else { throw deadlineError(rejectedCandidateCount) }
         emit("WeChat process \(processID) exited; waiting to re-attach to the new process")
         Thread.sleep(forTimeInterval: 1)
@@ -174,7 +180,8 @@ public struct LLDBPassphraseCapture: Sendable {
     architecture: LLDBTargetArchitecture,
     deadline: Date,
     accept: (PassphraseSecret) throws -> Bool,
-    rejectedCandidateCount: inout Int
+    rejectedCandidateCount: inout Int,
+    exitObservedAt: inout UInt64?
   ) throws -> PassphraseSecret {
     let script = LLDBCaptureScript.script(processID: processID, architecture: architecture)
 
@@ -269,6 +276,7 @@ public struct LLDBPassphraseCapture: Sendable {
         throw CaptureError.attachFailed(detail)
       }
       if drained.targetExited {
+        exitObservedAt = WeChatProcessTarget.microseconds(Date())
         throw CaptureError.targetExited
       }
       if !running {
