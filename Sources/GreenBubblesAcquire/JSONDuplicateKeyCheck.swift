@@ -25,6 +25,8 @@ enum JSONDuplicateKeyCheck {
     var scanner = Scanner(bytes: Array(data))
     do {
       try scanner.value(depth: 0)
+      // serde_json allows only whitespace after the top-level value.
+      try scanner.end()
       return nil
     } catch let failure as Failure {
       return failure
@@ -110,6 +112,11 @@ enum JSONDuplicateKeyCheck {
       UInt8(ascii: ","), UInt8(ascii: "}"), UInt8(ascii: "]"),
       UInt8(ascii: " "), UInt8(ascii: "\t"), UInt8(ascii: "\n"), UInt8(ascii: "\r"),
     ]
+
+    mutating func end() throws {
+      skipWhitespace()
+      guard index == bytes.count else { throw Failure.malformed }
+    }
 
     private func peek(_ byte: UInt8) -> Bool { index < bytes.count && bytes[index] == byte }
 

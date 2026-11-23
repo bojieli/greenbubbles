@@ -118,10 +118,16 @@ struct QueryProfileTargetTests {
     #expect(
       settingsRootOnly.originConflicting(withDatabaseRoot: other)
         == "from config.toml source.root")
-    #expect(settingsRootOnly.originConflicting(withDatabaseRoot: root) == nil)
+    // These made-up paths don't exist, so they are compared as spelled here;
+    // without that, an unresolvable root always counts as different.
+    let asSpelled: (URL) -> URL? = { $0.standardizedFileURL }
+    #expect(
+      settingsRootOnly.originConflicting(withDatabaseRoot: root, canonicalize: asSpelled) == nil)
     #expect(
       settingsRootOnly.originConflicting(
-        withDatabaseRoot: URL(fileURLWithPath: "/example/settings/./db_storage")) == nil)
+        withDatabaseRoot: URL(fileURLWithPath: "/example/settings/./db_storage"),
+        canonicalize: asSpelled) == nil)
+    #expect(settingsRootOnly.originConflicting(withDatabaseRoot: root) != nil)
     #expect(settingsRootOnly.originConflicting(withDatabaseRoot: nil) == nil)
     let profile = AcquireTarget(
       profileName: "main", sourceRoot: root,
@@ -267,6 +273,70 @@ struct QueryProfileTargetTests {
     let deep = String(repeating: "[", count: 200) + String(repeating: "]", count: 200)
     #expect(JSONDuplicateKeyCheck.problem(in: Data(deep.utf8)) == .malformed)
     #expect(JSONDuplicateKeyCheck.problem(in: Data("{\"a\u{01}\": 1}".utf8)) == .malformed)
+  }
+
+  @Test func parentComponentsAreRefusedInDatabaseRoots() throws {
+    #expect(QueryProfileTarget.hasParentComponent("/a/../b"))
+    #expect(QueryProfileTarget.hasParentComponent("/a/b/.."))
+    #expect(!QueryProfileTarget.hasParentComponent("/a/..b/c."))
+    let json =
+      #"{"schema": "greenbubbles.query-profiles.v1", "formatVersion": 1, "profiles": {"a": {"sourceRoot": "/x/link/../db_storage", "access": {"mode": "liveWeChatKeyFile", "credentialFile": "/k/key"}}}}"#
+    #expect(throws: QueryProfileError.self) {
+      try QueryProfileTarget.ProfileStore.parse(Data(json.utf8))
+    }
+    #expect(throws: QueryProfileError.self) {
+      try QueryProfileTarget.Settings.parse(Data("[source]\nroot = \"/x/link/../db\"\n".utf8))
+    }
+  }
+
+  @Test func conflictCheckComparesRootsThroughTheFilesystem() throws {
+    // accounts/A/db_storage is the configured account. "link" points into
+    // A, so "link/../db_storage" is A's root to the kernel, while a lexical
+    // comparison would see the decoy "db_storage" next to the link.
+    let home = try TemporaryHome()
+    let base = home.directory
+    let accountA = base.appending(path: "accounts/A/db_storage")
+    let inner = base.appending(path: "accounts/A/inner")
+    let decoy = base.appending(path: "db_storage")
+    for folder in [accountA, inner, decoy] {
+      try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    }
+    let link = base.appending(path: "link")
+    #expect(symlink(inner.path, link.path) == 0)
+    let alias = base.appending(path: "alias")
+    #expect(symlink(accountA.path, alias.path) == 0)
+
+    let target = AcquireTarget(
+      profileName: "a", sourceRoot: accountA,
+      credentialFile: URL(fileURLWithPath: "/example/keys/a"),
+      sourceRootOrigin: "from query profile a")
+    let throughLink = URL(fileURLWithPath: link.path + "/../db_storage")
+    #expect(target.originConflicting(withDatabaseRoot: throughLink) == nil)
+    #expect(target.originConflicting(withDatabaseRoot: alias) == nil)
+    #expect(target.originConflicting(withDatabaseRoot: decoy) == "from query profile a")
+    // A root that can't be resolved is treated as a different account.
+    #expect(
+      target.originConflicting(withDatabaseRoot: base.appending(path: "missing")) != nil)
+    #expect(
+      QueryProfileTarget.canonicalPath(throughLink)?.path
+        == QueryProfileTarget.canonicalPath(accountA)?.path)
+  }
+
+  @Test func jsonMustBeASingleUTF8Value() throws {
+    let json =
+      #"{"schema": "greenbubbles.query-profiles.v1", "formatVersion": 1, "profiles": {"a": {"sourceRoot": "/s", "access": {"mode": "decrypted"}}}}"#
+    let utf16BigEndian = json.data(using: .utf16BigEndian)!
+    #expect(!utf16BigEndian.starts(with: [0xFE, 0xFF]))  // BOM-less fixture
+    #expect(throws: QueryProfileError.self) {
+      try QueryProfileTarget.ProfileStore.parse(utf16BigEndian)
+    }
+    let utf16LittleEndian = json.data(using: .utf16LittleEndian)!
+    #expect(throws: QueryProfileError.self) {
+      try QueryProfileTarget.ProfileStore.parse(utf16LittleEndian)
+    }
+    #expect(JSONDuplicateKeyCheck.problem(in: Data((json + " \n").utf8)) == nil)
+    #expect(JSONDuplicateKeyCheck.problem(in: Data((json + " {}").utf8)) == .malformed)
+    #expect(JSONDuplicateKeyCheck.problem(in: Data((json + "x").utf8)) == .malformed)
   }
 
   @Test func duplicateFieldsAreRefusedLikeRust() throws {

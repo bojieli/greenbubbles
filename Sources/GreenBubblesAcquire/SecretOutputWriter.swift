@@ -91,17 +91,34 @@ public struct SecretOutputWriter: Sendable {
     guard path.hasPrefix("/") else { throw SecretOutputError.relativePath }
     let parentPath = (path as NSString).deletingLastPathComponent
     try Self.createMissingFolders(parentPath)
+    // Open the folder itself without following a link, check it through the
+    // descriptor, and create the file relative to it, so the folder checked
+    // is the folder written to.
+    let folder = Darwin.open(parentPath, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+    guard folder >= 0 else {
+      let code = errno
+      var link = stat()
+      if code == ELOOP || (Darwin.lstat(parentPath, &link) == 0 && link.st_mode & S_IFMT == S_IFLNK)
+      {
+        throw SecretOutputError.symbolicLinkParent
+      }
+      throw SecretOutputError.posix(operation: "open passphrase folder", code: code)
+    }
+    defer { Darwin.close(folder) }
     var parent = stat()
-    guard Darwin.lstat(parentPath, &parent) == 0 else {
+    guard Darwin.fstat(folder, &parent) == 0 else {
       throw SecretOutputError.posix(operation: "inspect passphrase folder", code: errno)
     }
-    guard parent.st_mode & S_IFMT != S_IFLNK else { throw SecretOutputError.symbolicLinkParent }
+    let name = (path as NSString).lastPathComponent
+    guard !name.isEmpty, name != "/", !name.contains("/") else {
+      throw SecretOutputError.dotComponents
+    }
 
     var flags = O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK
     if !overwrite {
       flags |= O_EXCL
     }
-    let descriptor = Darwin.open(path, flags, 0o600)
+    let descriptor = Darwin.openat(folder, name, flags, 0o600)
     guard descriptor >= 0 else {
       if errno == EEXIST, !overwrite { throw SecretOutputError.outputExists }
       throw SecretOutputError.posix(operation: "open passphrase output", code: errno)

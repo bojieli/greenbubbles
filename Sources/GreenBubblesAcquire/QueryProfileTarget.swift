@@ -69,12 +69,22 @@ public struct AcquireTarget: Equatable, Sendable {
   /// `databaseRoot` differs from it — or may differ, when a key file is
   /// configured but its root is auto-discovered — else nil. The caller then
   /// requires an explicit `--output` (fail closed).
-  public func originConflicting(withDatabaseRoot databaseRoot: URL?) -> String? {
+  ///
+  /// Roots are compared after `canonicalize` (realpath, run as the invoking
+  /// user), so symbolic links can't make two spellings name different
+  /// accounts; a root that can't be resolved counts as different.
+  public func originConflicting(
+    withDatabaseRoot databaseRoot: URL?,
+    canonicalize: (URL) -> URL? = QueryProfileTarget.canonicalPath
+  ) -> String? {
     guard let databaseRoot else { return nil }
     guard let sourceRoot else {
       return credentialFile == nil ? nil : "auto-discovered for the configured key file"
     }
-    guard databaseRoot.standardizedFileURL.path != sourceRoot.standardizedFileURL.path else {
+    if let resolvedOverride = canonicalize(databaseRoot),
+      let resolvedSource = canonicalize(sourceRoot),
+      resolvedOverride.path == resolvedSource.path
+    {
       return nil
     }
     return sourceRootOrigin ?? "configured"
@@ -246,6 +256,23 @@ public enum QueryProfileTarget {
     return depth > 0
   }
 
+  /// The path with every symbolic link, `.`, and `..` resolved by the
+  /// filesystem (realpath), or nil when it doesn't exist or can't be read.
+  /// Call inside `InvokingUser.perform(_:)` so it resolves with the user's
+  /// rights.
+  public static func canonicalPath(_ url: URL) -> URL? {
+    guard let resolved = realpath(url.path, nil) else { return nil }
+    defer { free(resolved) }
+    return URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
+  }
+
+  /// A database root may not contain `..`: Rust resolves it through the
+  /// filesystem while URL standardisation would drop it lexically, and the
+  /// two can name different accounts behind a symbolic link.
+  public static func hasParentComponent(_ path: String) -> Bool {
+    path.split(separator: "/").contains("..")
+  }
+
   static func validateProfileName(_ name: String) throws {
     let bytes = Array(name.utf8)
     let allowed = bytes.allSatisfy { byte in
@@ -279,8 +306,11 @@ public enum QueryProfileTarget {
     static func parse(_ data: Data) throws -> ProfileStore {
       // serde_json::from_slice reads UTF-8 only and rejects a byte-order
       // mark; JSONSerialization would accept both, so check first.
+      // A NUL byte is never valid JSON text; rejecting it also stops
+      // Foundation from detecting BOM-less UTF-16 or UTF-32.
       let bytes = [UInt8](data)
-      guard !bytes.starts(with: utf8ByteOrderMark), strictUTF8(bytes) != nil else {
+      guard !bytes.starts(with: utf8ByteOrderMark), !bytes.contains(0), strictUTF8(bytes) != nil
+      else {
         throw QueryProfileError.malformed("the file must be UTF-8 JSON without a byte-order mark")
       }
       let object: Any
@@ -345,9 +375,11 @@ public enum QueryProfileTarget {
       let fields = try table(value, "a profile")
       try onlyKeys(fields, ["sourceRoot", "access"], "a profile")
       guard let sourceRoot = fields["sourceRoot"] as? String,
-        QueryProfileTarget.isAbsoluteNonRoot(sourceRoot)
+        QueryProfileTarget.isAbsoluteNonRoot(sourceRoot),
+        !QueryProfileTarget.hasParentComponent(sourceRoot)
       else {
-        throw QueryProfileError.malformed("sourceRoot must be an absolute non-root path")
+        throw QueryProfileError.malformed(
+          "sourceRoot must be an absolute non-root path without '..' components")
       }
       guard fields["access"] != nil else { throw QueryProfileError.malformed("access is missing") }
       let access = try table(fields["access"]!, "access")
@@ -473,8 +505,11 @@ public enum QueryProfileTarget {
 
       var settings = Settings()
       if let root = values["source"]?["root"] {
-        guard QueryProfileTarget.isAbsoluteNonRoot(root) else {
-          throw QueryProfileError.invalidSettings("source.root must be an absolute non-root path")
+        guard QueryProfileTarget.isAbsoluteNonRoot(root),
+          !QueryProfileTarget.hasParentComponent(root)
+        else {
+          throw QueryProfileError.invalidSettings(
+            "source.root must be an absolute non-root path without '..' components")
         }
         settings.sourceRoot = root
       }

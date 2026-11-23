@@ -106,7 +106,12 @@ greenbubbles-acquire verify --passphrase-stdin [--profile <name>] [--db-root <pa
   different `--db-root` unless you also pass `--output`, so one account's key
   never replaces the key file another account's queries read (including the
   default file when `config.toml` sets only `source.root`). When `config.toml`
-  sets only `source.passphrase_file`, any `--db-root` needs `--output` too. Both files are read with the same rules as the
+  sets only `source.passphrase_file`, any `--db-root` needs `--output` too.
+  Roots are compared after resolving symbolic links, and a data folder path
+  (`--db-root`, `sourceRoot`, `source.root`) may not contain `..`.
+  `preflight` applies the same checks, so it reports ready only for a
+  target `capture` would accept, and its suggested command keeps
+  `--profile`, `--db-root`, `--output`, and any `--preserve-env` you need. Both files are read with the same rules as the
   `greenbubbles` CLI (owner-only file in an owner-only folder, no symbolic
   links, at most 64 KiB, `formatVersion` 1, no unknown fields).
   `GREENBUBBLES_QUERY_PROFILES_FILE` and `GREENBUBBLES_CONFIG_FILE` must be

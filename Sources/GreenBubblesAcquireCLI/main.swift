@@ -12,6 +12,7 @@ enum CLIError: Error, CustomStringConvertible {
   case invalidInteger(option: String, value: String)
   case verificationFailed(String)
   case rootConflictsWithTarget(String)
+  case parentComponentInRoot
 
   var description: String {
     switch self {
@@ -25,6 +26,8 @@ enum CLIError: Error, CustomStringConvertible {
       return "Expected a positive integer for \(option), got: \(value)"
     case .verificationFailed(let reason):
       return "Passphrase verification failed: \(reason)"
+    case .parentComponentInRoot:
+      return "--db-root must not contain '..'; give the folder's plain path"
     case .rootConflictsWithTarget(let origin):
       return
         "--db-root may name a different account than the root \(origin), whose key file "
@@ -268,11 +271,34 @@ private func resolveTarget(_ arguments: Arguments, needsOutput: Bool) throws -> 
   }
   if let name = target.profileName { printNote("using query profile \(name)") }
   if needsOutput, arguments.output == nil,
-    let origin = target.originConflicting(withDatabaseRoot: arguments.dbRoot)
+    let origin = try invokingUser.perform({
+      target.originConflicting(withDatabaseRoot: arguments.dbRoot)
+    })
   {
     throw CLIError.rootConflictsWithTarget(origin)
   }
   return target
+}
+
+// Where capture writes the key for this target.
+private func captureOutput(_ arguments: Arguments, _ target: AcquireTarget) -> URL {
+  arguments.output
+    ?? target.credentialFile
+    ?? invokingUserHomeDirectory()
+    .appending(path: ".greenbubbles-acquire", directoryHint: .isDirectory)
+    .appending(path: "passphrase.txt")
+}
+
+// The database root, found and resolved through the filesystem (realpath) as
+// the invoking user, so the folder inventoried is the one their queries open.
+private func userDatabaseRoot(_ option: URL?) throws -> URL {
+  if let option, QueryProfileTarget.hasParentComponent(option.path) {
+    throw CLIError.parentComponentInRoot
+  }
+  return try invokingUser.perform {
+    let root = try resolveDatabaseRoot(option)
+    return QueryProfileTarget.canonicalPath(root) ?? root
+  }
 }
 
 private func resolveDatabaseRoot(_ option: URL?) throws -> URL {
@@ -295,7 +321,13 @@ private func captureCommand(_ arguments: Arguments) -> [String] {
     }
     return plain ? text : "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
   }
-  var command = ["sudo", "greenbubbles-acquire", "capture"]
+  // sudo drops these unless told to keep them (names only, never values).
+  let preserved = [
+    QueryProfileTarget.profilesEnvironmentVariable, QueryProfileTarget.settingsEnvironmentVariable,
+  ].filter { ProcessInfo.processInfo.environment[$0] != nil }
+  var command = ["sudo"]
+  if !preserved.isEmpty { command.append("--preserve-env=" + preserved.joined(separator: ",")) }
+  command += ["greenbubbles-acquire", "capture"]
   if let profile = arguments.profile { command += ["--profile", profile] }
   if let dbRoot = arguments.dbRoot {
     command += ["--db-root", path(dbRoot, placeholder: "<db_storage-path>")]
@@ -408,7 +440,7 @@ private func runPreflight(
     // A profile or config.toml problem fails this check instead of the run.
     if let targetError { throw TargetResolutionFailure(description: targetError) }
     // As the invoking user: a root their own queries can't read must fail here.
-    let root = try invokingUser.perform { try resolveDatabaseRoot(dbRootOption) }
+    let root = try userDatabaseRoot(dbRootOption)
     databaseRootReference = PathPrivacy(includePaths: includePaths).reference(for: root)
     let inventory = try invokingUser.perform { try DatabaseSaltInventory(root: root) }
     databaseCount = inventory.entries.count
@@ -487,7 +519,9 @@ do {
     var target = AcquireTarget.none
     var targetError: String?
     do {
-      target = try resolveTarget(arguments, needsOutput: false)
+      // Readiness means capture would accept this target and destination.
+      target = try resolveTarget(arguments, needsOutput: true)
+      try SecretOutputWriter.checkDestination(captureOutput(arguments, target))
     } catch {
       targetError = String(describing: error)
     }
@@ -506,12 +540,7 @@ do {
   case .capture:
     let target = try resolveTarget(arguments, needsOutput: true)
     let dbRoot = arguments.dbRoot ?? target.sourceRoot
-    let output =
-      arguments.output
-      ?? target.credentialFile
-      ?? invokingUserHomeDirectory()
-      .appending(path: ".greenbubbles-acquire", directoryHint: .isDirectory)
-      .appending(path: "passphrase.txt")
+    let output = captureOutput(arguments, target)
     try SecretOutputWriter.checkDestination(output)
     let preflight = runPreflight(
       dbRootOption: dbRoot,
@@ -527,7 +556,7 @@ do {
       exit(1)
     }
     // Only the debugger attach needs root; read the databases as the user.
-    let root = try invokingUser.perform { try resolveDatabaseRoot(dbRoot) }
+    let root = try userDatabaseRoot(dbRoot)
     let inventory = try invokingUser.perform { try DatabaseSaltInventory(root: root) }
     printNote(
       "why this step: the passphrase only crosses the system key-derivation "
@@ -598,9 +627,7 @@ do {
     }
     let passphrase = try PassphraseSecret.readFromStandardInput()
     let target = try resolveTarget(arguments, needsOutput: false)
-    let root = try invokingUser.perform {
-      try resolveDatabaseRoot(arguments.dbRoot ?? target.sourceRoot)
-    }
+    let root = try userDatabaseRoot(arguments.dbRoot ?? target.sourceRoot)
     let inventory = try invokingUser.perform { try DatabaseSaltInventory(root: root) }
     let verifiedSaltCount = try verifyPassphrase(passphrase, inventory: inventory)
     let distinctSaltCount = inventory.distinctSalts.count
