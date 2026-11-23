@@ -119,6 +119,61 @@ struct LLDBOutputParserTests {
     #expect(candidates[0] == expectedBytes)
   }
 
+  @Test func shortReadEndedByAnErrorDoesNotShiftTheNextRead() {
+    let output = """
+      (lldb)  memory read --size 1 --count 32 --format x $x1
+      0x16fdfddd8: 0xaa 0xaa 0xaa 0xaa 0xaa 0xaa 0xaa 0xaa
+      0x16fdfdde0: 0xbb 0xbb 0xbb 0xbb 0xbb 0xbb 0xbb 0xbb
+      error: memory read failed for 0x16fdfdde8
+      (lldb)  continue
+      Process 69454 resuming
+      (lldb)  memory read --size 1 --count 32 --format x $x1
+      \(hexdumpLines)
+      """
+    #expect(LLDBOutputParser.parsePassphrases(from: output) == [expectedBytes])
+  }
+
+  @Test func shortReadFollowedDirectlyByANewAddressIsDiscarded() {
+    // No separator line between the reads: the address jump ends the first.
+    let output = """
+      0x200000000: 0xaa 0xaa 0xaa 0xaa 0xaa 0xaa 0xaa 0xaa
+      0x200000008: 0xbb 0xbb 0xbb 0xbb 0xbb 0xbb 0xbb 0xbb
+      \(hexdumpLines)
+      """
+    #expect(LLDBOutputParser.parsePassphrases(from: output) == [expectedBytes])
+  }
+
+  @Test func streamKeepsPartialLinesAcrossChunksButNotShortReads() {
+    var stream = LLDBMemoryReadStream()
+    let full = Array((hexdumpLines + "\n").utf8)
+    var candidates: [[UInt8]] = []
+    // Split the output mid-line, mid-token.
+    for range in [0..<20, 20..<75, 75..<full.count] {
+      var chunk = Array(full[range])
+      candidates += stream.consume(&chunk).candidates
+      #expect(chunk.isEmpty)
+    }
+    #expect(candidates == [expectedBytes])
+
+    var short = Array("0x300000000: 0x01 0x02 0x03 0x04 0x05 0x06 0x07 0x08\n".utf8)
+    #expect(stream.consume(&short).candidates.isEmpty)
+    var error = Array("error: memory read failed\n".utf8)
+    #expect(stream.consume(&error).candidates.isEmpty)
+    var next = Array((hexdumpLines + "\n").utf8)
+    #expect(stream.consume(&next).candidates == [expectedBytes])
+  }
+
+  @Test func streamReportsAttachFailureAndExitPerLine() {
+    var stream = LLDBMemoryReadStream()
+    var chunk = Array(
+      "error: attach failed: attach failed (Not allowed to attach to process.)\n".utf8)
+    let drained = stream.consume(&chunk)
+    #expect(drained.attachFailure?.contains("attach failed") == true)
+    var exit = Array("Process 69454 exited with status = 0 (0x00000000)".utf8)
+    #expect(!stream.consume(&exit).targetExited)
+    #expect(stream.finish().targetExited)
+  }
+
   @Test func detectsAttachFailure() {
     let output = """
       (lldb) process attach -p 66097

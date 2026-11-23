@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import GreenBubblesAcquire
@@ -6,56 +7,114 @@ struct CaptureCandidateCursorTests {
   private let unrelated = [UInt8](repeating: 0x11, count: 32)
   private let account = [UInt8](repeating: 0x22, count: 32)
 
+  private let farFuture = Date.distantFuture
+
   @Test func rejectedCandidateDoesNotHideTheNextOne() throws {
-    var considered = 0
+    var candidates = [unrelated, account]
     var seen: [[UInt8]] = []
     let decision = try CaptureCandidateCursor.decide(
-      among: [unrelated, account],
-      consideredCount: &considered
+      among: &candidates,
+      deadline: farFuture
     ) { secret in
       let bytes = secret.withUnsafeBytes { Array($0) }
       seen.append(bytes)
       return bytes == account
     }
-    #expect(considered == 2)
     #expect(decision.newlyRejected == 1)
+    #expect(!decision.deadlineReached)
     let accepted = try #require(decision.secret)
     #expect(accepted.withUnsafeBytes { Array($0) } == account)
     #expect(seen == [unrelated, account])
+    // Offered candidates are zeroized in place.
+    #expect(candidates.allSatisfy { $0.allSatisfy { $0 == 0 } })
   }
 
   @Test func allRejectedLeavesNothingAccepted() throws {
-    var considered = 0
+    var candidates = [unrelated, unrelated]
     let decision = try CaptureCandidateCursor.decide(
-      among: [unrelated, unrelated],
-      consideredCount: &considered
+      among: &candidates,
+      deadline: farFuture
     ) { _ in false }
     #expect(decision.secret == nil)
     #expect(decision.newlyRejected == 2)
-    #expect(considered == 2)
+    #expect(!decision.deadlineReached)
   }
 
-  @Test func alreadyConsideredCandidatesAreNotRevisited() throws {
-    var considered = 0
-    let first = try CaptureCandidateCursor.decide(
-      among: [unrelated, account],
-      consideredCount: &considered
-    ) { _ in false }
-    #expect(first.secret == nil)
-    #expect(first.newlyRejected == 2)
+  @Test func expiredDeadlineSkipsVerification() throws {
+    var candidates = [account]
+    var offered = 0
+    let decision = try CaptureCandidateCursor.decide(
+      among: &candidates,
+      deadline: Date(timeIntervalSinceReferenceDate: 100),
+      now: { Date(timeIntervalSinceReferenceDate: 100) },
+      accept: { _ in
+        offered += 1
+        return true
+      }
+    )
+    #expect(offered == 0)
+    #expect(decision.secret == nil)
+    #expect(decision.newlyRejected == 0)
+    #expect(decision.deadlineReached)
+  }
 
-    var seen = 0
-    let second = try CaptureCandidateCursor.decide(
-      among: [unrelated, account],
-      consideredCount: &considered
-    ) { _ in
-      seen += 1
-      return true
+  @Test func deadlineIsCheckedBeforeEachVerificationInABacklog() throws {
+    // Each verification takes "10 seconds" on the injected clock; the
+    // deadline falls after the second one.
+    var clock = 0.0
+    var candidates = [unrelated, unrelated, account]
+    var offered = 0
+    let decision = try CaptureCandidateCursor.decide(
+      among: &candidates,
+      deadline: Date(timeIntervalSinceReferenceDate: 15),
+      now: { Date(timeIntervalSinceReferenceDate: clock) },
+      accept: { _ in
+        offered += 1
+        clock += 10
+        return false
+      }
+    )
+    #expect(offered == 2)
+    #expect(decision.secret == nil)
+    #expect(decision.newlyRejected == 2)
+    #expect(decision.deadlineReached)
+  }
+
+  @Test func rejectedCandidateIsNotOfferedAgain() throws {
+    var stream = LLDBMemoryReadStream()
+    var offered: [[UInt8]] = []
+    func poll(_ text: String) throws -> CaptureCandidateCursor.Decision {
+      var chunk = Array(text.utf8)
+      var drained = stream.consume(&chunk)
+      return try CaptureCandidateCursor.decide(
+        among: &drained.candidates,
+        deadline: farFuture
+      ) { secret in
+        let bytes = secret.withUnsafeBytes { Array($0) }
+        offered.append(bytes)
+        return bytes == account
+      }
     }
-    #expect(second.secret == nil)
+    let first = try poll(Self.hexdump(of: unrelated, at: 0x1000) + "(lldb) continue\n")
+    #expect(first.newlyRejected == 1)
+    #expect(first.secret == nil)
+    // A later poll with no new output offers nothing.
+    let idle = try poll("Process 1 resuming\n")
+    #expect(idle.newlyRejected == 0)
+    #expect(idle.secret == nil)
+    let second = try poll(Self.hexdump(of: account, at: 0x2000))
     #expect(second.newlyRejected == 0)
-    #expect(seen == 0)
-    #expect(considered == 2)
+    #expect(second.secret != nil)
+    #expect(offered == [unrelated, account])
+  }
+
+  static func hexdump(of bytes: [UInt8], at address: UInt64) -> String {
+    stride(from: 0, to: bytes.count, by: 8).map { offset in
+      let group = bytes[offset..<min(offset + 8, bytes.count)]
+        .map { String(format: "0x%02x", $0) }
+        .joined(separator: " ")
+      return String(format: "0x%llx: ", address + UInt64(offset)) + group + "\n"
+    }.joined()
   }
 
   @Test func noAcceptableCandidateWritesNothing() {

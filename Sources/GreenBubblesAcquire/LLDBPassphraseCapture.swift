@@ -56,11 +56,12 @@ public enum CaptureError: Error, Equatable, CustomStringConvertible {
 ///
 /// The lldb script is written to a stdin pipe that stays open for the whole
 /// capture window (lldb must not see EOF while it waits for the breakpoint).
-/// stdout and stderr are accumulated incrementally and re-parsed after every
-/// chunk. The loop stops at the first candidate `accept` keeps, or at the
-/// timeout. A rejected candidate does not end the session: the breakpoint
-/// stays armed for a later call in the same window. Only the child process
-/// spawned here is ever terminated — never `pkill`.
+/// stdout and stderr are parsed incrementally; consumed output is zeroized
+/// and dropped, so each read is offered once. The loop stops at the first
+/// candidate `accept` keeps, or at the timeout. A rejected candidate does not
+/// end the session: the breakpoint stays armed for a later call in the same
+/// window. Only the child process spawned here is ever terminated — never
+/// `pkill`.
 ///
 /// Diagnostics the original Python tool lacks: an attach failure fails fast
 /// instead of stalling until the timeout, and if WeChat's logout flow restarts
@@ -165,10 +166,11 @@ public struct LLDBPassphraseCapture: Sendable {
     let accumulator = OutputAccumulator()
     let verboseRelay = verbose ? VerboseLineRelay(emit: { [self] in emit($0) }) : nil
     output.fileHandleForReading.readabilityHandler = { handle in
-      let data = handle.availableData
+      var data = handle.availableData
       if !data.isEmpty {
         accumulator.append(data)
         verboseRelay?.append(data)
+        data.resetBytes(in: 0..<data.count)
       }
     }
 
@@ -201,73 +203,52 @@ public struct LLDBPassphraseCapture: Sendable {
     // it waits for the breakpoint to hit.
     input.fileHandleForWriting.write(Data(script.utf8))
 
-    var reportedAttachFailure = false
-    var consideredCount = 0
-    while Date() < deadline {
-      let current = accumulator.current()
-      if let accepted = try consider(
-        current,
-        consideredCount: &consideredCount,
-        rejectedCandidateCount: &rejectedCandidateCount,
-        accept: accept
-      ) {
-        return accepted
+    var stream = LLDBMemoryReadStream()
+    defer { _ = stream.finish() }
+    while true {
+      let running = process.isRunning
+      if !running {
+        // Give the readability handler a moment to flush the final output.
+        Thread.sleep(forTimeInterval: 0.1)
       }
-      if !reportedAttachFailure, let detail = LLDBOutputParser.detectAttachFailure(in: current) {
-        reportedAttachFailure = true
+      var chunk = accumulator.take()
+      var drained = stream.consume(&chunk)
+      if !running {
+        let last = stream.finish()
+        drained.candidates += last.candidates
+        drained.attachFailure = drained.attachFailure ?? last.attachFailure
+        drained.targetExited = drained.targetExited || last.targetExited
+      }
+      defer { Self.zeroizeCandidates(&drained.candidates) }
+      let decision = try CaptureCandidateCursor.decide(
+        among: &drained.candidates,
+        deadline: deadline,
+        accept: accept
+      )
+      rejectedCandidateCount += decision.newlyRejected
+      if let secret = decision.secret {
+        return secret
+      }
+      if decision.deadlineReached {
+        throw deadlineError(rejectedCandidateCount)
+      }
+      if decision.newlyRejected > 0 {
+        emit("captured candidate was rejected; waiting for another derivation")
+      }
+      if let detail = drained.attachFailure {
         emit("lldb reported: \(detail)")
         throw CaptureError.attachFailed(detail)
       }
-      if LLDBOutputParser.detectTargetExit(in: current) {
+      if drained.targetExited {
         throw CaptureError.targetExited
       }
-      if !process.isRunning {
-        // Give the readability handler a moment to flush the final output.
-        Thread.sleep(forTimeInterval: 0.1)
-        let final = accumulator.current()
-        if let accepted = try consider(
-          final,
-          consideredCount: &consideredCount,
-          rejectedCandidateCount: &rejectedCandidateCount,
-          accept: accept
-        ) {
-          return accepted
-        }
-        if let detail = LLDBOutputParser.detectAttachFailure(in: final) {
-          throw CaptureError.attachFailed(detail)
-        }
-        if LLDBOutputParser.detectTargetExit(in: final) {
-          throw CaptureError.targetExited
-        }
+      if !running {
         if rejectedCandidateCount > 0 { throw CaptureError.noAcceptableCandidate }
         throw CaptureError.exitedWithoutCapture
       }
+      guard Date() < deadline else { throw deadlineError(rejectedCandidateCount) }
       Thread.sleep(forTimeInterval: 0.05)
     }
-    throw deadlineError(rejectedCandidateCount)
-  }
-
-  private func consider(
-    _ output: String,
-    consideredCount: inout Int,
-    rejectedCandidateCount: inout Int,
-    accept: (PassphraseSecret) throws -> Bool
-  ) throws -> PassphraseSecret? {
-    var parsed = LLDBOutputParser.parsePassphrases(from: output)
-    defer { Self.zeroizeCandidates(&parsed) }
-    let decision = try CaptureCandidateCursor.decide(
-      among: parsed,
-      consideredCount: &consideredCount,
-      accept: accept
-    )
-    rejectedCandidateCount += decision.newlyRejected
-    if let secret = decision.secret {
-      return secret
-    }
-    if decision.newlyRejected > 0 {
-      emit("captured candidate was rejected; waiting for another derivation")
-    }
-    return nil
   }
 
   private static func zeroizeCandidates(_ candidates: inout [[UInt8]]) {
@@ -276,20 +257,30 @@ public struct LLDBPassphraseCapture: Sendable {
     }
   }
 
+  /// Bytes received from lldb and not yet handed to the parser. `take`
+  /// moves them out, so output is held here only until the next poll.
   private final class OutputAccumulator: @unchecked Sendable {
     private let lock = NSLock()
-    private var buffer = String()
+    private var buffer: [UInt8] = []
+
+    init() {
+      buffer.reserveCapacity(64 * 1024)
+    }
 
     func append(_ data: Data) {
       lock.lock()
-      buffer.append(String(decoding: data, as: UTF8.self))
+      buffer.append(contentsOf: data)
       lock.unlock()
     }
 
-    func current() -> String {
+    func take() -> [UInt8] {
       lock.lock()
       defer { lock.unlock() }
-      return buffer
+      // Move the storage out rather than copying it; the caller zeroizes it.
+      let taken = buffer
+      buffer = []
+      buffer.reserveCapacity(64 * 1024)
+      return taken
     }
   }
 
@@ -340,25 +331,36 @@ public struct LLDBPassphraseCapture: Sendable {
   }
 }
 
-/// Walks newly parsed passphrase candidates. An earlier rejection does not
-/// hide a later one, and candidates already considered are not presented again.
+/// Offers newly parsed passphrase candidates to `accept`, in order. An
+/// earlier rejection does not hide a later one. Each candidate is offered at
+/// most once, because the stream consumes the output it came from.
+///
+/// Every `accept` call can run a 256,000-round PBKDF per distinct salt, so
+/// the deadline is checked before each one. A backlog of reads cannot keep
+/// the debugger attached past the timeout.
 enum CaptureCandidateCursor {
   struct Decision {
     var secret: PassphraseSecret?
     var newlyRejected: Int
+    /// The deadline passed before every candidate could be offered.
+    var deadlineReached = false
   }
 
+  /// Each offered candidate is zeroized in place; the caller zeroizes any
+  /// that were not offered.
   static func decide(
-    among candidates: [[UInt8]],
-    consideredCount: inout Int,
+    among candidates: inout [[UInt8]],
+    deadline: Date,
+    now: () -> Date = Date.init,
     accept: (PassphraseSecret) throws -> Bool
   ) throws -> Decision {
     var newlyRejected = 0
-    while consideredCount < candidates.count {
-      var bytes = candidates[consideredCount]
-      consideredCount += 1
-      defer { PassphraseSecret.zeroize(&bytes) }
-      let secret = try PassphraseSecret(bytes: bytes)
+    for index in candidates.indices {
+      guard now() < deadline else {
+        return Decision(secret: nil, newlyRejected: newlyRejected, deadlineReached: true)
+      }
+      defer { PassphraseSecret.zeroize(&candidates[index]) }
+      let secret = try PassphraseSecret(bytes: candidates[index])
       if try accept(secret) {
         return Decision(secret: secret, newlyRejected: newlyRejected)
       }
