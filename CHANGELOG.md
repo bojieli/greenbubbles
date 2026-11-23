@@ -13,6 +13,12 @@ Notable changes to GreenBubbles are documented here. The project follows
   because the FTS5 check of the contact search index cannot pass with
   GreenBubbles' tokenizer, which lacks pinyin. That one FTS5 row is now
   allowed; every other integrity row still fails the snapshot.
+- Account discovery finds the data of a duplicated WeChat app copy. It checks
+  `Data/Documents/xwechat_files` under every `~/Library/Containers/<bundle id>`
+  without reading other apps' data, and skips symbolic links. Each account
+  reports the bundle ID of the container that holds it. With a second copy's
+  account present, `greenbubbles-acquire` asks for `--db-root` instead of
+  silently using the first account (#34).
 
 ## 0.10.0 - 2026-10-01
 

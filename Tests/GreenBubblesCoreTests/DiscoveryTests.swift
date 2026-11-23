@@ -45,4 +45,24 @@ struct DiscoveryTests {
     #expect(redacted.path == nil)
     #expect(visible.path == url.standardizedFileURL.path)
   }
+
+  @Test func reportsDuplicatedAppContainersThatHoldWeChatData() throws {
+    let home = FileManager.default.temporaryDirectory
+      .appending(path: "greenbubbles-discovery-\(UUID().uuidString)", directoryHint: .isDirectory)
+    defer { try? FileManager.default.removeItem(at: home) }
+    let containers = home.appending(path: "Library/Containers", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(
+      at: containers.appending(path: "com.example.WeChatCopy/Data/Documents/xwechat_files"),
+      withIntermediateDirectories: true
+    )
+    try FileManager.default.createDirectory(
+      at: containers.appending(path: "com.example.Other/Data/Documents"),
+      withIntermediateDirectories: true
+    )
+
+    let report = WeChatDiscovery(homeDirectory: home, includePaths: true).discover()
+    let paths = report.dataRoots.compactMap(\.location.path)
+    #expect(paths.count == 1)
+    #expect(paths.first?.hasSuffix("/com.example.WeChatCopy") == true)
+  }
 }

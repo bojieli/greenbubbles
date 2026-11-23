@@ -6,19 +6,24 @@ public struct WeChatAccountLocation: Codable, Equatable, Sendable {
   public let databaseRoot: PathReference
   public let attachmentRoot: PathReference?
   public let isReadable: Bool
+  /// Bundle ID of the app whose sandbox container holds this account, or nil
+  /// for data found in a shared group container.
+  public let containerBundleIdentifier: String?
 
   public init(
     accountID: String,
     root: PathReference,
     databaseRoot: PathReference,
     attachmentRoot: PathReference?,
-    isReadable: Bool
+    isReadable: Bool,
+    containerBundleIdentifier: String? = nil
   ) {
     self.accountID = accountID
     self.root = root
     self.databaseRoot = databaseRoot
     self.attachmentRoot = attachmentRoot
     self.isReadable = isReadable
+    self.containerBundleIdentifier = containerBundleIdentifier
   }
 }
 
@@ -74,12 +79,14 @@ public struct WeChatAccountDiscovery: Sendable {
     let root: URL
     let databaseRoot: URL
     let attachmentRoot: URL?
+    /// Bundle ID of the owning app container; nil for a group container.
+    let containerBundleIdentifier: String?
   }
 
   func resolvedAccounts() -> [ResolvedAccount] {
     let fileManager = FileManager.default
     var accounts: [ResolvedAccount] = []
-    for xwechatRoot in xwechatFileRoots(fileManager: fileManager) {
+    for (xwechatRoot, containerBundleIdentifier) in xwechatFileRoots(fileManager: fileManager) {
       let children =
         (try? fileManager.contentsOfDirectory(
           at: xwechatRoot,
@@ -106,11 +113,13 @@ public struct WeChatAccountDiscovery: Sendable {
               root: rootReference,
               databaseRoot: privacy.reference(for: databaseRoot),
               attachmentRoot: attachmentRoot.map { privacy.reference(for: $0) },
-              isReadable: fileManager.isReadableFile(atPath: databaseRoot.path)
+              isReadable: fileManager.isReadableFile(atPath: databaseRoot.path),
+              containerBundleIdentifier: containerBundleIdentifier
             ),
             root: root.standardizedFileURL,
             databaseRoot: databaseRoot.standardizedFileURL,
-            attachmentRoot: attachmentRoot
+            attachmentRoot: attachmentRoot,
+            containerBundleIdentifier: containerBundleIdentifier
           ))
       }
     }
@@ -121,11 +130,13 @@ public struct WeChatAccountDiscovery: Sendable {
       .sorted { $0.report.accountID < $1.report.accountID }
   }
 
-  private func xwechatFileRoots(fileManager: FileManager) -> [URL] {
-    var candidates: [URL] = []
-    let documents = homeDirectory.appending(
-      path: "Library/Containers/com.tencent.xinWeChat/Data/Documents")
-    candidates.append(documents.appending(path: "xwechat_files", directoryHint: .isDirectory))
+  /// `xwechat_files` roots with the bundle ID of the app container that owns
+  /// each one (nil for a group container). App containers come from
+  /// `WeChatAppContainerScanner`, which covers duplicated app copies.
+  private func xwechatFileRoots(fileManager: FileManager) -> [(URL, String?)] {
+    var candidates: [(URL, String?)] = WeChatAppContainerScanner(homeDirectory: homeDirectory)
+      .containers(fileManager: fileManager)
+      .map { ($0.xwechatFilesRoot, $0.bundleIdentifier) }
 
     let groups = homeDirectory.appending(
       path: "Library/Group Containers", directoryHint: .isDirectory)
@@ -138,13 +149,13 @@ public struct WeChatAccountDiscovery: Sendable {
     for group in groupChildren {
       let name = group.lastPathComponent.lowercased()
       guard name.contains("wechat") || name.contains("xinwechat") else { continue }
-      candidates.append(group.appending(path: "xwechat_files", directoryHint: .isDirectory))
+      let root = group.appending(path: "xwechat_files", directoryHint: .isDirectory)
+      guard fileManager.fileExists(atPath: root.path) else { continue }
+      candidates.append((root, nil))
     }
 
     var seen = Set<String>()
-    return candidates.filter {
-      fileManager.fileExists(atPath: $0.path) && seen.insert($0.standardizedFileURL.path).inserted
-    }
+    return candidates.filter { seen.insert($0.0.standardizedFileURL.path).inserted }
   }
 
   private func safeDirectory(_ url: URL) -> Bool {

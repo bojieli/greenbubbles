@@ -65,6 +65,13 @@ public struct WeChatDiscovery: Sendable {
       (containers.appending(path: "com.tencent.xinWeChat"), .applicationContainer),
       (containers.appending(path: "com.tencent.WeChat"), .applicationContainer),
     ]
+    // Duplicated app copies get their own container; include those that hold
+    // WeChat 4.x data without looking inside any other app's container.
+    for container in WeChatAppContainerScanner(homeDirectory: homeDirectory)
+      .containers(fileManager: fileManager)
+    {
+      candidates.append((container.containerRoot, .applicationContainer))
+    }
 
     let groupContainers = homeDirectory.appending(path: "Library/Group Containers")
     let groupChildren =
