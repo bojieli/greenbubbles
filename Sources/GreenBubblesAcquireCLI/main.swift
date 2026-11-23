@@ -11,6 +11,8 @@ enum CLIError: Error, CustomStringConvertible {
   case missingRequiredOption(String)
   case invalidInteger(option: String, value: String)
   case verificationFailed(String)
+  case rootConflictsWithTarget(String)
+  case parentComponentInRoot
 
   var description: String {
     switch self {
@@ -24,6 +26,13 @@ enum CLIError: Error, CustomStringConvertible {
       return "Expected a positive integer for \(option), got: \(value)"
     case .verificationFailed(let reason):
       return "Passphrase verification failed: \(reason)"
+    case .parentComponentInRoot:
+      return "--db-root must not contain '..'; give the folder's plain path"
+    case .rootConflictsWithTarget(let origin):
+      return
+        "--db-root may name a different account than the root \(origin), whose key file "
+        + "capture would write; pass --output as well, or select that account's profile "
+        + "with --profile"
     }
   }
 }
@@ -40,6 +49,7 @@ struct Arguments {
   var output: URL?
   var timeoutSeconds = LLDBPassphraseCapture.defaultTimeoutSeconds
   var dbRoot: URL?
+  var profile: String?
   var processID: pid_t?
   var overwrite = false
   var passphraseStdin = false
@@ -81,6 +91,10 @@ struct Arguments {
         index += 1
         guard index < arguments.count else { throw CLIError.missingValue(option) }
         dbRoot = URL(fileURLWithPath: arguments[index])
+      case "--profile":
+        index += 1
+        guard index < arguments.count else { throw CLIError.missingValue(option) }
+        profile = arguments[index]
       case "--pid":
         index += 1
         guard index < arguments.count else { throw CLIError.missingValue(option) }
@@ -135,10 +149,16 @@ private let usage = """
     help                   Show this help
 
   Options:
-    --output <path>        Where capture writes the passphrase (default:
-                           ~/.greenbubbles-acquire/passphrase.txt, mode 0600)
+    --output <path>        Where capture writes the passphrase (default: the
+                           query profile's credentialFile, else config.toml's
+                           source.passphrase_file, else
+                           ~/.greenbubbles-acquire/passphrase.txt; mode 0600)
     --timeout-seconds <n>  Capture window in seconds (default: 300)
-    --db-root <path>       Select a db_storage root (required if several are found)
+    --db-root <path>       Select a db_storage root (overrides the profile's
+                           sourceRoot; required if several roots are found)
+    --profile <name>       Use this live query profile's sourceRoot and
+                           credentialFile (default: the file's defaultProfile,
+                           or config.toml when no profile file exists)
     --pid <n>              Select the WeChat process (required when the root is
                            not in an app container or several copies match)
     --overwrite            Replace an existing passphrase output file
@@ -196,33 +216,9 @@ private struct PreflightResult {
   let checks: [PreflightCheck]
   /// The WeChat app copy capture attaches to; set whenever `report.ready`.
   let target: WeChatProcessTarget?
-  /// The database root resolved once for this run; set whenever `report.ready`.
+  /// The user-checked database root, resolved once for this run; set
+  /// whenever `report.ready`.
   let databaseRoot: URL?
-  /// The capture command to run next, carrying the explicit selections.
-  let nextCommand: String
-}
-
-private func shellQuoted(_ value: String) -> String {
-  "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
-}
-
-/// `sudo greenbubbles-acquire capture` with the options that chose the data
-/// and process, so the capture targets the same account and app copy. The
-/// database path is shown only with `--include-paths`.
-private func captureCommand(dbRootOption: URL?, processIDOption: pid_t?, includePaths: Bool)
-  -> String
-{
-  var command = "sudo greenbubbles-acquire capture"
-  if let dbRootOption {
-    command +=
-      includePaths
-      ? " --db-root \(shellQuoted(dbRootOption.standardizedFileURL.path))"
-      : " --db-root <the same --db-root>"
-  }
-  if let processIDOption {
-    command += " --pid \(processIDOption)"
-  }
-  return command
 }
 
 private func printJSON<T: Encodable>(_ value: T) throws {
@@ -252,7 +248,10 @@ private func statusMark(_ ok: Bool) -> String {
 }
 
 // Human-readable rendering: one line per check, then a plain verdict.
-private func printPreflight(_ result: PreflightResult) {
+private func printPreflight(
+  _ result: PreflightResult,
+  captureCommand: [String] = ["sudo", "greenbubbles-acquire", "capture"]
+) {
   for check in result.checks {
     print("\(statusMark(check.ok)) \(check.label)")
     if !check.ok, let hint = check.hint {
@@ -263,21 +262,78 @@ private func printPreflight(_ result: PreflightResult) {
   let failed = result.checks.filter { !$0.ok }.count
   if result.report.ready {
     print("Ready to capture.")
-    print("Next: \(result.nextCommand)")
+    print("Next: \(captureCommand.joined(separator: " "))")
   } else {
     print("Not ready — \(failed) \(failed == 1 ? "problem" : "problems") to fix (see above).")
   }
 }
 
-// Under sudo the effective home is /var/root, but the WeChat data lives in the
-// invoking user's home; SUDO_USER tells us who that is.
-private func invokingUserHomeDirectory() -> URL {
-  if geteuid() == 0, let sudoUser = ProcessInfo.processInfo.environment["SUDO_USER"],
-    let entry = getpwnam(sudoUser), let directory = entry.pointee.pw_dir
-  {
-    return URL(fileURLWithPath: String(cString: directory)).standardizedFileURL
+// Under sudo, the user who ran it (SUDO_USER checked against SUDO_UID);
+// otherwise the current user. User-controlled files are opened as this user.
+private let invokingUser: InvokingUser = {
+  do {
+    return try InvokingUser.current()
+  } catch {
+    printError(String(describing: error))
+    exit(2)
   }
-  return FileManager.default.homeDirectoryForCurrentUser
+}()
+
+// Under sudo the effective home is /var/root, but the WeChat data lives in the
+// invoking user's home.
+private func invokingUserHomeDirectory() -> URL {
+  invokingUser.homeDirectory
+}
+
+// Explicit --db-root and --output win; a query profile or config.toml fills in
+// what they leave out, as for the Rust CLI's queries.
+private func resolveTarget(_ arguments: Arguments, needsOutput: Bool) throws -> AcquireTarget {
+  if arguments.profile == nil, arguments.dbRoot != nil, !needsOutput || arguments.output != nil {
+    return .none
+  }
+  let locations = try QueryProfileTarget.locations(
+    environment: ProcessInfo.processInfo.environment,
+    home: invokingUser.homeDirectory
+  )
+  let target = try invokingUser.perform {
+    try QueryProfileTarget.resolve(
+      requestedProfile: arguments.profile,
+      locations: locations,
+      ownerUID: invokingUser.uid
+    )
+  }
+  if let name = target.profileName { printNote("using query profile \(name)") }
+  if needsOutput, arguments.output == nil,
+    let origin = try invokingUser.perform({
+      target.originConflicting(withDatabaseRoot: arguments.dbRoot)
+    })
+  {
+    throw CLIError.rootConflictsWithTarget(origin)
+  }
+  return target
+}
+
+// Where capture writes the key for this target.
+private func captureOutput(_ arguments: Arguments, _ target: AcquireTarget) -> URL {
+  arguments.output
+    ?? target.credentialFile
+    ?? invokingUserHomeDirectory()
+    .appending(path: ".greenbubbles-acquire", directoryHint: .isDirectory)
+    .appending(path: "passphrase.txt")
+}
+
+// The database root, found and resolved through the filesystem (realpath) as
+// the invoking user, so the folder inventoried is the one their queries open.
+private func userDatabaseRoot(_ option: URL?) throws -> URL {
+  if let option, QueryProfileTarget.hasParentComponent(option.path) {
+    throw CLIError.parentComponentInRoot
+  }
+  return try invokingUser.perform {
+    let root = try resolveDatabaseRoot(option)
+    // Rust's LiveQuerySource::open checks the path as given, then resolves it.
+    try QueryProfileTarget.checkLiveSourceRoot(root, ownerUID: invokingUser.uid)
+    return QueryProfileTarget.canonicalPath(root) ?? root
+  }
 }
 
 private func resolveDatabaseRoot(_ option: URL?) throws -> URL {
@@ -286,6 +342,45 @@ private func resolveDatabaseRoot(_ option: URL?) throws -> URL {
   }
   return try WeChatAccountDiscovery(homeDirectory: invokingUserHomeDirectory())
     .singleDatabaseRoot()
+}
+
+// A path as one shell word: plain when safe, otherwise single-quoted.
+private func shellQuoted(_ text: String) -> String {
+  let plain =
+    !text.isEmpty
+    && text.unicodeScalars.allSatisfy {
+      CharacterSet.alphanumerics.contains($0) && $0.isASCII
+        || "/._-+,:@".unicodeScalars.contains($0)
+    }
+  return plain ? text : "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
+}
+
+// The capture command that reproduces this preflight's target. Private paths
+// become placeholders unless --include-paths was given.
+private func captureCommand(_ arguments: Arguments) -> [String] {
+  func path(_ url: URL, placeholder: String) -> String {
+    arguments.includePaths ? shellQuoted(url.path) : placeholder
+  }
+  // sudo drops these unless told to keep them (names only, never values).
+  let preserved = [
+    QueryProfileTarget.profilesEnvironmentVariable, QueryProfileTarget.settingsEnvironmentVariable,
+  ].filter { ProcessInfo.processInfo.environment[$0] != nil }
+  var command = ["sudo"]
+  if !preserved.isEmpty { command.append("--preserve-env=" + preserved.joined(separator: ",")) }
+  command += ["greenbubbles-acquire", "capture"]
+  if let profile = arguments.profile { command += ["--profile", profile] }
+  if let dbRoot = arguments.dbRoot {
+    command += ["--db-root", path(dbRoot, placeholder: "<db_storage-path>")]
+  }
+  if let output = arguments.output {
+    command += ["--output", path(output, placeholder: "<key-file-path>")]
+  }
+  if let processID = arguments.processID { command += ["--pid", String(processID)] }
+  return command
+}
+
+private struct TargetResolutionFailure: Error, CustomStringConvertible {
+  let description: String
 }
 
 private let listProcessesHint =
@@ -305,7 +400,9 @@ private func selectProcess(
   processIDOption: pid_t?,
   owner: DatabaseRootOwner?
 ) -> ProcessSelection {
-  let locator = WeChatProcessLocator()
+  // The invoking user the privilege switch uses (SUDO_USER checked against
+  // SUDO_UID); only their WeChat processes count.
+  let locator = WeChatProcessLocator(userID: invokingUser.uid)
   var selection = ProcessSelection()
   do {
     if let processIDOption {
@@ -368,8 +465,10 @@ private func selectProcess(
 
 private func runPreflight(
   dbRootOption: URL?,
-  processIDOption: pid_t?,
-  includePaths: Bool
+  rootOrigin: String = "from --db-root",
+  processIDOption: pid_t? = nil,
+  includePaths: Bool,
+  targetError: String? = nil
 ) -> PreflightResult {
   var checks: [PreflightCheck] = []
   var remediation: String?
@@ -391,14 +490,21 @@ private func runPreflight(
       hint: runningAsRoot ? nil : "capture needs to attach to WeChat; re-run with sudo"
     ))
 
-  // Resolve the database root once: process selection, the inventory and
-  // the capture all use this same root (and its error, if any).
-  let resolvedRoot = Result { try resolveDatabaseRoot(dbRootOption) }
+  // Resolve the database root once, as the invoking user (a root their own
+  // queries can't read fails here): process selection, the inventory and the
+  // capture all use this same root, or its error.
+  let resolvedRoot = Result<URL, Error> {
+    // A profile or config.toml problem fails the database check instead of the run.
+    if let targetError { throw TargetResolutionFailure(description: targetError) }
+    return try userDatabaseRoot(dbRootOption)
+  }
 
   // Choose the process first: version and signing are read from the app
   // bundle of the selected process, not from a default install location.
-  let databaseRootOwner = (try? resolvedRoot.get()).map {
-    DatabaseRootOwner.resolve(databaseRoot: $0, homeDirectory: homeDirectory)
+  let databaseRootOwner = (try? resolvedRoot.get()).flatMap { root in
+    try? invokingUser.perform {
+      DatabaseRootOwner.resolve(databaseRoot: root, homeDirectory: homeDirectory)
+    }
   }
   let selection = selectProcess(processIDOption: processIDOption, owner: databaseRootOwner)
 
@@ -473,10 +579,10 @@ private func runPreflight(
   do {
     let root = try resolvedRoot.get()
     databaseRootReference = PathPrivacy(includePaths: includePaths).reference(for: root)
-    let inventory = try DatabaseSaltInventory(root: root)
+    let inventory = try invokingUser.perform { try DatabaseSaltInventory(root: root) }
     databaseCount = inventory.entries.count
     distinctSaltCount = inventory.distinctSalts.count
-    let origin = dbRootOption == nil ? "auto-discovered" : "from --db-root"
+    let origin = dbRootOption == nil ? "auto-discovered" : rootOrigin
     if inventory.entries.isEmpty {
       databaseLabel = "database root found (\(origin)) but it contains no databases"
     } else {
@@ -523,13 +629,13 @@ private func runPreflight(
     report: report,
     checks: checks,
     target: selection.target,
-    databaseRoot: try? resolvedRoot.get(),
-    nextCommand: captureCommand(
-      dbRootOption: dbRootOption,
-      processIDOption: processIDOption,
-      includePaths: includePaths
-    )
+    databaseRoot: try? resolvedRoot.get()
   )
+}
+
+private func rootOrigin(_ arguments: Arguments, _ target: AcquireTarget) -> String {
+  if arguments.dbRoot == nil, let origin = target.sourceRootOrigin { return origin }
+  return "from --db-root"
 }
 
 do {
@@ -538,29 +644,40 @@ do {
   case .help:
     print(usage)
   case .preflight:
+    var target = AcquireTarget.none
+    var targetError: String?
+    do {
+      // Readiness means capture would accept this target and destination.
+      target = try resolveTarget(arguments, needsOutput: true)
+      try SecretOutputWriter.checkDestination(captureOutput(arguments, target))
+    } catch {
+      targetError = String(describing: error)
+    }
     let result = runPreflight(
-      dbRootOption: arguments.dbRoot,
+      dbRootOption: arguments.dbRoot ?? target.sourceRoot,
+      rootOrigin: rootOrigin(arguments, target),
       processIDOption: arguments.processID,
-      includePaths: arguments.includePaths
+      includePaths: arguments.includePaths,
+      targetError: targetError
     )
     if arguments.json {
       try printJSON(result.report)
     } else {
-      printPreflight(result)
+      printPreflight(result, captureCommand: captureCommand(arguments))
     }
     if !result.report.ready { exit(1) }
   case .capture:
-    let output =
-      arguments.output
-      ?? invokingUserHomeDirectory()
-      .appending(path: ".greenbubbles-acquire", directoryHint: .isDirectory)
-      .appending(path: "passphrase.txt")
+    let target = try resolveTarget(arguments, needsOutput: true)
+    let dbRoot = arguments.dbRoot ?? target.sourceRoot
+    let output = captureOutput(arguments, target)
+    try SecretOutputWriter.checkDestination(output)
     let preflight = runPreflight(
-      dbRootOption: arguments.dbRoot,
+      dbRootOption: dbRoot,
+      rootOrigin: rootOrigin(arguments, target),
       processIDOption: arguments.processID,
       includePaths: arguments.includePaths
     )
-    guard preflight.report.ready, let target = preflight.target,
+    guard preflight.report.ready, let processTarget = preflight.target,
       let root = preflight.databaseRoot
     else {
       if arguments.json {
@@ -570,7 +687,9 @@ do {
       }
       exit(1)
     }
-    let inventory = try DatabaseSaltInventory(root: root)
+    // Only the debugger attach needs root; read the databases as the user.
+    // `root` is the user-checked root preflight resolved and selected for.
+    let inventory = try invokingUser.perform { try DatabaseSaltInventory(root: root) }
     printNote(
       "why this step: the passphrase only crosses the system key-derivation "
         + "function while WeChat opens its databases at login, so a fresh "
@@ -582,7 +701,7 @@ do {
       "a captured value that does not open your databases is ignored; capture keeps waiting"
     )
     var capture = LLDBPassphraseCapture()
-    capture.target = target
+    capture.target = processTarget
     capture.verbose = arguments.verbose
     capture.outputHandler = { message in
       FileHandle.standardError.write(Data("note: \(message)\n".utf8))
@@ -612,7 +731,17 @@ do {
     let captureDurationSeconds = Date().timeIntervalSince(started)
     // `capture` returns only a candidate the closure accepted.
     assert(verifiedSaltCount > 0)
-    try SecretOutputWriter().write(passphrase, to: output, overwrite: arguments.overwrite)
+    let written = try SecretOutputWriter().write(
+      passphrase,
+      to: output,
+      overwrite: arguments.overwrite,
+      as: invokingUser
+    )
+    if !written.parentIsPrivate {
+      printNote(
+        "the folder holding the key is not owner-only; greenbubbles reads a key only "
+          + "from a folder you own with mode 700")
+    }
     if arguments.json {
       try printJSON(
         AcquisitionReport(
@@ -636,15 +765,22 @@ do {
       )
       print("  written to \(output.path) (mode 0600, owner-only)")
       print("")
-      print("Use it with:  cat \(output.path) | greenbubbles <args> --passphrase-stdin")
+      // An explicit --output is not the file the profile reads.
+      if let name = target.profileName, arguments.output == nil {
+        print("Use it with:  greenbubbles <args> --profile \(name)")
+      } else {
+        print(
+          "Use it with:  cat \(shellQuoted(output.path)) | greenbubbles <args> --passphrase-stdin")
+      }
     }
   case .verify:
     guard arguments.passphraseStdin else {
       throw CLIError.missingRequiredOption("--passphrase-stdin")
     }
     let passphrase = try PassphraseSecret.readFromStandardInput()
-    let root = try resolveDatabaseRoot(arguments.dbRoot)
-    let inventory = try DatabaseSaltInventory(root: root)
+    let target = try resolveTarget(arguments, needsOutput: false)
+    let root = try userDatabaseRoot(arguments.dbRoot ?? target.sourceRoot)
+    let inventory = try invokingUser.perform { try DatabaseSaltInventory(root: root) }
     let verifiedSaltCount = try inventory.verifiedSaltCount(for: passphrase)
     let distinctSaltCount = inventory.distinctSalts.count
     let allVerified = distinctSaltCount > 0 && verifiedSaltCount == distinctSaltCount

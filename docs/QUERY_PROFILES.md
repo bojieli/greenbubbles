@@ -96,6 +96,11 @@ a credential file without editing it.
    ${EDITOR:-vi} "$HOME/.greenbubbles/credentials/wechat-database-key"
    ```
 
+   For a live WeChat account, you don't need to type the key: run only that
+   account's WeChat and use `sudo greenbubbles-acquire capture --profile <name>`.
+   It writes the key to the profile's `credentialFile` (see
+   [Getting your database key](PASSPHRASE_ACQUISITION.md#command-options)).
+
    A WeChat key file holds one 64-character hex value (or exactly 32 raw
    bytes). A passphrase file holds one line of 12 to 1,024 bytes. Recovery-kit
    and local-credential files are created by the backup commands; don't write

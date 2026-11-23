@@ -26,6 +26,18 @@ Notable changes to GreenBubbles are documented here. The project follows
 - Update the `cookie` crate to 0.18.3 for RUSTSEC-2026-0594 (private cookie
   nonces can repeat in processes that fork).
 
+### Changed
+
+- `greenbubbles-acquire capture`, `verify`, and `preflight` follow query
+  profiles. `--profile <name>` takes the profile's `sourceRoot` and
+  `credentialFile`. With no flags, the tool picks the same source as an
+  ordinary query: the `defaultProfile` of `~/.greenbubbles/query-profiles.json`,
+  otherwise `profile.default`, `source.root`, and `source.passphrase_file` from
+  `~/.greenbubbles/config.toml`. Explicit `--output` and `--db-root` still win.
+  Both files are read with the Rust CLI's rules: schema, `formatVersion` 1, no
+  unknown fields, valid profile names, and an owner-only, single-link file of
+  at most 64 KiB in an owner-only folder.
+
 ### Fixed
 
 - `greenbubbles-acquire capture` no longer stops on the first unrelated
@@ -38,6 +50,13 @@ Notable changes to GreenBubbles are documented here. The project follows
   because the FTS5 check of the contact search index cannot pass with
   GreenBubbles' tokenizer, which lacks pinyin. That one FTS5 row is now
   allowed; every other integrity row still fails the snapshot.
+- Under `sudo`, `capture` now reads its profile files and writes the key with
+  the rights of the user who ran `sudo` (`SUDO_USER`, checked against
+  `SUDO_UID`), so the key file and every folder it creates belong to that user.
+  Before, both stayed owned by root, so the user's own `greenbubbles` could not
+  read the key. No `chown` is involved: a path from a user-editable profile
+  cannot make root create, replace, or hand over a file the user could not
+  already write.
 - Account discovery finds the data of a duplicated WeChat app copy. It checks
   `Data/Documents/xwechat_files` under every `~/Library/Containers/<bundle id>`
   without reading other apps' data, and skips symbolic links. Each account

@@ -23,6 +23,120 @@ struct SecretOutputWriterTests {
     #expect(try posixMode(of: output.deletingLastPathComponent()) == 0o700)
   }
 
+  @Test func createsEveryMissingLevelOwnerOnlyAndOwnedByTheUser() throws {
+    let base = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let output = base.appending(path: "a/b/c/passphrase.txt")
+
+    let secret = try PassphraseSecret(bytes: bytesFromHex(passphraseHex))
+    let outcome = try SecretOutputWriter().write(secret, to: output, as: currentUser())
+    #expect(outcome.parentIsPrivate)
+
+    for level in ["a", "a/b", "a/b/c", "a/b/c/passphrase.txt"] {
+      var info = stat()
+      #expect(lstat(base.appending(path: level).path, &info) == 0)
+      #expect(info.st_uid == getuid())
+    }
+    for level in ["a", "a/b", "a/b/c"] {
+      #expect(try posixMode(of: base.appending(path: level)) == 0o700)
+    }
+  }
+
+  @Test func refusesToOverwriteAFileOwnedBySomeoneElse() throws {
+    let base = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let output = base.appending(path: "passphrase.txt")
+    let original = Data("someone else's file".utf8)
+    try original.write(to: output)
+    chmod(output.path, 0o644)
+
+    // The test process owns the file; acting for another uid, the writer must
+    // treat it as somebody else's and leave it untouched.
+    let other = InvokingUser(
+      name: "other", uid: getuid() &+ 1, gid: getgid(),
+      homeDirectory: FileManager.default.homeDirectoryForCurrentUser)
+    let secret = try PassphraseSecret(bytes: bytesFromHex(passphraseHex))
+    #expect(throws: SecretOutputError.notOwnedByUser) {
+      try SecretOutputWriter().write(secret, to: output, overwrite: true, as: other)
+    }
+    #expect(try Data(contentsOf: output) == original)
+    #expect(try posixMode(of: output) == 0o644)
+  }
+
+  @Test func refusesASymlinkedParentFolder() throws {
+    let base = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let real = base.appending(path: "real", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: real, withIntermediateDirectories: false)
+    let linked = base.appending(path: "linked")
+    try FileManager.default.createSymbolicLink(at: linked, withDestinationURL: real)
+
+    let secret = try PassphraseSecret(bytes: bytesFromHex(passphraseHex))
+    #expect(throws: SecretOutputError.symbolicLinkParent) {
+      try SecretOutputWriter().write(secret, to: linked.appending(path: "passphrase.txt"))
+    }
+    #expect(try FileManager.default.contentsOfDirectory(atPath: real.path).isEmpty)
+  }
+
+  @Test func leavesFoldersTheUserCannotWriteAlone() throws {
+    guard geteuid() != 0 else { return }
+    let base = try makeTemporaryDirectory()
+    defer {
+      chmod(base.appending(path: "locked").path, 0o700)
+      try? FileManager.default.removeItem(at: base)
+    }
+    let locked = base.appending(path: "locked", directoryHint: .isDirectory)
+    try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: false)
+    chmod(locked.path, 0o500)
+
+    let secret = try PassphraseSecret(bytes: bytesFromHex(passphraseHex))
+    // Missing levels below a folder the user cannot write are not created.
+    #expect(throws: SecretOutputError.self) {
+      try SecretOutputWriter().write(secret, to: locked.appending(path: "new/passphrase.txt"))
+    }
+    #expect(throws: SecretOutputError.self) {
+      try SecretOutputWriter().write(secret, to: locked.appending(path: "passphrase.txt"))
+    }
+    // A system folder outside the user's rights stays untouched.
+    #expect(throws: SecretOutputError.self) {
+      try SecretOutputWriter().write(
+        secret, to: URL(fileURLWithPath: "/private/etc/greenbubbles-test-\(UUID().uuidString)"))
+    }
+  }
+
+  @Test func reportsAFolderTheRustReaderWouldRefuse() throws {
+    let base = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: base) }
+    chmod(base.path, 0o755)
+    let secret = try PassphraseSecret(bytes: bytesFromHex(passphraseHex))
+    let outcome = try SecretOutputWriter().write(secret, to: base.appending(path: "passphrase.txt"))
+    #expect(!outcome.parentIsPrivate)
+  }
+
+  @Test func refusesDotComponentsBeforeTouchingTheDisk() throws {
+    let base = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let secret = try PassphraseSecret(bytes: bytesFromHex(passphraseHex))
+    let dotted = URL(fileURLWithPath: base.path + "/new/../passphrase.txt")
+    #expect(throws: SecretOutputError.dotComponents) {
+      try SecretOutputWriter().write(secret, to: dotted)
+    }
+    #expect(try FileManager.default.contentsOfDirectory(atPath: base.path).isEmpty)
+  }
+
+  @Test func refusesARelativePath() throws {
+    let secret = try PassphraseSecret(bytes: bytesFromHex(passphraseHex))
+    #expect(throws: SecretOutputError.relativePath) {
+      try SecretOutputWriter().write(secret, to: URL(string: "relative/passphrase.txt")!)
+    }
+  }
+
+  private func currentUser() -> InvokingUser {
+    InvokingUser(
+      name: NSUserName(), uid: geteuid(), gid: getegid(),
+      homeDirectory: FileManager.default.homeDirectoryForCurrentUser)
+  }
+
   @Test func refusesToOverwriteUnlessRequested() throws {
     let base = try makeTemporaryDirectory()
     defer { try? FileManager.default.removeItem(at: base) }
