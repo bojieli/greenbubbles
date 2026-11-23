@@ -28,7 +28,9 @@ Notable changes to GreenBubbles are documented here. The project follows
   without reading other apps' data, and skips symbolic links. Each account
   reports the bundle ID of the container that holds it. With a second copy's
   account present, `greenbubbles-acquire` asks for `--db-root` instead of
-  silently using the first account (#34).
+  silently using the first account (#34). Inventory reports the owning
+  bundle ID of each automatic root, and `snapshot` leaves the client build
+  unset when the default installation doesn't own every discovered account.
 
 ## 0.10.0 - 2026-10-01
 

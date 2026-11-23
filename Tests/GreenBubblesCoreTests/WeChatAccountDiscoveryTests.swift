@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 
@@ -262,5 +263,57 @@ struct WeChatAccountDiscoveryTests {
     #expect(account.matches(accountID: reference.opaqueID))
     #expect(account.matches(accountID: "group-path-id"))
     #expect(!account.matches(accountID: "other"))
+  }
+
+  @Test func accountListingStaysAnchoredToTheVerifiedDirectory() throws {
+    let fileManager = FileManager.default
+    let base = fileManager.temporaryDirectory.appending(
+      path: "greenbubbles-account-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+    defer { try? fileManager.removeItem(at: base) }
+    let files = base.appending(path: "xwechat_files", directoryHint: .isDirectory)
+    try fileManager.createDirectory(
+      at: files.appending(path: "real/db_storage"), withIntermediateDirectories: true)
+    try fileManager.createDirectory(
+      at: files.appending(path: "real/msg/attach"), withIntermediateDirectories: true)
+    // An account whose db_storage is a link, and an account that is a link.
+    let elsewhere = base.appending(path: "elsewhere/db_storage")
+    try fileManager.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+    try fileManager.createDirectory(
+      at: files.appending(path: "linked-db"), withIntermediateDirectories: true)
+    try fileManager.createSymbolicLink(
+      at: files.appending(path: "linked-db/db_storage"), withDestinationURL: elsewhere)
+    try fileManager.createSymbolicLink(
+      at: files.appending(path: "linked-account"),
+      withDestinationURL: base.appending(path: "elsewhere"))
+
+    let descriptor = open(files.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+    #expect(descriptor >= 0)
+    defer { close(descriptor) }
+    // Swap the verified path for a link to other data after opening it.
+    let decoy = base.appending(path: "decoy", directoryHint: .isDirectory)
+    try fileManager.createDirectory(
+      at: decoy.appending(path: "decoy-account/db_storage"), withIntermediateDirectories: true)
+    try fileManager.moveItem(at: files, to: base.appending(path: "moved"))
+    try fileManager.createSymbolicLink(at: files, withDestinationURL: decoy)
+
+    let accounts = WeChatAppContainerScanner.accounts(inFiles: descriptor, at: files)
+    #expect(accounts.map(\.root.lastPathComponent) == ["real"])
+    #expect(accounts.first?.attachmentRoot != nil)
+    #expect(accounts.first?.isReadable == true)
+  }
+
+  @Test func reportsTheOwnerOfSelectedAccounts() throws {
+    let home = FileManager.default.temporaryDirectory.appending(
+      path: "greenbubbles-account-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+    defer { try? FileManager.default.removeItem(at: home) }
+    try FileManager.default.createDirectory(
+      at: home.appending(
+        path: "Library/Containers/com.example.WeChatCopy/Data/Documents/xwechat_files/a/db_storage"),
+      withIntermediateDirectories: true)
+    let discovery = WeChatAccountDiscovery(homeDirectory: home)
+    let accountID = try #require(discovery.discover().first?.accountID)
+    #expect(
+      discovery.containerBundleIdentifiers(accountID: accountID) == ["com.example.WeChatCopy"])
+    #expect(discovery.containerBundleIdentifiers(accountID: "missing").isEmpty)
   }
 }

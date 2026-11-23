@@ -41,10 +41,17 @@ public struct WeChatDiscovery: Sendable {
   }
 
   public func accessibleDataRoots() -> [(url: URL, kind: DataRootKind)] {
+    accessibleDataRootsWithOwners().map { ($0.url, $0.kind) }
+  }
+
+  /// Readable automatic data roots with the bundle ID of the app container
+  /// each belongs to, for inventory reports.
+  public func accessibleDataRootsWithOwners()
+    -> [(url: URL, kind: DataRootKind, containerBundleIdentifier: String?)]
+  {
     let fileManager = FileManager.default
     return dataRootCandidates(fileManager: fileManager)
       .filter { fileManager.isReadableFile(atPath: $0.url.path) }
-      .map { ($0.url, $0.kind) }
   }
 
   private func applicationCandidates() -> [URL] {
@@ -84,9 +91,7 @@ public struct WeChatDiscovery: Sendable {
       ].allSatisfy(WeChatAppContainerScanner.isRealDirectory)
       if reachable, let identity = WeChatAppContainerScanner.targetIdentity(files) {
         coveredByStandard.insert(identity)
-        if let match = scanned.first(where: {
-          WeChatAppContainerScanner.targetIdentity($0.xwechatFilesRoot) == identity
-        }) {
+        if let match = scanned.first(where: { $0.identity == identity }) {
           bundleIdentifier = match.bundleIdentifier
         }
       }
@@ -98,11 +103,7 @@ public struct WeChatDiscovery: Sendable {
     // is skipped only when an existing standard container is the same
     // directory.
     for container in scanned {
-      if let identity = WeChatAppContainerScanner.targetIdentity(container.xwechatFilesRoot),
-        coveredByStandard.contains(identity)
-      {
-        continue
-      }
+      if coveredByStandard.contains(container.identity) { continue }
       candidates.append(
         (container.xwechatFilesRoot, .applicationContainer, container.bundleIdentifier))
     }

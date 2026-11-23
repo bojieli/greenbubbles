@@ -77,6 +77,13 @@ struct DiscoveryTests {
     #expect(root.kind == .applicationContainer)
     let accessible = discovery.accessibleDataRoots().map(\.url.lastPathComponent)
     #expect(accessible == ["xwechat_files"])
+    // Automatic inventory keeps the owner; supplied roots have none.
+    let owned = discovery.accessibleDataRootsWithOwners()
+    #expect(owned.map(\.containerBundleIdentifier) == ["com.example.WeChatCopy"])
+    let inventory = ArtifactInventory().inventory(
+      ownedRoots: owned + [(home, .supplied, nil)])
+    #expect(
+      inventory.roots.map(\.containerBundleIdentifier) == ["com.example.WeChatCopy", nil])
   }
 
   @Test func differentlyCasedStandardContainerIsStillReported() throws {

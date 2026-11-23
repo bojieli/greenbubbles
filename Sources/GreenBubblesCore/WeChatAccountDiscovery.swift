@@ -63,6 +63,14 @@ public struct WeChatAccountDiscovery: Sendable {
       .map(\.databaseRoot)
   }
 
+  /// Bundle IDs of the app containers that own the selected accounts (nil
+  /// for an account in a group container).
+  public func containerBundleIdentifiers(accountID: String? = nil) -> [String?] {
+    resolvedAccounts()
+      .filter { accountID == nil || $0.matches(accountID: accountID!) }
+      .map(\.containerBundleIdentifier)
+  }
+
   public func singleDatabaseRoot() throws -> URL {
     let roots = databaseRoots()
     guard let first = roots.first else { throw DatabaseRootSelectionError.none }
@@ -94,18 +102,10 @@ public struct WeChatAccountDiscovery: Sendable {
   func resolvedAccounts() -> [ResolvedAccount] {
     let fileManager = FileManager.default
     var accounts: [ResolvedAccount] = []
-    for (xwechatRoot, containerBundleIdentifier, aliases) in xwechatFileRoots(
-      fileManager: fileManager)
-    {
-      let children =
-        (try? fileManager.contentsOfDirectory(
-          at: xwechatRoot,
-          includingPropertiesForKeys: [.isDirectoryKey],
-          options: [.skipsHiddenFiles]
-        )) ?? []
+    for source in xwechatFileRoots(fileManager: fileManager) {
       // Account paths as listed through each alias, keyed by account name.
       var aliasChildren: [String: [URL]] = [:]
-      for alias in aliases {
+      for alias in source.aliases {
         let listed =
           (try? fileManager.contentsOfDirectory(
             at: alias, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
@@ -113,34 +113,25 @@ public struct WeChatAccountDiscovery: Sendable {
           aliasChildren[child.lastPathComponent, default: []].append(child)
         }
       }
-      for root in children {
-        guard
-          let values = try? root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
-          values.isDirectory == true,
-          values.isSymbolicLink != true
-        else { continue }
-        let databaseRoot = root.appending(path: "db_storage", directoryHint: .isDirectory)
-        guard safeDirectory(databaseRoot) else { continue }
-        let attachmentCandidate = root.appending(path: "msg/attach", directoryHint: .isDirectory)
-        let attachmentRoot =
-          safeDirectory(attachmentCandidate)
-          ? attachmentCandidate.standardizedFileURL : nil
-        let rootReference = privacy.reference(for: root)
+      let found =
+        source.verifiedAccounts ?? pathCheckedAccounts(in: source.url, fileManager: fileManager)
+      for account in found {
+        let rootReference = privacy.reference(for: account.root)
         accounts.append(
           ResolvedAccount(
             report: WeChatAccountLocation(
               accountID: rootReference.opaqueID,
               root: rootReference,
-              databaseRoot: privacy.reference(for: databaseRoot),
-              attachmentRoot: attachmentRoot.map { privacy.reference(for: $0) },
-              isReadable: fileManager.isReadableFile(atPath: databaseRoot.path),
-              containerBundleIdentifier: containerBundleIdentifier
+              databaseRoot: privacy.reference(for: account.databaseRoot),
+              attachmentRoot: account.attachmentRoot.map { privacy.reference(for: $0) },
+              isReadable: account.isReadable,
+              containerBundleIdentifier: source.owner
             ),
-            root: root.standardizedFileURL,
-            databaseRoot: databaseRoot.standardizedFileURL,
-            attachmentRoot: attachmentRoot,
-            containerBundleIdentifier: containerBundleIdentifier,
-            aliasAccountIDs: (aliasChildren[root.lastPathComponent] ?? [])
+            root: account.root.standardizedFileURL,
+            databaseRoot: account.databaseRoot.standardizedFileURL,
+            attachmentRoot: account.attachmentRoot,
+            containerBundleIdentifier: source.owner,
+            aliasAccountIDs: (aliasChildren[account.root.lastPathComponent] ?? [])
               .map { privacy.reference(for: $0).opaqueID }
               .filter { $0 != rootReference.opaqueID }
           ))
@@ -153,14 +144,59 @@ public struct WeChatAccountDiscovery: Sendable {
       .sorted { $0.report.accountID < $1.report.accountID }
   }
 
+  /// Accounts in a group container's xwechat_files, checked by path as before.
+  private func pathCheckedAccounts(in xwechatRoot: URL, fileManager: FileManager)
+    -> [WeChatAppContainerScanner.Account]
+  {
+    let children =
+      (try? fileManager.contentsOfDirectory(
+        at: xwechatRoot,
+        includingPropertiesForKeys: [.isDirectoryKey],
+        options: [.skipsHiddenFiles]
+      )) ?? []
+    return children.compactMap { root in
+      guard
+        let values = try? root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+        values.isDirectory == true,
+        values.isSymbolicLink != true
+      else { return nil }
+      let databaseRoot = root.appending(path: "db_storage", directoryHint: .isDirectory)
+      guard safeDirectory(databaseRoot) else { return nil }
+      let attachmentCandidate = root.appending(path: "msg/attach", directoryHint: .isDirectory)
+      return WeChatAppContainerScanner.Account(
+        root: root,
+        databaseRoot: databaseRoot,
+        attachmentRoot: safeDirectory(attachmentCandidate)
+          ? attachmentCandidate.standardizedFileURL : nil,
+        isReadable: fileManager.isReadableFile(atPath: databaseRoot.path)
+      )
+    }
+  }
+
+  private struct RootSource {
+    let url: URL
+    /// Bundle ID of the owning app container; nil for a group container.
+    let owner: String?
+    /// Accounts verified through directory descriptors (app containers).
+    let verifiedAccounts: [WeChatAppContainerScanner.Account]?
+    var aliases: [URL] = []
+  }
+
   /// `xwechat_files` roots with the bundle ID of the app container that owns
   /// each one (nil for a group container) and the other paths that reach the
   /// same directory. App containers come from `WeChatAppContainerScanner`,
-  /// which covers duplicated app copies.
-  private func xwechatFileRoots(fileManager: FileManager) -> [(URL, String?, [URL])] {
-    var candidates: [(URL, String?)] = WeChatAppContainerScanner(homeDirectory: homeDirectory)
+  /// which covers duplicated app copies and verifies their accounts.
+  private func xwechatFileRoots(fileManager: FileManager) -> [RootSource] {
+    var candidates: [(RootSource, WeChatAppContainerScanner.FileIdentity?)] =
+      WeChatAppContainerScanner(homeDirectory: homeDirectory)
       .containers(fileManager: fileManager)
-      .map { ($0.xwechatFilesRoot, $0.bundleIdentifier) }
+      .map {
+        (
+          RootSource(
+            url: $0.xwechatFilesRoot, owner: $0.bundleIdentifier, verifiedAccounts: $0.accounts),
+          $0.identity
+        )
+      }
 
     let groups = homeDirectory.appending(
       path: "Library/Group Containers", directoryHint: .isDirectory)
@@ -175,7 +211,11 @@ public struct WeChatAccountDiscovery: Sendable {
       guard name.contains("wechat") || name.contains("xinwechat") else { continue }
       let root = group.appending(path: "xwechat_files", directoryHint: .isDirectory)
       guard fileManager.fileExists(atPath: root.path) else { continue }
-      candidates.append((root, nil))
+      candidates.append(
+        (
+          RootSource(url: root, owner: nil, verifiedAccounts: nil),
+          WeChatAppContainerScanner.targetIdentity(root)
+        ))
     }
 
     // App containers come first, so when a group container's xwechat_files
@@ -184,17 +224,17 @@ public struct WeChatAccountDiscovery: Sendable {
     // recorded as an alias.
     var seenPaths = Set<String>()
     var indexByTarget: [WeChatAppContainerScanner.FileIdentity: Int] = [:]
-    var roots: [(URL, String?, [URL])] = []
-    for (url, owner) in candidates {
-      guard seenPaths.insert(url.standardizedFileURL.path).inserted else { continue }
-      if let identity = WeChatAppContainerScanner.targetIdentity(url) {
+    var roots: [RootSource] = []
+    for (source, identity) in candidates {
+      guard seenPaths.insert(source.url.standardizedFileURL.path).inserted else { continue }
+      if let identity {
         if let index = indexByTarget[identity] {
-          roots[index].2.append(url)
+          roots[index].aliases.append(source.url)
           continue
         }
         indexByTarget[identity] = roots.count
       }
-      roots.append((url, owner, []))
+      roots.append(source)
     }
     return roots
   }
