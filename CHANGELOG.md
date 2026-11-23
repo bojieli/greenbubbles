@@ -28,6 +28,11 @@ Notable changes to GreenBubbles are documented here. The project follows
 
 ### Fixed
 
+- `greenbubbles-acquire capture` no longer stops on the first unrelated
+  32-byte `CCKeyDerivationPBKDF` call. The breakpoint matches the SQLCipher
+  account-key derivation (PBKDF2, 32-byte password, 16-byte salt, HMAC-SHA512,
+  256,000 rounds). A candidate that does not verify is ignored until one does,
+  or the timeout expires. Nothing is written when no candidate verifies.
 - `snapshot create` and `snapshot verify` work on real WeChat 4.x accounts.
   They failed every time with "SQLite integrity_check did not return ok",
   because the FTS5 check of the contact search index cannot pass with

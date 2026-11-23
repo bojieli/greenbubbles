@@ -530,26 +530,6 @@ private func runPreflight(
   )
 }
 
-private func verifyPassphrase(
-  _ passphrase: PassphraseSecret,
-  inventory: DatabaseSaltInventory
-) throws -> Int {
-  var verifiedSaltCount = 0
-  for sample in inventory.saltVerificationSamples {
-    var encryptionKey = try SQLCipherKeyVerifier.deriveEncryptionKey(
-      passphrase: passphrase,
-      salt: sample.salt
-    )
-    let verified = try SQLCipherKeyVerifier.verify(
-      encryptionKey: encryptionKey,
-      page1: sample.page1
-    )
-    PassphraseSecret.zeroize(&encryptionKey)
-    if verified { verifiedSaltCount += 1 }
-  }
-  return verifiedSaltCount
-}
-
 do {
   let arguments = try Arguments(Array(CommandLine.arguments.dropFirst()))
   switch arguments.command {
@@ -596,6 +576,9 @@ do {
     )
     printNote("in WeChat, log out of the account (not just quit the app), then log back in")
     printNote("waiting up to \(arguments.timeoutSeconds) seconds for the login")
+    printNote(
+      "a captured value that does not open your databases is ignored; capture keeps waiting"
+    )
     var capture = LLDBPassphraseCapture()
     capture.target = target
     capture.verbose = arguments.verbose
@@ -603,15 +586,30 @@ do {
       FileHandle.standardError.write(Data("note: \(message)\n".utf8))
     }
     let started = Date()
-    let passphrase = try capture.capture(timeoutSeconds: arguments.timeoutSeconds)
-    let captureDurationSeconds = Date().timeIntervalSince(started)
-    let verifiedSaltCount = try verifyPassphrase(passphrase, inventory: inventory)
-    guard verifiedSaltCount > 0 else {
+    // Matches the capture's own deadline. Verification stops between salts
+    // once it passes, so a candidate that arrives late cannot keep lldb
+    // attached for a full pass over every salt.
+    let deadline = started.addingTimeInterval(TimeInterval(arguments.timeoutSeconds))
+    var verifiedSaltCount = 0
+    let passphrase: PassphraseSecret
+    do {
+      passphrase = try capture.capture(timeoutSeconds: arguments.timeoutSeconds) { secret in
+        verifiedSaltCount = try inventory.verifiedSaltCount(for: secret) {
+          Date() >= deadline
+        }
+        return verifiedSaltCount > 0
+      }
+    } catch CaptureError.noAcceptableCandidate {
       throw CLIError.verificationFailed(
-        "no match among \(inventory.distinctSalts.count) distinct database salts "
-          + "in \(inventory.entries.count) inventoried files. No output was created or replaced."
+        CaptureError.verificationFailureDiagnostic(
+          distinctSaltCount: inventory.distinctSalts.count,
+          databaseCount: inventory.entries.count
+        )
       )
     }
+    let captureDurationSeconds = Date().timeIntervalSince(started)
+    // `capture` returns only a candidate the closure accepted.
+    assert(verifiedSaltCount > 0)
     try SecretOutputWriter().write(passphrase, to: output, overwrite: arguments.overwrite)
     if arguments.json {
       try printJSON(
@@ -645,7 +643,7 @@ do {
     let passphrase = try PassphraseSecret.readFromStandardInput()
     let root = try resolveDatabaseRoot(arguments.dbRoot)
     let inventory = try DatabaseSaltInventory(root: root)
-    let verifiedSaltCount = try verifyPassphrase(passphrase, inventory: inventory)
+    let verifiedSaltCount = try inventory.verifiedSaltCount(for: passphrase)
     let distinctSaltCount = inventory.distinctSalts.count
     let allVerified = distinctSaltCount > 0 && verifiedSaltCount == distinctSaltCount
     if arguments.json {
