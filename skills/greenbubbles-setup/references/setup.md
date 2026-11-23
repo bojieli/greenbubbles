@@ -134,9 +134,12 @@ The helper does not automate re-signing or sudo. Keep these owner-operated steps
 visible; do not run them as a side effect of a query or setup check. Capture
 writes the key where queries will read it: the default query profile's
 `credentialFile` when a live profile file exists, otherwise
-`~/.greenbubbles-acquire/passphrase.txt`. The file is handed back to the user
-who ran `sudo`. For a second account, run only that WeChat copy and pass
-`--profile <name>`; explicit `--output` and `--db-root` override the profile.
+`~/.greenbubbles-acquire/passphrase.txt`. The helper writes as the user who
+ran `sudo`, so the file belongs to that user. For a second account, run only
+that WeChat copy and pass `--profile <name>`; explicit `--output` overrides the
+profile. Never add, change, or redirect a profile's `credentialFile` or
+`config.toml`'s `source.passphrase_file` on your own, and never point them
+outside the user's home; ask the user to edit those paths.
 Never request the key in chat. If capture fails, report its prerequisite failure;
 do not repeatedly attach or modify the application.
 

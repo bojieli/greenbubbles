@@ -11,6 +11,7 @@ enum CLIError: Error, CustomStringConvertible {
   case missingRequiredOption(String)
   case invalidInteger(option: String, value: String)
   case verificationFailed(String)
+  case rootConflictsWithTarget(String)
 
   var description: String {
     switch self {
@@ -24,6 +25,10 @@ enum CLIError: Error, CustomStringConvertible {
       return "Expected a positive integer for \(option), got: \(value)"
     case .verificationFailed(let reason):
       return "Passphrase verification failed: \(reason)"
+    case .rootConflictsWithTarget(let origin):
+      return
+        "--db-root differs from the root \(origin), whose key file capture would write; "
+        + "pass --output as well, or select that account's profile with --profile"
     }
   }
 }
@@ -118,13 +123,15 @@ private let usage = """
 
   Options:
     --output <path>        Where capture writes the passphrase (default: the
-                           query profile's credentialFile, else
+                           query profile's credentialFile, else config.toml's
+                           source.passphrase_file, else
                            ~/.greenbubbles-acquire/passphrase.txt; mode 0600)
     --timeout-seconds <n>  Capture window in seconds (default: 300)
     --db-root <path>       Select a db_storage root (overrides the profile's
                            sourceRoot; required if several roots are found)
     --profile <name>       Use this live query profile's sourceRoot and
-                           credentialFile (default: the file's defaultProfile)
+                           credentialFile (default: the file's defaultProfile,
+                           or config.toml when no profile file exists)
     --overwrite            Replace an existing passphrase output file
     --passphrase-stdin     Read the 32-byte passphrase from standard input
     --include-paths        Include sensitive filesystem paths in local output
@@ -221,49 +228,49 @@ private func printPreflight(_ result: PreflightResult) {
   }
 }
 
+// Under sudo, the user who ran it (SUDO_USER checked against SUDO_UID);
+// otherwise the current user. User-controlled files are opened as this user.
+private let invokingUser: InvokingUser = {
+  do {
+    return try InvokingUser.current()
+  } catch {
+    printError(String(describing: error))
+    exit(2)
+  }
+}()
+
 // Under sudo the effective home is /var/root, but the WeChat data lives in the
-// invoking user's home; SUDO_USER tells us who that is.
+// invoking user's home.
 private func invokingUserHomeDirectory() -> URL {
-  if geteuid() == 0, let sudoUser = ProcessInfo.processInfo.environment["SUDO_USER"],
-    let entry = getpwnam(sudoUser), let directory = entry.pointee.pw_dir
-  {
-    return URL(fileURLWithPath: String(cString: directory)).standardizedFileURL
-  }
-  return FileManager.default.homeDirectoryForCurrentUser
+  invokingUser.homeDirectory
 }
 
-// The user who will read the key: the sudo caller when running as root.
-private func invokingUserIDs() -> (uid: uid_t, gid: gid_t) {
-  if geteuid() == 0, let sudoUser = ProcessInfo.processInfo.environment["SUDO_USER"],
-    let entry = getpwnam(sudoUser)
-  {
-    return (entry.pointee.pw_uid, entry.pointee.pw_gid)
-  }
-  return (getuid(), getgid())
-}
-
-// Same location rules as the Rust CLI's query profiles.
-private func queryProfilesFile() -> URL {
-  if let custom = ProcessInfo.processInfo.environment["GREENBUBBLES_QUERY_PROFILES_FILE"],
-    custom.hasPrefix("/")
-  {
-    return URL(fileURLWithPath: custom)
-  }
-  return invokingUserHomeDirectory().appending(path: ".greenbubbles/query-profiles.json")
-}
-
-// Explicit --db-root and --output win; a profile fills in what they leave out.
-private func resolveProfile(_ arguments: Arguments, needsOutput: Bool) throws -> LiveQueryProfile? {
+// Explicit --db-root and --output win; a query profile or config.toml fills in
+// what they leave out, as for the Rust CLI's queries.
+private func resolveTarget(_ arguments: Arguments, needsOutput: Bool) throws -> AcquireTarget {
   if arguments.profile == nil, arguments.dbRoot != nil, !needsOutput || arguments.output != nil {
-    return nil
+    return .none
   }
-  let profile = try QueryProfileTarget.resolve(
-    name: arguments.profile,
-    file: queryProfilesFile(),
-    ownerUID: invokingUserIDs().uid
+  let locations = try QueryProfileTarget.locations(
+    environment: ProcessInfo.processInfo.environment,
+    home: invokingUser.homeDirectory
   )
-  if let profile { printNote("using query profile \(profile.name)") }
-  return profile
+  let target = try invokingUser.perform {
+    try QueryProfileTarget.resolve(
+      requestedProfile: arguments.profile,
+      locations: locations,
+      ownerUID: invokingUser.uid
+    )
+  }
+  if let name = target.profileName { printNote("using query profile \(name)") }
+  // Don't write one account's key into the file another account's queries read.
+  if needsOutput, arguments.output == nil, target.credentialFile != nil,
+    let dbRoot = arguments.dbRoot, let targetRoot = target.sourceRoot,
+    dbRoot.standardizedFileURL.path != targetRoot.standardizedFileURL.path
+  {
+    throw CLIError.rootConflictsWithTarget(target.sourceRootOrigin ?? "configured")
+  }
+  return target
 }
 
 private func resolveDatabaseRoot(_ option: URL?) throws -> URL {
@@ -413,8 +420,8 @@ private func runPreflight(
   return PreflightResult(report: report, checks: checks)
 }
 
-private func rootOrigin(_ arguments: Arguments, _ profile: LiveQueryProfile?) -> String {
-  if arguments.dbRoot == nil, let profile { return "from query profile \(profile.name)" }
+private func rootOrigin(_ arguments: Arguments, _ target: AcquireTarget) -> String {
+  if arguments.dbRoot == nil, let origin = target.sourceRootOrigin { return origin }
   return "from --db-root"
 }
 
@@ -444,10 +451,10 @@ do {
   case .help:
     print(usage)
   case .preflight:
-    let profile = try resolveProfile(arguments, needsOutput: false)
+    let target = try resolveTarget(arguments, needsOutput: false)
     let result = runPreflight(
-      dbRootOption: arguments.dbRoot ?? profile?.sourceRoot,
-      rootOrigin: rootOrigin(arguments, profile),
+      dbRootOption: arguments.dbRoot ?? target.sourceRoot,
+      rootOrigin: rootOrigin(arguments, target),
       includePaths: arguments.includePaths
     )
     if arguments.json {
@@ -457,17 +464,17 @@ do {
     }
     if !result.report.ready { exit(1) }
   case .capture:
-    let profile = try resolveProfile(arguments, needsOutput: true)
-    let dbRoot = arguments.dbRoot ?? profile?.sourceRoot
+    let target = try resolveTarget(arguments, needsOutput: true)
+    let dbRoot = arguments.dbRoot ?? target.sourceRoot
     let output =
       arguments.output
-      ?? profile?.credentialFile
+      ?? target.credentialFile
       ?? invokingUserHomeDirectory()
       .appending(path: ".greenbubbles-acquire", directoryHint: .isDirectory)
       .appending(path: "passphrase.txt")
     let preflight = runPreflight(
       dbRootOption: dbRoot,
-      rootOrigin: rootOrigin(arguments, profile),
+      rootOrigin: rootOrigin(arguments, target),
       includePaths: arguments.includePaths
     )
     guard preflight.report.ready else {
@@ -502,12 +509,17 @@ do {
           + "in \(inventory.entries.count) inventoried files. No output was created or replaced."
       )
     }
-    try SecretOutputWriter().write(
+    let written = try SecretOutputWriter().write(
       passphrase,
       to: output,
       overwrite: arguments.overwrite,
-      owner: invokingUserIDs()
+      as: invokingUser
     )
+    if !written.parentIsPrivate {
+      printNote(
+        "the folder holding the key is not owner-only; greenbubbles reads a key only "
+          + "from a folder you own with mode 700")
+    }
     if arguments.json {
       try printJSON(
         AcquisitionReport(
@@ -532,8 +544,8 @@ do {
       print("  written to \(output.path) (mode 0600, owner-only)")
       print("")
       // An explicit --output is not the file the profile reads.
-      if let profile, arguments.output == nil {
-        print("Use it with:  greenbubbles <args> --profile \(profile.name)")
+      if let name = target.profileName, arguments.output == nil {
+        print("Use it with:  greenbubbles <args> --profile \(name)")
       } else {
         print("Use it with:  cat \(output.path) | greenbubbles <args> --passphrase-stdin")
       }
@@ -543,8 +555,8 @@ do {
       throw CLIError.missingRequiredOption("--passphrase-stdin")
     }
     let passphrase = try PassphraseSecret.readFromStandardInput()
-    let profile = try resolveProfile(arguments, needsOutput: false)
-    let root = try resolveDatabaseRoot(arguments.dbRoot ?? profile?.sourceRoot)
+    let target = try resolveTarget(arguments, needsOutput: false)
+    let root = try resolveDatabaseRoot(arguments.dbRoot ?? target.sourceRoot)
     let inventory = try DatabaseSaltInventory(root: root)
     let verifiedSaltCount = try verifyPassphrase(passphrase, inventory: inventory)
     let distinctSaltCount = inventory.distinctSalts.count

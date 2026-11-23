@@ -10,9 +10,13 @@ Notable changes to GreenBubbles are documented here. The project follows
 
 - `greenbubbles-acquire capture`, `verify`, and `preflight` follow query
   profiles. `--profile <name>` takes the profile's `sourceRoot` and
-  `credentialFile`. With no flags, a live `defaultProfile` is used when
-  `~/.greenbubbles/query-profiles.json` exists. Explicit `--db-root` and
-  `--output` still win. The profile file must be a regular, owner-only file.
+  `credentialFile`. With no flags, the tool picks the same source as an
+  ordinary query: the `defaultProfile` of `~/.greenbubbles/query-profiles.json`,
+  otherwise `profile.default`, `source.root`, and `source.passphrase_file` from
+  `~/.greenbubbles/config.toml`. Explicit `--output` and `--db-root` still win.
+  Both files are read with the Rust CLI's rules: schema, `formatVersion` 1, no
+  unknown fields, valid profile names, and an owner-only, single-link file of
+  at most 64 KiB in an owner-only folder.
 
 ### Fixed
 
@@ -21,9 +25,13 @@ Notable changes to GreenBubbles are documented here. The project follows
   because the FTS5 check of the contact search index cannot pass with
   GreenBubbles' tokenizer, which lacks pinyin. That one FTS5 row is now
   allowed; every other integrity row still fails the snapshot.
-- Under `sudo`, `capture` now hands the key file, and a folder it creates, to
-  the user who ran `sudo`. Before, both stayed owned by root, so the user's own
-  `greenbubbles` could not read the key.
+- Under `sudo`, `capture` now reads its profile files and writes the key with
+  the rights of the user who ran `sudo` (`SUDO_USER`, checked against
+  `SUDO_UID`), so the key file and every folder it creates belong to that user.
+  Before, both stayed owned by root, so the user's own `greenbubbles` could not
+  read the key. No `chown` is involved: a path from a user-editable profile
+  cannot make root create, replace, or hand over a file the user could not
+  already write.
 
 ## 0.10.0 - 2026-10-01
 
