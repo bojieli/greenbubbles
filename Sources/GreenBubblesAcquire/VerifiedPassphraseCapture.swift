@@ -81,6 +81,12 @@ public enum VerifiedPassphraseCapture {
         fullyRejectedCount += 1
         return false
       }
+    } catch CaptureError.timedOutWithUncheckedCandidates {
+      throw CaptureVerificationError.incomplete(
+        checkedSaltCount: 0,
+        distinctSaltCount: inventory.distinctSalts.count,
+        fullyRejectedCount: fullyRejectedCount
+      )
     } catch CaptureError.noAcceptableCandidate {
       throw CaptureVerificationError.noMatch(
         distinctSaltCount: inventory.distinctSalts.count,

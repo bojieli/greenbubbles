@@ -37,7 +37,7 @@ struct VerifiedPassphraseCaptureTests {
     }
     let lldb = try makeFakeLLDB(in: base, printing: [unrelated], thenExit: ending == .exits)
 
-    #expect(throws: (any Error).self) {
+    let error = #expect(throws: (any Error).self) {
       try VerifiedPassphraseCapture.captureAndWrite(
         inventory: inventory,
         deadline: .distantFuture,
@@ -45,8 +45,18 @@ struct VerifiedPassphraseCaptureTests {
         overwrite: true,
         as: currentUser()
       ) { accept in
-        try runCapture(lldb, deadline: Date().addingTimeInterval(1.5), accept: accept)
+        try runCapture(lldb, deadline: Date().addingTimeInterval(3), accept: accept)
       }
+    }
+    // The candidate was offered and rejected; the run then ended the way
+    // `ending` says.
+    switch ending {
+    case .timesOut:
+      #expect(
+        error as? CaptureVerificationError
+          == .noMatch(distinctSaltCount: 1, databaseCount: 1))
+    case .exits:
+      #expect(error as? CaptureError == .exitedAfterRejecting(rejectedCandidateCount: 1))
     }
 
     if outputExists {
@@ -90,7 +100,7 @@ struct VerifiedPassphraseCaptureTests {
     defer { try? FileManager.default.removeItem(at: base) }
     let lldb = try makeFakeLLDB(in: base, printing: [unrelated], thenExit: true)
     var offered = 0
-    #expect(throws: CaptureError.exitedWithoutCapture(rejectedCandidateCount: 1)) {
+    #expect(throws: CaptureError.exitedAfterRejecting(rejectedCandidateCount: 1)) {
       try runCapture(lldb, deadline: Date().addingTimeInterval(30)) { _ in
         offered += 1
         return false
@@ -101,12 +111,16 @@ struct VerifiedPassphraseCaptureTests {
 
   @Test func exitDescriptionKeepsTheRejectionAsContext() {
     #expect(
-      CaptureError.exitedWithoutCapture().description
+      CaptureError.exitedWithoutCapture.description
         == "lldb exited before a passphrase was captured")
     #expect(
-      CaptureError.exitedWithoutCapture(rejectedCandidateCount: 2).description
+      CaptureError.exitedAfterRejecting(rejectedCandidateCount: 1).description
+        == "lldb exited before a passphrase was captured (earlier, 1 captured candidate "
+        + "was rejected). No output was created or replaced.")
+    #expect(
+      CaptureError.exitedAfterRejecting(rejectedCandidateCount: 2).description
         == "lldb exited before a passphrase was captured (earlier, 2 captured candidates "
-        + "did not open your databases). No output was created or replaced.")
+        + "were rejected). No output was created or replaced.")
   }
 
   // MARK: Incomplete verification
@@ -158,6 +172,30 @@ struct VerifiedPassphraseCaptureTests {
         },
         capture: { accept in try offer([unrelated, unrelated], to: accept) }
       )
+    }
+  }
+
+  @Test func candidateLeftUncheckedAtTheDeadlineIsReportedAsIncomplete() throws {
+    let base = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let inventory = try makeInventory(in: base, openingWith: account, extraSalts: 1)
+    #expect(
+      throws: CaptureVerificationError.incomplete(
+        checkedSaltCount: 0, distinctSaltCount: 2, fullyRejectedCount: 1)
+    ) {
+      try VerifiedPassphraseCapture.captureAndWrite(
+        inventory: inventory,
+        deadline: .distantFuture,
+        to: base.appending(path: "passphrase.txt"),
+        overwrite: false,
+        as: currentUser()
+      ) { accept in
+        // What the capture loop does when a second candidate in the same
+        // batch is skipped because checking the first crossed the deadline.
+        #expect(try !accept(PassphraseSecret(bytes: unrelated)))
+        throw CaptureError.timedOutWithUncheckedCandidates(
+          uncheckedCandidateCount: 1, rejectedCandidateCount: 1)
+      }
     }
   }
 

@@ -78,6 +78,7 @@ struct CaptureCandidateCursorTests {
     #expect(decision.secret == nil)
     #expect(decision.newlyRejected == 2)
     #expect(decision.deadlineReached)
+    #expect(decision.uncheckedCount == 1)
   }
 
   @Test func verificationStopsBetweenSaltsOnceTheDeadlinePasses() {

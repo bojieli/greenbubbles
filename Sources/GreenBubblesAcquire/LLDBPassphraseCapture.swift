@@ -11,9 +11,13 @@ public enum CaptureError: Error, Equatable, CustomStringConvertible {
   case targetExited
   case timedOut
   case noAcceptableCandidate
-  /// lldb exited on its own before the deadline. A count above zero means
-  /// earlier candidates were rejected; the exit is still the cause.
-  case exitedWithoutCapture(rejectedCandidateCount: Int = 0)
+  /// The timeout passed with captured candidates still waiting to be offered
+  /// to `accept`; they were neither accepted nor rejected.
+  case timedOutWithUncheckedCandidates(uncheckedCandidateCount: Int, rejectedCandidateCount: Int)
+  case exitedWithoutCapture
+  /// lldb exited on its own before the deadline after `accept` rejected
+  /// earlier candidates. The exit is the cause; the rejections are context.
+  case exitedAfterRejecting(rejectedCandidateCount: Int)
 
   public var description: String {
     switch self {
@@ -33,17 +37,23 @@ public enum CaptureError: Error, Equatable, CustomStringConvertible {
     case .noAcceptableCandidate:
       return
         "every captured candidate was rejected before the timeout. No output was created or replaced."
-    case .exitedWithoutCapture(let rejectedCandidateCount):
-      guard rejectedCandidateCount > 0 else {
-        return "lldb exited before a passphrase was captured"
-      }
-      let candidates =
-        rejectedCandidateCount == 1
-        ? "1 captured candidate" : "\(rejectedCandidateCount) captured candidates"
+    case .timedOutWithUncheckedCandidates(let uncheckedCandidateCount, _):
       return
-        "lldb exited before a passphrase was captured (earlier, \(candidates) "
-        + "did not open your databases). No output was created or replaced."
+        "the timeout passed before \(Self.capturedCandidates(uncheckedCandidateCount)) could be "
+        + "checked. No output was created or replaced."
+    case .exitedWithoutCapture:
+      return "lldb exited before a passphrase was captured"
+    case .exitedAfterRejecting(let rejectedCandidateCount):
+      return
+        "lldb exited before a passphrase was captured (earlier, "
+        + "\(Self.capturedCandidates(rejectedCandidateCount)) "
+        + "\(rejectedCandidateCount == 1 ? "was" : "were") rejected). "
+        + "No output was created or replaced."
     }
+  }
+
+  private static func capturedCandidates(_ count: Int) -> String {
+    count == 1 ? "1 captured candidate" : "\(count) captured candidates"
   }
 
   /// Diagnostic for a capture whose candidates all failed verification.
@@ -287,7 +297,10 @@ public struct LLDBPassphraseCapture: Sendable {
         return secret
       }
       if decision.deadlineReached {
-        throw deadlineError(rejectedCandidateCount)
+        throw CaptureError.timedOutWithUncheckedCandidates(
+          uncheckedCandidateCount: decision.uncheckedCount,
+          rejectedCandidateCount: rejectedCandidateCount
+        )
       }
       if decision.newlyRejected > 0 {
         emit("captured candidate was rejected; waiting for another derivation")
@@ -302,7 +315,10 @@ public struct LLDBPassphraseCapture: Sendable {
       if !running {
         // An unexpected exit before the deadline is the cause even after a
         // rejection; the rejections are context, not the reason it stopped.
-        throw CaptureError.exitedWithoutCapture(rejectedCandidateCount: rejectedCandidateCount)
+        if rejectedCandidateCount > 0 {
+          throw CaptureError.exitedAfterRejecting(rejectedCandidateCount: rejectedCandidateCount)
+        }
+        throw CaptureError.exitedWithoutCapture
       }
       guard Date() < deadline else { throw deadlineError(rejectedCandidateCount) }
       Thread.sleep(forTimeInterval: 0.05)
@@ -423,8 +439,10 @@ enum CaptureCandidateCursor {
   struct Decision {
     var secret: PassphraseSecret?
     var newlyRejected: Int
+    /// Candidates not offered because the deadline had passed.
+    var uncheckedCount = 0
     /// The deadline passed before every candidate could be offered.
-    var deadlineReached = false
+    var deadlineReached: Bool { uncheckedCount > 0 }
   }
 
   /// Each offered candidate is zeroized in place; the caller zeroizes any
@@ -438,7 +456,11 @@ enum CaptureCandidateCursor {
     var newlyRejected = 0
     for index in candidates.indices {
       guard now() < deadline else {
-        return Decision(secret: nil, newlyRejected: newlyRejected, deadlineReached: true)
+        return Decision(
+          secret: nil,
+          newlyRejected: newlyRejected,
+          uncheckedCount: candidates.count - index
+        )
       }
       defer { PassphraseSecret.zeroize(&candidates[index]) }
       let secret = try PassphraseSecret(bytes: candidates[index])
