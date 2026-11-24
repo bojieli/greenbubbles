@@ -93,6 +93,13 @@ struct WeChatAppContainerScanner: Sendable {
 
     var seen = Set<FileIdentity>()
     return ordered.compactMap { name in
+      // The exact standard name adds nothing when a listed spelling already
+      // reached that directory; skip it before its accounts are listed.
+      if name == Self.standardBundleIdentifier, let canonicalIdentity,
+        seen.contains(canonicalIdentity)
+      {
+        return nil
+      }
       guard
         let container = verifiedContainer(
           named: name, in: containersDirectory, listAccounts: true),
@@ -120,6 +127,16 @@ struct WeChatAppContainerScanner: Sendable {
   static func targetIdentity(_ url: URL) -> FileIdentity? {
     var metadata = stat()
     guard fstatat(AT_FDCWD, url.path, &metadata, 0) == 0 else { return nil }
+    return FileIdentity(device: metadata.st_dev, inode: metadata.st_ino)
+  }
+
+  /// Identity of the directory entry itself (`lstat`); nil for a symbolic
+  /// link, anything that isn't a directory, or any error.
+  static func entryIdentity(_ url: URL) -> FileIdentity? {
+    var metadata = stat()
+    guard Darwin.lstat(url.path, &metadata) == 0, metadata.st_mode & S_IFMT == S_IFDIR else {
+      return nil
+    }
     return FileIdentity(device: metadata.st_dev, inode: metadata.st_ino)
   }
 

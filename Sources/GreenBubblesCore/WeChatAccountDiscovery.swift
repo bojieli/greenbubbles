@@ -97,7 +97,8 @@ public struct WeChatAccountDiscovery: Sendable {
   /// case-insensitive volume can differ in case from the app's Info.plist, so
   /// bundle IDs are compared case-insensitively. A case-only match also
   /// requires `~/Library/Containers/<bundleIdentifier>` to be the owner's
-  /// container directory: on a case-sensitive volume the two spellings can be
+  /// container directory (a real directory, not a link, as discovery
+  /// requires): on a case-sensitive volume the two spellings can be
   /// different containers.
   public func ownersAllMatch(_ owners: [String?], bundleIdentifier: String) -> Bool {
     let containers = homeDirectory.appending(
@@ -106,10 +107,10 @@ public struct WeChatAccountDiscovery: Sendable {
       guard let owner else { return false }
       if owner == bundleIdentifier { return true }
       guard owner.caseInsensitiveCompare(bundleIdentifier) == .orderedSame,
-        let ownerIdentity = WeChatAppContainerScanner.targetIdentity(
+        let ownerIdentity = WeChatAppContainerScanner.entryIdentity(
           containers.appending(path: owner, directoryHint: .isDirectory))
       else { return false }
-      return WeChatAppContainerScanner.targetIdentity(
+      return WeChatAppContainerScanner.entryIdentity(
         containers.appending(path: bundleIdentifier, directoryHint: .isDirectory))
         == ownerIdentity
     }

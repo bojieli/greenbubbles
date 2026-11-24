@@ -344,6 +344,14 @@ struct WeChatAccountDiscoveryTests {
     #expect(!discovery.ownersAllMatch(["com.example.WeChatCopy"], bundleIdentifier: installed))
     #expect(!discovery.ownersAllMatch([nil], bundleIdentifier: installed))
     #expect(!discovery.ownersAllMatch([installed, nil], bundleIdentifier: installed))
+    // A link standing in for the variant's container isn't verified.
+    try fileManager.createDirectory(
+      at: home.appending(path: "elsewhere"), withIntermediateDirectories: true)
+    try fileManager.createSymbolicLink(
+      at: containers.appending(path: "com.example.Linked"),
+      withDestinationURL: home.appending(path: "elsewhere"))
+    #expect(
+      !discovery.ownersAllMatch(["COM.EXAMPLE.LINKED"], bundleIdentifier: "com.example.Linked"))
     // No selected roots leaves nothing that contradicts the build.
     #expect(discovery.ownersAllMatch([], bundleIdentifier: installed))
   }
@@ -367,6 +375,13 @@ struct WeChatAccountDiscoveryTests {
     let discovery = WeChatAccountDiscovery(homeDirectory: home)
     #expect(!discovery.ownersAllMatch([variant], bundleIdentifier: installed))
     #expect(discovery.ownersAllMatch([installed], bundleIdentifier: installed))
+    // The installed ID's entry as a link to the variant's container doesn't
+    // count either: discovery rejects linked containers.
+    let installedURL = containers.appending(path: installed)
+    try fileManager.removeItem(at: installedURL)
+    try fileManager.createSymbolicLink(
+      at: installedURL, withDestinationURL: containers.appending(path: variant))
+    #expect(!discovery.ownersAllMatch([variant], bundleIdentifier: installed))
   }
 
   @Test func standardAccountIsFoundWhenContainersIsSearchOnly() throws {
