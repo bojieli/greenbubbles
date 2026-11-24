@@ -112,10 +112,11 @@ struct VerifiedPassphraseCaptureTests {
   @Test func candidateArrivingDuringTheLastCheckCountsAsUnchecked() throws {
     let base = try makeTemporaryDirectory()
     defer { try? FileManager.default.removeItem(at: base) }
-    // The second read arrives while the first is being checked, and that
-    // check runs past the deadline.
+    // The second read is printed only once the first check has started,
+    // and that check runs past the deadline.
+    let started = base.appending(path: "first-check-started")
     let lldb = try makeFakeLLDB(
-      in: base, printing: [unrelated], thenPrinting: [unrelated], after: 0.3, thenExit: false)
+      in: base, printing: [unrelated], thenPrinting: [unrelated], once: started, thenExit: false)
     var offered = 0
     #expect(
       throws: CaptureError.timedOutWithUncheckedCandidates(
@@ -123,6 +124,7 @@ struct VerifiedPassphraseCaptureTests {
     ) {
       try runCapture(lldb, deadline: Date().addingTimeInterval(1.5)) { _ in
         offered += 1
+        FileManager.default.createFile(atPath: started.path, contents: nil)
         Thread.sleep(forTimeInterval: 2.5)
         return false
       }
@@ -345,7 +347,7 @@ struct VerifiedPassphraseCaptureTests {
     in base: URL,
     printing candidates: [[UInt8]],
     thenPrinting later: [[UInt8]] = [],
-    after delay: Double = 0,
+    once signal: URL? = nil,
     thenExit: Bool
   ) throws -> LLDBPassphraseCapture {
     func reads(_ batch: [[UInt8]], from first: Int) -> String {
@@ -356,8 +358,11 @@ struct VerifiedPassphraseCaptureTests {
     }
     var script =
       "#!/bin/sh\nhead -c 1 >/dev/null\nprintf '%s' '\(reads(candidates, from: 0))'\n"
+    if let signal {
+      script += "while [ ! -e '\(signal.path)' ]; do sleep 0.05; done\n"
+    }
     if !later.isEmpty {
-      script += "sleep \(delay)\nprintf '%s' '\(reads(later, from: candidates.count))'\n"
+      script += "printf '%s' '\(reads(later, from: candidates.count))'\n"
     }
     script += thenExit ? "exit 0\n" : "exec sleep 60\n"
     let url = base.appending(path: "fake-lldb-\(UUID().uuidString)")

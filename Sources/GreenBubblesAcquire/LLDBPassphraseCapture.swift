@@ -223,6 +223,10 @@ public struct LLDBPassphraseCapture: Sendable {
     process.standardError = output
 
     let accumulator = OutputAccumulator()
+    // When lldb exited, recorded as it happens rather than at the next poll
+    // (a poll can be delayed by a long verification).
+    let exitClock = ExitClock()
+    process.terminationHandler = { _ in exitClock.record() }
     let verboseRelay = verbose ? VerboseLineRelay(emit: { [self] in emit($0) }) : nil
     output.fileHandleForReading.readabilityHandler = { handle in
       var data = handle.availableData
@@ -317,16 +321,13 @@ public struct LLDBPassphraseCapture: Sendable {
         throw CaptureError.targetExited
       }
       if !running, polledAt < deadline {
-        // An exit seen before the deadline is the cause even after a
-        // rejection; the rejections are context, not the reason it stopped.
-        // An exit first seen after the deadline may have followed it, so
-        // the timeout below is reported instead.
-        if rejectedCandidateCount > 0 {
-          throw CaptureError.exitedAfterRejecting(rejectedCandidateCount: rejectedCandidateCount)
-        }
-        throw CaptureError.exitedWithoutCapture
+        throw Self.exitError(rejectedCandidateCount)
       }
       guard Date() < deadline else {
+        // lldb may have exited while the last candidate was being checked.
+        if let exitedAt = exitClock.time, exitedAt < deadline {
+          throw Self.exitError(rejectedCandidateCount)
+        }
         throw deadlineErrorAfterDraining(
           rejectedCandidateCount,
           uncheckedCandidateCount: 0,
@@ -336,6 +337,16 @@ public struct LLDBPassphraseCapture: Sendable {
       }
       Thread.sleep(forTimeInterval: 0.05)
     }
+  }
+
+  /// An exit before the deadline is the cause even after a rejection; the
+  /// rejections are context, not the reason the capture stopped. An exit
+  /// first seen after the deadline may have followed it, so the timeout is
+  /// reported for that instead.
+  private static func exitError(_ rejectedCandidateCount: Int) -> CaptureError {
+    rejectedCandidateCount > 0
+      ? .exitedAfterRejecting(rejectedCandidateCount: rejectedCandidateCount)
+      : .exitedWithoutCapture
   }
 
   /// The error for a deadline reached inside a single capture. Complete reads
@@ -348,6 +359,11 @@ public struct LLDBPassphraseCapture: Sendable {
     stream: inout LLDBMemoryReadStream,
     accumulator: OutputAccumulator
   ) -> CaptureError {
+    if rejectedCandidateCount > 0 {
+      // Before a definitive "no acceptable candidate", let output the reader
+      // already has in hand reach the accumulator.
+      Thread.sleep(forTimeInterval: 0.1)
+    }
     var rest = accumulator.take()
     var late = stream.consume(&rest)
     defer { Self.zeroizeCandidates(&late.candidates) }
@@ -364,6 +380,24 @@ public struct LLDBPassphraseCapture: Sendable {
   private static func zeroizeCandidates(_ candidates: inout [[UInt8]]) {
     for index in candidates.indices {
       PassphraseSecret.zeroize(&candidates[index])
+    }
+  }
+
+  /// The moment lldb exited, set from its termination handler.
+  private final class ExitClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: Date?
+
+    func record() {
+      lock.lock()
+      defer { lock.unlock() }
+      if recorded == nil { recorded = Date() }
+    }
+
+    var time: Date? {
+      lock.lock()
+      defer { lock.unlock() }
+      return recorded
     }
   }
 
