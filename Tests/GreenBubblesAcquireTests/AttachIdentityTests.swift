@@ -203,15 +203,14 @@ struct AttachIdentityTests {
     capture.processIdentityReader = { _ in nil }
     capture.processIsGone = { $0 == 4242 }
     var exitObservedAt: UInt64?
-    let started = WeChatProcessTarget.microseconds(Date())
     #expect(throws: CaptureError.targetExited) {
       _ = try session.run(capture, identity: Self.selected, exitObservedAt: &exitObservedAt)
     }
     let finished = WeChatProcessTarget.microseconds(Date())
     let recorded = try #require(exitObservedAt)
-    #expect(finished - started >= 2_500_000)
-    // Recorded when the exit was confirmed, not after the detach wait.
-    #expect(recorded - started < 1_500_000)
+    // Recorded when the exit was confirmed, so the whole detach wait (3 s
+    // grace period) came after it. Independent of how long lldb took to start.
+    #expect(finished >= recorded + 2_500_000)
   }
 
   @Test func exitBeforeTheStopIsReportedWithoutReadingTheIdentity() throws {

@@ -292,13 +292,13 @@ public struct LLDBPassphraseCapture: Sendable {
         }
         // The restart ambiguity comes first: a candidate rejected before the
         // restart says nothing about the process that was never attached.
+        // So does a process that was found but could not be verified.
         if case .timingAmbiguous(let exited, let ambiguous) = refusal {
           throw CaptureError.replacementTimingAmbiguous(
             exitedProcessID: exited, candidateProcessIDs: ambiguous)
         }
-        if rejectedCandidateCount > 0 { throw CaptureError.noAcceptableCandidate }
-        // A WeChat process was found but could not be verified.
         if case .unverifiable(let error) = refusal { throw error }
+        if rejectedCandidateCount > 0 { throw CaptureError.noAcceptableCandidate }
         throw CaptureError.noWeChatProcess
       }
       let processID = identity.processID

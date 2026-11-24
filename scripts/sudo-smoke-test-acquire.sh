@@ -175,6 +175,9 @@ struct AttachHarness {
     guard processID > 0, let userID, let start else { exit(2) }
     let expected = AttachIdentity(processID: processID, userID: userID, startMicroseconds: start)
     var capture = LLDBPassphraseCapture()
+    // Verbose: lldb's own output is relayed as `note: lldb| ...` lines (hexdumps
+    // redacted), so the checks can read the debugger's transcript.
+    capture.verbose = true
     capture.outputHandler = { FileHandle.standardError.write(Data("note: \($0)\n".utf8)) }
     var rejected = 0
     var exitObservedAt: UInt64?
@@ -458,6 +461,7 @@ else
   sleep 1
   if grep -q '^RESULT timedOut' "$work/g1.out" \
     && grep -q "attached to the selected WeChat process $sleeper_pid" "$work/g1.out" \
+    && grep -q 'lldb| Breakpoint 1:' "$work/g1.out" \
     && sleeper_running; then
     pass "sudo (g): matching attach identity is verified, then lldb detaches"
   else
@@ -468,8 +472,12 @@ else
   sudo "$work/attach_harness" --pid "$sleeper_pid" --expect-uid "${sleeper_uid:-x}" \
     --expect-start "$((${sleeper_start:-0} + 1))" >"$work/g2.out" 2>&1 || true
   sleep 1
+  # lldb's transcript must show the detach and no breakpoint at all (the
+  # matching run above is the control that breakpoints do show up in it).
   if grep -q '^RESULT mismatch' "$work/g2.out" \
     && ! grep -q "attached to the selected" "$work/g2.out" \
+    && grep -q "lldb| Process $sleeper_pid detached" "$work/g2.out" \
+    && ! grep -qi 'lldb|.*breakpoint' "$work/g2.out" \
     && sleeper_running; then
     pass "sudo (g): reused-PID identity detaches without a breakpoint"
   else
