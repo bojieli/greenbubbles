@@ -203,6 +203,49 @@ struct VerifiedPassphraseCaptureTests {
     #expect(!tally.isComplete)
   }
 
+  @Test func incompleteCheckIsReportedEvenWhenLLDBThenExits() throws {
+    let base = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let inventory = try makeInventory(in: base, openingWith: account, extraSalts: 1)
+    let lldb = try makeFakeLLDB(in: base, printing: [unrelated], thenExit: true)
+    // The verification deadline has already passed when the candidate arrives.
+    #expect(
+      throws: CaptureVerificationError.incomplete(
+        checkedSaltCount: 0, distinctSaltCount: 2, fullyRejectedCount: 0)
+    ) {
+      try VerifiedPassphraseCapture.captureAndWrite(
+        inventory: inventory,
+        deadline: .distantPast,
+        to: base.appending(path: "passphrase.txt"),
+        overwrite: false,
+        as: currentUser(),
+        capture: { accept in
+          try runCapture(lldb, deadline: Date().addingTimeInterval(30), accept: accept)
+        }
+      )
+    }
+    #expect(!FileManager.default.fileExists(atPath: base.appending(path: "passphrase.txt").path))
+  }
+
+  @Test func writesTheVerifiedCandidateNotWhatCaptureReturns() throws {
+    let base = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let inventory = try makeInventory(in: base, openingWith: account)
+    let output = base.appending(path: "passphrase.txt")
+    _ = try VerifiedPassphraseCapture.captureAndWrite(
+      inventory: inventory,
+      deadline: .distantFuture,
+      to: output,
+      overwrite: false,
+      as: currentUser()
+    ) { accept in
+      #expect(try accept(PassphraseSecret(bytes: account)))
+      return try PassphraseSecret(bytes: unrelated)
+    }
+    let expected = account.map { String(format: "%02x", $0) }.joined() + "\n"
+    #expect(String(decoding: try Data(contentsOf: output), as: UTF8.self) == expected)
+  }
+
   // MARK: Helpers
 
   /// Stands in for `LLDBPassphraseCapture.capture`: offers each candidate,
