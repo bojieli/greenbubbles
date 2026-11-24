@@ -185,14 +185,33 @@ struct AttachIdentityTests {
     var capture = LLDBPassphraseCapture(lldbPath: session.executable.path)
     capture.processIdentityReader = { reader.read($0) }
     capture.processIsGone = { $0 == 4242 }
+    var exitObservedAt: UInt64?
     #expect(throws: CaptureError.targetExited) {
-      _ = try session.run(capture, identity: Self.selected)
+      _ = try session.run(capture, identity: Self.selected, exitObservedAt: &exitObservedAt)
     }
     let log = try session.log()
     #expect(log.contains("process detach\nquit\n"))
     for command in ["breakpoint", "memory read", "process continue"] {
       #expect(!log.contains(command), "\(command) was sent")
     }
+  }
+
+  @Test func vanishedProcessExitIsRecordedBeforeTheDetachWait() throws {
+    // This lldb ignores `quit`, so the detach waits its full grace period.
+    let session = try FakeLLDB(ignoresQuit: true)
+    var capture = LLDBPassphraseCapture(lldbPath: session.executable.path)
+    capture.processIdentityReader = { _ in nil }
+    capture.processIsGone = { $0 == 4242 }
+    var exitObservedAt: UInt64?
+    let started = WeChatProcessTarget.microseconds(Date())
+    #expect(throws: CaptureError.targetExited) {
+      _ = try session.run(capture, identity: Self.selected, exitObservedAt: &exitObservedAt)
+    }
+    let finished = WeChatProcessTarget.microseconds(Date())
+    let recorded = try #require(exitObservedAt)
+    #expect(finished - started >= 2_500_000)
+    // Recorded when the exit was confirmed, not after the detach wait.
+    #expect(recorded - started < 1_500_000)
   }
 
   @Test func exitBeforeTheStopIsReportedWithoutReadingTheIdentity() throws {
@@ -360,7 +379,7 @@ private final class FakeLLDB: @unchecked Sendable {
   let executable: URL
   let logFile: URL
 
-  init(attachOutput: String = "Process 4242 stopped") throws {
+  init(attachOutput: String = "Process 4242 stopped", ignoresQuit: Bool = false) throws {
     directory = FileManager.default.temporaryDirectory
       .appending(path: "greenbubbles-fake-lldb-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -388,7 +407,7 @@ private final class FakeLLDB: @unchecked Sendable {
           "process detach")
             echo 'Process 4242 detached' ;;
           "quit")
-            exit 0 ;;
+            \(ignoresQuit ? ":" : "exit 0") ;;
         esac
       done
 
@@ -411,8 +430,17 @@ private final class FakeLLDB: @unchecked Sendable {
     identity: AttachIdentity,
     accept: (PassphraseSecret) throws -> Bool = { _ in true }
   ) throws -> PassphraseSecret {
-    var rejected = 0
     var exitObservedAt: UInt64?
+    return try run(capture, identity: identity, exitObservedAt: &exitObservedAt, accept: accept)
+  }
+
+  func run(
+    _ capture: LLDBPassphraseCapture,
+    identity: AttachIdentity,
+    exitObservedAt: inout UInt64?,
+    accept: (PassphraseSecret) throws -> Bool = { _ in true }
+  ) throws -> PassphraseSecret {
+    var rejected = 0
     return try capture.runSingleCapture(
       identity: identity,
       architecture: .arm64,

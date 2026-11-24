@@ -447,10 +447,12 @@ public struct LLDBPassphraseCapture: Sendable {
           // Gone, not replaced: lldb's exit report may not have arrived yet.
           // Handle it as an exit so the capture can follow a restart.
           if observed == nil, processIsGone(processID) {
-            Self.detach(process, input: input)
+            // Record the exit before detaching, which can wait up to 3 s: a
+            // replacement started during that wait must count as later.
             if exitObservedAt == nil {
               exitObservedAt = WeChatProcessTarget.microseconds(Date())
             }
+            Self.detach(process, input: input)
             throw CaptureError.targetExited
           }
           if let detail = AttachIdentity.mismatch(expected: identity, observed: observed) {

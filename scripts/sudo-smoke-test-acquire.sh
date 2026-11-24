@@ -47,7 +47,7 @@ chmod 700 "$work"
 root_probe="/private/var/root/greenbubbles-acquire-smoke-$(basename "$work")"
 
 supervisor_pid=""
-# Ends step (e)'s sleeper: its supervisor SIGKILLs it (which also ends a
+# Ends step (g)'s sleeper: its supervisor SIGKILLs it (which also ends a
 # stopped process) and only then reaps it, so its PID is never recycled
 # while this script uses it.
 stop_sleeper() {
@@ -200,8 +200,8 @@ swiftc -parse-as-library -o "$work/attach_harness" "$work/attach_harness.swift" 
   "$sources/WeChatProcessSelection.swift" "$sources/WeChatProcessLocator.swift" \
   "$sources/InvokingUser.swift" "$sources/SQLCipherKeyVerifier.swift"
 # The supervisor forks the sleeper, prints its PID, and doesn't reap it until
-# the stop file appears (or after 15 minutes): until then the PID stays
-# reserved even if the sleeper dies.
+# the stop file appears or this script (its parent) is gone: until then the
+# PID stays reserved even if the sleeper dies. No timer can end it early.
 cat >"$work/sleeper.c" <<'C'
 #include <signal.h>
 #include <stdio.h>
@@ -210,6 +210,7 @@ cat >"$work/sleeper.c" <<'C'
 
 int main(int argc, char **argv) {
   if (argc != 2) return 2;
+  pid_t script = getppid();
   pid_t child = fork();
   if (child < 0) return 1;
   if (child == 0) {
@@ -217,7 +218,7 @@ int main(int argc, char **argv) {
   }
   printf("%d\n", (int)child);
   fflush(stdout);
-  for (int i = 0; i < 1800 && access(argv[1], F_OK) != 0; i++) usleep(500000);
+  while (access(argv[1], F_OK) != 0 && getppid() == script) usleep(200000);
   kill(child, SIGKILL);
   waitpid(child, NULL, 0);
   return 0;
@@ -449,7 +450,8 @@ else
   sleeper_running() {
     local state
     state="$(ps -o state= -p "$sleeper_pid" 2>/dev/null || true)"
-    [[ -n "$state" && "$state" != T* ]]
+    # Stopped (T) or killed and unreaped (Z) both fail.
+    [[ -n "$state" && "$state" != T* && "$state" != Z* ]]
   }
   sudo "$work/attach_harness" --pid "$sleeper_pid" --expect-uid "${sleeper_uid:-x}" \
     --expect-start "${sleeper_start:-x}" >"$work/g1.out" 2>&1 || true
