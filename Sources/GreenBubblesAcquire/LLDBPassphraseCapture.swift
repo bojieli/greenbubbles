@@ -269,6 +269,8 @@ public struct LLDBPassphraseCapture: Sendable {
     defer { stream.discard() }
     while true {
       let running = process.isRunning
+      // lldb had exited by this moment if `running` is false.
+      let polledAt = Date()
       if !running {
         // Give the readability handler a moment to flush the final output.
         Thread.sleep(forTimeInterval: 0.1)
@@ -297,9 +299,11 @@ public struct LLDBPassphraseCapture: Sendable {
         return secret
       }
       if decision.deadlineReached {
-        throw CaptureError.timedOutWithUncheckedCandidates(
+        throw deadlineErrorAfterDraining(
+          rejectedCandidateCount,
           uncheckedCandidateCount: decision.uncheckedCount,
-          rejectedCandidateCount: rejectedCandidateCount
+          stream: &stream,
+          accumulator: accumulator
         )
       }
       if decision.newlyRejected > 0 {
@@ -312,17 +316,49 @@ public struct LLDBPassphraseCapture: Sendable {
       if drained.targetExited {
         throw CaptureError.targetExited
       }
-      if !running {
-        // An unexpected exit before the deadline is the cause even after a
+      if !running, polledAt < deadline {
+        // An exit seen before the deadline is the cause even after a
         // rejection; the rejections are context, not the reason it stopped.
+        // An exit first seen after the deadline may have followed it, so
+        // the timeout below is reported instead.
         if rejectedCandidateCount > 0 {
           throw CaptureError.exitedAfterRejecting(rejectedCandidateCount: rejectedCandidateCount)
         }
         throw CaptureError.exitedWithoutCapture
       }
-      guard Date() < deadline else { throw deadlineError(rejectedCandidateCount) }
+      guard Date() < deadline else {
+        throw deadlineErrorAfterDraining(
+          rejectedCandidateCount,
+          uncheckedCandidateCount: 0,
+          stream: &stream,
+          accumulator: accumulator
+        )
+      }
       Thread.sleep(forTimeInterval: 0.05)
     }
+  }
+
+  /// The error for a deadline reached inside a single capture. Complete reads
+  /// that arrived while the last candidate was being checked were never
+  /// offered, so they count as unchecked rather than letting the rejections
+  /// read as a definitive "no acceptable candidate".
+  private func deadlineErrorAfterDraining(
+    _ rejectedCandidateCount: Int,
+    uncheckedCandidateCount: Int,
+    stream: inout LLDBMemoryReadStream,
+    accumulator: OutputAccumulator
+  ) -> CaptureError {
+    var rest = accumulator.take()
+    var late = stream.consume(&rest)
+    defer { Self.zeroizeCandidates(&late.candidates) }
+    let unchecked = uncheckedCandidateCount + late.candidates.count
+    guard unchecked == 0 else {
+      return .timedOutWithUncheckedCandidates(
+        uncheckedCandidateCount: unchecked,
+        rejectedCandidateCount: rejectedCandidateCount
+      )
+    }
+    return deadlineError(rejectedCandidateCount)
   }
 
   private static func zeroizeCandidates(_ candidates: inout [[UInt8]]) {

@@ -109,6 +109,27 @@ struct VerifiedPassphraseCaptureTests {
     #expect(offered == 1)
   }
 
+  @Test func candidateArrivingDuringTheLastCheckCountsAsUnchecked() throws {
+    let base = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: base) }
+    // The second read arrives while the first is being checked, and that
+    // check runs past the deadline.
+    let lldb = try makeFakeLLDB(
+      in: base, printing: [unrelated], thenPrinting: [unrelated], after: 0.3, thenExit: false)
+    var offered = 0
+    #expect(
+      throws: CaptureError.timedOutWithUncheckedCandidates(
+        uncheckedCandidateCount: 1, rejectedCandidateCount: 1)
+    ) {
+      try runCapture(lldb, deadline: Date().addingTimeInterval(1.5)) { _ in
+        offered += 1
+        Thread.sleep(forTimeInterval: 2.5)
+        return false
+      }
+    }
+    #expect(offered == 1)
+  }
+
   @Test func exitDescriptionKeepsTheRejectionAsContext() {
     #expect(
       CaptureError.exitedWithoutCapture.description
@@ -323,15 +344,22 @@ struct VerifiedPassphraseCaptureTests {
   private func makeFakeLLDB(
     in base: URL,
     printing candidates: [[UInt8]],
+    thenPrinting later: [[UInt8]] = [],
+    after delay: Double = 0,
     thenExit: Bool
   ) throws -> LLDBPassphraseCapture {
-    let output = candidates.enumerated().map { index, bytes in
-      CaptureCandidateCursorTests.hexdump(of: bytes, at: UInt64(0x1000 * (index + 1)))
-        + "(lldb) continue\n"
-    }.joined()
-    let script =
-      "#!/bin/sh\nhead -c 1 >/dev/null\nprintf '%s' '\(output)'\n"
-      + (thenExit ? "exit 0\n" : "exec sleep 60\n")
+    func reads(_ batch: [[UInt8]], from first: Int) -> String {
+      batch.enumerated().map { index, bytes in
+        CaptureCandidateCursorTests.hexdump(of: bytes, at: UInt64(0x1000 * (first + index + 1)))
+          + "(lldb) continue\n"
+      }.joined()
+    }
+    var script =
+      "#!/bin/sh\nhead -c 1 >/dev/null\nprintf '%s' '\(reads(candidates, from: 0))'\n"
+    if !later.isEmpty {
+      script += "sleep \(delay)\nprintf '%s' '\(reads(later, from: candidates.count))'\n"
+    }
+    script += thenExit ? "exit 0\n" : "exec sleep 60\n"
     let url = base.appending(path: "fake-lldb-\(UUID().uuidString)")
     try Data(script.utf8).write(to: url)
     #expect(chmod(url.path, 0o700) == 0)
