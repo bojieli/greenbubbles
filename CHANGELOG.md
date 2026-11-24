@@ -19,6 +19,12 @@ Notable changes to GreenBubbles are documented here. The project follows
   scan can't redirect it (#49).
 - Account discovery skips folders flagged hidden (`UF_HIDDEN`) again, as it
   did before 0.11.0 (#49).
+- `greenbubbles-acquire capture` no longer reports "no match" when the timeout
+  cut verification of a captured value short or left one unchecked; it says
+  how many database salts were checked and that the value was neither
+  confirmed nor ruled out. If lldb exits unexpectedly after a captured value
+  was rejected, the exit is reported as the cause, with the rejection as
+  context. As before, no output is created or replaced in either case (#48).
 
 ## 0.11.0 - 2026-11-23
 

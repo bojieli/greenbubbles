@@ -78,6 +78,7 @@ struct CaptureCandidateCursorTests {
     #expect(decision.secret == nil)
     #expect(decision.newlyRejected == 2)
     #expect(decision.deadlineReached)
+    #expect(decision.uncheckedCount == 1)
   }
 
   @Test func verificationStopsBetweenSaltsOnceTheDeadlinePasses() {
@@ -145,7 +146,9 @@ struct CaptureCandidateCursorTests {
     }.joined()
   }
 
-  @Test func noAcceptableCandidateWritesNothing() {
+  // The filesystem side of this guarantee is tested in
+  // VerifiedPassphraseCaptureTests.
+  @Test func noAcceptableCandidateSaysNothingWasWritten() {
     #expect(
       CaptureError.noAcceptableCandidate.description.contains(
         "No output was created or replaced.")
