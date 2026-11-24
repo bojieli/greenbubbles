@@ -12,7 +12,8 @@ Notable changes to GreenBubbles are documented here. The project follows
   `~/Library/Containers` can be searched but not listed (#49).
 - `greenbubbles-discover snapshot` records the client build when the data
   folder's container name differs from the app's bundle ID only in letter
-  case, and checks the owners of the same roots it snapshots (#49).
+  case but is the same container, and checks the owners of the same roots it
+  snapshots (#49).
 - Group-container accounts are checked through directory descriptors, like
   app-container accounts, so a folder swapped for a symbolic link during the
   scan can't redirect it (#49).

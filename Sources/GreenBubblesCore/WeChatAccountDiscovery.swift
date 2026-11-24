@@ -89,15 +89,29 @@ public struct WeChatAccountDiscovery: Sendable {
     ownedDatabaseRoots(accountID: accountID).map(\.containerBundleIdentifier)
   }
 
-  /// True when every owner is the app with `bundleIdentifier`. Bundle IDs are
-  /// compared case-insensitively, because discovery reports the container's
-  /// on-disk spelling, which can differ in case from the app's Info.plist on a
-  /// case-insensitive volume. An unknown owner (nil, such as a group
-  /// container) can't be verified and never matches.
-  public static func ownersAllMatch(_ owners: [String?], bundleIdentifier: String) -> Bool {
-    owners.allSatisfy { owner in
+  /// True when every owner is the app with `bundleIdentifier`. An unknown
+  /// owner (nil, such as a group container) can't be verified and never
+  /// matches.
+  ///
+  /// Discovery reports the container's on-disk spelling, which on a
+  /// case-insensitive volume can differ in case from the app's Info.plist, so
+  /// bundle IDs are compared case-insensitively. A case-only match also
+  /// requires `~/Library/Containers/<bundleIdentifier>` to be the owner's
+  /// container directory: on a case-sensitive volume the two spellings can be
+  /// different containers.
+  public func ownersAllMatch(_ owners: [String?], bundleIdentifier: String) -> Bool {
+    let containers = homeDirectory.appending(
+      path: "Library/Containers", directoryHint: .isDirectory)
+    return owners.allSatisfy { owner in
       guard let owner else { return false }
-      return owner.caseInsensitiveCompare(bundleIdentifier) == .orderedSame
+      if owner == bundleIdentifier { return true }
+      guard owner.caseInsensitiveCompare(bundleIdentifier) == .orderedSame,
+        let ownerIdentity = WeChatAppContainerScanner.targetIdentity(
+          containers.appending(path: owner, directoryHint: .isDirectory))
+      else { return false }
+      return WeChatAppContainerScanner.targetIdentity(
+        containers.appending(path: bundleIdentifier, directoryHint: .isDirectory))
+        == ownerIdentity
     }
   }
 

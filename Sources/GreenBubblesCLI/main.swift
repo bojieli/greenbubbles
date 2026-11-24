@@ -217,11 +217,11 @@ do {
     let roots: [URL]
     // Bundle IDs of the app containers that own auto-discovered accounts.
     var rootOwners: [String?]?
+    let accountDiscovery = WeChatAccountDiscovery(includePaths: arguments.includePaths)
     if arguments.roots.isEmpty {
       // One discovery pass, so the owners checked below are those of the
       // roots handed to the planner.
-      let selected = WeChatAccountDiscovery(includePaths: arguments.includePaths)
-        .ownedDatabaseRoots(accountID: arguments.accountID)
+      let selected = accountDiscovery.ownedDatabaseRoots(accountID: arguments.accountID)
       roots = selected.map(\.databaseRoot)
       rootOwners = selected.map(\.containerBundleIdentifier)
     } else {
@@ -232,9 +232,9 @@ do {
     // The default installation's build is recorded only when it is the app
     // that owns every discovered account; otherwise (another app copy, or a
     // group container whose owner can't be verified) provenance stays unset.
-    // Bundle IDs are compared case-insensitively.
+    // A bundle ID that differs only in case must name the same container.
     if let build = clientBuild, let rootOwners,
-      !WeChatAccountDiscovery.ownersAllMatch(rootOwners, bundleIdentifier: build.bundleIdentifier)
+      !accountDiscovery.ownersAllMatch(rootOwners, bundleIdentifier: build.bundleIdentifier)
     {
       clientBuild = nil
     }

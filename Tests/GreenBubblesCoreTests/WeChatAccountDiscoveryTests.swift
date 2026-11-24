@@ -320,22 +320,53 @@ struct WeChatAccountDiscoveryTests {
     #expect(discovery.ownedDatabaseRoots(accountID: "missing").isEmpty)
   }
 
-  @Test func ownerBundleIdentifiersMatchCaseInsensitivelyButUnknownOwnersNever() {
+  @Test func ownerBundleIdentifiersMatchCaseInsensitivelyButUnknownOwnersNever() throws {
+    let fileManager = FileManager.default
+    let home = fileManager.temporaryDirectory.appending(
+      path: "greenbubbles-account-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+    defer { try? fileManager.removeItem(at: home) }
+    let containers = home.appending(path: "Library/Containers", directoryHint: .isDirectory)
+    try fileManager.createDirectory(
+      at: containers.appending(path: "com.tencent.xinwechat"), withIntermediateDirectories: true)
+    let discovery = WeChatAccountDiscovery(homeDirectory: home)
     let installed = "com.tencent.xinWeChat"
+    // A case-only match counts when the installed ID names the same container,
+    // which is so only on a case-insensitive volume.
+    let sameContainer =
+      WeChatAppContainerScanner.targetIdentity(containers.appending(path: installed)) != nil
     #expect(
-      WeChatAccountDiscovery.ownersAllMatch(["com.tencent.xinwechat"], bundleIdentifier: installed))
+      discovery.ownersAllMatch(["com.tencent.xinwechat"], bundleIdentifier: installed)
+        == sameContainer)
+    #expect(discovery.ownersAllMatch([installed, installed], bundleIdentifier: installed))
     #expect(
-      WeChatAccountDiscovery.ownersAllMatch(
-        ["com.tencent.xinWeChat", "COM.TENCENT.XINWECHAT"], bundleIdentifier: installed))
-    #expect(
-      !WeChatAccountDiscovery.ownersAllMatch(
-        ["com.example.WeChatCopy"], bundleIdentifier: installed))
-    #expect(!WeChatAccountDiscovery.ownersAllMatch([nil], bundleIdentifier: installed))
-    #expect(
-      !WeChatAccountDiscovery.ownersAllMatch(
-        ["com.tencent.xinWeChat", nil], bundleIdentifier: installed))
+      discovery.ownersAllMatch(["COM.TENCENT.XINWECHAT"], bundleIdentifier: installed)
+        == sameContainer)
+    #expect(!discovery.ownersAllMatch(["com.example.WeChatCopy"], bundleIdentifier: installed))
+    #expect(!discovery.ownersAllMatch([nil], bundleIdentifier: installed))
+    #expect(!discovery.ownersAllMatch([installed, nil], bundleIdentifier: installed))
     // No selected roots leaves nothing that contradicts the build.
-    #expect(WeChatAccountDiscovery.ownersAllMatch([], bundleIdentifier: installed))
+    #expect(discovery.ownersAllMatch([], bundleIdentifier: installed))
+  }
+
+  @Test func caseVariantOwnerInADifferentContainerDoesNotMatch() throws {
+    let fileManager = FileManager.default
+    let home = fileManager.temporaryDirectory.appending(
+      path: "greenbubbles-account-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+    defer { try? fileManager.removeItem(at: home) }
+    let containers = home.appending(path: "Library/Containers", directoryHint: .isDirectory)
+    let installed = "com.tencent.xinWeChat"
+    let variant = "com.tencent.xinwechat"
+    try fileManager.createDirectory(
+      at: containers.appending(path: installed), withIntermediateDirectories: true)
+    // Two containers that differ only in case exist only on a case-sensitive
+    // volume; on a case-insensitive one there is nothing to check.
+    guard WeChatAppContainerScanner.targetIdentity(containers.appending(path: variant)) == nil
+    else { return }
+    try fileManager.createDirectory(
+      at: containers.appending(path: variant), withIntermediateDirectories: true)
+    let discovery = WeChatAccountDiscovery(homeDirectory: home)
+    #expect(!discovery.ownersAllMatch([variant], bundleIdentifier: installed))
+    #expect(discovery.ownersAllMatch([installed], bundleIdentifier: installed))
   }
 
   @Test func standardAccountIsFoundWhenContainersIsSearchOnly() throws {

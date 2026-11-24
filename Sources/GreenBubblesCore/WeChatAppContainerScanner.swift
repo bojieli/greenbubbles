@@ -78,9 +78,14 @@ struct WeChatAppContainerScanner: Sendable {
     let isStandard = { (name: String) in
       name.caseInsensitiveCompare(Self.standardBundleIdentifier) == .orderedSame
     }
+    // The exact standard name is probed after any listed spellings of it, so
+    // a listed spelling that is the same directory wins and the exact name
+    // only adds a container the listing left out (hidden, or not listable).
     let standardNames = names.filter(isStandard).sorted()
     let ordered =
-      (standardNames.isEmpty ? [Self.standardBundleIdentifier] : standardNames)
+      standardNames
+      + (standardNames.contains(Self.standardBundleIdentifier)
+        ? [] : [Self.standardBundleIdentifier])
       + names.filter { !isStandard($0) }.sorted()
     let canonicalIdentity = verifiedContainer(
       named: Self.standardBundleIdentifier, in: containersDirectory, listAccounts: false)?
