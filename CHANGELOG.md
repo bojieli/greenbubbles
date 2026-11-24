@@ -4,7 +4,25 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.12.0 - 2026-11-24
+
+Passphrase capture against a live WeChat session was not re-tested for this
+release. `scripts/sudo-smoke-test-acquire.sh` passed 17/17 on synthetic data
+under `sudo` at the code being released, including the attach identity check
+against the real lldb; a live capture needs a running WeChat.
+
+### Changed
+
+- `greenbubbles-acquire preflight` and `capture` check the key destination as
+  the invoking user, without changing it, before the WeChat logout step: an
+  existing key file without `--overwrite`, a file owned by someone else, or a
+  folder you can't write (such as a root-owned folder from an earlier capture)
+  now stops preflight instead of failing at the final write (#50).
+- With only `source.passphrase_file` in `config.toml`, `greenbubbles-acquire`
+  keys the database root queries discover: the most recently written account,
+  unless another one was written within 14 days. When `GREENBUBBLES_CONFIG_FILE`
+  points elsewhere, or with `--db-root`, an explicit `--output` is required
+  instead (#50).
 
 ### Fixed
 
@@ -25,16 +43,6 @@ Notable changes to GreenBubbles are documented here. The project follows
   confirmed nor ruled out. If lldb exits unexpectedly after a captured value
   was rejected, the exit is reported as the cause, with the rejection as
   context. As before, no output is created or replaced in either case (#48).
-- `greenbubbles-acquire preflight` and `capture` check the key destination as
-  the invoking user, without changing it, before the WeChat logout step: an
-  existing key file without `--overwrite`, a file owned by someone else, or a
-  folder you can't write (such as a root-owned folder from an earlier capture)
-  now stops preflight instead of failing at the final write (#50).
-- With only `source.passphrase_file` in `config.toml`, `greenbubbles-acquire`
-  keys the database root queries discover: the most recently written account,
-  unless another one was written within 14 days. When `GREENBUBBLES_CONFIG_FILE`
-  points elsewhere, or with `--db-root`, an explicit `--output` is required
-  instead (#50).
 - The `--db-root` conflict check compares directories by device and inode
   instead of by path spelling; a root that can't be looked up counts as a
   different account (#50).

@@ -22,7 +22,9 @@ source/profile, or capture steps. Use `command -v greenbubbles` and
 `greenbubbles --version` to identify the selected executable; 0.10.0 includes
 `chats find`, name selection, and command-line `--query` search. 0.11.0 capture
 follows query profiles, leaves the key owned by the user who ran `sudo`, and
-attaches to the WeChat copy that owns the data folder. Do not silently substitute
+attaches to the WeChat copy that owns the data folder. 0.12.0 preflight
+checks the key destination before the logout step, and capture confirms the
+attached process is the selected WeChat. Do not silently substitute
 another executable after a failed check.
 
 Ordinary live use needs no profile after capture: the CLI discovers the account
