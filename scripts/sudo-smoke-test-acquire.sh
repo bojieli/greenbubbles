@@ -166,6 +166,10 @@ cat >"$profiles" <<JSON
     "rootdir": {
       "sourceRoot": "$database_root",
       "access": { "mode": "liveWeChatKeyFile", "credentialFile": "$root_probe/live.key" }
+    },
+    "rootfolder": {
+      "sourceRoot": "$database_root",
+      "access": { "mode": "liveWeChatKeyFile", "credentialFile": "$work/keys/root-0700/live.key" }
     }
   }
 }
@@ -196,6 +200,17 @@ sys.exit(0 if ok else 1)
 ' "$1"
 }
 
+# Prints the blockers of a preflight --json report; succeeds when one of them
+# contains the given text (case-insensitive).
+blockers_mention() {
+  python3 -I -c '
+import json, sys
+blockers = json.load(open(sys.argv[1]))["blockers"]
+print("blockers=%s" % blockers)
+sys.exit(0 if any(sys.argv[2].lower() in b.lower() for b in blockers) else 1)
+' "$1" "$2"
+}
+
 # --- Unprivileged checks -----------------------------------------------------
 
 if "$binary" verify --passphrase-stdin --profile smoke <"$work/synthetic.key" >"$work/u1.out" 2>&1; then
@@ -219,13 +234,32 @@ else
   fail "user: writer" "$(tr '\n' ' ' <"$work/u3.err")"
 fi
 
+# Issue #50: preflight checks the key destination, and keeps --overwrite.
+printf 'existing\n' >"$work/keys/existing.key"
+chmod 600 "$work/keys/existing.key"
+"$binary" preflight --json --profile smoke --output "$work/keys/existing.key" \
+  >"$work/u4.json" 2>/dev/null || true
+"$binary" preflight --json --profile smoke --output "$work/keys/existing.key" --overwrite \
+  >"$work/u4b.json" 2>/dev/null || true
+if blockers_mention "$work/u4.json" "already exists" >"$work/u4.out" 2>&1 \
+  && ! blockers_mention "$work/u4b.json" "already exists" >/dev/null 2>&1 \
+  && [[ "$(cat "$work/keys/existing.key")" == "existing" ]]; then
+  pass "user: preflight reports an existing key file unless --overwrite is given"
+else
+  fail "user: preflight existing key file" "$(tr '\n' ' ' <"$work/u4.out")"
+fi
+
 # --- sudo checks ---------------------------------------------------------------
 
 if [[ "$use_sudo" -eq 0 ]]; then
   for check in "sudo: --preserve-env passes the profile location" \
     "sudo (a): preflight reads the profile as you" "sudo (a): verify reads databases as you" \
     "sudo (b): key written from the profile is yours" "sudo (c): root-owned folder refused" \
-    "sudo (d): root-owned file not overwritten"; do
+    "sudo (d): root-owned file not overwritten" \
+    "sudo (e): preflight refuses a root-owned 0700 key folder as you" \
+    "sudo (e): capture refuses it before the login step" \
+    "sudo (e): preflight refuses a key folder inside root's home" \
+    "sudo (f): preflight refuses a root-owned key file even with --overwrite"; do
     skip "$check"
   done
 else
@@ -289,6 +323,49 @@ else
       fail "sudo (d): root-owned $mode file not overwritten" "now $(owner_and_mode "$target"): $(cat "$target")"
     fi
   done
+fi
+
+if [[ "$use_sudo" -eq 1 ]]; then
+  # (e) Issue #50: the destination is checked as you before capture starts.
+  # A root-owned 0700 folder left by an earlier capture blocks preflight, and
+  # capture stops before asking for the WeChat logout; nothing is created.
+  sudo /bin/mkdir -m 700 "$work/keys/root-0700"
+  as_root "$binary" preflight --json --profile rootfolder >"$work/e.json" 2>"$work/e.err" || true
+  if blockers_mention "$work/e.json" "POSIX error 13" >"$work/e.out" 2>&1 \
+    && [[ -z "$(sudo ls -A "$work/keys/root-0700")" ]] \
+    && [[ "$(owner_and_mode "$work/keys/root-0700")" == "0 700" ]]; then
+    pass "sudo (e): preflight refuses a root-owned 0700 key folder as you ($(tr '\n' ' ' <"$work/e.out"))"
+  else
+    fail "sudo (e): preflight refuses a root-owned 0700 key folder" "$(cat "$work/e.out" "$work/e.err" | tr '\n' ' ')"
+  fi
+  if as_root "$binary" capture --profile rootfolder --timeout-seconds 1 >"$work/e2.out" 2>&1; then
+    fail "sudo (e): capture refuses it before the login step" "capture succeeded"
+  elif grep -q "POSIX error 13" "$work/e2.out" && ! grep -q "log out" "$work/e2.out" \
+    && [[ -z "$(sudo ls -A "$work/keys/root-0700")" ]]; then
+    pass "sudo (e): capture refuses it before the login step"
+  else
+    fail "sudo (e): capture refuses it before the login step" "$(tr '\n' ' ' <"$work/e2.out")"
+  fi
+  as_root "$binary" preflight --json --profile rootdir >"$work/e3.json" 2>/dev/null || true
+  if blockers_mention "$work/e3.json" "POSIX error 13" >"$work/e3.out" 2>&1 \
+    && ! sudo test -e "$root_probe"; then
+    pass "sudo (e): preflight refuses a key folder inside root's home; nothing created"
+  else
+    fail "sudo (e): preflight refuses a key folder inside root's home" "$(tr '\n' ' ' <"$work/e3.out")"
+  fi
+
+  # (f) A root-owned key file in your folder: preflight with --overwrite
+  # reports it (as the final write would) and leaves it alone.
+  target="$work/keys/root-owned-644.key"
+  as_root "$binary" preflight --json --profile smoke --output "$target" --overwrite \
+    >"$work/f.json" 2>/dev/null || true
+  if blockers_mention "$work/f.json" "belongs to another user" >"$work/f.out" 2>&1 \
+    && [[ "$(cat "$target")" == "root-owned original" && "$(owner_and_mode "$target")" == "0 644" ]]; then
+    pass "sudo (f): preflight refuses a root-owned key file even with --overwrite"
+  else
+    fail "sudo (f): preflight refuses a root-owned key file" "$(tr '\n' ' ' <"$work/f.out")"
+  fi
+  sudo /bin/rm -rf "$work/keys/root-0700" "$work/keys/root-owned-644.key" "$work/keys/root-owned-666.key"
 fi
 
 echo ""

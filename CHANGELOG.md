@@ -19,6 +19,19 @@ Notable changes to GreenBubbles are documented here. The project follows
   scan can't redirect it (#49).
 - Account discovery skips folders flagged hidden (`UF_HIDDEN`) again, as it
   did before 0.11.0 (#49).
+- `greenbubbles-acquire preflight` and `capture` check the key destination as
+  the invoking user, without changing it, before the WeChat logout step: an
+  existing key file without `--overwrite`, a file owned by someone else, or a
+  folder you can't write (such as a root-owned folder from an earlier capture)
+  now stops preflight instead of failing at the final write (#50).
+- With only `source.passphrase_file` in `config.toml`, `greenbubbles-acquire`
+  keys the database root queries discover: the most recently written account,
+  unless another one was written within 14 days (#50).
+- The `--db-root` conflict check compares directories by device and inode
+  instead of by path spelling; a root that can't be looked up counts as a
+  different account (#50).
+- The `Next:` command printed by `preflight --overwrite` keeps `--overwrite`
+  (#50).
 
 ## 0.11.0 - 2026-11-23
 
