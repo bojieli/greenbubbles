@@ -118,15 +118,19 @@ struct QueryProfileTargetTests {
     #expect(
       settingsRootOnly.originConflicting(withDatabaseRoot: other)
         == "from config.toml source.root")
-    // These made-up paths don't exist, so they are compared as spelled here;
-    // without that, an unresolvable root always counts as different.
-    let asSpelled: (URL) -> URL? = { $0.standardizedFileURL }
+    // These made-up paths don't exist, so they get made-up identities here;
+    // without that, a root whose identity can't be read always counts as
+    // different.
+    let madeUp: (URL) -> QueryProfileTarget.FileIdentity? = {
+      $0.standardizedFileURL.path == root.path
+        ? QueryProfileTarget.FileIdentity(device: 1, inode: 2) : nil
+    }
     #expect(
-      settingsRootOnly.originConflicting(withDatabaseRoot: root, canonicalize: asSpelled) == nil)
+      settingsRootOnly.originConflicting(withDatabaseRoot: root, identify: madeUp) == nil)
     #expect(
       settingsRootOnly.originConflicting(
         withDatabaseRoot: URL(fileURLWithPath: "/example/settings/./db_storage"),
-        canonicalize: asSpelled) == nil)
+        identify: madeUp) == nil)
     #expect(settingsRootOnly.originConflicting(withDatabaseRoot: root) != nil)
     #expect(settingsRootOnly.originConflicting(withDatabaseRoot: nil) == nil)
     let profile = AcquireTarget(
@@ -147,15 +151,121 @@ struct QueryProfileTargetTests {
       target.originConflicting(withDatabaseRoot: URL(fileURLWithPath: "/example/other")) != nil)
   }
 
-  @Test func configuredKeyFileWithoutARootNeedsExplicitOutputForAnyDbRoot() throws {
+  @Test func configuredKeyFileWithoutADiscoverableRootNeedsExplicitOutputForAnyDbRoot() throws {
     let home = try TemporaryHome()
     try home.writeSettings("[source]\npassphrase_file = \"/example/keys/settings-key\"\n")
     let target = try home.resolve(nil)
     #expect(target.sourceRoot == nil)
+    #expect(
+      target.sourceRootDiscoveryFailure
+        == .liveSourceUnavailable("no live WeChat database was found"))
     #expect(target.credentialFile?.path == "/example/keys/settings-key")
     #expect(
       target.originConflicting(withDatabaseRoot: URL(fileURLWithPath: "/example/any")) != nil)
     #expect(target.originConflicting(withDatabaseRoot: nil) == nil)
+  }
+
+  // MARK: Discovery for a configured key file (Rust's discover_default_live_source_root)
+
+  @Test func configuredKeyFileUsesTheRootQueriesDiscover() throws {
+    let home = try TemporaryHome()
+    try home.writeSettings("[source]\npassphrase_file = \"/example/keys/settings-key\"\n")
+    let live = try home.makeAccount("live", ageDays: 0)
+    _ = try home.makeAccount("stale", ageDays: 15)
+    let target = try home.resolve(nil)
+    #expect(target.sourceRoot?.path == live.path)
+    #expect(target.sourceRootDiscovered)
+    #expect(target.sourceRootDiscoveryFailure == nil)
+    #expect(target.credentialFile?.path == "/example/keys/settings-key")
+    // A query may discover under a different $HOME, so any --db-root still
+    // needs an explicit --output.
+    #expect(target.originConflicting(withDatabaseRoot: live) != nil)
+    #expect(target.originConflicting(withDatabaseRoot: nil) == nil)
+  }
+
+  @Test func configuredKeyFileFromAnOverriddenSettingsFileIsNotGuessed() throws {
+    let home = try TemporaryHome()
+    _ = try home.makeAccount("live", ageDays: 0)
+    let settings = home.directory.appending(path: ".greenbubbles/elsewhere.toml")
+    try Data("[source]\npassphrase_file = \"/example/keys/k\"\n".utf8).write(to: settings)
+    chmod(settings.path, 0o600)
+    let locations = try QueryProfileTarget.locations(
+      environment: [QueryProfileTarget.settingsEnvironmentVariable: settings.path],
+      home: home.directory)
+    let target = try QueryProfileTarget.resolve(
+      requestedProfile: nil, locations: locations, ownerUID: getuid())
+    #expect(target.sourceRoot == nil)
+    #expect(target.sourceRootDiscoveryFailure != nil)
+    #expect(target.credentialFile?.path == "/example/keys/k")
+  }
+
+  @Test func discoveryRefusesTwoAccountsWrittenWithinFourteenDays() throws {
+    let home = try TemporaryHome()
+    _ = try home.makeAccount("a", ageDays: 0)
+    _ = try home.makeAccount("b", ageDays: 13)
+    #expect(throws: QueryProfileError.self) { try home.discover() }
+    // A group container whose name contains "wechat" is a candidate too.
+    let home2 = try TemporaryHome()
+    let group = try home2.makeAccount(
+      "acct", ageDays: 0,
+      filesRoot: home2.directory.appending(
+        path: "Library/Group Containers/5A4RE8SF68.com.tencent.XinWeChat/xwechat_files"))
+    #expect(try home2.discover().path == group.path)
+    _ = try home2.makeAccount("other", ageDays: 1)
+    #expect(throws: QueryProfileError.self) { try home2.discover() }
+  }
+
+  @Test func discoverySkipsRootsRustSkips() throws {
+    let home = try TemporaryHome()
+    let live = try home.makeAccount("live", ageDays: 20)
+    // Newer, but each unusable: incomplete, no regular files, a symbolic
+    // link, owned by someone else, or in a group container without "wechat".
+    let incomplete = home.filesRoot.appending(path: "incomplete/db_storage/contact")
+    try FileManager.default.createDirectory(at: incomplete, withIntermediateDirectories: true)
+    try Data().write(to: incomplete.appending(path: "c.db"))
+    let empty = home.filesRoot.appending(path: "empty/db_storage")
+    for component in ["contact", "session", "message"] {
+      try FileManager.default.createDirectory(
+        at: empty.appending(path: component), withIntermediateDirectories: true)
+    }
+    try FileManager.default.createDirectory(
+      at: home.filesRoot.appending(path: "linked"), withIntermediateDirectories: true)
+    let elsewhere = try home.makeAccount(
+      "real", ageDays: 0, filesRoot: home.directory.appending(path: "elsewhere"))
+    #expect(
+      symlink(elsewhere.path, home.filesRoot.appending(path: "linked/db_storage").path) == 0)
+    _ = try home.makeAccount(
+      "acct", ageDays: 0,
+      filesRoot: home.directory.appending(
+        path: "Library/Group Containers/group.example.other/xwechat_files"))
+    #expect(try home.discover().path == live.path)
+    #expect(throws: QueryProfileError.self) { try home.discover(ownerUID: getuid() &+ 1) }
+  }
+
+  @Test func rootsAreComparedByIdentityNotSpelling() throws {
+    let home = try TemporaryHome()
+    // "é" composed (NFC) and decomposed (NFD): different strings to Swift's
+    // `==` only after normalization, and different paths to the kernel on a
+    // normalization-sensitive volume.
+    let composed = home.directory.appending(path: "caf\u{E9}/db_storage")
+    try FileManager.default.createDirectory(at: composed, withIntermediateDirectories: true)
+    let decomposed = URL(fileURLWithPath: home.directory.path + "/cafe\u{301}/db_storage")
+    let target = AcquireTarget(
+      profileName: "a", sourceRoot: composed,
+      credentialFile: URL(fileURLWithPath: "/example/keys/a"),
+      sourceRootOrigin: "from query profile a")
+    let identity = QueryProfileTarget.fileIdentity(composed)
+    #expect(identity != nil)
+    // The decomposed spelling conflicts unless it is the same directory.
+    let sameDirectory = QueryProfileTarget.fileIdentity(decomposed) == identity
+    #expect((target.originConflicting(withDatabaseRoot: decomposed) == nil) == sameDirectory)
+    // A failed lookup on either side is a conflict.
+    let missing = home.directory.appending(path: "missing")
+    #expect(target.originConflicting(withDatabaseRoot: missing) != nil)
+    let missingSource = AcquireTarget(
+      profileName: "b", sourceRoot: missing, credentialFile: URL(fileURLWithPath: "/k"),
+      sourceRootOrigin: "from query profile b")
+    #expect(missingSource.originConflicting(withDatabaseRoot: missing) != nil)
   }
 
   @Test func tomlWhitespaceIsOnlySpaceAndTab() throws {
@@ -320,6 +430,8 @@ struct QueryProfileTargetTests {
     #expect(
       QueryProfileTarget.canonicalPath(throughLink)?.path
         == QueryProfileTarget.canonicalPath(accountA)?.path)
+    #expect(
+      QueryProfileTarget.fileIdentity(throughLink) == QueryProfileTarget.fileIdentity(accountA))
   }
 
   @Test func jsonMustBeASingleUTF8Value() throws {
@@ -689,6 +801,32 @@ private final class TemporaryHome {
 
   func resolve(_ name: String?, ownerUID: uid_t = getuid()) throws -> AcquireTarget {
     try QueryProfileTarget.resolve(requestedProfile: name, locations: locations, ownerUID: ownerUID)
+  }
+
+  func discover(ownerUID: uid_t = getuid()) throws -> URL {
+    try QueryProfileTarget.discoverDefaultLiveSourceRoot(home: directory, ownerUID: ownerUID)
+  }
+
+  /// The app container's xwechat_files, where Rust looks first.
+  var filesRoot: URL {
+    directory.appending(
+      path: "Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files")
+  }
+
+  /// A made-up account whose database files were last written `ageDays` ago.
+  func makeAccount(_ name: String, ageDays: Int, filesRoot: URL? = nil) throws -> URL {
+    let root = (filesRoot ?? self.filesRoot).appending(path: name).appending(path: "db_storage")
+    let modified = Date().addingTimeInterval(-Double(ageDays) * 24 * 60 * 60)
+    for component in ["contact", "session", "message"] {
+      let folder = root.appending(path: component)
+      try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+      let file = folder.appending(path: component + ".db")
+      try Data("x".utf8).write(to: file)
+      try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: file.path)
+    }
+    // Folder timestamps don't count; make them look fresh.
+    try FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: root.path)
+    return root
   }
 
   private func write(_ text: String, to url: URL) throws {

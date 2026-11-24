@@ -307,7 +307,18 @@ private func resolveTarget(_ arguments: Arguments, needsOutput: Bool) throws -> 
   {
     throw CLIError.rootConflictsWithTarget(origin)
   }
+  // Only source.passphrase_file is configured and the root queries would
+  // pick can't be determined: capture can't tell which account to key.
+  if arguments.dbRoot == nil, let failure = target.sourceRootDiscoveryFailure {
+    throw failure
+  }
   return target
+}
+
+// The key destination as the invoking user, without changing anything: the
+// final write's rules, checked before the owner logs out of WeChat.
+private func checkCaptureOutput(_ output: URL, overwrite: Bool) throws {
+  try SecretOutputWriter.checkDestinationAccess(output, overwrite: overwrite, as: invokingUser)
 }
 
 // Where capture writes the key for this target.
@@ -373,6 +384,7 @@ private func captureCommand(_ arguments: Arguments) -> [String] {
     command += ["--output", path(output, placeholder: "<key-file-path>")]
   }
   if let processID = arguments.processID { command += ["--pid", String(processID)] }
+  if arguments.overwrite { command.append("--overwrite") }
   return command
 }
 
@@ -483,14 +495,17 @@ private func selectProcess(
 
 private func runPreflight(
   dbRootOption: URL?,
+  rootAutoDiscovered: Bool? = nil,
   rootOrigin: String = "from --db-root",
   processIDOption: pid_t? = nil,
   includePaths: Bool,
-  targetError: String? = nil
+  targetError: String? = nil,
+  destinationError: String? = nil
 ) -> PreflightResult {
   var checks: [PreflightCheck] = []
   var remediation: String?
   let homeDirectory = invokingUserHomeDirectory()
+  let autoDiscovered = rootAutoDiscovered ?? (dbRootOption == nil)
 
   let lldbAvailable = LLDBPassphraseCapture().lldbAvailable
   checks.append(
@@ -633,6 +648,12 @@ private func runPreflight(
   }
   checks.append(PreflightCheck(ok: databasesOK, label: databaseLabel, hint: databaseHint))
 
+  // Checked apart from the database root, so a key-file problem doesn't hide
+  // the database and process diagnostics.
+  if let destinationError {
+    checks.append(PreflightCheck(ok: false, label: destinationError, hint: nil))
+  }
+
   let blockers = checks.filter { !$0.ok }.map { check in
     check.hint.map { "\(check.label) (\($0))" } ?? check.label
   }
@@ -656,7 +677,7 @@ private func runPreflight(
       return nil
     }(),
     databaseRoot: databaseRootReference,
-    databaseRootAutoDiscovered: dbRootOption == nil,
+    databaseRootAutoDiscovered: autoDiscovered,
     databaseCount: databaseCount,
     distinctSaltCount: distinctSaltCount
   )
@@ -673,6 +694,12 @@ private func rootOrigin(_ arguments: Arguments, _ target: AcquireTarget) -> Stri
   return "from --db-root"
 }
 
+// Whether the root was discovered rather than named: no --db-root and no
+// configured root (a root queries discover for a configured key file counts).
+private func rootAutoDiscovered(_ arguments: Arguments, _ target: AcquireTarget) -> Bool {
+  arguments.dbRoot == nil && (target.sourceRoot == nil || target.sourceRootDiscovered)
+}
+
 do {
   let arguments = try Arguments(Array(CommandLine.arguments.dropFirst()))
   switch arguments.command {
@@ -681,19 +708,26 @@ do {
   case .preflight:
     var target = AcquireTarget.none
     var targetError: String?
+    var destinationError: String?
+    // Readiness means capture would accept this target and destination.
     do {
-      // Readiness means capture would accept this target and destination.
       target = try resolveTarget(arguments, needsOutput: true)
-      try SecretOutputWriter.checkDestination(captureOutput(arguments, target))
+      do {
+        try checkCaptureOutput(captureOutput(arguments, target), overwrite: arguments.overwrite)
+      } catch {
+        destinationError = String(describing: error)
+      }
     } catch {
       targetError = String(describing: error)
     }
     let result = runPreflight(
       dbRootOption: arguments.dbRoot ?? target.sourceRoot,
+      rootAutoDiscovered: rootAutoDiscovered(arguments, target),
       rootOrigin: rootOrigin(arguments, target),
       processIDOption: arguments.processID,
       includePaths: arguments.includePaths,
-      targetError: targetError
+      targetError: targetError,
+      destinationError: destinationError
     )
     if arguments.json {
       try printJSON(result.report)
@@ -705,12 +739,21 @@ do {
     let target = try resolveTarget(arguments, needsOutput: true)
     let dbRoot = arguments.dbRoot ?? target.sourceRoot
     let output = captureOutput(arguments, target)
-    try SecretOutputWriter.checkDestination(output)
+    // A destination problem blocks like any other preflight check, before
+    // the owner is asked to log out.
+    var destinationError: String?
+    do {
+      try checkCaptureOutput(output, overwrite: arguments.overwrite)
+    } catch {
+      destinationError = String(describing: error)
+    }
     let preflight = runPreflight(
       dbRootOption: dbRoot,
+      rootAutoDiscovered: rootAutoDiscovered(arguments, target),
       rootOrigin: rootOrigin(arguments, target),
       processIDOption: arguments.processID,
-      includePaths: arguments.includePaths
+      includePaths: arguments.includePaths,
+      destinationError: destinationError
     )
     guard preflight.report.ready, let processTarget = preflight.target,
       let root = preflight.databaseRoot
