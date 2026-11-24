@@ -312,8 +312,95 @@ struct WeChatAccountDiscoveryTests {
       withIntermediateDirectories: true)
     let discovery = WeChatAccountDiscovery(homeDirectory: home)
     let accountID = try #require(discovery.discover().first?.accountID)
+    let selected = discovery.ownedDatabaseRoots(accountID: accountID)
+    #expect(selected.map(\.containerBundleIdentifier) == ["com.example.WeChatCopy"])
+    #expect(selected.map(\.databaseRoot) == discovery.databaseRoots(accountID: accountID))
+    #expect(discovery.ownedDatabaseRoots(accountID: "missing").isEmpty)
+  }
+
+  @Test func ownerBundleIdentifiersMatchCaseInsensitivelyButUnknownOwnersNever() {
+    let installed = "com.tencent.xinWeChat"
     #expect(
-      discovery.containerBundleIdentifiers(accountID: accountID) == ["com.example.WeChatCopy"])
-    #expect(discovery.containerBundleIdentifiers(accountID: "missing").isEmpty)
+      WeChatAccountDiscovery.ownersAllMatch(["com.tencent.xinwechat"], bundleIdentifier: installed))
+    #expect(
+      WeChatAccountDiscovery.ownersAllMatch(
+        ["com.tencent.xinWeChat", "COM.TENCENT.XINWECHAT"], bundleIdentifier: installed))
+    #expect(
+      !WeChatAccountDiscovery.ownersAllMatch(
+        ["com.example.WeChatCopy"], bundleIdentifier: installed))
+    #expect(!WeChatAccountDiscovery.ownersAllMatch([nil], bundleIdentifier: installed))
+    #expect(
+      !WeChatAccountDiscovery.ownersAllMatch(
+        ["com.tencent.xinWeChat", nil], bundleIdentifier: installed))
+    // No selected roots leaves nothing that contradicts the build.
+    #expect(WeChatAccountDiscovery.ownersAllMatch([], bundleIdentifier: installed))
+  }
+
+  @Test func standardAccountIsFoundWhenContainersIsSearchOnly() throws {
+    let fileManager = FileManager.default
+    let home = fileManager.temporaryDirectory.appending(
+      path: "greenbubbles-account-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+    let containers = home.appending(path: "Library/Containers", directoryHint: .isDirectory)
+    defer {
+      try? fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: containers.path)
+      try? fileManager.removeItem(at: home)
+    }
+    try fileManager.createDirectory(
+      at: containers.appending(
+        path: "com.tencent.xinWeChat/Data/Documents/xwechat_files/account/db_storage"),
+      withIntermediateDirectories: true)
+    try fileManager.createDirectory(
+      at: containers.appending(
+        path: "com.example.WeChatCopy/Data/Documents/xwechat_files/copy/db_storage"),
+      withIntermediateDirectories: true)
+    try fileManager.setAttributes([.posixPermissions: 0o111], ofItemAtPath: containers.path)
+    // Running as root would bypass the permission bits; the test means nothing then.
+    guard open(containers.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC) < 0 else { return }
+
+    let discovery = WeChatAccountDiscovery(homeDirectory: home)
+    // Only the standard name can be probed without a listing.
+    #expect(discovery.discover().map(\.containerBundleIdentifier) == ["com.tencent.xinWeChat"])
+    #expect(
+      discovery.databaseRoots().first?.path.hasSuffix("xwechat_files/account/db_storage") == true)
+  }
+
+  @Test func groupContainerAccountsAreCheckedThroughDescriptors() throws {
+    let fileManager = FileManager.default
+    let home = fileManager.temporaryDirectory.appending(
+      path: "greenbubbles-account-tests-\(UUID().uuidString)", directoryHint: .isDirectory)
+    defer { try? fileManager.removeItem(at: home) }
+    let groups = home.appending(path: "Library/Group Containers", directoryHint: .isDirectory)
+    let files = groups.appending(path: "ABC.com.tencent.xinWeChat/xwechat_files")
+    try fileManager.createDirectory(
+      at: files.appending(path: "real/db_storage"), withIntermediateDirectories: true)
+    try fileManager.createDirectory(
+      at: files.appending(path: "real/msg/attach"), withIntermediateDirectories: true)
+    // An account whose db_storage is a link, and an account that is a link.
+    let elsewhere = home.appending(path: "elsewhere")
+    try fileManager.createDirectory(
+      at: elsewhere.appending(path: "db_storage"), withIntermediateDirectories: true)
+    try fileManager.createDirectory(
+      at: files.appending(path: "linked-db"), withIntermediateDirectories: true)
+    try fileManager.createSymbolicLink(
+      at: files.appending(path: "linked-db/db_storage"),
+      withDestinationURL: elsewhere.appending(path: "db_storage"))
+    try fileManager.createSymbolicLink(
+      at: files.appending(path: "linked-account"), withDestinationURL: elsewhere)
+    // Groups not named for WeChat, or without xwechat_files, are skipped.
+    try fileManager.createDirectory(
+      at: groups.appending(path: "XYZ.com.example.Other/xwechat_files/other/db_storage"),
+      withIntermediateDirectories: true)
+    try fileManager.createDirectory(
+      at: groups.appending(path: "DEF.com.tencent.xinWeChat/Library"),
+      withIntermediateDirectories: true)
+
+    let discovery = WeChatAccountDiscovery(homeDirectory: home)
+    let accounts = discovery.discover()
+    #expect(accounts.count == 1)
+    #expect(accounts.first?.containerBundleIdentifier == nil)
+    #expect(
+      discovery.databaseRoots().first?.path.hasSuffix("xwechat_files/real/db_storage") == true)
+    #expect(accounts.first?.attachmentRoot != nil)
+    #expect(accounts.first?.isReadable == true)
   }
 }

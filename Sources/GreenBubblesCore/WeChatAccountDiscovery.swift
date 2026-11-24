@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public struct WeChatAccountLocation: Codable, Equatable, Sendable {
@@ -63,12 +64,34 @@ public struct WeChatAccountDiscovery: Sendable {
       .map(\.databaseRoot)
   }
 
-  /// Bundle IDs of the app containers that own the selected accounts (nil
-  /// for an account in a group container).
-  public func containerBundleIdentifiers(accountID: String? = nil) -> [String?] {
+  /// A selected database root and the bundle ID of the app container that
+  /// owns it (nil for an account in a group container).
+  public struct OwnedDatabaseRoot: Equatable, Sendable {
+    public let databaseRoot: URL
+    public let containerBundleIdentifier: String?
+  }
+
+  /// The selected database roots together with their owners, from a single
+  /// discovery pass, so the owners always describe the roots returned.
+  public func ownedDatabaseRoots(accountID: String? = nil) -> [OwnedDatabaseRoot] {
     resolvedAccounts()
       .filter { accountID == nil || $0.matches(accountID: accountID!) }
-      .map(\.containerBundleIdentifier)
+      .map {
+        OwnedDatabaseRoot(
+          databaseRoot: $0.databaseRoot, containerBundleIdentifier: $0.containerBundleIdentifier)
+      }
+  }
+
+  /// True when every owner is the app with `bundleIdentifier`. Bundle IDs are
+  /// compared case-insensitively, because discovery reports the container's
+  /// on-disk spelling, which can differ in case from the app's Info.plist on a
+  /// case-insensitive volume. An unknown owner (nil, such as a group
+  /// container) can't be verified and never matches.
+  public static func ownersAllMatch(_ owners: [String?], bundleIdentifier: String) -> Bool {
+    owners.allSatisfy { owner in
+      guard let owner else { return false }
+      return owner.caseInsensitiveCompare(bundleIdentifier) == .orderedSame
+    }
   }
 
   public func singleDatabaseRoot() throws -> URL {
@@ -113,9 +136,7 @@ public struct WeChatAccountDiscovery: Sendable {
           aliasChildren[child.lastPathComponent, default: []].append(child)
         }
       }
-      let found =
-        source.verifiedAccounts ?? pathCheckedAccounts(in: source.url, fileManager: fileManager)
-      for account in found {
+      for account in source.accounts {
         let rootReference = privacy.reference(for: account.root)
         accounts.append(
           ResolvedAccount(
@@ -144,41 +165,12 @@ public struct WeChatAccountDiscovery: Sendable {
       .sorted { $0.report.accountID < $1.report.accountID }
   }
 
-  /// Accounts in a group container's xwechat_files, checked by path as before.
-  private func pathCheckedAccounts(in xwechatRoot: URL, fileManager: FileManager)
-    -> [WeChatAppContainerScanner.Account]
-  {
-    let children =
-      (try? fileManager.contentsOfDirectory(
-        at: xwechatRoot,
-        includingPropertiesForKeys: [.isDirectoryKey],
-        options: [.skipsHiddenFiles]
-      )) ?? []
-    return children.compactMap { root in
-      guard
-        let values = try? root.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
-        values.isDirectory == true,
-        values.isSymbolicLink != true
-      else { return nil }
-      let databaseRoot = root.appending(path: "db_storage", directoryHint: .isDirectory)
-      guard safeDirectory(databaseRoot) else { return nil }
-      let attachmentCandidate = root.appending(path: "msg/attach", directoryHint: .isDirectory)
-      return WeChatAppContainerScanner.Account(
-        root: root,
-        databaseRoot: databaseRoot,
-        attachmentRoot: safeDirectory(attachmentCandidate)
-          ? attachmentCandidate.standardizedFileURL : nil,
-        isReadable: fileManager.isReadableFile(atPath: databaseRoot.path)
-      )
-    }
-  }
-
   private struct RootSource {
     let url: URL
     /// Bundle ID of the owning app container; nil for a group container.
     let owner: String?
-    /// Accounts verified through directory descriptors (app containers).
-    let verifiedAccounts: [WeChatAppContainerScanner.Account]?
+    /// Accounts verified through directory descriptors.
+    let accounts: [WeChatAppContainerScanner.Account]
     var aliases: [URL] = []
   }
 
@@ -193,29 +185,13 @@ public struct WeChatAccountDiscovery: Sendable {
       .map {
         (
           RootSource(
-            url: $0.xwechatFilesRoot, owner: $0.bundleIdentifier, verifiedAccounts: $0.accounts),
+            url: $0.xwechatFilesRoot, owner: $0.bundleIdentifier, accounts: $0.accounts),
           $0.identity
         )
       }
 
-    let groups = homeDirectory.appending(
-      path: "Library/Group Containers", directoryHint: .isDirectory)
-    let groupChildren =
-      (try? fileManager.contentsOfDirectory(
-        at: groups,
-        includingPropertiesForKeys: [.isDirectoryKey],
-        options: [.skipsHiddenFiles]
-      )) ?? []
-    for group in groupChildren {
-      let name = group.lastPathComponent.lowercased()
-      guard name.contains("wechat") || name.contains("xinwechat") else { continue }
-      let root = group.appending(path: "xwechat_files", directoryHint: .isDirectory)
-      guard fileManager.fileExists(atPath: root.path) else { continue }
-      candidates.append(
-        (
-          RootSource(url: root, owner: nil, verifiedAccounts: nil),
-          WeChatAppContainerScanner.targetIdentity(root)
-        ))
+    candidates += groupContainerRoots().map {
+      (RootSource(url: $0.url, owner: nil, accounts: $0.accounts), $0.identity)
     }
 
     // App containers come first, so when a group container's xwechat_files
@@ -239,10 +215,44 @@ public struct WeChatAccountDiscovery: Sendable {
     return roots
   }
 
-  private func safeDirectory(_ url: URL) -> Bool {
-    guard
-      let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-    else { return false }
-    return values.isDirectory == true && values.isSymbolicLink != true
+  /// `xwechat_files` directories in WeChat group containers, walked by
+  /// descriptor like the app-container scan: `Group Containers` is listed
+  /// once, each matching group and its `xwechat_files` are opened relative to
+  /// the directory opened before them, and the identity and the account
+  /// listing both come from that one `xwechat_files` descriptor, so a path
+  /// swapped between checks cannot make them describe different directories.
+  /// Accounts are checked with `WeChatAppContainerScanner.accounts`, which
+  /// rejects linked accounts and linked `db_storage`.
+  ///
+  /// Unlike app containers, a group or its `xwechat_files` may be a symbolic
+  /// link, as earlier versions allowed: a group linked to an app container's
+  /// data is reported as an alias of that account, so saved IDs keep working.
+  private func groupContainerRoots() -> [(
+    url: URL, identity: WeChatAppContainerScanner.FileIdentity,
+    accounts: [WeChatAppContainerScanner.Account]
+  )] {
+    let groupsURL = homeDirectory.appending(
+      path: "Library/Group Containers", directoryHint: .isDirectory)
+    let groups = open(groupsURL.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    guard groups >= 0 else { return [] }
+    defer { close(groups) }
+    return WeChatAppContainerScanner.entryNames(ofDirectory: groups).sorted().compactMap { name in
+      guard name.lowercased().contains("wechat") else { return nil }
+      let group = openat(groups, name, O_SEARCH | O_DIRECTORY | O_CLOEXEC)
+      guard group >= 0 else { return nil }
+      defer { close(group) }
+      let files = openat(group, "xwechat_files", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+      guard files >= 0 else { return nil }
+      defer { close(files) }
+      var metadata = stat()
+      guard fstat(files, &metadata) == 0, metadata.st_mode & S_IFMT == S_IFDIR else { return nil }
+      let url = groupsURL.appending(path: name, directoryHint: .isDirectory)
+        .appending(path: "xwechat_files", directoryHint: .isDirectory).standardizedFileURL
+      return (
+        url,
+        WeChatAppContainerScanner.FileIdentity(device: metadata.st_dev, inode: metadata.st_ino),
+        WeChatAppContainerScanner.accounts(inFiles: files, at: url)
+      )
+    }
   }
 }

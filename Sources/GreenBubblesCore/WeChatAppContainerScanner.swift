@@ -54,7 +54,8 @@ struct WeChatAppContainerScanner: Sendable {
   /// Names come from the directory listing, so `bundleIdentifier` is the
   /// on-disk spelling; the standard name is probed directly only when the
   /// listing has no entry that matches it case-insensitively (for example
-  /// when listing fails). Candidates that are the same `xwechat_files`
+  /// when listing fails, including when `~/Library/Containers` is
+  /// search-only and is opened with `O_SEARCH` instead). Candidates that are the same `xwechat_files`
   /// directory (device and inode) are reported once, which also covers
   /// case-insensitive volumes.
   ///
@@ -63,7 +64,12 @@ struct WeChatAppContainerScanner: Sendable {
   /// URLs, as earlier versions used; only `bundleIdentifier` takes the
   /// on-disk spelling.
   func containers(fileManager: FileManager = .default) -> [Container] {
-    let containersDirectory = open(containersRoot.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    // When Containers can't be listed (search-only), a search-only
+    // descriptor still lets the standard name below be probed directly.
+    var containersDirectory = open(containersRoot.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    if containersDirectory < 0 {
+      containersDirectory = open(containersRoot.path, O_SEARCH | O_DIRECTORY | O_CLOEXEC)
+    }
     guard containersDirectory >= 0 else { return [] }
     defer { close(containersDirectory) }
     let names = Self.entryNames(ofDirectory: containersDirectory)

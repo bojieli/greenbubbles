@@ -4,6 +4,19 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- Account discovery still finds the standard WeChat account when
+  `~/Library/Containers` can be searched but not listed (#49).
+- `greenbubbles-discover snapshot` records the client build when the data
+  folder's container name differs from the app's bundle ID only in letter
+  case, and checks the owners of the same roots it snapshots (#49).
+- Group-container accounts are checked through directory descriptors, like
+  app-container accounts, so a folder swapped for a symbolic link during the
+  scan can't redirect it (#49).
+
 ## 0.11.0 - 2026-11-23
 
 Passphrase capture against a live WeChat session was not re-tested for this
