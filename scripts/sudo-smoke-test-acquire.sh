@@ -372,7 +372,13 @@ if [[ "$use_sudo" -eq 1 ]]; then
   else
     fail "sudo (f): preflight refuses a root-owned key file" "$(tr '\n' ' ' <"$work/f.out")"
   fi
-  sudo /bin/rm -rf "$work/keys/root-0700" "$work/keys/root-owned-644.key" "$work/keys/root-owned-666.key"
+  # Clean up as you, not root: the fixtures are entries in your own writable
+  # keys folder, so unlinking them needs no privilege, and rmdir refuses a
+  # folder that unexpectedly has contents instead of deleting them.
+  /bin/rm -f "$work/keys/root-owned-644.key" "$work/keys/root-owned-666.key" \
+    || echo "cleanup: could not remove the root-owned key fixtures in $work/keys" >&2
+  /bin/rmdir "$work/keys/root-0700" \
+    || echo "cleanup: $work/keys/root-0700 is not empty; left in place for inspection" >&2
 fi
 
 echo ""
