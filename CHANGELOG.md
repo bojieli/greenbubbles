@@ -9,10 +9,10 @@ Notable changes to GreenBubbles are documented here. The project follows
 ### Fixed
 
 - `greenbubbles-acquire` checks that the process lldb attached to is still the
-  selected WeChat process (same PID, user and start time) before it reads any
-  memory or sets the breakpoint. If the PID was reused after selection, lldb
-  detaches without doing either and capture stops with an error asking you to
-  rerun preflight (#51).
+  selected WeChat process (same PID, user and start time) before it sets the
+  capture breakpoint or reads the passphrase. If the PID was reused after
+  selection, lldb detaches before doing either and capture stops with an error
+  asking you to rerun preflight (#51).
 - When WeChat restarts so quickly that its new process had already started by
   the time the capture recorded the old one's exit, capture still won't attach
   to it, but now says so right away and, at the timeout, reports this timing

@@ -46,7 +46,11 @@ work="$(mktemp -d /private/tmp/greenbubbles-acquire-smoke.XXXXXX)"
 chmod 700 "$work"
 root_probe="/private/var/root/greenbubbles-acquire-smoke-$(basename "$work")"
 
+sleeper_pid=""
 cleanup() {
+  if [[ -n "$sleeper_pid" ]]; then
+    kill -KILL "$sleeper_pid" 2>/dev/null || true
+  fi
   if [[ "$use_sudo" -eq 1 ]] && sudo -n test -e "$root_probe" 2>/dev/null; then
     sudo -n rm -rf "$root_probe" || true
   fi
@@ -382,8 +386,10 @@ else
     fail "sudo (e): reused-PID identity" \
       "$(tr '\n' ' ' <"$work/e2.out"); state=$(ps -o state= -p "$sleeper_pid" 2>&1)"
   fi
-  kill "$sleeper_pid" 2>/dev/null || true
+  # SIGKILL also ends it if a regression left it stopped.
+  kill -KILL "$sleeper_pid" 2>/dev/null || true
   wait "$sleeper_pid" 2>/dev/null || true
+  sleeper_pid=""
 fi
 
 echo ""

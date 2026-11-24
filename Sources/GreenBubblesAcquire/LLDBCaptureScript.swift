@@ -124,8 +124,9 @@ struct SQLCipherAccountKeyDerivation: Equatable {
 /// breakpoint, stored breakpoint commands, `DONE`, then `process continue`.
 ///
 /// 1. `attach` attaches to the PID and prints its status; lldb then waits on
-///    stdin with the process stopped. Nothing has read target memory for the
-///    capture or set a breakpoint yet.
+///    stdin with the process stopped. No breakpoint is set and no passphrase
+///    register has been read yet (lldb itself may inspect the process while
+///    attaching, as any attach does).
 /// 2. The Swift side re-reads that PID's user and start time. Only when they
 ///    still match the selected process does it send `capture`; otherwise it
 ///    sends `detach`. Once attached, lldb holds the process's task port, so

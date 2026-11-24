@@ -49,8 +49,9 @@ public struct ProcessIdentity: Hashable, Sendable {
 
 /// What the debugger attach is meant to reach: one process, by PID, real
 /// user ID and start time. The capture re-reads these after lldb has stopped
-/// the process and before it reads memory or sets a breakpoint, so a PID that
-/// was reused between selection and `process attach` is detected.
+/// the process and before it sets the capture breakpoint or reads the
+/// passphrase, so a PID reused between selection and `process attach` is
+/// detected.
 public struct AttachIdentity: Equatable, Sendable, CustomStringConvertible {
   public let processID: pid_t
   public let userID: uid_t

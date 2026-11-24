@@ -52,6 +52,43 @@ struct AttachIdentityTests {
     #expect(WeChatProcessLocator.attachIdentity(ofProcessID: -1) == nil)
   }
 
+  // MARK: - No selected app
+
+  static func described(
+    executable: String? = "/Applications/WeChat.app/Contents/MacOS/WeChat",
+    user: uid_t? = 501,
+    start: UInt64? = 1_000
+  ) -> WeChatProcessCandidate {
+    WeChatProcessCandidate(
+      processID: 4242, userID: user, executablePath: executable,
+      applicationPath: nil, bundleIdentifier: nil, startMicroseconds: start)
+  }
+
+  @Test func unselectedPIDIsAttachedOnlyAsAStableWeChatOfThisUser() {
+    #expect(
+      LLDBPassphraseCapture.unselectedAttachIdentity(
+        candidate: Self.described(), userID: 501, current: Self.selected) == Self.selected)
+    let reused = AttachIdentity(processID: 4242, userID: 501, startMicroseconds: 9_000)
+    for (candidate, current) in [
+      // The PID now runs another program of the same user.
+      (Self.described(executable: "/usr/bin/caffeinate"), Self.selected),
+      (Self.described(executable: nil), Self.selected),
+      (Self.described(user: 502), Self.selected),
+      (Self.described(user: nil), Self.selected),
+      (Self.described(start: nil), Self.selected),
+      // Reused between the description and the identity read.
+      (Self.described(), reused),
+      (Self.described(), nil),
+    ] as [(WeChatProcessCandidate, AttachIdentity?)] {
+      #expect(
+        LLDBPassphraseCapture.unselectedAttachIdentity(
+          candidate: candidate, userID: 501, current: current) == nil)
+    }
+    #expect(
+      LLDBPassphraseCapture.unselectedAttachIdentity(
+        candidate: nil, userID: 501, current: Self.selected) == nil)
+  }
+
   // MARK: - lldb stop lines
 
   @Test func detectsOnlyProcessStoppedStatusLines() {
@@ -158,7 +195,7 @@ struct AttachIdentityTests {
     )
     .description
     #expect(message.contains("process 4242"))
-    #expect(message.contains("without reading its memory or setting a breakpoint"))
+    #expect(message.contains("before setting the capture breakpoint or reading a passphrase"))
     #expect(message.contains("Rerun preflight"))
   }
 
