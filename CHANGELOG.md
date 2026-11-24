@@ -8,6 +8,23 @@ Notable changes to GreenBubbles are documented here. The project follows
 
 ### Fixed
 
+- Account discovery still finds the standard WeChat account when
+  `~/Library/Containers` can be searched but not listed (#49).
+- `greenbubbles-discover snapshot` records the client build when the data
+  folder's container name differs from the app's bundle ID only in letter
+  case but is the same container, and checks the owners of the same roots it
+  snapshots (#49).
+- Group-container accounts are checked through directory descriptors, like
+  app-container accounts, so a folder swapped for a symbolic link during the
+  scan can't redirect it (#49).
+- Account discovery skips folders flagged hidden (`UF_HIDDEN`) again, as it
+  did before 0.11.0 (#49).
+- `greenbubbles-acquire capture` no longer reports "no match" when the timeout
+  cut verification of a captured value short or left one unchecked; it says
+  how many database salts were checked and that the value was neither
+  confirmed nor ruled out. If lldb exits unexpectedly after a captured value
+  was rejected, the exit is reported as the cause, with the rejection as
+  context. As before, no output is created or replaced in either case (#48).
 - `greenbubbles-acquire` checks that the process lldb attached to is still the
   selected WeChat process (same PID, user and start time) before it sets the
   capture breakpoint or reads the passphrase. If the PID was reused after

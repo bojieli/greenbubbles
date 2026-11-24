@@ -11,6 +11,9 @@ public enum CaptureError: Error, Equatable, CustomStringConvertible {
   case targetExited
   case timedOut
   case noAcceptableCandidate
+  /// The timeout passed with captured candidates still waiting to be offered
+  /// to `accept`; they were neither accepted nor rejected.
+  case timedOutWithUncheckedCandidates(uncheckedCandidateCount: Int, rejectedCandidateCount: Int)
   case exitedWithoutCapture
   /// lldb stopped the PID, but its user or start time no longer matched the
   /// selected process. lldb was told to detach before the capture breakpoint
@@ -20,6 +23,9 @@ public enum CaptureError: Error, Equatable, CustomStringConvertible {
   /// could be its restart had already started when the exit was recorded,
   /// so none can be confirmed as the replacement.
   case replacementTimingAmbiguous(exitedProcessID: pid_t, candidateProcessIDs: [pid_t])
+  /// lldb exited on its own before the deadline after `accept` rejected
+  /// earlier candidates. The exit is the cause; the rejections are context.
+  case exitedAfterRejecting(rejectedCandidateCount: Int)
 
   public var description: String {
     switch self {
@@ -39,6 +45,10 @@ public enum CaptureError: Error, Equatable, CustomStringConvertible {
     case .noAcceptableCandidate:
       return
         "every captured candidate was rejected before the timeout. No output was created or replaced."
+    case .timedOutWithUncheckedCandidates(let uncheckedCandidateCount, _):
+      return
+        "the timeout passed before \(Self.capturedCandidates(uncheckedCandidateCount)) could be "
+        + "checked. No output was created or replaced."
     case .exitedWithoutCapture:
       return "lldb exited before a passphrase was captured"
     case .attachedProcessMismatch(let processID, let detail):
@@ -55,7 +65,17 @@ public enum CaptureError: Error, Equatable, CustomStringConvertible {
         + "which one is the restarted WeChat and attached to none. "
         + "No output was created or replaced. Rerun preflight to select the running "
         + "process, then capture again"
+    case .exitedAfterRejecting(let rejectedCandidateCount):
+      return
+        "lldb exited before a passphrase was captured (earlier, "
+        + "\(Self.capturedCandidates(rejectedCandidateCount)) "
+        + "\(rejectedCandidateCount == 1 ? "was" : "were") rejected). "
+        + "No output was created or replaced."
     }
+  }
+
+  private static func capturedCandidates(_ count: Int) -> String {
+    count == 1 ? "1 captured candidate" : "\(count) captured candidates"
   }
 
   /// Diagnostic for a capture whose candidates all failed verification.
@@ -313,7 +333,8 @@ public struct LLDBPassphraseCapture: Sendable {
 
   /// One lldb session against one process. lldb first only attaches; the
   /// breakpoint and its memory read are sent after the stopped process is
-  /// confirmed to be `identity`.
+  /// confirmed to be `identity`. Internal (not private) so tests can drive
+  /// it with a stand-in lldb.
   func runSingleCapture(
     identity: AttachIdentity,
     architecture: LLDBTargetArchitecture,
@@ -336,6 +357,10 @@ public struct LLDBPassphraseCapture: Sendable {
     process.standardError = output
 
     let accumulator = OutputAccumulator()
+    // When lldb exited, recorded as it happens rather than at the next poll
+    // (a poll can be delayed by a long verification).
+    let exitClock = ExitClock()
+    process.terminationHandler = { _ in exitClock.record() }
     let verboseRelay = verbose ? VerboseLineRelay(emit: { [self] in emit($0) }) : nil
     output.fileHandleForReading.readabilityHandler = { handle in
       var data = handle.availableData
@@ -387,6 +412,8 @@ public struct LLDBPassphraseCapture: Sendable {
     var identityVerified = false
     while true {
       let running = process.isRunning
+      // lldb had exited by this moment if `running` is false.
+      let polledAt = Date()
       if !running {
         // Give the readability handler a moment to flush the final output.
         Thread.sleep(forTimeInterval: 0.1)
@@ -441,7 +468,7 @@ public struct LLDBPassphraseCapture: Sendable {
             contentsOf: Data(LLDBCaptureScript.capture(architecture: architecture).utf8))
           emit("attached to the selected WeChat process \(processID); waiting for the login")
         }
-        if !running { throw CaptureError.exitedWithoutCapture }
+        if !running, polledAt < deadline { throw Self.exitError(rejectedCandidateCount) }
         guard Date() < deadline else { throw deadlineError(rejectedCandidateCount) }
         Thread.sleep(forTimeInterval: 0.05)
         continue
@@ -456,7 +483,12 @@ public struct LLDBPassphraseCapture: Sendable {
         return secret
       }
       if decision.deadlineReached {
-        throw deadlineError(rejectedCandidateCount)
+        throw deadlineErrorAfterDraining(
+          rejectedCandidateCount,
+          uncheckedCandidateCount: decision.uncheckedCount,
+          stream: &stream,
+          accumulator: accumulator
+        )
       }
       if decision.newlyRejected > 0 {
         emit("captured candidate was rejected; waiting for another derivation")
@@ -468,11 +500,21 @@ public struct LLDBPassphraseCapture: Sendable {
       if drained.targetExited {
         throw CaptureError.targetExited
       }
-      if !running {
-        if rejectedCandidateCount > 0 { throw CaptureError.noAcceptableCandidate }
-        throw CaptureError.exitedWithoutCapture
+      if !running, polledAt < deadline {
+        throw Self.exitError(rejectedCandidateCount)
       }
-      guard Date() < deadline else { throw deadlineError(rejectedCandidateCount) }
+      guard Date() < deadline else {
+        // lldb may have exited while the last candidate was being checked.
+        if let exitedAt = exitClock.time, exitedAt < deadline {
+          throw Self.exitError(rejectedCandidateCount)
+        }
+        throw deadlineErrorAfterDraining(
+          rejectedCandidateCount,
+          uncheckedCandidateCount: 0,
+          stream: &stream,
+          accumulator: accumulator
+        )
+      }
       Thread.sleep(forTimeInterval: 0.05)
     }
   }
@@ -487,9 +529,65 @@ public struct LLDBPassphraseCapture: Sendable {
     }
   }
 
+  /// An exit before the deadline is the cause even after a rejection; the
+  /// rejections are context, not the reason the capture stopped. An exit
+  /// first seen after the deadline may have followed it, so the timeout is
+  /// reported for that instead.
+  private static func exitError(_ rejectedCandidateCount: Int) -> CaptureError {
+    rejectedCandidateCount > 0
+      ? .exitedAfterRejecting(rejectedCandidateCount: rejectedCandidateCount)
+      : .exitedWithoutCapture
+  }
+
+  /// The error for a deadline reached inside a single capture. Complete reads
+  /// that arrived while the last candidate was being checked were never
+  /// offered, so they count as unchecked rather than letting the rejections
+  /// read as a definitive "no acceptable candidate".
+  private func deadlineErrorAfterDraining(
+    _ rejectedCandidateCount: Int,
+    uncheckedCandidateCount: Int,
+    stream: inout LLDBMemoryReadStream,
+    accumulator: OutputAccumulator
+  ) -> CaptureError {
+    if rejectedCandidateCount > 0 {
+      // Before a definitive "no acceptable candidate", let output the reader
+      // already has in hand reach the accumulator.
+      Thread.sleep(forTimeInterval: 0.1)
+    }
+    var rest = accumulator.take()
+    var late = stream.consume(&rest)
+    defer { Self.zeroizeCandidates(&late.candidates) }
+    let unchecked = uncheckedCandidateCount + late.candidates.count
+    guard unchecked == 0 else {
+      return .timedOutWithUncheckedCandidates(
+        uncheckedCandidateCount: unchecked,
+        rejectedCandidateCount: rejectedCandidateCount
+      )
+    }
+    return deadlineError(rejectedCandidateCount)
+  }
+
   private static func zeroizeCandidates(_ candidates: inout [[UInt8]]) {
     for index in candidates.indices {
       PassphraseSecret.zeroize(&candidates[index])
+    }
+  }
+
+  /// The moment lldb exited, set from its termination handler.
+  private final class ExitClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: Date?
+
+    func record() {
+      lock.lock()
+      defer { lock.unlock() }
+      if recorded == nil { recorded = Date() }
+    }
+
+    var time: Date? {
+      lock.lock()
+      defer { lock.unlock() }
+      return recorded
     }
   }
 
@@ -601,8 +699,10 @@ enum CaptureCandidateCursor {
   struct Decision {
     var secret: PassphraseSecret?
     var newlyRejected: Int
+    /// Candidates not offered because the deadline had passed.
+    var uncheckedCount = 0
     /// The deadline passed before every candidate could be offered.
-    var deadlineReached = false
+    var deadlineReached: Bool { uncheckedCount > 0 }
   }
 
   /// Each offered candidate is zeroized in place; the caller zeroizes any
@@ -616,7 +716,11 @@ enum CaptureCandidateCursor {
     var newlyRejected = 0
     for index in candidates.indices {
       guard now() < deadline else {
-        return Decision(secret: nil, newlyRejected: newlyRejected, deadlineReached: true)
+        return Decision(
+          secret: nil,
+          newlyRejected: newlyRejected,
+          uncheckedCount: candidates.count - index
+        )
       }
       defer { PassphraseSecret.zeroize(&candidates[index]) }
       let secret = try PassphraseSecret(bytes: candidates[index])

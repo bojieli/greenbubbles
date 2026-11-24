@@ -54,7 +54,10 @@ struct WeChatAppContainerScanner: Sendable {
   /// Names come from the directory listing, so `bundleIdentifier` is the
   /// on-disk spelling; the standard name is probed directly only when the
   /// listing has no entry that matches it case-insensitively (for example
-  /// when listing fails). Candidates that are the same `xwechat_files`
+  /// when listing fails, including when `~/Library/Containers` is
+  /// search-only and is opened with `O_SEARCH` instead). The standard name is
+  /// probed even when its entry is hidden, as releases before 0.11.0 always
+  /// checked that fixed path; hidden entries only drop out of the listing. Candidates that are the same `xwechat_files`
   /// directory (device and inode) are reported once, which also covers
   /// case-insensitive volumes.
   ///
@@ -63,16 +66,26 @@ struct WeChatAppContainerScanner: Sendable {
   /// URLs, as earlier versions used; only `bundleIdentifier` takes the
   /// on-disk spelling.
   func containers(fileManager: FileManager = .default) -> [Container] {
-    let containersDirectory = open(containersRoot.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    // When Containers can't be listed (search-only), a search-only
+    // descriptor still lets the standard name below be probed directly.
+    var containersDirectory = open(containersRoot.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    if containersDirectory < 0 {
+      containersDirectory = open(containersRoot.path, O_SEARCH | O_DIRECTORY | O_CLOEXEC)
+    }
     guard containersDirectory >= 0 else { return [] }
     defer { close(containersDirectory) }
     let names = Self.entryNames(ofDirectory: containersDirectory)
     let isStandard = { (name: String) in
       name.caseInsensitiveCompare(Self.standardBundleIdentifier) == .orderedSame
     }
+    // The exact standard name is probed after any listed spellings of it, so
+    // a listed spelling that is the same directory wins and the exact name
+    // only adds a container the listing left out (hidden, or not listable).
     let standardNames = names.filter(isStandard).sorted()
     let ordered =
-      (standardNames.isEmpty ? [Self.standardBundleIdentifier] : standardNames)
+      standardNames
+      + (standardNames.contains(Self.standardBundleIdentifier)
+        ? [] : [Self.standardBundleIdentifier])
       + names.filter { !isStandard($0) }.sorted()
     let canonicalIdentity = verifiedContainer(
       named: Self.standardBundleIdentifier, in: containersDirectory, listAccounts: false)?
@@ -80,6 +93,13 @@ struct WeChatAppContainerScanner: Sendable {
 
     var seen = Set<FileIdentity>()
     return ordered.compactMap { name in
+      // The exact standard name adds nothing when a listed spelling already
+      // reached that directory; skip it before its accounts are listed.
+      if name == Self.standardBundleIdentifier, let canonicalIdentity,
+        seen.contains(canonicalIdentity)
+      {
+        return nil
+      }
       guard
         let container = verifiedContainer(
           named: name, in: containersDirectory, listAccounts: true),
@@ -110,6 +130,16 @@ struct WeChatAppContainerScanner: Sendable {
     return FileIdentity(device: metadata.st_dev, inode: metadata.st_ino)
   }
 
+  /// Identity of the directory entry itself (`lstat`); nil for a symbolic
+  /// link, anything that isn't a directory, or any error.
+  static func entryIdentity(_ url: URL) -> FileIdentity? {
+    var metadata = stat()
+    guard Darwin.lstat(url.path, &metadata) == 0, metadata.st_mode & S_IFMT == S_IFDIR else {
+      return nil
+    }
+    return FileIdentity(device: metadata.st_dev, inode: metadata.st_ino)
+  }
+
   /// `lstat` only: a symbolic link, a missing entry, or any error is rejected.
   static func isRealDirectory(_ url: URL) -> Bool {
     var metadata = stat()
@@ -134,7 +164,8 @@ struct WeChatAppContainerScanner: Sendable {
   }
 
   /// Visible entry names of an open directory, read through a duplicate of
-  /// its descriptor.
+  /// its descriptor. Like Foundation's `.skipsHiddenFiles`, names starting
+  /// with `.` and entries flagged `UF_HIDDEN` are left out.
   static func entryNames(ofDirectory directory: Int32) -> [String] {
     let duplicate = dup(directory)
     guard duplicate >= 0 else { return [] }
@@ -149,7 +180,14 @@ struct WeChatAppContainerScanner: Sendable {
       let name = withUnsafeBytes(of: entry.pointee.d_name) { bytes in
         String(decoding: bytes.prefix(Int(entry.pointee.d_namlen)), as: UTF8.self)
       }
-      if !name.hasPrefix(".") { names.append(name) }
+      guard !name.hasPrefix(".") else { continue }
+      var metadata = stat()
+      if fstatat(directory, name, &metadata, AT_SYMLINK_NOFOLLOW) == 0,
+        metadata.st_flags & UInt32(UF_HIDDEN) != 0
+      {
+        continue
+      }
+      names.append(name)
     }
     return names
   }

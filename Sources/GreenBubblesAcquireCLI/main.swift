@@ -10,7 +10,6 @@ enum CLIError: Error, CustomStringConvertible {
   case missingValue(String)
   case missingRequiredOption(String)
   case invalidInteger(option: String, value: String)
-  case verificationFailed(String)
   case rootConflictsWithTarget(String)
   case parentComponentInRoot
 
@@ -24,8 +23,6 @@ enum CLIError: Error, CustomStringConvertible {
       return "Missing required option: \(option)"
     case .invalidInteger(let option, let value):
       return "Expected a positive integer for \(option), got: \(value)"
-    case .verificationFailed(let reason):
-      return "Passphrase verification failed: \(reason)"
     case .parentComponentInRoot:
       return "--db-root must not contain '..'; give the folder's plain path"
     case .rootConflictsWithTarget(let origin):
@@ -750,33 +747,19 @@ do {
     // once it passes, so a candidate that arrives late cannot keep lldb
     // attached for a full pass over every salt.
     let deadline = started.addingTimeInterval(TimeInterval(arguments.timeoutSeconds))
-    var verifiedSaltCount = 0
-    let passphrase: PassphraseSecret
-    do {
-      passphrase = try capture.capture(timeoutSeconds: arguments.timeoutSeconds) { secret in
-        verifiedSaltCount = try inventory.verifiedSaltCount(for: secret) {
-          Date() >= deadline
-        }
-        return verifiedSaltCount > 0
-      }
-    } catch CaptureError.noAcceptableCandidate {
-      throw CLIError.verificationFailed(
-        CaptureError.verificationFailureDiagnostic(
-          distinctSaltCount: inventory.distinctSalts.count,
-          databaseCount: inventory.entries.count
-        )
-      )
-    }
-    let captureDurationSeconds = Date().timeIntervalSince(started)
-    // `capture` returns only a candidate the closure accepted.
-    assert(verifiedSaltCount > 0)
-    let written = try SecretOutputWriter().write(
-      passphrase,
+    var captureDurationSeconds = 0.0
+    let written = try VerifiedPassphraseCapture.captureAndWrite(
+      inventory: inventory,
+      deadline: deadline,
       to: output,
       overwrite: arguments.overwrite,
       as: invokingUser
-    )
-    if !written.parentIsPrivate {
+    ) { accept in
+      defer { captureDurationSeconds = Date().timeIntervalSince(started) }
+      return try capture.capture(timeoutSeconds: arguments.timeoutSeconds, accept: accept)
+    }
+    let verifiedSaltCount = written.verifiedSaltCount
+    if !written.outcome.parentIsPrivate {
       printNote(
         "the folder holding the key is not owner-only; greenbubbles reads a key only "
           + "from a folder you own with mode 700")
