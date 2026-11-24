@@ -417,7 +417,9 @@ public enum WeChatProcessSelector {
     if unclassified { return [] }
     return candidates.compactMap { target(for: $0, userID: selected.userID) }
       .filter { match in
+        // A process older than the selected one can't be its restart.
         match.runsSameApp(as: selected) && !match.isSameProcess(as: selected)
+          && match.startMicroseconds > selected.startMicroseconds
           && match.startMicroseconds <= exitObserved
           && !selected.excludedProcesses.contains(match.identity)
       }

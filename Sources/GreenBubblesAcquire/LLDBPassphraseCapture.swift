@@ -132,33 +132,54 @@ public struct LLDBPassphraseCapture: Sendable {
     outputHandler?(message)
   }
 
+  /// Why the last poll found a WeChat process but attached to none.
+  enum AttachRefusal: Equatable {
+    /// Every possible restart of `exited` had already started when its exit
+    /// was recorded.
+    case timingAmbiguous(exited: pid_t, candidates: [pid_t])
+    /// Without a selected app, the listed process could not be verified.
+    case unverifiable(ProcessSelectionError)
+  }
+
   /// The process to attach to next, with the identity the attach must
   /// still find. `followed` starts as `target`; it keeps the selected
   /// process while it runs and moves only to a process of the same app that
-  /// started after the previous one was seen to exit. After a successful
-  /// listing that yields no process, `ambiguous` is set to the same-app
-  /// processes that had already started when the exit was recorded.
+  /// started after the previous one was seen to exit. When a conclusive poll
+  /// attaches to nothing although a process was found, `refusal` says why;
+  /// it is cleared by a poll that finds nothing to explain.
   private func currentAttachIdentity(
     following followed: inout WeChatProcessTarget?,
-    ambiguous: inout [pid_t]
+    refusal: inout AttachRefusal?
   ) throws -> AttachIdentity? {
     guard var current = followed else {
       // No selected app: the single running WeChat of this user, identified
-      // now so the attach can be checked against it.
-      // Only kernel metadata is read here, never the app's files.
+      // now so the attach can be checked against it. Only kernel metadata
+      // is read here, never the app's files.
       let locator = processLocator ?? WeChatProcessLocator()
-      guard let processID = try locator.uniqueProcessID(),
-        let before = processIdentityReader(processID)
-      else { return nil }
+      refusal = nil
+      guard let processID = try locator.uniqueProcessID() else { return nil }
+      let before = processIdentityReader(processID)
       let executablePath = WeChatProcessLocator.executablePath(ofProcessID: processID)
-      return Self.unselectedAttachIdentity(
-        candidate: WeChatProcessCandidate(
-          processID: processID, userID: before.userID, executablePath: executablePath,
-          applicationPath: nil, bundleIdentifier: nil,
-          startMicroseconds: before.startMicroseconds),
+      let identity = Self.unselectedAttachIdentity(
+        candidate: before.map {
+          WeChatProcessCandidate(
+            processID: processID, userID: $0.userID, executablePath: executablePath,
+            applicationPath: nil, bundleIdentifier: nil,
+            startMicroseconds: $0.startMicroseconds)
+        },
         userID: locator.userID,
         current: processIdentityReader(processID)
       )
+      if identity == nil {
+        let notWeChat =
+          executablePath.map {
+            ($0 as NSString).lastPathComponent != WeChatProcessLocator.executableName
+          } ?? false
+        refusal = .unverifiable(
+          notWeChat
+            ? .processNotWeChat(processID) : .processIdentityUnavailable(processID))
+      }
+      return identity
     }
     let locator = processLocator ?? WeChatProcessLocator(userID: current.userID)
     let listing = Result { try locator.candidates() }
@@ -169,12 +190,15 @@ public struct LLDBPassphraseCapture: Sendable {
     )
     followed = current
     if let next {
-      ambiguous = []
+      refusal = nil
       return next.attachIdentity
     }
     if case .success(let candidates) = listing {
-      ambiguous = WeChatProcessSelector.replacementsStartedBeforeExitRecorded(
+      let ambiguous = WeChatProcessSelector.replacementsStartedBeforeExitRecorded(
         candidates: candidates, following: current)
+      refusal =
+        ambiguous.isEmpty
+        ? nil : .timingAmbiguous(exited: current.processID, candidates: ambiguous)
     }
     return nil
   }
@@ -222,12 +246,12 @@ public struct LLDBPassphraseCapture: Sendable {
     var followed = target
     var rejectedCandidateCount = 0
     var exitObservedAt: UInt64?
-    var ambiguous: [pid_t] = []
-    var reportedAmbiguity: [pid_t] = []
+    var refusal: AttachRefusal?
+    var reportedRefusal: AttachRefusal?
     while true {
-      guard let identity = try currentAttachIdentity(following: &followed, ambiguous: &ambiguous)
+      guard let identity = try currentAttachIdentity(following: &followed, refusal: &refusal)
       else {
-        if !ambiguous.isEmpty, ambiguous != reportedAmbiguity, let exited = followed?.processID {
+        if case .timingAmbiguous(let exited, let ambiguous) = refusal, refusal != reportedRefusal {
           // Still fail closed: never attach to such a process. Say so now
           // rather than only at the timeout.
           let list = ambiguous.map(String.init).joined(separator: ", ")
@@ -236,7 +260,7 @@ public struct LLDBPassphraseCapture: Sendable {
               + "started when that exit was recorded, so it can't be confirmed as the restarted "
               + "WeChat and will not be attached. Still waiting for a process that starts "
               + "later; if none does, rerun preflight and capture again")
-          reportedAmbiguity = ambiguous
+          reportedRefusal = refusal
         }
         if Date() < deadline {
           Thread.sleep(forTimeInterval: 1)
@@ -244,11 +268,13 @@ public struct LLDBPassphraseCapture: Sendable {
         }
         // The restart ambiguity comes first: a candidate rejected before the
         // restart says nothing about the process that was never attached.
-        if !ambiguous.isEmpty, let exited = followed?.processID {
+        if case .timingAmbiguous(let exited, let ambiguous) = refusal {
           throw CaptureError.replacementTimingAmbiguous(
             exitedProcessID: exited, candidateProcessIDs: ambiguous)
         }
         if rejectedCandidateCount > 0 { throw CaptureError.noAcceptableCandidate }
+        // A WeChat process was found but could not be verified.
+        if case .unverifiable(let error) = refusal { throw error }
         throw CaptureError.noWeChatProcess
       }
       let processID = identity.processID

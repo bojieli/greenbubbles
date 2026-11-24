@@ -185,7 +185,7 @@ swiftc -parse-as-library -o "$work/attach_harness" "$work/attach_harness.swift" 
   "$sources/LLDBOutputParser.swift" "$sources/PassphraseSecret.swift" \
   "$sources/WeChatProcessSelection.swift" "$sources/WeChatProcessLocator.swift" \
   "$sources/InvokingUser.swift" "$sources/SQLCipherKeyVerifier.swift"
-printf '#include <unistd.h>\nint main(void) { sleep(120); return 0; }\n' >"$work/sleeper.c"
+printf '#include <unistd.h>\nint main(void) { sleep(900); return 0; }\n' >"$work/sleeper.c"
 cc -o "$work/sleeper" "$work/sleeper.c"
 
 # --- Synthetic data (as you) -------------------------------------------------
@@ -359,6 +359,10 @@ else
   # the capture verifies it and arms the breakpoint (which never hits, so it
   # times out); with a wrong one it detaches before any breakpoint. Either way
   # the program must be left running, not stopped.
+  # The sleeper is this script's child and is not reaped until the `wait`
+  # below, so even if it exits early its PID can't be reused by another
+  # process; the harness can only ever reach this sleeper, and the attach
+  # to an exited one fails the check.
   "$work/sleeper" &
   sleeper_pid=$!
   sleeper_running() {

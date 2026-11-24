@@ -269,6 +269,16 @@ struct AttachIdentityTests {
       ).isEmpty)
   }
 
+  @Test func processOlderThanTheSelectedOneIsNotItsRestart() {
+    // A sibling from before the current target started (for example from
+    // an earlier restart) can't be this target's restart.
+    #expect(
+      WeChatProcessSelector.replacementsStartedBeforeExitRecorded(
+        candidates: [Self.candidate(60, start: 900), Self.candidate(61, start: 1_000)],
+        following: Self.followed(exitRecordedAt: 5_000)
+      ).isEmpty)
+  }
+
   @Test func nothingIsAmbiguousBeforeAnExitIsRecorded() {
     #expect(
       WeChatProcessSelector.replacementsStartedBeforeExitRecorded(
