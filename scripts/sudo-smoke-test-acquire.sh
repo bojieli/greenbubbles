@@ -201,14 +201,19 @@ sys.exit(0 if ok else 1)
 }
 
 # Prints the blockers of a preflight --json report; succeeds when one of them
-# contains the given text (case-insensitive).
+# contains the given text (case-insensitive), or with --absent when the
+# report is valid and none does. A missing or malformed report always fails.
 blockers_mention() {
   python3 -I -c '
 import json, sys
-blockers = json.load(open(sys.argv[1]))["blockers"]
+absent = sys.argv[1] == "--absent"
+path, text = sys.argv[2:] if absent else sys.argv[1:]
+blockers = json.load(open(path))["blockers"]
+assert isinstance(blockers, list)
 print("blockers=%s" % blockers)
-sys.exit(0 if any(sys.argv[2].lower() in b.lower() for b in blockers) else 1)
-' "$1" "$2"
+found = any(text.lower() in b.lower() for b in blockers)
+sys.exit(0 if found != absent else 1)
+' "$@"
 }
 
 # --- Unprivileged checks -----------------------------------------------------
@@ -242,7 +247,7 @@ chmod 600 "$work/keys/existing.key"
 "$binary" preflight --json --profile smoke --output "$work/keys/existing.key" --overwrite \
   >"$work/u4b.json" 2>/dev/null || true
 if blockers_mention "$work/u4.json" "already exists" >"$work/u4.out" 2>&1 \
-  && ! blockers_mention "$work/u4b.json" "already exists" >/dev/null 2>&1 \
+  && blockers_mention --absent "$work/u4b.json" "already exists" >/dev/null 2>&1 \
   && [[ "$(cat "$work/keys/existing.key")" == "existing" ]]; then
   pass "user: preflight reports an existing key file unless --overwrite is given"
 else

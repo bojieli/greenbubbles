@@ -502,7 +502,8 @@ private func runPreflight(
   rootOrigin: String = "from --db-root",
   processIDOption: pid_t? = nil,
   includePaths: Bool,
-  targetError: String? = nil
+  targetError: String? = nil,
+  destinationError: String? = nil
 ) -> PreflightResult {
   var checks: [PreflightCheck] = []
   var remediation: String?
@@ -650,6 +651,12 @@ private func runPreflight(
   }
   checks.append(PreflightCheck(ok: databasesOK, label: databaseLabel, hint: databaseHint))
 
+  // Checked apart from the database root, so a key-file problem doesn't hide
+  // the database and process diagnostics.
+  if let destinationError {
+    checks.append(PreflightCheck(ok: false, label: destinationError, hint: nil))
+  }
+
   let blockers = checks.filter { !$0.ok }.map { check in
     check.hint.map { "\(check.label) (\($0))" } ?? check.label
   }
@@ -704,10 +711,15 @@ do {
   case .preflight:
     var target = AcquireTarget.none
     var targetError: String?
+    var destinationError: String?
+    // Readiness means capture would accept this target and destination.
     do {
-      // Readiness means capture would accept this target and destination.
       target = try resolveTarget(arguments, needsOutput: true)
-      try checkCaptureOutput(captureOutput(arguments, target), overwrite: arguments.overwrite)
+      do {
+        try checkCaptureOutput(captureOutput(arguments, target), overwrite: arguments.overwrite)
+      } catch {
+        destinationError = String(describing: error)
+      }
     } catch {
       targetError = String(describing: error)
     }
@@ -717,7 +729,8 @@ do {
       rootOrigin: rootOrigin(arguments, target),
       processIDOption: arguments.processID,
       includePaths: arguments.includePaths,
-      targetError: targetError
+      targetError: targetError,
+      destinationError: destinationError
     )
     if arguments.json {
       try printJSON(result.report)

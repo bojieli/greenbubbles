@@ -108,6 +108,10 @@ public struct SecretOutputWriter: Sendable {
         throw SecretOutputError.destinationNotWritable(code: errno)
       }
       if parent.st_mode & S_IFMT == S_IFLNK { throw SecretOutputError.symbolicLinkParent }
+      // The writer opens the folder O_RDONLY, then the file inside it.
+      guard Darwin.faccessat(AT_FDCWD, parentPath, R_OK | X_OK, AT_EACCESS) == 0 else {
+        throw SecretOutputError.destinationNotWritable(code: errno)
+      }
       guard info.st_mode & S_IFMT == S_IFREG, info.st_nlink == 1 else {
         throw SecretOutputError.unsafeOutputFile
       }
@@ -140,7 +144,10 @@ public struct SecretOutputWriter: Sendable {
     guard folder.st_mode & S_IFMT == S_IFDIR else {
       throw SecretOutputError.destinationNotWritable(code: ENOTDIR)
     }
-    guard Darwin.faccessat(AT_FDCWD, existing, W_OK | X_OK, AT_EACCESS) == 0 else {
+    // New folders need write and search access; an existing containing
+    // folder is also opened O_RDONLY by the writer, so it must be readable.
+    let needed = existing == parentPath ? R_OK | W_OK | X_OK : W_OK | X_OK
+    guard Darwin.faccessat(AT_FDCWD, existing, needed, AT_EACCESS) == 0 else {
       throw SecretOutputError.destinationNotWritable(code: errno)
     }
   }

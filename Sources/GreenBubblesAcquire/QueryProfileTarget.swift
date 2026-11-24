@@ -315,7 +315,8 @@ public enum QueryProfileTarget {
     if found.count > 1, newest.modified - found[1].modified < ambiguousWindowSeconds {
       throw QueryProfileError.liveSourceUnavailable(
         "more than one WeChat account was written recently; set source.root in "
-          + "~/.greenbubbles/config.toml to the account you are signed in to, or pass --db-root")
+          + "~/.greenbubbles/config.toml to the account you are signed in to, or pass --db-root "
+          + "together with --output")
     }
     return URL(fileURLWithPath: newest.path, isDirectory: true)
   }

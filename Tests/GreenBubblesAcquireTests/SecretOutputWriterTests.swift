@@ -267,6 +267,15 @@ struct SecretOutputWriterTests {
       try SecretOutputWriter.checkDestinationAccess(
         locked.appending(path: "passphrase.txt"), overwrite: true, as: user)
     }
+    // Writable and searchable but not readable: the writer can't open it.
+    chmod(locked.path, 0o300)
+    #expect(throws: SecretOutputError.destinationNotWritable(code: EACCES)) {
+      try SecretOutputWriter.checkDestinationAccess(
+        locked.appending(path: "passphrase.txt"), overwrite: false, as: user)
+    }
+    // A missing level below it is created by the writer, so that's fine.
+    try SecretOutputWriter.checkDestinationAccess(
+      locked.appending(path: "new/passphrase.txt"), overwrite: false, as: user)
     chmod(locked.path, 0o700)
 
     // An existing file the user can't write, even with --overwrite.
