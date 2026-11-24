@@ -373,10 +373,16 @@ public enum QueryProfileTarget {
     guard let directory = withRawPath(path, { opendir($0) }) else { return [] }
     defer { closedir(directory) }
     var names: [[UInt8]] = []
+    // Darwin's readdir returns variable-length records, so read only the
+    // name's d_namlen bytes in place, never the whole d_name array.
+    let lengthOffset = MemoryLayout<dirent>.offset(of: \dirent.d_namlen)!
+    let nameOffset = MemoryLayout<dirent>.offset(of: \dirent.d_name)!
     while let entry = readdir(directory) {
-      let name = withUnsafeBytes(of: entry.pointee.d_name) { raw in
-        Array(raw.prefix(Int(entry.pointee.d_namlen)))
-      }
+      let record = UnsafeRawPointer(entry)
+      let length = record.loadUnaligned(
+        fromByteOffset: lengthOffset, as: type(of: dirent().d_namlen))
+      let name = Array(
+        UnsafeRawBufferPointer(start: record + nameOffset, count: Int(length)))
       if name != [0x2E], name != [0x2E, 0x2E] { names.append(name) }
     }
     return names
