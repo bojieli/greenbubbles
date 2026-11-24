@@ -219,6 +219,127 @@ struct SecretOutputWriterTests {
     #expect(try posixMode(of: output) == 0o600)
   }
 
+  // MARK: Destination access (preflight and capture, before the login step)
+
+  @Test func destinationCheckAcceptsWhatTheWriteAcceptsWithoutChangingAnything() throws {
+    let base = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let nested = base.appending(path: "a/b/passphrase.txt")
+    try SecretOutputWriter.checkDestinationAccess(nested, overwrite: false, as: currentUser())
+    #expect(try FileManager.default.contentsOfDirectory(atPath: base.path).isEmpty)
+
+    let output = base.appending(path: "passphrase.txt")
+    try SecretOutputWriter.checkDestinationAccess(output, overwrite: false, as: currentUser())
+    let secret = try PassphraseSecret(bytes: bytesFromHex(passphraseHex))
+    try SecretOutputWriter().write(secret, to: output)
+    let written = try Data(contentsOf: output)
+    #expect(throws: SecretOutputError.outputExists) {
+      try SecretOutputWriter.checkDestinationAccess(output, overwrite: false, as: currentUser())
+    }
+    try SecretOutputWriter.checkDestinationAccess(output, overwrite: true, as: currentUser())
+    #expect(try Data(contentsOf: output) == written)
+    #expect(try posixMode(of: output) == 0o600)
+  }
+
+  @Test func destinationCheckRefusesWhatTheWriteWouldRefuse() throws {
+    guard geteuid() != 0 else { return }
+    let base = try makeTemporaryDirectory()
+    let locked = base.appending(path: "locked", directoryHint: .isDirectory)
+    defer {
+      chmod(locked.path, 0o700)
+      try? FileManager.default.removeItem(at: base)
+    }
+    let user = currentUser()
+
+    // A folder the user can't write, such as a root-owned 0700 folder left
+    // by an earlier capture: a new file or new levels below it.
+    try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: false)
+    chmod(locked.path, 0o500)
+    for path in ["passphrase.txt", "new/passphrase.txt"] {
+      #expect(throws: SecretOutputError.destinationNotWritable(code: EACCES)) {
+        try SecretOutputWriter.checkDestinationAccess(
+          locked.appending(path: path), overwrite: false, as: user)
+      }
+    }
+    // A folder the user can't search hides even whether the file exists.
+    chmod(locked.path, 0o000)
+    #expect(throws: SecretOutputError.destinationNotWritable(code: EACCES)) {
+      try SecretOutputWriter.checkDestinationAccess(
+        locked.appending(path: "passphrase.txt"), overwrite: true, as: user)
+    }
+    // Writable and searchable but not readable: the writer can't open it.
+    chmod(locked.path, 0o300)
+    #expect(throws: SecretOutputError.destinationNotWritable(code: EACCES)) {
+      try SecretOutputWriter.checkDestinationAccess(
+        locked.appending(path: "passphrase.txt"), overwrite: false, as: user)
+    }
+    // A missing level below it is created by the writer, so that's fine.
+    try SecretOutputWriter.checkDestinationAccess(
+      locked.appending(path: "new/passphrase.txt"), overwrite: false, as: user)
+    chmod(locked.path, 0o700)
+
+    // An existing file the user can't write, even with --overwrite.
+    let readOnly = base.appending(path: "read-only.txt")
+    try Data("x".utf8).write(to: readOnly)
+    chmod(readOnly.path, 0o400)
+    #expect(throws: SecretOutputError.outputNotWritable(code: EACCES)) {
+      try SecretOutputWriter.checkDestinationAccess(readOnly, overwrite: true, as: user)
+    }
+
+    // A linked file, a folder in the file's place, and a file in a folder's place.
+    let target = base.appending(path: "target.txt")
+    try Data("x".utf8).write(to: target)
+    let hardLink = base.appending(path: "hard.txt")
+    #expect(link(target.path, hardLink.path) == 0)
+    let symbolic = base.appending(path: "symbolic.txt")
+    try FileManager.default.createSymbolicLink(at: symbolic, withDestinationURL: target)
+    for url in [hardLink, symbolic, locked] {
+      #expect(throws: SecretOutputError.unsafeOutputFile) {
+        try SecretOutputWriter.checkDestinationAccess(url, overwrite: true, as: user)
+      }
+    }
+    #expect(throws: SecretOutputError.destinationNotWritable(code: ENOTDIR)) {
+      try SecretOutputWriter.checkDestinationAccess(
+        target.appending(path: "passphrase.txt"), overwrite: false, as: user)
+    }
+    #expect(throws: SecretOutputError.destinationNotWritable(code: ENOTDIR)) {
+      try SecretOutputWriter.checkDestinationAccess(
+        target.appending(path: "deeper/passphrase.txt"), overwrite: false, as: user)
+    }
+
+    // A symbolic link as the containing folder, whether or not the file exists.
+    let linkedFolder = base.appending(path: "linked")
+    try FileManager.default.createSymbolicLink(at: linkedFolder, withDestinationURL: locked)
+    #expect(throws: SecretOutputError.symbolicLinkParent) {
+      try SecretOutputWriter.checkDestinationAccess(
+        linkedFolder.appending(path: "passphrase.txt"), overwrite: false, as: user)
+    }
+    try Data("x".utf8).write(to: locked.appending(path: "passphrase.txt"))
+    #expect(throws: SecretOutputError.symbolicLinkParent) {
+      try SecretOutputWriter.checkDestinationAccess(
+        linkedFolder.appending(path: "passphrase.txt"), overwrite: true, as: user)
+    }
+    #expect(throws: SecretOutputError.dotComponents) {
+      try SecretOutputWriter.checkDestinationAccess(
+        URL(fileURLWithPath: base.path + "/x/../passphrase.txt"), overwrite: false, as: user)
+    }
+  }
+
+  @Test func destinationCheckRefusesAFileOwnedBySomeoneElse() throws {
+    let base = try makeTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: base) }
+    let output = base.appending(path: "passphrase.txt")
+    try Data("x".utf8).write(to: output)
+    // Same process credentials, but the owner the file must belong to differs.
+    let other = InvokingUser(
+      name: NSUserName(), uid: geteuid() &+ 1, gid: getegid(),
+      homeDirectory: FileManager.default.homeDirectoryForCurrentUser)
+    guard !other.switchesCredentials else { return }
+    #expect(throws: SecretOutputError.notOwnedByUser) {
+      try SecretOutputWriter.checkDestinationAccess(output, overwrite: true, as: other)
+    }
+  }
+
   private func makeTemporaryDirectory() throws -> URL {
     let url = FileManager.default.temporaryDirectory.appending(
       path: "greenbubbles-acquire-writer-tests-\(UUID().uuidString)",

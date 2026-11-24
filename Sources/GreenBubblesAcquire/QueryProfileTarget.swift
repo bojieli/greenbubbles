@@ -11,6 +11,7 @@ public enum QueryProfileError: Error, Equatable, CustomStringConvertible {
   case notLiveProfile(name: String, mode: String)
   case invalidEnvironment(String)
   case unsafeSourceRoot(String)
+  case liveSourceUnavailable(String)
 
   public var description: String {
     switch self {
@@ -32,6 +33,8 @@ public enum QueryProfileError: Error, Equatable, CustomStringConvertible {
         + "with a live profile, or give both --db-root and --output"
     case .unsafeSourceRoot(let reason):
       return "The database root is not usable: \(reason)"
+    case .liveSourceUnavailable(let reason):
+      return "The database root for config.toml's source.passphrase_file is unavailable: \(reason)"
     case .invalidEnvironment(let variable):
       return "\(variable) must be an absolute, non-root path"
     }
@@ -50,17 +53,28 @@ public struct AcquireTarget: Equatable, Sendable {
   public let credentialFile: URL?
   /// How `sourceRoot` was chosen, for the preflight line.
   public let sourceRootOrigin: String?
+  /// Why the root queries would discover for a configured key file could
+  /// not be found (only `source.passphrase_file` set); `sourceRoot` is then
+  /// nil. Capture and verify need an explicit `--db-root` instead.
+  public let sourceRootDiscoveryFailure: QueryProfileError?
+  /// Whether `sourceRoot` was discovered the way queries discover it rather
+  /// than configured.
+  public let sourceRootDiscovered: Bool
 
   public init(
     profileName: String? = nil,
     sourceRoot: URL? = nil,
     credentialFile: URL? = nil,
-    sourceRootOrigin: String? = nil
+    sourceRootOrigin: String? = nil,
+    sourceRootDiscoveryFailure: QueryProfileError? = nil,
+    sourceRootDiscovered: Bool = false
   ) {
     self.profileName = profileName
     self.sourceRoot = sourceRoot
     self.credentialFile = credentialFile
     self.sourceRootOrigin = sourceRootOrigin
+    self.sourceRootDiscoveryFailure = sourceRootDiscoveryFailure
+    self.sourceRootDiscovered = sourceRootDiscovered
   }
 
   public static let none = AcquireTarget()
@@ -73,20 +87,27 @@ public struct AcquireTarget: Equatable, Sendable {
   /// configured but its root is auto-discovered — else nil. The caller then
   /// requires an explicit `--output` (fail closed).
   ///
-  /// Roots are compared after `canonicalize` (realpath, run as the invoking
-  /// user), so symbolic links can't make two spellings name different
-  /// accounts; a root that can't be resolved counts as different.
+  /// Roots are compared by filesystem identity (`st_dev` and `st_ino` from
+  /// `stat`, run as the invoking user), not by spelling: symbolic links
+  /// can't make two spellings name different accounts, and two spellings
+  /// that differ only in Unicode normalization still count as different
+  /// directories on a normalization-sensitive volume unless they are the
+  /// same directory. A root whose identity can't be read counts as
+  /// different.
   public func originConflicting(
     withDatabaseRoot databaseRoot: URL?,
-    canonicalize: (URL) -> URL? = QueryProfileTarget.canonicalPath
+    identify: (URL) -> QueryProfileTarget.FileIdentity? = QueryProfileTarget.fileIdentity
   ) -> String? {
     guard let databaseRoot else { return nil }
-    guard let sourceRoot else {
+    // A discovered root is found under the invoking user's login home, but
+    // a query discovers under its own $HOME, which can differ; keep
+    // requiring --output whenever --db-root is given for a configured key
+    // file without a configured root.
+    guard let sourceRoot, !sourceRootDiscovered else {
       return credentialFile == nil ? nil : "auto-discovered for the configured key file"
     }
-    if let resolvedOverride = canonicalize(databaseRoot),
-      let resolvedSource = canonicalize(sourceRoot),
-      resolvedOverride.path == resolvedSource.path
+    if let override = identify(databaseRoot), let source = identify(sourceRoot),
+      override == source
     {
       return nil
     }
@@ -220,11 +241,181 @@ public enum QueryProfileTarget {
       let (name, profile) = try store.select(profileName)
       return try target(for: profile, named: name)
     }
+    if settings.sourceRoot == nil, let passphraseFile = settings.passphraseFile {
+      // Queries with only a key file configured pick the root with Rust's
+      // discover_default_live_source_root, so capture must key that root.
+      let credentialFile = URL(fileURLWithPath: passphraseFile)
+      // Rust discovers under the query's $HOME. A query reads the default
+      // ~/.greenbubbles/config.toml only with $HOME at this home, so the
+      // same discovery is known to apply; with GREENBUBBLES_CONFIG_FILE the
+      // query's home can't be established, so don't guess an account.
+      guard locations.settingsOverride == nil else {
+        return AcquireTarget(
+          credentialFile: credentialFile,
+          sourceRootDiscoveryFailure: .liveSourceUnavailable(
+            "\(settingsEnvironmentVariable) is set, so the home folder queries search can't be "
+              + "known; set source.root in that file, or pass --db-root together with --output"))
+      }
+      do {
+        return AcquireTarget(
+          sourceRoot: try discoverDefaultLiveSourceRoot(
+            home: locations.home, ownerUID: ownerUID),
+          credentialFile: credentialFile,
+          sourceRootOrigin: "auto-discovered as queries do for config.toml source.passphrase_file",
+          sourceRootDiscovered: true
+        )
+      } catch let error as QueryProfileError {
+        return AcquireTarget(credentialFile: credentialFile, sourceRootDiscoveryFailure: error)
+      }
+    }
     return AcquireTarget(
       sourceRoot: settings.sourceRoot.map { URL(fileURLWithPath: $0) },
       credentialFile: settings.passphraseFile.map { URL(fileURLWithPath: $0) },
       sourceRootOrigin: settings.sourceRoot == nil ? nil : "from config.toml source.root"
     )
+  }
+
+  // MARK: - Live root discovery (Rust's discover_default_live_source_root)
+
+  /// Rust's ambiguity window: a second account written within 14 days of
+  /// the newest one makes the choice ambiguous.
+  static let ambiguousWindowSeconds = 14 * 24 * 60 * 60
+
+  /// The `db_storage` root a query picks when no root is configured, with
+  /// the candidate and recency rules of Rust's
+  /// `discover_default_live_source_root` (`query_profile.rs`):
+  ///
+  /// - candidates are `<account>/db_storage` for every entry of
+  ///   `~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files`
+  ///   and of `xwechat_files` in each `~/Library/Group Containers` entry whose
+  ///   ASCII-lowercased name contains `wechat` or `xinwechat`;
+  /// - a candidate is usable when it is a real directory (not a symbolic
+  ///   link) owned by `ownerUID` and `contact`, `session`, and `message` are
+  ///   directories;
+  /// - its recency is the newest `mtime` (whole seconds) of a regular file
+  ///   directly inside those three folders; one without such a file is
+  ///   skipped;
+  /// - the most recent wins, unless the next one is less than 14 days older.
+  ///
+  /// The path is returned as Rust builds it, without resolving links. Call
+  /// inside `InvokingUser.perform(_:)` with that user's uid.
+  public static func discoverDefaultLiveSourceRoot(home: URL, ownerUID: uid_t) throws -> URL {
+    // Paths are kept as bytes, as Rust's PathBuf does, so a name that isn't
+    // UTF-8 is still looked up exactly as listed.
+    let homePath = Array(home.path.utf8)
+    var candidates = [
+      homePath
+        + Array("/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files".utf8)
+    ]
+    let groups = homePath + Array("/Library/Group Containers".utf8)
+    for name in directoryEntryNames(groups) {
+      let lowered = name.map { (0x41...0x5A).contains($0) ? $0 + 0x20 : $0 }
+      if containsBytes(lowered, Array("wechat".utf8))
+        || containsBytes(lowered, Array("xinwechat".utf8))
+      {
+        candidates.append(groups + [0x2F] + name + Array("/xwechat_files".utf8))
+      }
+    }
+    var found: [(modified: Int, path: [UInt8])] = []
+    for filesRoot in candidates {
+      for account in directoryEntryNames(filesRoot) {
+        let databaseRoot = filesRoot + [0x2F] + account + Array("/db_storage".utf8)
+        guard isUsableLiveDatabaseRoot(databaseRoot, ownerUID: ownerUID),
+          let modified = databaseRootRecency(databaseRoot)
+        else { continue }
+        found.append((modified, databaseRoot))
+      }
+    }
+    // Rust sorts newest first; ties are ambiguous below either way.
+    found.sort { $0.modified > $1.modified }
+    guard let newest = found.first else {
+      throw QueryProfileError.liveSourceUnavailable("no live WeChat database was found")
+    }
+    if found.count > 1, newest.modified - found[1].modified < ambiguousWindowSeconds {
+      throw QueryProfileError.liveSourceUnavailable(
+        "more than one WeChat account was written recently; set source.root in "
+          + "~/.greenbubbles/config.toml to the account you are signed in to, or pass --db-root "
+          + "together with --output")
+    }
+    // The rest of greenbubbles-acquire handles paths as text; refuse rather
+    // than open a different folder than the one discovered.
+    guard let path = strictUTF8(newest.path) else {
+      throw QueryProfileError.liveSourceUnavailable("the discovered database path is not UTF-8")
+    }
+    return URL(fileURLWithPath: path, isDirectory: true)
+  }
+
+  private static func containsBytes(_ haystack: [UInt8], _ needle: [UInt8]) -> Bool {
+    guard haystack.count >= needle.count else { return false }
+    return (0...(haystack.count - needle.count)).contains {
+      haystack[$0..<($0 + needle.count)].elementsEqual(needle)
+    }
+  }
+
+  /// Runs `body` with `path` as a NUL-terminated C string.
+  private static func withRawPath<T>(_ path: [UInt8], _ body: (UnsafePointer<CChar>) -> T) -> T {
+    (path + [0]).withUnsafeBufferPointer { buffer in
+      buffer.baseAddress!.withMemoryRebound(to: CChar.self, capacity: buffer.count) { body($0) }
+    }
+  }
+
+  private static func rawStat(_ path: [UInt8], followingLinks: Bool) -> stat? {
+    var info = stat()
+    let flags = followingLinks ? 0 : AT_SYMLINK_NOFOLLOW
+    let status = withRawPath(path) { fstatat(AT_FDCWD, $0, &info, flags) }
+    return status == 0 ? info : nil
+  }
+
+  /// Entry names as Rust's `fs::read_dir` lists them: every entry except
+  /// `.` and `..`, hidden ones included, as raw bytes; empty when the folder
+  /// can't be read.
+  private static func directoryEntryNames(_ path: [UInt8]) -> [[UInt8]] {
+    guard let directory = withRawPath(path, { opendir($0) }) else { return [] }
+    defer { closedir(directory) }
+    var names: [[UInt8]] = []
+    // Darwin's readdir returns variable-length records, so read only the
+    // name's d_namlen bytes in place, never the whole d_name array.
+    let lengthOffset = MemoryLayout<dirent>.offset(of: \dirent.d_namlen)!
+    let nameOffset = MemoryLayout<dirent>.offset(of: \dirent.d_name)!
+    while let entry = readdir(directory) {
+      let record = UnsafeRawPointer(entry)
+      let length = record.loadUnaligned(
+        fromByteOffset: lengthOffset, as: type(of: dirent().d_namlen))
+      let name = Array(
+        UnsafeRawBufferPointer(start: record + nameOffset, count: Int(length)))
+      if name != [0x2E], name != [0x2E, 0x2E] { names.append(name) }
+    }
+    return names
+  }
+
+  private static func isUsableLiveDatabaseRoot(_ path: [UInt8], ownerUID: uid_t) -> Bool {
+    guard let info = rawStat(path, followingLinks: false), info.st_mode & S_IFMT == S_IFDIR,
+      info.st_uid == ownerUID
+    else { return false }
+    // Rust's Path::is_dir follows symbolic links.
+    return ["contact", "session", "message"].allSatisfy { component in
+      guard let child = rawStat(path + Array("/\(component)".utf8), followingLinks: true)
+      else { return false }
+      return child.st_mode & S_IFMT == S_IFDIR
+    }
+  }
+
+  // Directory timestamps stay behind after an account switch; the files
+  // WeChat writes are the evidence of the account in use. Rust's
+  // DirEntry::metadata does not follow symbolic links.
+  private static func databaseRootRecency(_ path: [UInt8]) -> Int? {
+    var newest: Int?
+    for component in ["contact", "session", "message"] {
+      let directory = path + Array("/\(component)".utf8)
+      for name in directoryEntryNames(directory) {
+        guard let info = rawStat(directory + [0x2F] + name, followingLinks: false),
+          info.st_mode & S_IFMT == S_IFREG
+        else { continue }
+        let modified = Int(info.st_mtimespec.tv_sec)
+        newest = max(newest ?? modified, modified)
+      }
+    }
+    return newest
   }
 
   private static func target(for profile: ProfileStore.Profile, named name: String) throws
@@ -267,6 +458,21 @@ public enum QueryProfileTarget {
     guard let resolved = realpath(url.path, nil) else { return nil }
     defer { free(resolved) }
     return URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
+  }
+
+  /// A directory's identity on disk.
+  public struct FileIdentity: Equatable, Sendable {
+    public let device: dev_t
+    public let inode: ino_t
+  }
+
+  /// The identity (`st_dev`, `st_ino`) of what the path names once the
+  /// kernel resolves it, or nil when `stat` fails. Call inside
+  /// `InvokingUser.perform(_:)` so it resolves with the user's rights.
+  public static func fileIdentity(_ url: URL) -> FileIdentity? {
+    var info = stat()
+    guard fstatat(AT_FDCWD, url.path, &info, 0) == 0 else { return nil }
+    return FileIdentity(device: info.st_dev, inode: info.st_ino)
   }
 
   /// The checks Rust's `LiveQuerySource::open` applies to the root exactly as

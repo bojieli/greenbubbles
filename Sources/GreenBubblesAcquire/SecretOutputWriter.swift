@@ -10,6 +10,8 @@ public enum SecretOutputError: Error, Equatable, CustomStringConvertible {
   case relativePath
   case dotComponents
   case symbolicLinkParent
+  case destinationNotWritable(code: Int32)
+  case outputNotWritable(code: Int32)
   case posix(operation: String, code: Int32)
 
   public var description: String {
@@ -30,6 +32,15 @@ public enum SecretOutputError: Error, Equatable, CustomStringConvertible {
       return
         "The folder that would hold the passphrase output is a symbolic link; "
         + "give its real path instead (for example /private/tmp rather than /tmp)"
+    case .destinationNotWritable(let code):
+      return
+        "You can't create or replace the passphrase output file there (POSIX error \(code)): "
+        + "a folder on its path isn't writable or searchable by you (for example one an "
+        + "earlier capture created as root); fix that folder or choose another --output"
+    case .outputNotWritable(let code):
+      return
+        "You can't write the existing passphrase output file (POSIX error \(code)); "
+        + "make it writable by you or choose another --output"
     case .posix(let operation, let code):
       return "\(operation) failed with POSIX error \(code)"
     }
@@ -65,6 +76,84 @@ public struct SecretOutputWriter: Sendable {
     let components = path.split(separator: "/", omittingEmptySubsequences: true)
     guard !components.isEmpty, !components.contains(where: { $0 == "." || $0 == ".." }) else {
       throw SecretOutputError.dotComponents
+    }
+  }
+
+  /// Checks, as `user` and without changing anything, that `write` could
+  /// put the key at `url`: an existing output must be replaceable (only
+  /// with `overwrite`, a single-link regular file the user owns and can
+  /// write, in a folder that is not a symbolic link), and otherwise the
+  /// nearest existing folder on the path must let the user create entries.
+  /// Run before capture starts, so a destination the final write would
+  /// refuse fails before the owner logs out of WeChat.
+  public static func checkDestinationAccess(
+    _ url: URL,
+    overwrite: Bool,
+    as user: InvokingUser
+  ) throws {
+    try checkDestination(url)
+    try user.perform {
+      try checkDestinationAccessAsUser(url.path, overwrite: overwrite, ownerUID: user.uid)
+    }
+  }
+
+  // Access is checked with faccessat(AT_EACCESS): under sudo the real user
+  // is root, so plain access(2) would approve everything.
+  private static func checkDestinationAccessAsUser(
+    _ path: String,
+    overwrite: Bool,
+    ownerUID: uid_t
+  ) throws {
+    let parentPath = (path as NSString).deletingLastPathComponent
+    var info = stat()
+    if Darwin.lstat(path, &info) == 0 {
+      guard overwrite else { throw SecretOutputError.outputExists }
+      var parent = stat()
+      guard Darwin.lstat(parentPath, &parent) == 0 else {
+        throw SecretOutputError.destinationNotWritable(code: errno)
+      }
+      if parent.st_mode & S_IFMT == S_IFLNK { throw SecretOutputError.symbolicLinkParent }
+      // The writer opens the folder O_RDONLY, then the file inside it.
+      guard Darwin.faccessat(AT_FDCWD, parentPath, R_OK | X_OK, AT_EACCESS) == 0 else {
+        throw SecretOutputError.destinationNotWritable(code: errno)
+      }
+      guard info.st_mode & S_IFMT == S_IFREG, info.st_nlink == 1 else {
+        throw SecretOutputError.unsafeOutputFile
+      }
+      guard info.st_uid == ownerUID else { throw SecretOutputError.notOwnedByUser }
+      guard Darwin.faccessat(AT_FDCWD, path, W_OK, AT_EACCESS) == 0 else {
+        throw SecretOutputError.outputNotWritable(code: errno)
+      }
+      return
+    }
+    guard errno == ENOENT else { throw SecretOutputError.destinationNotWritable(code: errno) }
+    // Walk up to the nearest folder that exists; `write` creates the rest.
+    var existing = parentPath
+    while true {
+      var folder = stat()
+      if Darwin.lstat(existing, &folder) == 0 {
+        if existing == parentPath, folder.st_mode & S_IFMT == S_IFLNK {
+          throw SecretOutputError.symbolicLinkParent
+        }
+        break
+      }
+      guard errno == ENOENT, existing != "/" else {
+        throw SecretOutputError.destinationNotWritable(code: errno)
+      }
+      existing = (existing as NSString).deletingLastPathComponent
+    }
+    var folder = stat()
+    guard Darwin.fstatat(AT_FDCWD, existing, &folder, 0) == 0 else {
+      throw SecretOutputError.destinationNotWritable(code: errno)
+    }
+    guard folder.st_mode & S_IFMT == S_IFDIR else {
+      throw SecretOutputError.destinationNotWritable(code: ENOTDIR)
+    }
+    // New folders need write and search access; an existing containing
+    // folder is also opened O_RDONLY by the writer, so it must be readable.
+    let needed = existing == parentPath ? R_OK | W_OK | X_OK : W_OK | X_OK
+    guard Darwin.faccessat(AT_FDCWD, existing, needed, AT_EACCESS) == 0 else {
+      throw SecretOutputError.destinationNotWritable(code: errno)
     }
   }
 
