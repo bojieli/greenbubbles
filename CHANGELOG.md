@@ -26,7 +26,9 @@ Notable changes to GreenBubbles are documented here. The project follows
   now stops preflight instead of failing at the final write (#50).
 - With only `source.passphrase_file` in `config.toml`, `greenbubbles-acquire`
   keys the database root queries discover: the most recently written account,
-  unless another one was written within 14 days (#50).
+  unless another one was written within 14 days. When `GREENBUBBLES_CONFIG_FILE`
+  points elsewhere, or with `--db-root`, an explicit `--output` is required
+  instead (#50).
 - The `--db-root` conflict check compares directories by device and inode
   instead of by path spelling; a root that can't be looked up counts as a
   different account (#50).

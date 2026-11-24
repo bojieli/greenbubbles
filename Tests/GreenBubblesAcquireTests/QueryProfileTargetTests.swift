@@ -183,6 +183,22 @@ struct QueryProfileTargetTests {
     #expect(target.originConflicting(withDatabaseRoot: nil) == nil)
   }
 
+  @Test func configuredKeyFileFromAnOverriddenSettingsFileIsNotGuessed() throws {
+    let home = try TemporaryHome()
+    _ = try home.makeAccount("live", ageDays: 0)
+    let settings = home.directory.appending(path: ".greenbubbles/elsewhere.toml")
+    try Data("[source]\npassphrase_file = \"/example/keys/k\"\n".utf8).write(to: settings)
+    chmod(settings.path, 0o600)
+    let locations = try QueryProfileTarget.locations(
+      environment: [QueryProfileTarget.settingsEnvironmentVariable: settings.path],
+      home: home.directory)
+    let target = try QueryProfileTarget.resolve(
+      requestedProfile: nil, locations: locations, ownerUID: getuid())
+    #expect(target.sourceRoot == nil)
+    #expect(target.sourceRootDiscoveryFailure != nil)
+    #expect(target.credentialFile?.path == "/example/keys/k")
+  }
+
   @Test func discoveryRefusesTwoAccountsWrittenWithinFourteenDays() throws {
     let home = try TemporaryHome()
     _ = try home.makeAccount("a", ageDays: 0)

@@ -245,6 +245,17 @@ public enum QueryProfileTarget {
       // Queries with only a key file configured pick the root with Rust's
       // discover_default_live_source_root, so capture must key that root.
       let credentialFile = URL(fileURLWithPath: passphraseFile)
+      // Rust discovers under the query's $HOME. A query reads the default
+      // ~/.greenbubbles/config.toml only with $HOME at this home, so the
+      // same discovery is known to apply; with GREENBUBBLES_CONFIG_FILE the
+      // query's home can't be established, so don't guess an account.
+      guard locations.settingsOverride == nil else {
+        return AcquireTarget(
+          credentialFile: credentialFile,
+          sourceRootDiscoveryFailure: .liveSourceUnavailable(
+            "\(settingsEnvironmentVariable) is set, so the home folder queries search can't be "
+              + "known; set source.root in that file, or pass --db-root together with --output"))
+      }
       do {
         return AcquireTarget(
           sourceRoot: try discoverDefaultLiveSourceRoot(
