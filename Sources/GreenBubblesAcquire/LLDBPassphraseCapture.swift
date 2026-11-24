@@ -11,7 +11,9 @@ public enum CaptureError: Error, Equatable, CustomStringConvertible {
   case targetExited
   case timedOut
   case noAcceptableCandidate
-  case exitedWithoutCapture
+  /// lldb exited on its own before the deadline. A count above zero means
+  /// earlier candidates were rejected; the exit is still the cause.
+  case exitedWithoutCapture(rejectedCandidateCount: Int = 0)
 
   public var description: String {
     switch self {
@@ -31,8 +33,16 @@ public enum CaptureError: Error, Equatable, CustomStringConvertible {
     case .noAcceptableCandidate:
       return
         "every captured candidate was rejected before the timeout. No output was created or replaced."
-    case .exitedWithoutCapture:
-      return "lldb exited before a passphrase was captured"
+    case .exitedWithoutCapture(let rejectedCandidateCount):
+      guard rejectedCandidateCount > 0 else {
+        return "lldb exited before a passphrase was captured"
+      }
+      let candidates =
+        rejectedCandidateCount == 1
+        ? "1 captured candidate" : "\(rejectedCandidateCount) captured candidates"
+      return
+        "lldb exited before a passphrase was captured (earlier, \(candidates) "
+        + "did not open your databases). No output was created or replaced."
     }
   }
 
@@ -180,7 +190,8 @@ public struct LLDBPassphraseCapture: Sendable {
     rejectedCandidateCount > 0 ? .noAcceptableCandidate : .timedOut
   }
 
-  private func runSingleCapture(
+  // Internal (not private) so tests can drive it with a stand-in lldb.
+  func runSingleCapture(
     processID: pid_t,
     architecture: LLDBTargetArchitecture,
     deadline: Date,
@@ -289,8 +300,9 @@ public struct LLDBPassphraseCapture: Sendable {
         throw CaptureError.targetExited
       }
       if !running {
-        if rejectedCandidateCount > 0 { throw CaptureError.noAcceptableCandidate }
-        throw CaptureError.exitedWithoutCapture
+        // An unexpected exit before the deadline is the cause even after a
+        // rejection; the rejections are context, not the reason it stopped.
+        throw CaptureError.exitedWithoutCapture(rejectedCandidateCount: rejectedCandidateCount)
       }
       guard Date() < deadline else { throw deadlineError(rejectedCandidateCount) }
       Thread.sleep(forTimeInterval: 0.05)

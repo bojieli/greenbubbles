@@ -4,6 +4,17 @@ Notable changes to GreenBubbles are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- `greenbubbles-acquire capture` no longer reports "no match" when the timeout
+  cut verification of a captured value short; it says how many database salts
+  were checked and that the value was neither confirmed nor ruled out. If lldb
+  exits unexpectedly after a captured value was rejected, the exit is reported
+  as the cause, with the rejection as context. As before, no output is created
+  or replaced in either case.
+
 ## 0.11.0 - 2026-11-23
 
 Passphrase capture against a live WeChat session was not re-tested for this

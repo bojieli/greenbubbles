@@ -145,7 +145,9 @@ struct CaptureCandidateCursorTests {
     }.joined()
   }
 
-  @Test func noAcceptableCandidateWritesNothing() {
+  // The filesystem side of this guarantee is tested in
+  // VerifiedPassphraseCaptureTests.
+  @Test func noAcceptableCandidateSaysNothingWasWritten() {
     #expect(
       CaptureError.noAcceptableCandidate.description.contains(
         "No output was created or replaced.")
