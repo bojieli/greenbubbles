@@ -163,7 +163,7 @@ struct AttachIdentityTests {
           return true
         }
         Issue.record("capture succeeded with observed identity \(String(describing: observed))")
-      } catch let CaptureError.attachedProcessMismatch(processID, detail) {
+      } catch CaptureError.attachedProcessMismatch(let processID, let detail) {
         #expect(processID == 4242)
         #expect(
           detail == AttachIdentity.mismatch(expected: Self.selected, observed: observed))
