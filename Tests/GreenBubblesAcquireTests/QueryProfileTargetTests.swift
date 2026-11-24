@@ -177,10 +177,10 @@ struct QueryProfileTargetTests {
     #expect(target.sourceRootDiscovered)
     #expect(target.sourceRootDiscoveryFailure == nil)
     #expect(target.credentialFile?.path == "/example/keys/settings-key")
-    // --db-root naming the same account needs no --output; another does.
-    #expect(target.originConflicting(withDatabaseRoot: live) == nil)
-    let stale = home.filesRoot.appending(path: "stale/db_storage")
-    #expect(target.originConflicting(withDatabaseRoot: stale) != nil)
+    // A query may discover under a different $HOME, so any --db-root still
+    // needs an explicit --output.
+    #expect(target.originConflicting(withDatabaseRoot: live) != nil)
+    #expect(target.originConflicting(withDatabaseRoot: nil) == nil)
   }
 
   @Test func discoveryRefusesTwoAccountsWrittenWithinFourteenDays() throws {

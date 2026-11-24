@@ -11,6 +11,7 @@ public enum SecretOutputError: Error, Equatable, CustomStringConvertible {
   case dotComponents
   case symbolicLinkParent
   case destinationNotWritable(code: Int32)
+  case outputNotWritable(code: Int32)
   case posix(operation: String, code: Int32)
 
   public var description: String {
@@ -36,6 +37,10 @@ public enum SecretOutputError: Error, Equatable, CustomStringConvertible {
         "You can't create or replace the passphrase output file there (POSIX error \(code)): "
         + "a folder on its path isn't writable or searchable by you (for example one an "
         + "earlier capture created as root); fix that folder or choose another --output"
+    case .outputNotWritable(let code):
+      return
+        "You can't write the existing passphrase output file (POSIX error \(code)); "
+        + "make it writable by you or choose another --output"
     case .posix(let operation, let code):
       return "\(operation) failed with POSIX error \(code)"
     }
@@ -117,7 +122,7 @@ public struct SecretOutputWriter: Sendable {
       }
       guard info.st_uid == ownerUID else { throw SecretOutputError.notOwnedByUser }
       guard Darwin.faccessat(AT_FDCWD, path, W_OK, AT_EACCESS) == 0 else {
-        throw SecretOutputError.destinationNotWritable(code: errno)
+        throw SecretOutputError.outputNotWritable(code: errno)
       }
       return
     }

@@ -99,7 +99,11 @@ public struct AcquireTarget: Equatable, Sendable {
     identify: (URL) -> QueryProfileTarget.FileIdentity? = QueryProfileTarget.fileIdentity
   ) -> String? {
     guard let databaseRoot else { return nil }
-    guard let sourceRoot else {
+    // A discovered root is found under the invoking user's login home, but
+    // a query discovers under its own $HOME, which can differ; keep
+    // requiring --output whenever --db-root is given for a configured key
+    // file without a configured root.
+    guard let sourceRoot, !sourceRootDiscovered else {
       return credentialFile == nil ? nil : "auto-discovered for the configured key file"
     }
     if let override = identify(databaseRoot), let source = identify(sourceRoot),

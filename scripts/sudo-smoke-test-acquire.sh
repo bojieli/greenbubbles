@@ -343,13 +343,15 @@ if [[ "$use_sudo" -eq 1 ]]; then
   else
     fail "sudo (e): preflight refuses a root-owned 0700 key folder" "$(cat "$work/e.out" "$work/e.err" | tr '\n' ' ')"
   fi
-  if as_root "$binary" capture --profile rootfolder --timeout-seconds 1 >"$work/e2.out" 2>&1; then
+  if as_root "$binary" capture --json --profile rootfolder --timeout-seconds 1 \
+    >"$work/e2.json" 2>"$work/e2.err"; then
     fail "sudo (e): capture refuses it before the login step" "capture succeeded"
-  elif grep -q "POSIX error 13" "$work/e2.out" && ! grep -q "log out" "$work/e2.out" \
+  elif blockers_mention "$work/e2.json" "POSIX error 13" >"$work/e2.out" 2>&1 \
+    && ! grep -q "log out" "$work/e2.err" \
     && [[ -z "$(sudo ls -A "$work/keys/root-0700")" ]]; then
     pass "sudo (e): capture refuses it before the login step"
   else
-    fail "sudo (e): capture refuses it before the login step" "$(tr '\n' ' ' <"$work/e2.out")"
+    fail "sudo (e): capture refuses it before the login step" "$(cat "$work/e2.out" "$work/e2.err" | tr '\n' ' ')"
   fi
   as_root "$binary" preflight --json --profile rootdir >"$work/e3.json" 2>/dev/null || true
   if blockers_mention "$work/e3.json" "POSIX error 13" >"$work/e3.out" 2>&1 \

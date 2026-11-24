@@ -742,13 +742,21 @@ do {
     let target = try resolveTarget(arguments, needsOutput: true)
     let dbRoot = arguments.dbRoot ?? target.sourceRoot
     let output = captureOutput(arguments, target)
-    try checkCaptureOutput(output, overwrite: arguments.overwrite)
+    // A destination problem blocks like any other preflight check, before
+    // the owner is asked to log out.
+    var destinationError: String?
+    do {
+      try checkCaptureOutput(output, overwrite: arguments.overwrite)
+    } catch {
+      destinationError = String(describing: error)
+    }
     let preflight = runPreflight(
       dbRootOption: dbRoot,
       rootAutoDiscovered: rootAutoDiscovered(arguments, target),
       rootOrigin: rootOrigin(arguments, target),
       processIDOption: arguments.processID,
-      includePaths: arguments.includePaths
+      includePaths: arguments.includePaths,
+      destinationError: destinationError
     )
     guard preflight.report.ready, let processTarget = preflight.target,
       let root = preflight.databaseRoot

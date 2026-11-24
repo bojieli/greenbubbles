@@ -282,7 +282,7 @@ struct SecretOutputWriterTests {
     let readOnly = base.appending(path: "read-only.txt")
     try Data("x".utf8).write(to: readOnly)
     chmod(readOnly.path, 0o400)
-    #expect(throws: SecretOutputError.destinationNotWritable(code: EACCES)) {
+    #expect(throws: SecretOutputError.outputNotWritable(code: EACCES)) {
       try SecretOutputWriter.checkDestinationAccess(readOnly, overwrite: true, as: user)
     }
 
