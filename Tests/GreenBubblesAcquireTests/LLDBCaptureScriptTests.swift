@@ -9,6 +9,7 @@ struct LLDBCaptureScriptTests {
     "settings set target.preload-symbols false",
     "settings set target.skip-prologue false",
     "process attach -p 4242",
+    "process status\n",
     "breakpoint set -n CCKeyDerivationPBKDF",
     "breakpoint command add 1",
     "memory read --size 1 --count 32 --format x",
@@ -17,8 +18,29 @@ struct LLDBCaptureScriptTests {
     "process continue\n",
   ]
 
+  /// What lldb receives when the attached process passes the identity check.
+  private func verifiedSessionScript(_ architecture: LLDBTargetArchitecture) -> String {
+    LLDBCaptureScript.attach(processID: 4242)
+      + LLDBCaptureScript.capture(architecture: architecture)
+  }
+
+  @Test func attachPhaseNeitherReadsMemoryNorSetsABreakpoint() {
+    let attach = LLDBCaptureScript.attach(processID: 4242)
+    #expect(attach.contains("process attach -p 4242\n"))
+    #expect(attach.hasSuffix("process status\n"))
+    for command in ["breakpoint", "memory", "continue", "register", "expression"] {
+      #expect(!attach.contains(command))
+    }
+    // The capture phase never attaches anew.
+    #expect(!LLDBCaptureScript.capture(architecture: .arm64).contains("attach"))
+  }
+
+  @Test func detachReleasesTheProcessAndQuits() {
+    #expect(LLDBCaptureScript.detach == "process detach\nquit\n")
+  }
+
   @Test func arm64ScriptStopsOnlyOnTheSQLCipherDerivation() {
-    let script = LLDBCaptureScript.script(processID: 4242, architecture: .arm64)
+    let script = verifiedSessionScript(.arm64)
     let condition = "$w0 == 2 && $x2 == 32 && $x4 == 16 && $w5 == 5 && $w6 == 256000"
     #expect(
       script.contains("breakpoint set -n CCKeyDerivationPBKDF -c '\(condition)'")
@@ -32,7 +54,7 @@ struct LLDBCaptureScriptTests {
   }
 
   @Test func x86_64ScriptReadsRoundsFromTheEntryStackSlot() {
-    let script = LLDBCaptureScript.script(processID: 4242, architecture: .x86_64)
+    let script = verifiedSessionScript(.x86_64)
     let condition =
       "$edi == 2 && $rdx == 32 && $r8 == 16 && $r9d == 5 && *(unsigned int *)($rsp + 8) == 256000"
     #expect(

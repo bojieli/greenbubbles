@@ -132,6 +132,23 @@ public struct WeChatProcessLocator: Sendable {
     }
   }
 
+  /// The PID's real user ID and start time as the kernel reports them now
+  /// (`proc_pidinfo`), or nil when they can't be read (for example because
+  /// no such process exists).
+  public static func attachIdentity(ofProcessID processID: pid_t) -> AttachIdentity? {
+    guard processID > 0 else { return nil }
+    var info = proc_bsdinfo()
+    let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+    guard proc_pidinfo(processID, PROC_PIDTBSDINFO, 0, &info, size) == size,
+      info.pbi_pid == UInt32(processID)
+    else { return nil }
+    return AttachIdentity(
+      processID: processID,
+      userID: info.pbi_ruid,
+      startMicroseconds: info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec
+    )
+  }
+
   /// Describes a live process: its real UID and start time (`proc_pidinfo`),
   /// executable (`proc_pidpath`), enclosing app bundle and, only when the
   /// process belongs to `expectedUserID`, that bundle's identifier. The

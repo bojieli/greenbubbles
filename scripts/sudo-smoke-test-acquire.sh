@@ -10,8 +10,11 @@
 # asks for your password once). Everything uses synthetic data in a fresh
 # private folder under /private/tmp: a made-up query-profiles.json and a
 # synthetic SQLCipher db_storage tree whose key is the public test pattern
-# below. It never reads ~/.greenbubbles, WeChat data, or the keychain, never
-# attaches a debugger, and removes everything it created.
+# below. It never reads ~/.greenbubbles, WeChat data, or the keychain, and
+# removes everything it created. The only debugger attach is step (e): lldb,
+# as root, attaches to a small sleeping program this script compiles and
+# starts as you (never to WeChat), to check the attached-process identity
+# check against the real lldb.
 #
 # Pass --no-sudo to run only the unprivileged checks.
 
@@ -125,6 +128,62 @@ swiftc -parse-as-library -o "$work/harness" "$work/harness.swift" \
   "$sources/PrivateConfigurationFile.swift" "$sources/JSONDuplicateKeyCheck.swift"
 harness="$work/harness"
 
+# (e) Attach harness: the real capture's attach phase against --pid, expecting
+# its real start time (--start-offset 0) or a different one (as if the PID had
+# been reused). Prints one RESULT line.
+cat >"$work/attach_harness.swift" <<'SWIFT'
+import Darwin
+import Foundation
+
+@main
+struct AttachHarness {
+  static func main() {
+    var arguments = Array(CommandLine.arguments.dropFirst())
+    var processID: pid_t = 0
+    var offset: UInt64 = 0
+    while !arguments.isEmpty {
+      let option = arguments.removeFirst()
+      switch option {
+      case "--pid": processID = pid_t(arguments.removeFirst()) ?? 0
+      case "--start-offset": offset = UInt64(arguments.removeFirst()) ?? 0
+      default: exit(2)
+      }
+    }
+    guard let actual = WeChatProcessLocator.attachIdentity(ofProcessID: processID) else {
+      print("RESULT unreadable")
+      exit(1)
+    }
+    let expected = AttachIdentity(
+      processID: processID, userID: actual.userID,
+      startMicroseconds: actual.startMicroseconds + offset)
+    var capture = LLDBPassphraseCapture()
+    capture.outputHandler = { FileHandle.standardError.write(Data("note: \($0)\n".utf8)) }
+    var rejected = 0
+    var exitObservedAt: UInt64?
+    do {
+      _ = try capture.runSingleCapture(
+        identity: expected, architecture: .current,
+        deadline: Date().addingTimeInterval(10), accept: { _ in false },
+        rejectedCandidateCount: &rejected, exitObservedAt: &exitObservedAt)
+      print("RESULT captured")
+    } catch CaptureError.attachedProcessMismatch {
+      print("RESULT mismatch")
+    } catch CaptureError.timedOut {
+      print("RESULT timedOut")
+    } catch {
+      print("RESULT other \(error)")
+    }
+  }
+}
+SWIFT
+swiftc -parse-as-library -o "$work/attach_harness" "$work/attach_harness.swift" \
+  "$sources/LLDBPassphraseCapture.swift" "$sources/LLDBCaptureScript.swift" \
+  "$sources/LLDBOutputParser.swift" "$sources/PassphraseSecret.swift" \
+  "$sources/WeChatProcessSelection.swift" "$sources/WeChatProcessLocator.swift" \
+  "$sources/InvokingUser.swift" "$sources/SQLCipherKeyVerifier.swift"
+printf '#include <unistd.h>\nint main(void) { sleep(120); return 0; }\n' >"$work/sleeper.c"
+cc -o "$work/sleeper" "$work/sleeper.c"
+
 # --- Synthetic data (as you) -------------------------------------------------
 
 mkdir -m 700 "$work/cfg" "$work/account" "$work/keys"
@@ -225,7 +284,9 @@ if [[ "$use_sudo" -eq 0 ]]; then
   for check in "sudo: --preserve-env passes the profile location" \
     "sudo (a): preflight reads the profile as you" "sudo (a): verify reads databases as you" \
     "sudo (b): key written from the profile is yours" "sudo (c): root-owned folder refused" \
-    "sudo (d): root-owned file not overwritten"; do
+    "sudo (d): root-owned file not overwritten" \
+    "sudo (e): matching attach identity is verified, then lldb detaches" \
+    "sudo (e): reused-PID identity detaches without a breakpoint"; do
     skip "$check"
   done
 else
@@ -289,6 +350,40 @@ else
       fail "sudo (d): root-owned $mode file not overwritten" "now $(owner_and_mode "$target"): $(cat "$target")"
     fi
   done
+
+  # (e) lldb attaches as root to a program of yours. With the real start time
+  # the capture verifies it and arms the breakpoint (which never hits, so it
+  # times out); with a wrong one it detaches before any breakpoint. Either way
+  # the program must be left running, not stopped.
+  "$work/sleeper" &
+  sleeper_pid=$!
+  sleeper_running() {
+    local state
+    state="$(ps -o state= -p "$sleeper_pid" 2>/dev/null || true)"
+    [[ -n "$state" && "$state" != T* ]]
+  }
+  sudo "$work/attach_harness" --pid "$sleeper_pid" --start-offset 0 >"$work/e1.out" 2>&1 || true
+  sleep 1
+  if grep -q '^RESULT timedOut' "$work/e1.out" \
+    && grep -q "attached to the selected WeChat process $sleeper_pid" "$work/e1.out" \
+    && sleeper_running; then
+    pass "sudo (e): matching attach identity is verified, then lldb detaches"
+  else
+    fail "sudo (e): matching attach identity" \
+      "$(tr '\n' ' ' <"$work/e1.out"); state=$(ps -o state= -p "$sleeper_pid" 2>&1)"
+  fi
+  sudo "$work/attach_harness" --pid "$sleeper_pid" --start-offset 1 >"$work/e2.out" 2>&1 || true
+  sleep 1
+  if grep -q '^RESULT mismatch' "$work/e2.out" \
+    && ! grep -q "attached to the selected" "$work/e2.out" \
+    && sleeper_running; then
+    pass "sudo (e): reused-PID identity detaches without a breakpoint"
+  else
+    fail "sudo (e): reused-PID identity" \
+      "$(tr '\n' ' ' <"$work/e2.out"); state=$(ps -o state= -p "$sleeper_pid" 2>&1)"
+  fi
+  kill "$sleeper_pid" 2>/dev/null || true
+  wait "$sleeper_pid" 2>/dev/null || true
 fi
 
 echo ""
