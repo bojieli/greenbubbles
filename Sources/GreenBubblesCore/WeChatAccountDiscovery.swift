@@ -197,7 +197,7 @@ public struct WeChatAccountDiscovery: Sendable {
         )
       }
 
-    candidates += groupContainerRoots().map {
+    candidates += groupContainerRoots(knownTargets: Set(candidates.compactMap { $0.1 })).map {
       (RootSource(url: $0.url, owner: nil, accounts: $0.accounts), $0.identity)
     }
 
@@ -234,7 +234,12 @@ public struct WeChatAccountDiscovery: Sendable {
   /// Unlike app containers, a group or its `xwechat_files` may be a symbolic
   /// link, as earlier versions allowed: a group linked to an app container's
   /// data is reported as an alias of that account, so saved IDs keep working.
-  private func groupContainerRoots() -> [(
+  /// A root that is the same directory as one in `knownTargets` or an earlier
+  /// group is returned without its accounts, which are never used for an
+  /// alias, so they aren't checked again.
+  private func groupContainerRoots(
+    knownTargets: Set<WeChatAppContainerScanner.FileIdentity>
+  ) -> [(
     url: URL, identity: WeChatAppContainerScanner.FileIdentity,
     accounts: [WeChatAppContainerScanner.Account]
   )] {
@@ -243,6 +248,7 @@ public struct WeChatAccountDiscovery: Sendable {
     let groups = open(groupsURL.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
     guard groups >= 0 else { return [] }
     defer { close(groups) }
+    var seenTargets = knownTargets
     return WeChatAppContainerScanner.entryNames(ofDirectory: groups).sorted().compactMap { name in
       guard name.lowercased().contains("wechat") else { return nil }
       let group = openat(groups, name, O_SEARCH | O_DIRECTORY | O_CLOEXEC)
@@ -255,10 +261,12 @@ public struct WeChatAccountDiscovery: Sendable {
       guard fstat(files, &metadata) == 0, metadata.st_mode & S_IFMT == S_IFDIR else { return nil }
       let url = groupsURL.appending(path: name, directoryHint: .isDirectory)
         .appending(path: "xwechat_files", directoryHint: .isDirectory).standardizedFileURL
+      let identity = WeChatAppContainerScanner.FileIdentity(
+        device: metadata.st_dev, inode: metadata.st_ino)
+      let isNewTarget = seenTargets.insert(identity).inserted
       return (
-        url,
-        WeChatAppContainerScanner.FileIdentity(device: metadata.st_dev, inode: metadata.st_ino),
-        WeChatAppContainerScanner.accounts(inFiles: files, at: url)
+        url, identity,
+        isNewTarget ? WeChatAppContainerScanner.accounts(inFiles: files, at: url) : []
       )
     }
   }

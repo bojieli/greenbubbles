@@ -55,7 +55,9 @@ struct WeChatAppContainerScanner: Sendable {
   /// on-disk spelling; the standard name is probed directly only when the
   /// listing has no entry that matches it case-insensitively (for example
   /// when listing fails, including when `~/Library/Containers` is
-  /// search-only and is opened with `O_SEARCH` instead). Candidates that are the same `xwechat_files`
+  /// search-only and is opened with `O_SEARCH` instead). The standard name is
+  /// probed even when its entry is hidden, as releases before 0.11.0 always
+  /// checked that fixed path; hidden entries only drop out of the listing. Candidates that are the same `xwechat_files`
   /// directory (device and inode) are reported once, which also covers
   /// case-insensitive volumes.
   ///
