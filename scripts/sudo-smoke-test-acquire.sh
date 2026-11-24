@@ -47,10 +47,18 @@ chmod 700 "$work"
 root_probe="/private/var/root/greenbubbles-acquire-smoke-$(basename "$work")"
 
 sleeper_pid=""
-cleanup() {
-  if [[ -n "$sleeper_pid" ]]; then
+sleeper_identity=""
+# SIGKILL (which also ends a stopped process) the step (e) sleeper, but only
+# while its PID still has the identity recorded at launch.
+kill_sleeper() {
+  if [[ -n "$sleeper_pid" && -n "$sleeper_identity" ]] \
+    && [[ "$("$work/attach_harness" --identity --pid "$sleeper_pid" 2>/dev/null)" == "$sleeper_identity" ]]; then
     kill -KILL "$sleeper_pid" 2>/dev/null || true
   fi
+  sleeper_pid=""
+}
+cleanup() {
+  kill_sleeper
   if [[ "$use_sudo" -eq 1 ]] && sudo -n test -e "$root_probe" 2>/dev/null; then
     sudo -n rm -rf "$root_probe" || true
   fi
@@ -132,9 +140,9 @@ swiftc -parse-as-library -o "$work/harness" "$work/harness.swift" \
   "$sources/PrivateConfigurationFile.swift" "$sources/JSONDuplicateKeyCheck.swift"
 harness="$work/harness"
 
-# (e) Attach harness: the real capture's attach phase against --pid, expecting
-# its real start time (--start-offset 0) or a different one (as if the PID had
-# been reused). Prints one RESULT line.
+# (e) Attach harness. `--identity --pid <n>` prints the PID's "uid start".
+# `--pid <n> --expect-uid <u> --expect-start <s>` runs the real capture's
+# attach phase expecting that identity and prints one RESULT line.
 cat >"$work/attach_harness.swift" <<'SWIFT'
 import Darwin
 import Foundation
@@ -144,22 +152,28 @@ struct AttachHarness {
   static func main() {
     var arguments = Array(CommandLine.arguments.dropFirst())
     var processID: pid_t = 0
-    var offset: UInt64 = 0
+    var userID: uid_t?
+    var start: UInt64?
+    var printIdentity = false
     while !arguments.isEmpty {
       let option = arguments.removeFirst()
       switch option {
+      case "--identity": printIdentity = true
       case "--pid": processID = pid_t(arguments.removeFirst()) ?? 0
-      case "--start-offset": offset = UInt64(arguments.removeFirst()) ?? 0
+      case "--expect-uid": userID = uid_t(arguments.removeFirst())
+      case "--expect-start": start = UInt64(arguments.removeFirst())
       default: exit(2)
       }
     }
-    guard let actual = WeChatProcessLocator.attachIdentity(ofProcessID: processID) else {
-      print("RESULT unreadable")
-      exit(1)
+    if printIdentity {
+      guard let actual = WeChatProcessLocator.attachIdentity(ofProcessID: processID) else {
+        exit(1)
+      }
+      print("\(actual.userID) \(actual.startMicroseconds)")
+      return
     }
-    let expected = AttachIdentity(
-      processID: processID, userID: actual.userID,
-      startMicroseconds: actual.startMicroseconds + offset)
+    guard processID > 0, let userID, let start else { exit(2) }
+    let expected = AttachIdentity(processID: processID, userID: userID, startMicroseconds: start)
     var capture = LLDBPassphraseCapture()
     capture.outputHandler = { FileHandle.standardError.write(Data("note: \($0)\n".utf8)) }
     var rejected = 0
@@ -359,18 +373,20 @@ else
   # the capture verifies it and arms the breakpoint (which never hits, so it
   # times out); with a wrong one it detaches before any breakpoint. Either way
   # the program must be left running, not stopped.
-  # The sleeper is this script's child and is not reaped until the `wait`
-  # below, so even if it exits early its PID can't be reused by another
-  # process; the harness can only ever reach this sleeper, and the attach
-  # to an exited one fails the check.
+  # The expected identity is recorded once, right after launch, and passed
+  # to every attempt; should the PID ever be recycled, the capture's own
+  # check sees a mismatch and step (e) fails instead of attaching onward.
   "$work/sleeper" &
   sleeper_pid=$!
+  sleeper_identity="$("$work/attach_harness" --identity --pid "$sleeper_pid" || true)"
+  read -r sleeper_uid sleeper_start <<<"$sleeper_identity" || true
   sleeper_running() {
     local state
     state="$(ps -o state= -p "$sleeper_pid" 2>/dev/null || true)"
     [[ -n "$state" && "$state" != T* ]]
   }
-  sudo "$work/attach_harness" --pid "$sleeper_pid" --start-offset 0 >"$work/e1.out" 2>&1 || true
+  sudo "$work/attach_harness" --pid "$sleeper_pid" --expect-uid "${sleeper_uid:-x}" \
+    --expect-start "${sleeper_start:-x}" >"$work/e1.out" 2>&1 || true
   sleep 1
   if grep -q '^RESULT timedOut' "$work/e1.out" \
     && grep -q "attached to the selected WeChat process $sleeper_pid" "$work/e1.out" \
@@ -380,7 +396,9 @@ else
     fail "sudo (e): matching attach identity" \
       "$(tr '\n' ' ' <"$work/e1.out"); state=$(ps -o state= -p "$sleeper_pid" 2>&1)"
   fi
-  sudo "$work/attach_harness" --pid "$sleeper_pid" --start-offset 1 >"$work/e2.out" 2>&1 || true
+  # One microsecond off: as if the PID now belonged to a later process.
+  sudo "$work/attach_harness" --pid "$sleeper_pid" --expect-uid "${sleeper_uid:-x}" \
+    --expect-start "$((${sleeper_start:-0} + 1))" >"$work/e2.out" 2>&1 || true
   sleep 1
   if grep -q '^RESULT mismatch' "$work/e2.out" \
     && ! grep -q "attached to the selected" "$work/e2.out" \
@@ -390,10 +408,7 @@ else
     fail "sudo (e): reused-PID identity" \
       "$(tr '\n' ' ' <"$work/e2.out"); state=$(ps -o state= -p "$sleeper_pid" 2>&1)"
   fi
-  # SIGKILL also ends it if a regression left it stopped.
-  kill -KILL "$sleeper_pid" 2>/dev/null || true
-  wait "$sleeper_pid" 2>/dev/null || true
-  sleeper_pid=""
+  kill_sleeper
 fi
 
 echo ""
