@@ -149,6 +149,15 @@ public struct WeChatProcessLocator: Sendable {
     )
   }
 
+  /// The PID's executable path (`proc_pidpath`); reads no file.
+  static func executablePath(ofProcessID processID: pid_t) -> String? {
+    var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+    let length = proc_pidpath(processID, &buffer, UInt32(buffer.count))
+    return length > 0
+      ? String(decoding: buffer.prefix(Int(length)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+      : nil
+  }
+
   /// Describes a live process: its real UID and start time (`proc_pidinfo`),
   /// executable (`proc_pidpath`), enclosing app bundle and, only when the
   /// process belongs to `expectedUserID`, that bundle's identifier. The
@@ -167,12 +176,7 @@ public struct WeChatProcessLocator: Sendable {
     let startMicroseconds: UInt64? =
       haveInfo ? info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec : nil
 
-    var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
-    let length = proc_pidpath(processID, &buffer, UInt32(buffer.count))
-    let executablePath: String? =
-      length > 0
-      ? String(decoding: buffer.prefix(Int(length)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
-      : nil
+    let executablePath = Self.executablePath(ofProcessID: processID)
     guard userID != nil || executablePath != nil else { return nil }
 
     let applicationPath = executablePath.flatMap(

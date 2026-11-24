@@ -401,13 +401,20 @@ public enum WeChatProcessSelector {
   /// selected one. When WeChat restarts before the capture reads lldb's exit
   /// report, the real replacement lands here and would never be attached.
   /// The capture still fails closed, but reports this instead of waiting for
-  /// its timeout. Empty while the exit has not been recorded; processes
+  /// its timeout. Empty while the exit has not been recorded or when the
+  /// listing is inconclusive (a process of this user could not be
+  /// classified, which is then why no replacement was chosen); processes
   /// recorded at selection are never listed.
   public static func replacementsStartedBeforeExitRecorded(
     candidates: [WeChatProcessCandidate],
     following selected: WeChatProcessTarget
   ) -> [pid_t] {
     guard let exitObserved = selected.exitObservedMicroseconds else { return [] }
+    let unclassified = candidates.contains {
+      ($0.userID == nil || $0.userID == selected.userID)
+        && (!isClassified($0, userID: selected.userID) || $0.startMicroseconds == nil)
+    }
+    if unclassified { return [] }
     return candidates.compactMap { target(for: $0, userID: selected.userID) }
       .filter { match in
         match.runsSameApp(as: selected) && !match.isSameProcess(as: selected)

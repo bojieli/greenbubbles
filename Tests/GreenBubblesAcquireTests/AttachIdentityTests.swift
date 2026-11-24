@@ -256,6 +256,19 @@ struct AttachIdentityTests {
       ).isEmpty)
   }
 
+  @Test func inconclusiveListingIsNotReportedAsTimingAmbiguity() {
+    let unreadable = WeChatProcessCandidate(
+      processID: 99, userID: nil, executablePath: nil, applicationPath: nil,
+      bundleIdentifier: nil)
+    #expect(
+      WeChatProcessSelector.replacementsStartedBeforeExitRecorded(
+        candidates: [
+          Self.candidate(90, start: 4_800), Self.candidate(70, start: 6_000), unreadable,
+        ],
+        following: Self.followed(exitRecordedAt: 5_000)
+      ).isEmpty)
+  }
+
   @Test func nothingIsAmbiguousBeforeAnExitIsRecorded() {
     #expect(
       WeChatProcessSelector.replacementsStartedBeforeExitRecorded(

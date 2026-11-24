@@ -145,11 +145,17 @@ public struct LLDBPassphraseCapture: Sendable {
     guard var current = followed else {
       // No selected app: the single running WeChat of this user, identified
       // now so the attach can be checked against it.
+      // Only kernel metadata is read here, never the app's files.
       let locator = processLocator ?? WeChatProcessLocator()
-      guard let processID = try locator.uniqueProcessID() else { return nil }
+      guard let processID = try locator.uniqueProcessID(),
+        let before = processIdentityReader(processID)
+      else { return nil }
+      let executablePath = WeChatProcessLocator.executablePath(ofProcessID: processID)
       return Self.unselectedAttachIdentity(
-        candidate: WeChatProcessLocator.candidate(
-          forProcessID: processID, expectedUserID: locator.userID, readingAs: locator.readingAs),
+        candidate: WeChatProcessCandidate(
+          processID: processID, userID: before.userID, executablePath: executablePath,
+          applicationPath: nil, bundleIdentifier: nil,
+          startMicroseconds: before.startMicroseconds),
         userID: locator.userID,
         current: processIdentityReader(processID)
       )
@@ -385,6 +391,11 @@ public struct LLDBPassphraseCapture: Sendable {
             emit("process \(processID) does not match the selected WeChat process; detaching")
             Self.detach(process, input: input)
             throw CaptureError.attachedProcessMismatch(processID: processID, detail: detail)
+          }
+          // Don't arm a capture whose window has already closed.
+          guard Date() < deadline else {
+            Self.detach(process, input: input)
+            throw deadlineError(rejectedCandidateCount)
           }
           identityVerified = true
           try? input.fileHandleForWriting.write(
