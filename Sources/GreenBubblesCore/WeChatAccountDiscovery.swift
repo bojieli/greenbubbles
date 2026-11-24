@@ -82,6 +82,13 @@ public struct WeChatAccountDiscovery: Sendable {
       }
   }
 
+  /// Bundle IDs of the app containers that own the selected accounts (nil
+  /// for an account in a group container). Each call runs discovery again;
+  /// use `ownedDatabaseRoots(accountID:)` when the roots are needed too.
+  public func containerBundleIdentifiers(accountID: String? = nil) -> [String?] {
+    ownedDatabaseRoots(accountID: accountID).map(\.containerBundleIdentifier)
+  }
+
   /// True when every owner is the app with `bundleIdentifier`. Bundle IDs are
   /// compared case-insensitively, because discovery reports the container's
   /// on-disk spelling, which can differ in case from the app's Info.plist on a

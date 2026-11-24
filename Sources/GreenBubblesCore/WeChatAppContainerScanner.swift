@@ -140,7 +140,8 @@ struct WeChatAppContainerScanner: Sendable {
   }
 
   /// Visible entry names of an open directory, read through a duplicate of
-  /// its descriptor.
+  /// its descriptor. Like Foundation's `.skipsHiddenFiles`, names starting
+  /// with `.` and entries flagged `UF_HIDDEN` are left out.
   static func entryNames(ofDirectory directory: Int32) -> [String] {
     let duplicate = dup(directory)
     guard duplicate >= 0 else { return [] }
@@ -155,7 +156,14 @@ struct WeChatAppContainerScanner: Sendable {
       let name = withUnsafeBytes(of: entry.pointee.d_name) { bytes in
         String(decoding: bytes.prefix(Int(entry.pointee.d_namlen)), as: UTF8.self)
       }
-      if !name.hasPrefix(".") { names.append(name) }
+      guard !name.hasPrefix(".") else { continue }
+      var metadata = stat()
+      if fstatat(directory, name, &metadata, AT_SYMLINK_NOFOLLOW) == 0,
+        metadata.st_flags & UInt32(UF_HIDDEN) != 0
+      {
+        continue
+      }
+      names.append(name)
     }
     return names
   }

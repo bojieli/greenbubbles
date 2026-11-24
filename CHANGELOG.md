@@ -16,6 +16,8 @@ Notable changes to GreenBubbles are documented here. The project follows
 - Group-container accounts are checked through directory descriptors, like
   app-container accounts, so a folder swapped for a symbolic link during the
   scan can't redirect it (#49).
+- Account discovery skips folders flagged hidden (`UF_HIDDEN`) again, as it
+  did before 0.11.0 (#49).
 
 ## 0.11.0 - 2026-11-23
 

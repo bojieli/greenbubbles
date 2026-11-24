@@ -315,6 +315,8 @@ struct WeChatAccountDiscoveryTests {
     let selected = discovery.ownedDatabaseRoots(accountID: accountID)
     #expect(selected.map(\.containerBundleIdentifier) == ["com.example.WeChatCopy"])
     #expect(selected.map(\.databaseRoot) == discovery.databaseRoots(accountID: accountID))
+    #expect(
+      discovery.containerBundleIdentifiers(accountID: accountID) == ["com.example.WeChatCopy"])
     #expect(discovery.ownedDatabaseRoots(accountID: "missing").isEmpty)
   }
 
@@ -355,7 +357,11 @@ struct WeChatAccountDiscoveryTests {
       withIntermediateDirectories: true)
     try fileManager.setAttributes([.posixPermissions: 0o111], ofItemAtPath: containers.path)
     // Running as root would bypass the permission bits; the test means nothing then.
-    guard open(containers.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC) < 0 else { return }
+    let probe = open(containers.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+    guard probe < 0 else {
+      close(probe)
+      return
+    }
 
     let discovery = WeChatAccountDiscovery(homeDirectory: home)
     // Only the standard name can be probed without a listing.
@@ -393,6 +399,17 @@ struct WeChatAccountDiscoveryTests {
     try fileManager.createDirectory(
       at: groups.appending(path: "DEF.com.tencent.xinWeChat/Library"),
       withIntermediateDirectories: true)
+    // Hidden accounts and hidden groups are skipped, as Foundation's
+    // .skipsHiddenFiles did before.
+    let hiddenAccount = files.appending(path: "hidden-account")
+    try fileManager.createDirectory(
+      at: hiddenAccount.appending(path: "db_storage"), withIntermediateDirectories: true)
+    #expect(chflags(hiddenAccount.path, UInt32(UF_HIDDEN)) == 0)
+    let hiddenGroup = groups.appending(path: "GHI.com.tencent.xinWeChat")
+    try fileManager.createDirectory(
+      at: hiddenGroup.appending(path: "xwechat_files/hidden-group-account/db_storage"),
+      withIntermediateDirectories: true)
+    #expect(chflags(hiddenGroup.path, UInt32(UF_HIDDEN)) == 0)
 
     let discovery = WeChatAccountDiscovery(homeDirectory: home)
     let accounts = discovery.discover()
