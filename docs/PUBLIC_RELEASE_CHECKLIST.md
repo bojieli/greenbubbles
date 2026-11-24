@@ -1,9 +1,40 @@
 # Public release checklist
 
-The latest published release is [v0.10.0](https://github.com/bojieli/greenbubbles/releases/tag/v0.10.0).
+The latest published release is [v0.11.0](https://github.com/bojieli/greenbubbles/releases/tag/v0.11.0).
 The last publication with a verification record here is v0.4.0, verified on
 2026-09-29. Earlier review sections below are historical records; their
 unchecked items describe the state at the time of those reviews.
+
+## 0.12.0 publication
+
+The owner approved a 0.12.0 minor release of the follow-ups to 0.11.0: #48
+(#54), #49 (#53), #50 (#55), and #51 (#56). It is a minor release because
+`greenbubbles-acquire` behaves differently in ways users see: preflight has new
+blockers for the key destination, and capture has new errors for an attached
+process that is not the selected WeChat.
+
+No new distribution category is added. The acquisition changes (capture
+diagnostics, the early destination check, the `config.toml` passphrase-file
+default, the attached-process identity check) stay within "Passphrase
+acquisition": capture is still owner-run, requires root, and stays outside the
+AI boundary. The discovery follow-ups are part of the existing CLI/tool set. No
+dependency changes; only the root package version changes in the inventory.
+
+Passphrase capture against a live WeChat session was not re-tested for this
+release. `scripts/sudo-smoke-test-acquire.sh` passed 17/17 on the owner's Mac at
+the #56 head 62e9167, whose tree is identical to its squash-merge 86be945,
+including the attach identity check (g) against the real lldb.
+
+- [x] Cargo version, lockfile root package, and dependency inventory set to
+      `0.12.0`; CHANGELOG entry dated; setup skill notes updated.
+- [ ] Annotated tag `v0.12.0` on the merged release commit;
+      `bash scripts/check-public-release.sh v0.12.0` passes against it.
+- [ ] Release workflow passed CI, signing, and notarization.
+- [ ] Downloaded assets match every entry in `SHA256SUMS-0.12.0.txt`.
+- [ ] App, CLI, and DMG notarization logs report `Accepted`; the DMG's stapled
+      ticket validates.
+- [ ] `Update Homebrew` published the 0.12.0 formula; Homebrew installation
+      and CLI smoke tests pass, and the installed CLI signature verifies.
 
 ## 0.11.0 publication
 

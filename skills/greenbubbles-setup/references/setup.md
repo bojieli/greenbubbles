@@ -32,7 +32,10 @@ Version 0.10.0 adds nickname/remark/alias selection, `chats find`, and
 command-line `--query` search. Version 0.11.0 makes `greenbubbles-acquire`
 follow query profiles and `config.toml`, write the key as the user who ran
 `sudo`, and attach to the WeChat copy that owns the data folder (`--pid` picks
-one explicitly). If a local build shadows Homebrew, use `command -v
+one explicitly). Version 0.12.0 makes `preflight` stop early when the key
+destination can't be written (an existing key without `--overwrite`, or a
+root-owned folder from an earlier capture), and capture stops if the attached
+process is no longer the selected WeChat. If a local build shadows Homebrew, use `command -v
 greenbubbles` to identify the selected binary before concluding an upgrade
 failed. A successful help check confirms syntax, not database access. Verify
 access with `source status` before reading messages. The setup check does not
