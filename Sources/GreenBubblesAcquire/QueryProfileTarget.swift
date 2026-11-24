@@ -285,22 +285,26 @@ public enum QueryProfileTarget {
   /// The path is returned as Rust builds it, without resolving links. Call
   /// inside `InvokingUser.perform(_:)` with that user's uid.
   public static func discoverDefaultLiveSourceRoot(home: URL, ownerUID: uid_t) throws -> URL {
+    // Paths are kept as bytes, as Rust's PathBuf does, so a name that isn't
+    // UTF-8 is still looked up exactly as listed.
+    let homePath = Array(home.path.utf8)
     var candidates = [
-      home.path + "/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"
+      homePath
+        + Array("/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files".utf8)
     ]
-    let groups = home.path + "/Library/Group Containers"
+    let groups = homePath + Array("/Library/Group Containers".utf8)
     for name in directoryEntryNames(groups) {
-      let lowered = name.utf8.map { (0x41...0x5A).contains($0) ? $0 + 0x20 : $0 }
+      let lowered = name.map { (0x41...0x5A).contains($0) ? $0 + 0x20 : $0 }
       if containsBytes(lowered, Array("wechat".utf8))
         || containsBytes(lowered, Array("xinwechat".utf8))
       {
-        candidates.append(groups + "/" + name + "/xwechat_files")
+        candidates.append(groups + [0x2F] + name + Array("/xwechat_files".utf8))
       }
     }
-    var found: [(modified: Int, path: String)] = []
+    var found: [(modified: Int, path: [UInt8])] = []
     for filesRoot in candidates {
       for account in directoryEntryNames(filesRoot) {
-        let databaseRoot = filesRoot + "/" + account + "/db_storage"
+        let databaseRoot = filesRoot + [0x2F] + account + Array("/db_storage".utf8)
         guard isUsableLiveDatabaseRoot(databaseRoot, ownerUID: ownerUID),
           let modified = databaseRootRecency(databaseRoot)
         else { continue }
@@ -318,7 +322,12 @@ public enum QueryProfileTarget {
           + "~/.greenbubbles/config.toml to the account you are signed in to, or pass --db-root "
           + "together with --output")
     }
-    return URL(fileURLWithPath: newest.path, isDirectory: true)
+    // The rest of greenbubbles-acquire handles paths as text; refuse rather
+    // than open a different folder than the one discovered.
+    guard let path = strictUTF8(newest.path) else {
+      throw QueryProfileError.liveSourceUnavailable("the discovered database path is not UTF-8")
+    }
+    return URL(fileURLWithPath: path, isDirectory: true)
   }
 
   private static func containsBytes(_ haystack: [UInt8], _ needle: [UInt8]) -> Bool {
@@ -328,43 +337,58 @@ public enum QueryProfileTarget {
     }
   }
 
+  /// Runs `body` with `path` as a NUL-terminated C string.
+  private static func withRawPath<T>(_ path: [UInt8], _ body: (UnsafePointer<CChar>) -> T) -> T {
+    (path + [0]).withUnsafeBufferPointer { buffer in
+      buffer.baseAddress!.withMemoryRebound(to: CChar.self, capacity: buffer.count) { body($0) }
+    }
+  }
+
+  private static func rawStat(_ path: [UInt8], followingLinks: Bool) -> stat? {
+    var info = stat()
+    let flags = followingLinks ? 0 : AT_SYMLINK_NOFOLLOW
+    let status = withRawPath(path) { fstatat(AT_FDCWD, $0, &info, flags) }
+    return status == 0 ? info : nil
+  }
+
   /// Entry names as Rust's `fs::read_dir` lists them: every entry except
-  /// `.` and `..`, hidden ones included; empty when the folder can't be read.
-  private static func directoryEntryNames(_ path: String) -> [String] {
-    guard let directory = opendir(path) else { return [] }
+  /// `.` and `..`, hidden ones included, as raw bytes; empty when the folder
+  /// can't be read.
+  private static func directoryEntryNames(_ path: [UInt8]) -> [[UInt8]] {
+    guard let directory = withRawPath(path, { opendir($0) }) else { return [] }
     defer { closedir(directory) }
-    var names: [String] = []
+    var names: [[UInt8]] = []
     while let entry = readdir(directory) {
       let name = withUnsafeBytes(of: entry.pointee.d_name) { raw in
-        String(decoding: raw.prefix(Int(entry.pointee.d_namlen)), as: UTF8.self)
+        Array(raw.prefix(Int(entry.pointee.d_namlen)))
       }
-      if name != ".", name != ".." { names.append(name) }
+      if name != [0x2E], name != [0x2E, 0x2E] { names.append(name) }
     }
     return names
   }
 
-  private static func isUsableLiveDatabaseRoot(_ path: String, ownerUID: uid_t) -> Bool {
-    var info = stat()
-    guard lstat(path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR, info.st_uid == ownerUID
+  private static func isUsableLiveDatabaseRoot(_ path: [UInt8], ownerUID: uid_t) -> Bool {
+    guard let info = rawStat(path, followingLinks: false), info.st_mode & S_IFMT == S_IFDIR,
+      info.st_uid == ownerUID
     else { return false }
     // Rust's Path::is_dir follows symbolic links.
     return ["contact", "session", "message"].allSatisfy { component in
-      var child = stat()
-      return fstatat(AT_FDCWD, path + "/" + component, &child, 0) == 0
-        && child.st_mode & S_IFMT == S_IFDIR
+      guard let child = rawStat(path + Array("/\(component)".utf8), followingLinks: true)
+      else { return false }
+      return child.st_mode & S_IFMT == S_IFDIR
     }
   }
 
   // Directory timestamps stay behind after an account switch; the files
   // WeChat writes are the evidence of the account in use. Rust's
   // DirEntry::metadata does not follow symbolic links.
-  private static func databaseRootRecency(_ path: String) -> Int? {
+  private static func databaseRootRecency(_ path: [UInt8]) -> Int? {
     var newest: Int?
     for component in ["contact", "session", "message"] {
-      let directory = path + "/" + component
+      let directory = path + Array("/\(component)".utf8)
       for name in directoryEntryNames(directory) {
-        var info = stat()
-        guard lstat(directory + "/" + name, &info) == 0, info.st_mode & S_IFMT == S_IFREG
+        guard let info = rawStat(directory + [0x2F] + name, followingLinks: false),
+          info.st_mode & S_IFMT == S_IFREG
         else { continue }
         let modified = Int(info.st_mtimespec.tv_sec)
         newest = max(newest ?? modified, modified)
