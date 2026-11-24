@@ -40,6 +40,15 @@ Notable changes to GreenBubbles are documented here. The project follows
   different account (#50).
 - The `Next:` command printed by `preflight --overwrite` keeps `--overwrite`
   (#50).
+- `greenbubbles-acquire` checks that the process lldb attached to is still the
+  selected WeChat process (same PID, user and start time) before it sets the
+  capture breakpoint or reads the passphrase. If the PID was reused after
+  selection, lldb detaches before doing either and capture stops with an error
+  asking you to rerun preflight (#51).
+- When WeChat restarts so quickly that its new process had already started by
+  the time the capture recorded the old one's exit, capture still won't attach
+  to it, but now says so right away and, at the timeout, reports this timing
+  ambiguity and asks you to rerun preflight instead of a plain timeout (#51).
 
 ## 0.11.0 - 2026-11-23
 

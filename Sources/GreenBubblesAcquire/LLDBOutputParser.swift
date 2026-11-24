@@ -50,6 +50,18 @@ public enum LLDBOutputParser {
     return false
   }
 
+  /// The PID in a `Process <pid> stopped` status line, which lldb prints once
+  /// an attach has stopped the process (and again from `process status`).
+  /// Any other line returns nil.
+  public static func detectProcessStop(in line: String) -> pid_t? {
+    let words = line.trimmingCharacters(in: .whitespaces).split(separator: " ")
+    guard words.count == 3, words[0] == "Process", words[2] == "stopped",
+      words[1].allSatisfy(\.isASCII), words[1].allSatisfy(\.isNumber),
+      let processID = pid_t(words[1]), processID > 0
+    else { return nil }
+    return processID
+  }
+
   /// Whether a line is a `memory read --format x` byte-dump line (the shape
   /// that carries the captured bytes; used to redact verbose output).
   public static func isByteLine(_ line: String) -> Bool {
@@ -140,6 +152,8 @@ struct LLDBMemoryReadStream {
     var candidates: [[UInt8]] = []
     var attachFailure: String?
     var targetExited = false
+    /// PIDs from `Process <pid> stopped` lines, in order.
+    var stoppedProcessIDs: [pid_t] = []
   }
 
   private var pendingLine: [UInt8] = []
@@ -213,6 +227,9 @@ struct LLDBMemoryReadStream {
     }
     if LLDBOutputParser.detectTargetExit(in: text) {
       drained.targetExited = true
+    }
+    if let processID = LLDBOutputParser.detectProcessStop(in: text) {
+      drained.stoppedProcessIDs.append(processID)
     }
   }
 

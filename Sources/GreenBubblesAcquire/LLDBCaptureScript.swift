@@ -119,9 +119,18 @@ struct SQLCipherAccountKeyDerivation: Equatable {
   )
 }
 
-/// Generates the lldb command script. Command registration order matches the
-/// live-validated capture: settings, attach, breakpoint, stored breakpoint
-/// commands, `DONE`, then `process continue`.
+/// Generates the lldb commands, in two phases with a check between them.
+/// Command order matches the live-validated capture: settings, attach,
+/// breakpoint, stored breakpoint commands, `DONE`, then `process continue`.
+///
+/// 1. `attach` attaches to the PID and prints its status; lldb then waits on
+///    stdin with the process stopped. No breakpoint is set and no passphrase
+///    register has been read yet (lldb itself may inspect the process while
+///    attaching, as any attach does).
+/// 2. The Swift side re-reads that PID's user and start time. Only when they
+///    still match the selected process does it send `capture`; otherwise it
+///    sends `detach`. Once attached, lldb holds the process's task port, so
+///    later commands reach the verified process even if its PID is reused.
 ///
 /// `target.skip-prologue` is off so the breakpoint is the function's first
 /// instruction. That is where arm64 argument registers still hold the incoming
@@ -132,14 +141,21 @@ struct SQLCipherAccountKeyDerivation: Equatable {
 /// for a later call in the same login. The Swift side terminates lldb, which
 /// detaches, after a candidate is accepted or the timeout expires.
 public enum LLDBCaptureScript {
-  public static func script(
-    processID: pid_t,
-    architecture: LLDBTargetArchitecture = .current
-  ) -> String {
+  /// Phase 1: attach and stop. `process status` prints `Process <pid>
+  /// stopped` once the attach has completed, which the capture waits for.
+  public static func attach(processID: pid_t) -> String {
     """
     settings set target.preload-symbols false
     settings set target.skip-prologue false
     process attach -p \(processID)
+    process status
+
+    """
+  }
+
+  /// Phase 2, sent only after the attached process's identity was verified.
+  public static func capture(architecture: LLDBTargetArchitecture = .current) -> String {
+    """
     breakpoint set -n CCKeyDerivationPBKDF -c '\(architecture.derivationCondition)'
     breakpoint command add 1
     memory read --size 1 --count 32 --format x $\(architecture.passwordRegister)
@@ -149,4 +165,12 @@ public enum LLDBCaptureScript {
 
     """
   }
+
+  /// Sent instead of `capture` when the attached process is not the selected
+  /// one: release it untouched and end lldb.
+  public static let detach = """
+    process detach
+    quit
+
+    """
 }

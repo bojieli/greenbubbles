@@ -328,10 +328,14 @@ struct VerifiedPassphraseCaptureTests {
     deadline: Date,
     accept: (PassphraseSecret) throws -> Bool
   ) throws -> PassphraseSecret {
+    // The stand-in reports PID 1 stopped; its identity is synthetic.
+    let identity = AttachIdentity(processID: 1, userID: 0, startMicroseconds: 1)
+    var capture = capture
+    capture.processIdentityReader = { _ in identity }
     var rejectedCandidateCount = 0
     var exitObservedAt: UInt64?
     return try capture.runSingleCapture(
-      processID: 1,
+      identity: identity,
       architecture: .current,
       deadline: deadline,
       accept: accept,
@@ -340,9 +344,10 @@ struct VerifiedPassphraseCaptureTests {
     )
   }
 
-  /// A script that waits for the capture script on stdin (so the write never
-  /// meets a closed pipe), prints a `memory read` for each candidate, and then
-  /// exits or stays attached.
+  /// A script that reports the attached process stopped, waits for the
+  /// capture commands that follow the identity check (through `process
+  /// continue`), prints a `memory read` for each candidate, and then exits
+  /// or stays attached.
   private func makeFakeLLDB(
     in base: URL,
     printing candidates: [[UInt8]],
@@ -357,7 +362,9 @@ struct VerifiedPassphraseCaptureTests {
       }.joined()
     }
     var script =
-      "#!/bin/sh\nhead -c 1 >/dev/null\nprintf '%s' '\(reads(candidates, from: 0))'\n"
+      "#!/bin/sh\necho 'Process 1 stopped'\n"
+      + "while IFS= read -r line; do [ \"$line\" = 'process continue' ] && break; done\n"
+      + "printf '%s' '\(reads(candidates, from: 0))'\n"
     if let signal {
       script += "while [ ! -e '\(signal.path)' ]; do sleep 0.05; done\n"
     }

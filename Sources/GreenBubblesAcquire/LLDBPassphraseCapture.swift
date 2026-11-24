@@ -15,6 +15,14 @@ public enum CaptureError: Error, Equatable, CustomStringConvertible {
   /// to `accept`; they were neither accepted nor rejected.
   case timedOutWithUncheckedCandidates(uncheckedCandidateCount: Int, rejectedCandidateCount: Int)
   case exitedWithoutCapture
+  /// lldb stopped the PID, but its user or start time no longer matched the
+  /// selected process. lldb was told to detach before the capture breakpoint
+  /// was set or the passphrase register read.
+  case attachedProcessMismatch(processID: pid_t, detail: String)
+  /// The selected process exited, and every process of the same app that
+  /// could be its restart had already started when the exit was recorded,
+  /// so none can be confirmed as the replacement.
+  case replacementTimingAmbiguous(exitedProcessID: pid_t, candidateProcessIDs: [pid_t])
   /// lldb exited on its own before the deadline after `accept` rejected
   /// earlier candidates. The exit is the cause; the rejections are context.
   case exitedAfterRejecting(rejectedCandidateCount: Int)
@@ -43,6 +51,20 @@ public enum CaptureError: Error, Equatable, CustomStringConvertible {
         + "checked. No output was created or replaced."
     case .exitedWithoutCapture:
       return "lldb exited before a passphrase was captured"
+    case .attachedProcessMismatch(let processID, let detail):
+      return
+        "process \(processID) is no longer the selected WeChat process (\(detail)); "
+        + "lldb detached before setting the capture breakpoint or reading a passphrase. "
+        + "No output was created or replaced. Rerun preflight, then capture again"
+    case .replacementTimingAmbiguous(let exitedProcessID, let candidates):
+      let list = candidates.map(String.init).joined(separator: ", ")
+      let noun = candidates.count == 1 ? "process" : "processes"
+      return
+        "WeChat process \(exitedProcessID) exited, but the same app's \(noun) \(list) "
+        + "had already started when that exit was recorded, so the capture can't confirm "
+        + "which one is the restarted WeChat and attached to none. "
+        + "No output was created or replaced. Rerun preflight to select the running "
+        + "process, then capture again"
     case .exitedAfterRejecting(let rejectedCandidateCount):
       return
         "lldb exited before a passphrase was captured (earlier, "
@@ -118,25 +140,111 @@ public struct LLDBPassphraseCapture: Sendable {
   /// user's processes with metadata read by the current process.
   public var processLocator: WeChatProcessLocator?
 
+  /// Reads a PID's current user and start time. The capture calls it after
+  /// lldb has stopped the process, before any memory read or breakpoint, and
+  /// detaches unless the result matches the selected process. Replaceable
+  /// for tests.
+  public var processIdentityReader: @Sendable (pid_t) -> AttachIdentity? = {
+    WeChatProcessLocator.attachIdentity(ofProcessID: $0)
+  }
+
+  /// Whether the kernel confirms a PID no longer exists. Replaceable for
+  /// tests.
+  var processIsGone: @Sendable (pid_t) -> Bool = { WeChatProcessLocator.processIsGone($0) }
+
   private func emit(_ message: String) {
     outputHandler?(message)
   }
 
-  /// The process to attach to next. `followed` starts as `target`; it keeps
-  /// the selected process while it runs and moves only to a process of the
-  /// same app that started after the previous one was seen to exit.
-  private func currentTargetProcessID(following followed: inout WeChatProcessTarget?) throws
-    -> pid_t?
-  {
-    guard var current = followed else { return try WeChatProcessLocator().uniqueProcessID() }
+  /// Why the last poll found a WeChat process but attached to none.
+  enum AttachRefusal: Equatable {
+    /// Every possible restart of `exited` had already started when its exit
+    /// was recorded.
+    case timingAmbiguous(exited: pid_t, candidates: [pid_t])
+    /// Without a selected app, the listed process could not be verified.
+    case unverifiable(ProcessSelectionError)
+  }
+
+  /// The process to attach to next, with the identity the attach must
+  /// still find. `followed` starts as `target`; it keeps the selected
+  /// process while it runs and moves only to a process of the same app that
+  /// started after the previous one was seen to exit. When a conclusive poll
+  /// attaches to nothing although a process was found, `refusal` says why;
+  /// it is cleared by a poll that finds nothing to explain.
+  private func currentAttachIdentity(
+    following followed: inout WeChatProcessTarget?,
+    refusal: inout AttachRefusal?
+  ) throws -> AttachIdentity? {
+    guard var current = followed else {
+      // No selected app: the single running WeChat of this user, identified
+      // now so the attach can be checked against it. Only kernel metadata
+      // is read here, never the app's files.
+      let locator = processLocator ?? WeChatProcessLocator()
+      refusal = nil
+      guard let processID = try locator.uniqueProcessID() else { return nil }
+      let before = processIdentityReader(processID)
+      let executablePath = WeChatProcessLocator.executablePath(ofProcessID: processID)
+      let identity = Self.unselectedAttachIdentity(
+        candidate: before.map {
+          WeChatProcessCandidate(
+            processID: processID, userID: $0.userID, executablePath: executablePath,
+            applicationPath: nil, bundleIdentifier: nil,
+            startMicroseconds: $0.startMicroseconds)
+        },
+        userID: locator.userID,
+        current: processIdentityReader(processID)
+      )
+      if identity == nil {
+        let notWeChat =
+          executablePath.map {
+            ($0 as NSString).lastPathComponent != WeChatProcessLocator.executableName
+          } ?? false
+        refusal = .unverifiable(
+          notWeChat
+            ? .processNotWeChat(processID) : .processIdentityUnavailable(processID))
+      }
+      return identity
+    }
     let locator = processLocator ?? WeChatProcessLocator(userID: current.userID)
+    let listing = Result { try locator.candidates() }
     let next = try WeChatProcessSelector.reselect(
-      listing: Result { try locator.candidates() },
+      listing: listing,
       following: &current,
       nowMicroseconds: WeChatProcessTarget.microseconds(Date())
     )
     followed = current
-    return next?.processID
+    if let next {
+      refusal = nil
+      return next.attachIdentity
+    }
+    if case .success(let candidates) = listing {
+      let ambiguous = WeChatProcessSelector.replacementsStartedBeforeExitRecorded(
+        candidates: candidates, following: current)
+      refusal =
+        ambiguous.isEmpty
+        ? nil : .timingAmbiguous(exited: current.processID, candidates: ambiguous)
+    }
+    return nil
+  }
+
+  /// The identity to attach to when no app was selected: the listed PID
+  /// must, when described, run an executable named `WeChat` for `userID`
+  /// with a known start time, and its identity read afterwards (`current`)
+  /// must be the same process. Otherwise nil, so nothing is attached on
+  /// this poll (the PID may have been reused after the listing).
+  static func unselectedAttachIdentity(
+    candidate: WeChatProcessCandidate?,
+    userID: uid_t,
+    current: AttachIdentity?
+  ) -> AttachIdentity? {
+    guard let candidate, candidate.userID == userID,
+      let start = candidate.startMicroseconds,
+      let executablePath = candidate.executablePath,
+      (executablePath as NSString).lastPathComponent == WeChatProcessLocator.executableName
+    else { return nil }
+    let described = AttachIdentity(
+      processID: candidate.processID, userID: userID, startMicroseconds: start)
+    return current == described ? described : nil
   }
 
   /// Resolves the WeChat process itself and re-attaches if the target exits
@@ -162,19 +270,42 @@ public struct LLDBPassphraseCapture: Sendable {
     var followed = target
     var rejectedCandidateCount = 0
     var exitObservedAt: UInt64?
+    var refusal: AttachRefusal?
+    var reportedRefusal: AttachRefusal?
     while true {
-      guard let processID = try currentTargetProcessID(following: &followed) else {
+      guard let identity = try currentAttachIdentity(following: &followed, refusal: &refusal)
+      else {
+        if case .timingAmbiguous(let exited, let ambiguous) = refusal, refusal != reportedRefusal {
+          // Still fail closed: never attach to such a process. Say so now
+          // rather than only at the timeout.
+          let list = ambiguous.map(String.init).joined(separator: ", ")
+          emit(
+            "WeChat process \(exited) exited, but the same app's process \(list) had already "
+              + "started when that exit was recorded, so it can't be confirmed as the restarted "
+              + "WeChat and will not be attached. Still waiting for a process that starts "
+              + "later; if none does, rerun preflight and capture again")
+          reportedRefusal = refusal
+        }
         if Date() < deadline {
           Thread.sleep(forTimeInterval: 1)
           continue
         }
+        // The restart ambiguity comes first: a candidate rejected before the
+        // restart says nothing about the process that was never attached.
+        // So does a process that was found but could not be verified.
+        if case .timingAmbiguous(let exited, let ambiguous) = refusal {
+          throw CaptureError.replacementTimingAmbiguous(
+            exitedProcessID: exited, candidateProcessIDs: ambiguous)
+        }
+        if case .unverifiable(let error) = refusal { throw error }
         if rejectedCandidateCount > 0 { throw CaptureError.noAcceptableCandidate }
         throw CaptureError.noWeChatProcess
       }
+      let processID = identity.processID
       emit("attaching to WeChat process \(processID)")
       do {
         return try runSingleCapture(
-          processID: processID,
+          identity: identity,
           architecture: architecture,
           deadline: deadline,
           accept: accept,
@@ -200,16 +331,19 @@ public struct LLDBPassphraseCapture: Sendable {
     rejectedCandidateCount > 0 ? .noAcceptableCandidate : .timedOut
   }
 
-  // Internal (not private) so tests can drive it with a stand-in lldb.
+  /// One lldb session against one process. lldb first only attaches; the
+  /// breakpoint and its memory read are sent after the stopped process is
+  /// confirmed to be `identity`. Internal (not private) so tests can drive
+  /// it with a stand-in lldb.
   func runSingleCapture(
-    processID: pid_t,
+    identity: AttachIdentity,
     architecture: LLDBTargetArchitecture,
     deadline: Date,
     accept: (PassphraseSecret) throws -> Bool,
     rejectedCandidateCount: inout Int,
     exitObservedAt: inout UInt64?
   ) throws -> PassphraseSecret {
-    let script = LLDBCaptureScript.script(processID: processID, architecture: architecture)
+    let processID = identity.processID
 
     let process = Process()
     let input = Pipe()
@@ -265,12 +399,17 @@ public struct LLDBPassphraseCapture: Sendable {
       try? input.fileHandleForWriting.close()
     }
 
-    // Keep stdin open after writing the script: lldb must not read EOF while
-    // it waits for the breakpoint to hit.
-    input.fileHandleForWriting.write(Data(script.utf8))
+    // A write after lldb has exited must fail with EPIPE, not raise SIGPIPE.
+    _ = fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+    // Keep stdin open after writing: lldb must not read EOF while it waits
+    // for the identity check or for the breakpoint to hit. A failed write
+    // means lldb has exited, which the loop below reports.
+    try? input.fileHandleForWriting.write(
+      contentsOf: Data(LLDBCaptureScript.attach(processID: processID).utf8))
 
     var stream = LLDBMemoryReadStream()
     defer { stream.discard() }
+    var identityVerified = false
     while true {
       let running = process.isRunning
       // lldb had exited by this moment if `running` is false.
@@ -292,6 +431,49 @@ public struct LLDBPassphraseCapture: Sendable {
       // from the same batch (verification can take a while).
       if drained.targetExited, exitObservedAt == nil {
         exitObservedAt = WeChatProcessTarget.microseconds(Date())
+      }
+      if !identityVerified {
+        // Nothing in this phase reads memory, so there are no real
+        // candidates; anything shaped like one is dropped unoffered.
+        if let detail = drained.attachFailure {
+          emit("lldb reported: \(detail)")
+          throw CaptureError.attachFailed(detail)
+        }
+        if drained.targetExited {
+          throw CaptureError.targetExited
+        }
+        if drained.stoppedProcessIDs.contains(processID) {
+          let observed = processIdentityReader(processID)
+          // Gone, not replaced: lldb's exit report may not have arrived yet.
+          // Handle it as an exit so the capture can follow a restart.
+          if observed == nil, processIsGone(processID) {
+            // Record the exit before detaching, which can wait up to 3 s: a
+            // replacement started during that wait must count as later.
+            if exitObservedAt == nil {
+              exitObservedAt = WeChatProcessTarget.microseconds(Date())
+            }
+            Self.detach(process, input: input)
+            throw CaptureError.targetExited
+          }
+          if let detail = AttachIdentity.mismatch(expected: identity, observed: observed) {
+            emit("process \(processID) does not match the selected WeChat process; detaching")
+            Self.detach(process, input: input)
+            throw CaptureError.attachedProcessMismatch(processID: processID, detail: detail)
+          }
+          // Don't arm a capture whose window has already closed.
+          guard Date() < deadline else {
+            Self.detach(process, input: input)
+            throw deadlineError(rejectedCandidateCount)
+          }
+          identityVerified = true
+          try? input.fileHandleForWriting.write(
+            contentsOf: Data(LLDBCaptureScript.capture(architecture: architecture).utf8))
+          emit("attached to the selected WeChat process \(processID); waiting for the login")
+        }
+        if !running, polledAt < deadline { throw Self.exitError(rejectedCandidateCount) }
+        guard Date() < deadline else { throw deadlineError(rejectedCandidateCount) }
+        Thread.sleep(forTimeInterval: 0.05)
+        continue
       }
       let decision = try CaptureCandidateCursor.decide(
         among: &drained.candidates,
@@ -335,6 +517,16 @@ public struct LLDBPassphraseCapture: Sendable {
           accumulator: accumulator
         )
       }
+      Thread.sleep(forTimeInterval: 0.05)
+    }
+  }
+
+  /// Asks lldb to detach and quit, waiting briefly. The caller's cleanup
+  /// terminates lldb if it is still running, which also detaches.
+  private static func detach(_ process: Process, input: Pipe) {
+    try? input.fileHandleForWriting.write(contentsOf: Data(LLDBCaptureScript.detach.utf8))
+    let graceDeadline = Date().addingTimeInterval(3)
+    while process.isRunning, Date() < graceDeadline {
       Thread.sleep(forTimeInterval: 0.05)
     }
   }

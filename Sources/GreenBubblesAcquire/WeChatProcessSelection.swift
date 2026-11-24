@@ -47,6 +47,49 @@ public struct ProcessIdentity: Hashable, Sendable {
   }
 }
 
+/// What the debugger attach is meant to reach: one process, by PID, real
+/// user ID and start time. The capture re-reads these after lldb has stopped
+/// the process and before it sets the capture breakpoint or reads the
+/// passphrase, so a PID reused between selection and `process attach` is
+/// detected.
+public struct AttachIdentity: Equatable, Sendable, CustomStringConvertible {
+  public let processID: pid_t
+  public let userID: uid_t
+  /// Microseconds since 1970, as in `WeChatProcessCandidate.startMicroseconds`.
+  public let startMicroseconds: UInt64
+
+  public init(processID: pid_t, userID: uid_t, startMicroseconds: UInt64) {
+    self.processID = processID
+    self.userID = userID
+    self.startMicroseconds = startMicroseconds
+  }
+
+  public var description: String {
+    "pid \(processID), uid \(userID), start \(startMicroseconds)"
+  }
+
+  /// Why `observed` (the PID's identity read after the attach stopped it) is
+  /// not the selected process, or nil when PID, user and start time all
+  /// match. An unreadable identity never matches.
+  public static func mismatch(expected: AttachIdentity, observed: AttachIdentity?) -> String? {
+    guard let observed else {
+      return "the user and start time of process \(expected.processID) could not be read"
+    }
+    var differences: [String] = []
+    if observed.processID != expected.processID {
+      differences.append("pid \(observed.processID) instead of \(expected.processID)")
+    }
+    if observed.userID != expected.userID {
+      differences.append("uid \(observed.userID) instead of \(expected.userID)")
+    }
+    if observed.startMicroseconds != expected.startMicroseconds {
+      differences.append(
+        "start time \(observed.startMicroseconds) instead of \(expected.startMicroseconds)")
+    }
+    return differences.isEmpty ? nil : differences.joined(separator: ", ")
+  }
+}
+
 /// The WeChat process chosen for a capture. The capture follows this app
 /// bundle (path and bundle ID) when WeChat restarts during logout and login.
 public struct WeChatProcessTarget: Equatable, Sendable {
@@ -99,6 +142,11 @@ public struct WeChatProcessTarget: Equatable, Sendable {
 
   var identity: ProcessIdentity {
     ProcessIdentity(processID: processID, startMicroseconds: startMicroseconds)
+  }
+
+  /// The PID, user and start time the attach must still find.
+  public var attachIdentity: AttachIdentity {
+    AttachIdentity(processID: processID, userID: userID, startMicroseconds: startMicroseconds)
   }
 
   func runsSameApp(as other: WeChatProcessTarget) -> Bool {
@@ -342,6 +390,40 @@ public enum WeChatProcessSelector {
     guard let replacement = replacements.first else { return nil }
     selected = selected.replaced(by: replacement)
     return selected
+  }
+
+  /// Same-app processes that could be the restarted WeChat but are not
+  /// accepted as its replacement because they had already started when the
+  /// selected process's exit was recorded (`exitObservedMicroseconds`).
+  ///
+  /// `reselect` requires a replacement to start strictly after that moment,
+  /// so it can't tell such a process from one that ran alongside the
+  /// selected one. When WeChat restarts before the capture reads lldb's exit
+  /// report, the real replacement lands here and would never be attached.
+  /// The capture still fails closed, but reports this instead of waiting for
+  /// its timeout. Empty while the exit has not been recorded or when the
+  /// listing is inconclusive (a process of this user could not be
+  /// classified, which is then why no replacement was chosen); processes
+  /// recorded at selection are never listed.
+  public static func replacementsStartedBeforeExitRecorded(
+    candidates: [WeChatProcessCandidate],
+    following selected: WeChatProcessTarget
+  ) -> [pid_t] {
+    guard let exitObserved = selected.exitObservedMicroseconds else { return [] }
+    let unclassified = candidates.contains {
+      ($0.userID == nil || $0.userID == selected.userID)
+        && (!isClassified($0, userID: selected.userID) || $0.startMicroseconds == nil)
+    }
+    if unclassified { return [] }
+    return candidates.compactMap { target(for: $0, userID: selected.userID) }
+      .filter { match in
+        // A process older than the selected one can't be its restart.
+        match.runsSameApp(as: selected) && !match.isSameProcess(as: selected)
+          && match.startMicroseconds > selected.startMicroseconds
+          && match.startMicroseconds <= exitObserved
+          && !selected.excludedProcesses.contains(match.identity)
+      }
+      .map(\.processID)
   }
 
   /// `reselect` for one poll's process listing. When the listing itself
