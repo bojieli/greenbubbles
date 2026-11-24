@@ -128,6 +128,10 @@ public struct LLDBPassphraseCapture: Sendable {
     WeChatProcessLocator.attachIdentity(ofProcessID: $0)
   }
 
+  /// Whether the kernel confirms a PID no longer exists. Replaceable for
+  /// tests.
+  var processIsGone: @Sendable (pid_t) -> Bool = { WeChatProcessLocator.processIsGone($0) }
+
   private func emit(_ message: String) {
     outputHandler?(message)
   }
@@ -413,6 +417,15 @@ public struct LLDBPassphraseCapture: Sendable {
         }
         if drained.stoppedProcessIDs.contains(processID) {
           let observed = processIdentityReader(processID)
+          // Gone, not replaced: lldb's exit report may not have arrived yet.
+          // Handle it as an exit so the capture can follow a restart.
+          if observed == nil, processIsGone(processID) {
+            Self.detach(process, input: input)
+            if exitObservedAt == nil {
+              exitObservedAt = WeChatProcessTarget.microseconds(Date())
+            }
+            throw CaptureError.targetExited
+          }
           if let detail = AttachIdentity.mismatch(expected: identity, observed: observed) {
             emit("process \(processID) does not match the selected WeChat process; detaching")
             Self.detach(process, input: input)

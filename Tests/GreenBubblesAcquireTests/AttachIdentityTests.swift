@@ -154,6 +154,8 @@ struct AttachIdentityTests {
       let reader = RecordingReader(session: session, result: observed)
       var capture = LLDBPassphraseCapture(lldbPath: session.executable.path)
       capture.processIdentityReader = { reader.read($0) }
+      // Unreadable but still present: never treated as an exit.
+      capture.processIsGone = { _ in false }
       var offered = 0
       do {
         _ = try session.run(capture, identity: Self.selected) { _ in
@@ -174,6 +176,22 @@ struct AttachIdentityTests {
       for command in ["breakpoint", "memory read", "process continue"] {
         #expect(!log.contains(command), "\(command) was sent")
       }
+    }
+  }
+
+  @Test func processGoneAtTheIdentityCheckIsAnExitNotAMismatch() throws {
+    let session = try FakeLLDB()
+    let reader = RecordingReader(session: session, result: nil)
+    var capture = LLDBPassphraseCapture(lldbPath: session.executable.path)
+    capture.processIdentityReader = { reader.read($0) }
+    capture.processIsGone = { $0 == 4242 }
+    #expect(throws: CaptureError.targetExited) {
+      _ = try session.run(capture, identity: Self.selected)
+    }
+    let log = try session.log()
+    #expect(log.contains("process detach\nquit\n"))
+    for command in ["breakpoint", "memory read", "process continue"] {
+      #expect(!log.contains(command), "\(command) was sent")
     }
   }
 

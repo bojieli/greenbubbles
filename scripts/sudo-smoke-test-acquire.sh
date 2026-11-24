@@ -46,19 +46,19 @@ work="$(mktemp -d /private/tmp/greenbubbles-acquire-smoke.XXXXXX)"
 chmod 700 "$work"
 root_probe="/private/var/root/greenbubbles-acquire-smoke-$(basename "$work")"
 
-sleeper_pid=""
-sleeper_identity=""
-# SIGKILL (which also ends a stopped process) the step (e) sleeper, but only
-# while its PID still has the identity recorded at launch.
-kill_sleeper() {
-  if [[ -n "$sleeper_pid" && -n "$sleeper_identity" ]] \
-    && [[ "$("$work/attach_harness" --identity --pid "$sleeper_pid" 2>/dev/null)" == "$sleeper_identity" ]]; then
-    kill -KILL "$sleeper_pid" 2>/dev/null || true
+supervisor_pid=""
+# Ends step (e)'s sleeper: its supervisor SIGKILLs it (which also ends a
+# stopped process) and only then reaps it, so its PID is never recycled
+# while this script uses it.
+stop_sleeper() {
+  if [[ -n "$supervisor_pid" ]]; then
+    touch "$work/sleeper.stop"
+    wait "$supervisor_pid" 2>/dev/null || true
+    supervisor_pid=""
   fi
-  sleeper_pid=""
 }
 cleanup() {
-  kill_sleeper
+  stop_sleeper
   if [[ "$use_sudo" -eq 1 ]] && sudo -n test -e "$root_probe" 2>/dev/null; then
     sudo -n rm -rf "$root_probe" || true
   fi
@@ -199,7 +199,30 @@ swiftc -parse-as-library -o "$work/attach_harness" "$work/attach_harness.swift" 
   "$sources/LLDBOutputParser.swift" "$sources/PassphraseSecret.swift" \
   "$sources/WeChatProcessSelection.swift" "$sources/WeChatProcessLocator.swift" \
   "$sources/InvokingUser.swift" "$sources/SQLCipherKeyVerifier.swift"
-printf '#include <unistd.h>\nint main(void) { sleep(900); return 0; }\n' >"$work/sleeper.c"
+# The supervisor forks the sleeper, prints its PID, and doesn't reap it until
+# the stop file appears (or after 15 minutes): until then the PID stays
+# reserved even if the sleeper dies.
+cat >"$work/sleeper.c" <<'C'
+#include <signal.h>
+#include <stdio.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {
+  if (argc != 2) return 2;
+  pid_t child = fork();
+  if (child < 0) return 1;
+  if (child == 0) {
+    for (;;) pause();
+  }
+  printf("%d\n", (int)child);
+  fflush(stdout);
+  for (int i = 0; i < 1800 && access(argv[1], F_OK) != 0; i++) usleep(500000);
+  kill(child, SIGKILL);
+  waitpid(child, NULL, 0);
+  return 0;
+}
+C
 cc -o "$work/sleeper" "$work/sleeper.c"
 
 # --- Synthetic data (as you) -------------------------------------------------
@@ -373,11 +396,15 @@ else
   # the capture verifies it and arms the breakpoint (which never hits, so it
   # times out); with a wrong one it detaches before any breakpoint. Either way
   # the program must be left running, not stopped.
-  # The expected identity is recorded once, right after launch, and passed
-  # to every attempt; should the PID ever be recycled, the capture's own
-  # check sees a mismatch and step (e) fails instead of attaching onward.
-  "$work/sleeper" &
-  sleeper_pid=$!
+  # The sleeper's PID stays reserved by its supervisor until stop_sleeper.
+  # Its identity is recorded once and passed to every attempt.
+  "$work/sleeper" "$work/sleeper.stop" >"$work/sleeper.pid" &
+  supervisor_pid=$!
+  for _ in $(seq 50); do
+    [[ -s "$work/sleeper.pid" ]] && break
+    sleep 0.1
+  done
+  sleeper_pid="$(cat "$work/sleeper.pid")"
   sleeper_identity="$("$work/attach_harness" --identity --pid "$sleeper_pid" || true)"
   read -r sleeper_uid sleeper_start <<<"$sleeper_identity" || true
   sleeper_running() {
@@ -408,7 +435,7 @@ else
     fail "sudo (e): reused-PID identity" \
       "$(tr '\n' ' ' <"$work/e2.out"); state=$(ps -o state= -p "$sleeper_pid" 2>&1)"
   fi
-  kill_sleeper
+  stop_sleeper
 fi
 
 echo ""
