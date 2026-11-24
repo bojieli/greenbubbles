@@ -29,6 +29,24 @@ public enum SaltInventoryError: Error, Equatable, CustomStringConvertible {
   }
 }
 
+/// How a passphrase fared against an inventory's distinct salts.
+public struct SaltVerification: Equatable, Sendable {
+  /// Salts whose first page the passphrase opened.
+  public var verifiedCount: Int
+  /// Salts checked before verification finished or was stopped.
+  public var checkedCount: Int
+  public var distinctSaltCount: Int
+
+  public init(verifiedCount: Int, checkedCount: Int, distinctSaltCount: Int) {
+    self.verifiedCount = verifiedCount
+    self.checkedCount = checkedCount
+    self.distinctSaltCount = distinctSaltCount
+  }
+
+  /// Every salt was checked, so zero matches is a real mismatch.
+  public var isComplete: Bool { checkedCount == distinctSaltCount }
+}
+
 /// Read-only collection of database page-1 salts under a supplied db root.
 ///
 /// Files are opened with `O_RDONLY | O_CLOEXEC | O_NOFOLLOW`; only regular
@@ -79,7 +97,16 @@ public struct DatabaseSaltInventory: Sendable {
     for passphrase: PassphraseSecret,
     shouldStop: () -> Bool = { false }
   ) throws -> Int {
-    try Self.countVerified(saltVerificationSamples, shouldStop: shouldStop) { sample in
+    try saltVerification(for: passphrase, shouldStop: shouldStop).verifiedCount
+  }
+
+  /// Like `verifiedSaltCount`, but also says how many salts were checked
+  /// before `shouldStop`, so a stopped check is not mistaken for a mismatch.
+  public func saltVerification(
+    for passphrase: PassphraseSecret,
+    shouldStop: () -> Bool = { false }
+  ) throws -> SaltVerification {
+    try Self.tallyVerified(saltVerificationSamples, shouldStop: shouldStop) { sample in
       var encryptionKey = try SQLCipherKeyVerifier.deriveEncryptionKey(
         passphrase: passphrase,
         salt: sample.salt
@@ -94,12 +121,22 @@ public struct DatabaseSaltInventory: Sendable {
     shouldStop: () -> Bool,
     verify: (Sample) throws -> Bool
   ) rethrows -> Int {
-    var verifiedCount = 0
+    try tallyVerified(samples, shouldStop: shouldStop, verify: verify).verifiedCount
+  }
+
+  static func tallyVerified<Sample>(
+    _ samples: [Sample],
+    shouldStop: () -> Bool,
+    verify: (Sample) throws -> Bool
+  ) rethrows -> SaltVerification {
+    var tally = SaltVerification(
+      verifiedCount: 0, checkedCount: 0, distinctSaltCount: samples.count)
     for sample in samples {
       if shouldStop() { break }
-      if try verify(sample) { verifiedCount += 1 }
+      if try verify(sample) { tally.verifiedCount += 1 }
+      tally.checkedCount += 1
     }
-    return verifiedCount
+    return tally
   }
 
   private struct Collector {
