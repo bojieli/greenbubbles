@@ -262,7 +262,7 @@ repository-level license checksum.
 - `regex-automata 0.4.18` — `MIT OR Apache-2.0` — https://github.com/rust-lang/regex
 - `regex-syntax 0.8.11` — `MIT OR Apache-2.0` — https://github.com/rust-lang/regex
 - `ring 0.17.14` — `Apache-2.0 AND ISC` — https://github.com/briansmith/ring
-- `roxmltree 0.21.1` — `MIT OR Apache-2.0` — https://github.com/RazrFalcon/roxmltree
+- `roxmltree 0.21.2` — `MIT OR Apache-2.0` — https://github.com/RazrFalcon/roxmltree
 - `rusqlite 0.40.2` — `MIT` — https://github.com/rusqlite/rusqlite
 - `rust-stemmers 1.2.0` — `MIT OR BSD-3-Clause` — https://github.com/CurrySoftware/rust-stemmers
 - `rustix 1.1.4` — `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` — https://github.com/bytecodealliance/rustix
@@ -274,10 +274,10 @@ repository-level license checksum.
 - `serde 1.0.229` — `MIT OR Apache-2.0` — https://github.com/serde-rs/serde
 - `serde_core 1.0.229` — `MIT OR Apache-2.0` — https://github.com/serde-rs/serde
 - `serde_derive 1.0.229` — `MIT OR Apache-2.0` — https://github.com/serde-rs/serde
-- `serde_json 1.0.151` — `MIT OR Apache-2.0` — https://github.com/serde-rs/json
+- `serde_json 1.0.154` — `MIT OR Apache-2.0` — https://github.com/serde-rs/json
 - `serde_spanned 1.1.1` — `MIT OR Apache-2.0` — https://github.com/toml-rs/toml
 - `sha2 0.10.9` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/hashes
-- `sha2 0.11.0` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/hashes
+- `sha2 0.11.1` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/hashes
 - `signal-hook-registry 1.4.8` — `MIT OR Apache-2.0` — https://github.com/vorner/signal-hook
 - `signature 2.2.0` — `Apache-2.0 OR MIT` — https://github.com/RustCrypto/traits/tree/master/signature
 - `silk-rs 0.2.0` — `MIT` — https://github.com/lz1998/silk-rs
@@ -305,8 +305,8 @@ repository-level license checksum.
 - `unicode-normalization 0.1.25` — `MIT OR Apache-2.0` — https://github.com/unicode-rs/unicode-normalization
 - `universal-hash 0.6.1` — `MIT OR Apache-2.0` — https://github.com/RustCrypto/traits
 - `untrusted 0.9.0` — `ISC` — https://github.com/briansmith/untrusted
-- `ureq 3.4.2` — `MIT OR Apache-2.0` — https://github.com/algesten/ureq
-- `ureq-proto 0.6.5` — `MIT OR Apache-2.0` — https://github.com/algesten/ureq-proto
+- `ureq 3.5.2` — `MIT OR Apache-2.0` — https://github.com/algesten/ureq
+- `ureq-proto 0.7.1` — `MIT OR Apache-2.0` — https://github.com/algesten/ureq-proto
 - `utf8-zero 0.8.1` — `MIT OR Apache-2.0` — https://github.com/algesten/utf8-zero
 - `walkdir 2.5.0` — `Unlicense OR MIT` — https://github.com/BurntSushi/walkdir
 - `webpki-roots 1.0.12` — `CDLA-Permissive-2.0` — https://github.com/rustls/webpki-roots
@@ -317,7 +317,7 @@ repository-level license checksum.
 - `wx-keychain 0.7.4` — `MIT`
 - `wx-media 0.7.4` — `MIT`
 - `wx-paths 0.7.4` — `MIT`
-- `zeroize 1.9.0` — `Apache-2.0 OR MIT` — https://github.com/RustCrypto/utils
+- `zeroize 1.9.2` — `Apache-2.0 OR MIT` — https://github.com/RustCrypto/utils
 - `zeroize_derive 1.5.0` — `Apache-2.0 OR MIT` — https://github.com/RustCrypto/utils
 - `zmij 1.0.23` — `MIT` — https://github.com/dtolnay/zmij
 - `zstd 0.13.5` — `BSD-3-Clause` — https://github.com/gyscos/zstd-rs
@@ -2922,7 +2922,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- `sha2 0.11.0`
+- `sha2 0.11.1`
 
 ```text
 Copyright (c) 2016-2026 The RustCrypto Project Developers
@@ -3527,7 +3527,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- `zeroize 1.9.0`
+- `zeroize 1.9.2`
 
 ```text
 Copyright (c) 2018-2026 The RustCrypto Project Developers
@@ -4304,7 +4304,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- `ureq-proto 0.6.5`
+- `ureq-proto 0.7.1`
 
 ```text
 Copyright 2022 Martin Algesten
@@ -4413,7 +4413,7 @@ SOFTWARE.
 
 Used by:
 
-- `ureq 3.4.2`
+- `ureq 3.5.2`
 
 ```text
 MIT License
@@ -4779,7 +4779,7 @@ Used by:
 - `serde 1.0.229`
 - `serde_core 1.0.229`
 - `serde_derive 1.0.229`
-- `serde_json 1.0.151`
+- `serde_json 1.0.154`
 - `syn 2.0.119`
 - `syn 3.0.4`
 - `thiserror-impl 1.0.69`
@@ -5021,7 +5021,7 @@ THE SOFTWARE.
 
 Used by:
 
-- `roxmltree 0.21.1`
+- `roxmltree 0.21.2`
 
 ```text
 The MIT License (MIT)
